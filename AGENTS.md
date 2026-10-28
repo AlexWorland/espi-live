@@ -21,7 +21,7 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 | `archive/` | Superseded app versions, old scripts, a scratch-project zip | No |
 | `output/` | Run-time logs, frames, recordings (git-ignored) | Never commit |
 
-`espi_live.py` used to exist as several diverging copies. They were merged into `src/espi_live/app.py`; the originals are in `archive/legacy/` and in git history (see the commit "Initial import…").
+`espi_live.py` used to exist as several diverging copies. They were merged into `src/espi_live/app.py`; the originals are kept in `archive/legacy/`.
 
 ## Commands
 
