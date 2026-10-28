@@ -40,3 +40,8 @@ research/
 # Written by CI before PyInstaller (build number, update token); never commit
 src/espi_live/_build_info.py
 update-token.txt
+
+# Coverage data
+.coverage
+.coverage.*
+htmlcov/

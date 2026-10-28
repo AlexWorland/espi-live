@@ -15,7 +15,7 @@ scripts/windows/SETUP AND START ESPI.bat
 ./run.sh --demo --ui tk
 ```
 
-Manually: `PYTHONPATH=src python -m espi_live [--demo]` (on Windows, `set PYTHONPATH=src` first). Run it with an interpreter that has the packages in `requirements.txt` (OpenCV, NumPy, Pillow, PySide6); the camera runtime also needs PySpin, normally `C:\Python310\PySpin\python.exe`. Without PySide6 the app falls back to the Tk interface. `python -m espi_live --check` loads everything without opening a window; `python -m unittest discover -s tests` runs the camera-free tests (both with `PYTHONPATH=src`).
+Manually: `PYTHONPATH=src python -m espi_live [--demo]` (on Windows, `set PYTHONPATH=src` first). Run it with an interpreter that has the packages in `requirements.txt` (OpenCV, NumPy, Pillow, PySide6); the camera runtime also needs PySpin, normally `C:\Python310\PySpin\python.exe`. Without PySide6 the app falls back to the Tk interface. `python -m espi_live --check` loads everything without opening a window; `python -m unittest discover -s tests` runs the camera-free tests (both with `PYTHONPATH=src`). For line coverage (kept at 100%), `pip install coverage`, then `QT_QPA_PLATFORM=offscreen python -m coverage run -m unittest discover -s tests` and `python -m coverage report`.
 
 ## Project layout
 
@@ -46,7 +46,7 @@ CHANGELOG.md  AGENTS.md  CLAUDE.md  requirements.txt  run.sh
 
 ## Prebuilt binaries
 
-Releases are made by hand: in GitHub, open **Actions > Build release > Run workflow**, pick the branch (normally `main`), optionally type release notes, and run it. `.github/workflows/build-binaries.yml` builds self-contained PyInstaller binaries and publishes them as release **Build N** (tag `build-N`, where N is the workflow run number). Merging into `main` does not build anything. Tick **Pre-release** to publish a test build that installed copies are not offered; runs from any branch other than `main` are always pre-releases.
+Releases are made by hand: in GitHub, open **Actions > Build release > Run workflow**, pick the branch (normally `main`), optionally type release notes, and run it. `.github/workflows/build-binaries.yml` builds self-contained PyInstaller binaries and publishes them as release **Build N** (tag `build-N`, where N is the workflow run number). Merging into `main` does not build anything. The run first executes the test suite on Linux; if any test fails or line coverage of `src/espi_live/` is below 100%, nothing is built or released. Tick **Pre-release** to publish a test build that installed copies are not offered; runs from any branch other than `main` are always pre-releases.
 
 | File | Camera support |
 |------|----------------|

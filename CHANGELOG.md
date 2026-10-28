@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-28 — Full test coverage
+
+### Previous state
+
+- The tests covered processing, the demo engine and part of the updater (25% of lines); the Qt and Tk front ends, camera code, CLI and logging were untested.
+
+### Current state
+
+- The camera-free test suite covers every line of `src/espi_live/` (about 430 tests, ~12 s), using an in-memory PySpin, offscreen Qt and withdrawn Tk windows; `.coveragerc` fails the report below 100%.
+- The **Build release** workflow runs this suite first (Linux, Python 3.12); a failing test or coverage below 100% stops the run before any binary is built or released.
+- Fixed: zooming with the anchor at the image's top-left corner (point 0,0) zoomed about the window center instead.
+
 ## 2026-10-28 — Automatic updates and manual releases for the prebuilt binaries
 
 ### Previous state

@@ -11,13 +11,13 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 | Path | Contents | Edit? |
 |------|----------|-------|
 | `src/espi_live/` | The application package (see Architecture). `__main__.py` → `cli.py` is the entry point. | Yes: single source of truth |
-| `tests/` | Camera-free `unittest` checks for processing and the engine (demo source) | Yes |
+| `tests/` | Camera-free `unittest` suite with 100% line coverage of `src/espi_live/`: both front ends (Qt offscreen, withdrawn Tk roots), the engine and camera code against an in-memory PySpin (`fake_pyspin.py`), and the updater with mocked network | Yes |
 | `scripts/windows/`, `scripts/bash/` | Camera-PC setup and launch helpers; `scripts/camera_live_control.py` is a standalone camera-control helper | Yes; keep their paths current when files move |
 | `experiments/` | Tentative work and older scripts, including `espi_live_bfs_u3_200s6m.py` (a 20 MP-camera variant of the viewer, not reconciled with the package) | Yes |
 | `docs/camera/` | Curated PySpin, BFS-U3-63S4M-C and acquisition notes | Yes |
 | `docs/notes/` | Development notes and reports | Yes |
 | `third_party/` | FLIR Spinnaker 4.2 (camera-PC SDK, wheel, docs, Examples) and 4.4 installers; large files are in Git LFS | Never |
-| `.github/workflows/` | `build-binaries.yml` ("Build release"): manual-only PyInstaller builds for Windows/Linux/macOS, published as release `build-N` | Yes |
+| `.github/workflows/` | `build-binaries.yml` ("Build release"): manual-only; a `test` job (full suite, 100% line coverage) gates the PyInstaller builds for Windows/Linux/macOS, published as release `build-N` | Yes |
 | `reference/saba-originals/` | Preserved earlier scripts | No |
 | `research/` | Physics talks, notebooks, papers, earlier code (not source to build). Local only: git-ignored because it holds third-party and personal documents | No |
 | `archive/` | Superseded app versions, old scripts, a scratch-project zip | No |
@@ -33,6 +33,7 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 ./run.sh --demo --ui tk                            # legacy Tk UI
 PYTHONPATH=src python -m espi_live --check         # import everything (Qt, engine, PySpin if present), no window
 PYTHONPATH=src python -m unittest discover -s tests   # camera-free tests
+PYTHONPATH=src QT_QPA_PLATFORM=offscreen python -m coverage run -m unittest discover -s tests && python -m coverage report   # must stay at 100% (.coveragerc)
 python -m py_compile src/espi_live/*.py            # required check after edits (no display or camera needed)
 ```
 
@@ -80,7 +81,7 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 - Updates must never start the new build while the camera is open: the Qt front end installs and relaunches only after the engine has stopped (`qt_app.finish_update`). Keep the release archive names, `build-info.json` and `_build_info.py` fields in `build-binaries.yml` in step with `updater.py`.
 - Don't add a virtual-environment or dependency-management system (pyproject, lockfiles) unless asked.
 - Keep `README.md` accurate when layout, entry points or setup change, and add a `CHANGELOG.md` entry for user-visible changes.
-- After edits, run `python -m py_compile` on the changed files and the tests.
+- After edits, run `python -m py_compile` on the changed files and the tests. Keep line coverage at 100% (`coverage report` fails below it, and so does the release workflow): add tests with new code, and don't use `# pragma: no cover`. Tests must never open a camera, touch the network, write to the real `output/` folder or block on a dialog.
 
 ## Git
 

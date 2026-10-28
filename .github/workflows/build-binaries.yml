@@ -9,6 +9,9 @@ name: Build release
 # updater uses to order builds). Installed copies update only to the newest
 # full release; a pre-release (the checkbox, and always for branches other than
 # main) is for testing and is never offered to them.
+#
+# The test job runs first; if a test fails or line coverage is below 100%,
+# nothing is built or released.
 on:
   workflow_dispatch:
     inputs:
@@ -34,8 +37,45 @@ env:
   BUILD_REF: ${{ github.sha }}
 
 jobs:
+  # Gate for the whole release: no binary is built or published unless the
+  # camera-free suite passes and covers every line of src/espi_live/
+  # (.coveragerc sets fail_under = 100, so `coverage report` exits non-zero
+  # below that). No LFS files are needed: the tests use a fake PySpin.
+  test:
+    name: Tests and 100% coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux system packages
+        run: |
+          # xvfb: a display for the Tk tests (Qt runs offscreen); the rest as in the build job.
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1 libtk8.6 libtcl8.6 libegl1 libxkbcommon0 \
+            libxkbcommon-x11-0 libfontconfig1 libdbus-1-3
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt coverage==7.17.0
+
+      - name: Run tests with coverage
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+        run: xvfb-run -a python -m coverage run -m unittest discover -s tests
+
+      - name: Require 100% line coverage
+        run: python -m coverage report
+
   build:
     name: Build ${{ matrix.name }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
