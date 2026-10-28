@@ -12,8 +12,10 @@ import numpy as np
 
 from espi_live import paths
 from espi_live.engine import Engine
-from espi_live.processing import (PALETTES, ESPIProcessor, apply_palette,
-                                  palette_rgb_table)
+from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
+                                  apply_palette, normalize_min_max,
+                                  palette_rgb_table, smooth_speckle,
+                                  stretch_contrast)
 
 
 class ListLog:
@@ -88,6 +90,42 @@ class ProcessingTests(unittest.TestCase):
                 else:
                     cpu_rgb = cpu[..., ::-1]
                 np.testing.assert_array_equal(table[image], cpu_rgb)
+
+    def test_stretch_contrast(self):
+        """0% clip matches min/max; a clip ignores a few hot pixels.
+
+        Args: None.
+        Returns: None.
+        """
+        rng = np.random.default_rng(2)
+        image = rng.integers(40, 120, (100, 100), dtype=np.uint8)
+        image[0, :5] = 255  # stray bright speckles
+        exact = stretch_contrast(image, 0)
+        np.testing.assert_array_equal(exact[0], normalize_min_max(image)[0])
+        clipped, low, high = stretch_contrast(image, 1.0)
+        self.assertLess(high, 255)
+        self.assertGreaterEqual(low, 40)
+        self.assertEqual(int(clipped.max()), 255)
+        flat = stretch_contrast(np.full((8, 8), 7, np.uint8), 1.0)[0]
+        self.assertEqual(int(flat.max()), 0)
+
+    def test_rolling_average_and_smoothing(self):
+        """The running average converges and every frame returns an image.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        results = [processor.rolling_average(np.full((4, 4), 100, np.uint8), 5)
+                   for _ in range(3)]
+        self.assertTrue(all(r is not None and int(r[0, 0]) == 100 for r in results))
+        result = processor.rolling_average(np.full((4, 4), 200, np.uint8), 5)
+        self.assertEqual(int(result[0, 0]), 120)  # 100 + (200 - 100) / 5
+        noisy = np.random.default_rng(3).integers(0, 256, (64, 64), dtype=np.uint8)
+        for method in SMOOTHING_METHODS:
+            smoothed = smooth_speckle(noisy, method, 7)
+            self.assertLess(float(smoothed.std()), float(noisy.std()))
+        self.assertIs(smooth_speckle(noisy, "Gaussian", 0), noisy)
 
 
 class EngineDemoTests(unittest.TestCase):
@@ -190,6 +228,26 @@ class EngineDemoTests(unittest.TestCase):
         packet = self.engine.latest_packet()
         self.assertEqual((packet.palette, packet.gamma), ("Gray", 2.0))
         self.assertEqual(self.engine.status()["demo"], True)
+
+    def test_fringe_tools_and_reference_refresh(self):
+        """Rolling average, filters, clip, invert and auto-refresh run together.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(
+            mode="Reference", average=4, rolling=True, ref_refresh_s=0.2,
+            smoothing=5, smoothing_method="Median", clip_percent=1.0,
+            invert=True, clahe=False)
+        self.assertTrue(wait_until(lambda: any(
+            "Reference auto-refresh: every 0.2 s" in line for line in self.log.lines)))
+        self.assertTrue(wait_until(lambda: (
+            self.engine.latest_packet() is not None and
+            self.engine.latest_packet().mode == "Reference")))
+        first = self.engine.latest_packet().sequence
+        self.assertTrue(wait_until(
+            lambda: self.engine.latest_packet().sequence > first + 3))
+        self.assertIn("refreshes every", self.engine.status()["hint"])
 
 
 if __name__ == "__main__":

@@ -26,7 +26,8 @@ import numpy as np
 
 from espi_live.camera import CameraSession, format_camera_values
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
-                                  gamma_lut, normalize_min_max, watermark_demo)
+                                  gamma_lut, smooth_speckle,
+                                  stretch_contrast, watermark_demo)
 from espi_live.recording import AVIRecorder, recording_path, save_frame
 
 CAMERA_TIMEOUT_MS = 100
@@ -45,7 +46,13 @@ class Settings:
     gain_db: float = 0.0
     fps: float = 30.0
     average: int = 1
+    rolling: bool = False         # running average instead of one image per N frames
+    ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
+    smoothing: int = 0            # speckle filter width in pixels; 0 = off
+    smoothing_method: str = "Gaussian"
     scale_range: bool = True
+    clip_percent: float = 0.0     # stretch ignores this % of pixels at each end
+    invert: bool = False
     palette: str = "Gray"
     gamma: float = 1.0
     clahe: bool = True
@@ -136,6 +143,7 @@ class Engine:
             "range": "Input: —    Scaled: —",
             "hint": "Raw view: direct Mono8 positioning",
             "processing": "Processing: —", "record": "Recording: off",
+            "camera_fps": "Camera: — fps",
             "processed_fps": 0.0,
         }
         self._status_lock = threading.Lock()
@@ -272,7 +280,7 @@ class Engine:
 
         Args: None.
         Returns: A dict with keys demo, camera, range, hint, processing,
-            record and processed_fps.
+            record, camera_fps and processed_fps.
         """
         with self._status_lock:
             return dict(self._status)
@@ -340,6 +348,8 @@ class Engine:
         record_signature = None
         resulting_fps = None
         last_range_time = 0.0
+        last_rolling = applied.rolling
+        last_refresh = applied.ref_refresh_s
         last_readback = time.monotonic()
         last_error_log = 0.0
         last_valid = time.monotonic()
@@ -356,7 +366,7 @@ class Engine:
         while not self._stop.is_set():
             s = self.settings()
             self._reap_recorders()
-            signature = (s.mode, s.average if s.mode != "Raw" else 1)
+            signature = (s.mode, s.average if s.mode != "Raw" else 1, s.rolling)
             recorder = self._recorder
             if recorder is not None and (
                     not s.record or signature != record_signature
@@ -375,11 +385,20 @@ class Engine:
                     processor.prev = None
                 self.log.write(f"View: {s.mode}")
                 last_mode = s.mode
+            if s.rolling != last_rolling:
+                processor.reset_avg()
+                last_rolling = s.rolling
+            if s.ref_refresh_s != last_refresh:
+                self.log.write(f"Reference auto-refresh: every {s.ref_refresh_s:.1f} s"
+                               if s.ref_refresh_s > 0 else "Reference auto-refresh: off")
+                last_refresh = s.ref_refresh_s
             self._set_status(hint=(
                 "Raw view: direct Mono8 positioning"
                 if s.mode == "Raw" else
                 "Reference: press F or Set reference to capture a baseline"
                 if s.mode == "Reference" and processor.ref is None else
+                f"Reference refreshes every {s.ref_refresh_s:.1f} s to cancel slow drift"
+                if s.mode == "Reference" and s.ref_refresh_s > 0 else
                 "ESPI difference view; min/max range is before gamma and palette"))
 
             work_started = time.monotonic()
@@ -411,7 +430,10 @@ class Engine:
                 if now - last_readback >= READBACK_INTERVAL_S:
                     values = self.camera.read_values()
                     resulting_fps = values["resulting"]
-                    self._set_status(camera=format_camera_values(values))
+                    self._set_status(
+                        camera=format_camera_values(values),
+                        camera_fps=("Camera: n/a" if resulting_fps is None else
+                                    f"Camera: {resulting_fps:.1f} fps"))
                     last_readback = now
                 if (now - last_setting_time >= SETTING_INTERVAL_S and
                         (s.exposure_us, s.gain_db, s.fps) !=
@@ -425,6 +447,13 @@ class Engine:
                     applied = s
                     last_setting_time = now
 
+            if s.mode == "Reference" and s.ref_refresh_s > 0 and (
+                    processor.ref is None or
+                    now - processor.ref_time >= s.ref_refresh_s):
+                processor.set_reference(frame, now)
+                if not s.rolling:  # keep each block average on one baseline
+                    processor.reset_avg()
+
             update_range = now - last_range_time >= RANGE_INTERVAL_S
             image = None
             palette, gamma = "Gray", 1.0
@@ -434,11 +463,13 @@ class Engine:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
             else:
-                averaged = processor.average(
-                    processor.difference(frame, s.mode), s.average)
+                difference = processor.difference(frame, s.mode)
+                averaged = (processor.rolling_average(difference, s.average)
+                            if s.rolling else processor.average(difference, s.average))
                 if averaged is not None:
+                    averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
                     if s.scale_range:
-                        image, low, high = normalize_min_max(averaged)
+                        image, low, high = stretch_contrast(averaged, s.clip_percent)
                         scaled = (0, 255) if high > low else (0, 0)
                     else:
                         image = averaged
@@ -451,6 +482,8 @@ class Engine:
                         self._set_status(range=(
                             f"Input: {low}–{high}    Scaled: {scaled[0]}–{scaled[1]}"))
                         last_range_time = now
+                    if s.invert:
+                        image = cv2.bitwise_not(image)
                     palette, gamma = s.palette, s.gamma
                     if s.clahe and s.palette != "Gray":
                         # CLAHE sits between gamma and the palette, so do both
@@ -476,6 +509,8 @@ class Engine:
 
             elapsed = time.monotonic() - window_start
             if elapsed >= 1.0:
+                if self.demo:  # no sensor; the synthetic source runs at the request
+                    self._set_status(camera_fps=f"Camera: {s.fps:.1f} fps (simulated)")
                 self._set_status(
                     processed_fps=window_frames / elapsed,
                     processing=(f"Processed: {window_frames / elapsed:.1f} fps    "
@@ -498,7 +533,8 @@ class Engine:
     def _feed_recorder(self, s, signature, record_signature, packet, resulting_fps):
         """Start a recording or submit the newest frame to the active one.
 
-        Args: s is the settings snapshot; signature is (mode, average);
+        Args: s is the settings snapshot; signature is (mode, average,
+            rolling);
             record_signature is the active recording's signature; packet is
             the newest frame; resulting_fps is the camera's measured rate.
         Returns: The (possibly new) active recording signature.
@@ -509,7 +545,8 @@ class Engine:
             self._recorder.submit(packet.render())
             return record_signature
         source_fps = resulting_fps or s.fps
-        fps = min(30.0, max(1.0, source_fps / signature[1]))
+        frames_per_image = 1 if signature[2] else signature[1]  # rolling: every frame
+        fps = min(30.0, max(1.0, source_fps / frames_per_image))
         try:
             path = recording_path(s.mode, self.demo)
             self._recorder = AVIRecorder(path, packet.render(), fps)
@@ -566,7 +603,7 @@ class Engine:
                 if frame is None:
                     self.log.write("No frame available yet for a reference.")
                 else:
-                    processor.ref = frame.copy()
+                    processor.set_reference(frame, time.monotonic())
                     processor.reset_avg()
                     self.log.write("Captured reference frame.")
             elif action == "switch_live" and self.demo:

@@ -20,6 +20,10 @@ COLOR_MAPS = {
 }
 PALETTES = ("Gray", *COLOR_MAPS)
 VIEW_MODES = ("Raw", "Previous", "Reference")
+SMOOTHING_METHODS = ("Gaussian", "Median")
+# OpenCV's vectorized median handles widths up to 5; wider uint8 medians take
+# ~30 ms per 6 MP frame, which would cut the camera's 30 fps.
+MAX_MEDIAN_WIDTH = 5
 
 
 def normalize_min_max(image):
@@ -35,6 +39,48 @@ def normalize_min_max(image):
         return np.zeros_like(image), low, high
     return cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX,
                          dtype=cv2.CV_8U), low, high
+
+
+def stretch_contrast(image, clip_percent):
+    """Stretch a measurement image to 0..255, optionally ignoring outliers.
+
+    Speckle leaves a few very bright pixels in a difference image; with an
+    exact min/max stretch they set the top of the range and flatten the
+    fringes. Clipping a small percentage at each end keeps the contrast.
+
+    Args: image is a nonempty, single-channel uint8 array; clip_percent is
+        the share of pixels (0..50) allowed to saturate at each end, where 0
+        means the exact minimum and maximum.
+    Returns: A tuple of scaled image, low and high input levels. A constant
+        image (or clipped range) becomes zeros, as in normalize_min_max.
+    """
+    if clip_percent <= 0:
+        return normalize_min_max(image)
+    counts = np.cumsum(cv2.calcHist([image], [0], None, [256], [0, 256]).ravel())
+    clipped = counts[-1] * min(clip_percent, 50.0) / 100.0
+    low = int(np.searchsorted(counts, clipped, side="right"))
+    high = int(np.searchsorted(counts, counts[-1] - clipped, side="left"))
+    if high <= low:
+        return np.zeros_like(image), low, high
+    levels = (np.arange(256, dtype=np.float32) - low) * (255.0 / (high - low))
+    return cv2.LUT(image, np.clip(np.rint(levels), 0, 255).astype(np.uint8)), low, high
+
+
+def smooth_speckle(image, method, size):
+    """Blur away pixel-scale speckle so broad fringes stand out.
+
+    Args: image is a 2-D uint8 array; method is a SMOOTHING_METHODS name;
+        size is the kernel width in pixels (made odd), with 0 or 1 meaning off;
+        Median is capped at MAX_MEDIAN_WIDTH to stay within a frame interval.
+    Returns: The smoothed uint8 image, or the input itself when off.
+    """
+    size = int(size)
+    if size <= 1:
+        return image
+    size |= 1  # OpenCV kernels must have odd widths
+    if method == "Median":
+        return cv2.medianBlur(image, min(size, MAX_MEDIAN_WIDTH))
+    return cv2.GaussianBlur(image, (size, size), 0)
 
 
 def gamma_lut(gamma):
@@ -92,9 +138,11 @@ class ESPIProcessor:
         """
         self.prev = None
         self.ref = None
+        self.ref_time = None
         self.avg_accum = None
         self.avg_count = 0
         self.avg_target = None
+        self.rolling = None
 
     def reset_avg(self):
         """Discard any partial temporal average.
@@ -105,6 +153,17 @@ class ESPIProcessor:
         self.avg_accum = None
         self.avg_count = 0
         self.avg_target = None
+        self.rolling = None
+
+    def set_reference(self, frame, now):
+        """Store a copy of a frame as the Reference baseline.
+
+        Args: frame is the Mono8 array to keep; now is the monotonic time,
+            used to schedule automatic refreshes.
+        Returns: None.
+        """
+        self.ref = frame.copy()
+        self.ref_time = now
 
     def difference(self, frame, mode):
         """Subtract the previous frame or the captured reference.
@@ -152,6 +211,25 @@ class ESPIProcessor:
         result = self.avg_accum.astype(np.uint8)
         self.reset_avg()
         return result
+
+    def rolling_average(self, image, count):
+        """Blend each difference frame into a running average.
+
+        Unlike average(), this returns a frame every time, so the display
+        keeps the camera's rate; older frames fade with weight 1/count.
+
+        Args: image is a uint8 difference frame; count sets the effective
+            number of frames remembered, with one disabling averaging.
+        Returns: The rounded uint8 running average.
+        """
+        if count <= 1:
+            self.reset_avg()
+            return image
+        if self.rolling is None or self.rolling.shape != image.shape:
+            self.rolling = image.astype(np.float32)
+        else:
+            cv2.accumulateWeighted(image, self.rolling, 1.0 / count)
+        return cv2.convertScaleAbs(self.rolling)
 
 
 class DemoSource:
