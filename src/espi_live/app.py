@@ -1,19 +1,15 @@
 """Live Blackfly Mono8 preview and ESPI measurement viewer.
 
+Legacy Tk front end (``--ui tk``); the default is the Qt front end in
+qt_app.py.
 The camera image stays in a separate Tk viewer. A resizable Tk control panel has a
 font-size slider, and a separate log window shows application messages. Focus
 the image window for shortcuts: q/Esc quit, s save, r reset previous frame,
 a reset averaging, and f capture a reference frame.
 """
 
-import argparse
-import ctypes
-import importlib
-import os
 import math
 import queue
-import sys
-import threading
 import time
 import traceback
 import tkinter as tk
@@ -27,308 +23,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-PySpin = None  # Imported only if real-camera startup is requested.
+from espi_live.camera import CameraSession, format_camera_values
+from espi_live.engine import WindowsPreviewTimer
+from espi_live.logs import AppLog
+from espi_live.processing import (COLOR_MAPS, DemoSource, ESPIProcessor,
+                                  normalize_min_max, watermark_demo)
+from espi_live.recording import AVIRecorder, recording_path, save_frame
 
-
-# This file lives at <project>/src/espi_live/app.py; outputs go to <project>/output.
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
-COLOR_MAPS = {
-    "Turbo": cv2.COLORMAP_TURBO,
-    "Jet": cv2.COLORMAP_JET,
-    "Hot": cv2.COLORMAP_HOT,
-    "Viridis": cv2.COLORMAP_VIRIDIS,
-    "Plasma": cv2.COLORMAP_PLASMA,
-    "Inferno": cv2.COLORMAP_INFERNO,
-}
 FAST_PREVIEW_MAX_PIXELS = 1_500_000
-
-
-def timestamp():
-    """Create a unique filename timestamp.
-
-    Args: None.
-    Returns: A local-time string with microsecond precision.
-    """
-    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-
-
-def set_enum(nodemap, name, entry_name):
-    """Set an available, writable GenICam enumeration.
-
-    Args: nodemap is the camera or stream map; name identifies the node;
-        entry_name identifies the requested enum entry.
-    Returns: True if set, or False when unsupported or read-only.
-    """
-    node = PySpin.CEnumerationPtr(nodemap.GetNode(name))
-    if not PySpin.IsWritable(node):
-        return False
-    entry = PySpin.CEnumEntryPtr(node.GetEntryByName(entry_name))
-    if PySpin.IsReadable(entry):
-        node.SetIntValue(entry.GetValue())
-        return True
-    return False
-
-
-def set_bool(nodemap, name, value):
-    """Set an available, writable GenICam boolean.
-
-    Args: nodemap is the camera map; name identifies the node; value is the
-        requested boolean state.
-    Returns: True if set, or False when read-only.
-    """
-    node = PySpin.CBooleanPtr(nodemap.GetNode(name))
-    if PySpin.IsWritable(node):
-        node.SetValue(bool(value))
-        return True
-    return False
-
-
-def set_float(nodemap, name, value):
-    """Clamp and set an available GenICam floating-point value.
-
-    Args: nodemap is the camera map; name identifies the node; value is the
-        requested number in that node's native units.
-    Returns: True if set, or False when unsupported or read-only.
-    """
-    node = PySpin.CFloatPtr(nodemap.GetNode(name))
-    if PySpin.IsReadable(node) and PySpin.IsWritable(node):
-        node.SetValue(float(np.clip(value, node.GetMin(), node.GetMax())))
-        return True
-    return False
-
-
-def readable_float_node(nodemap, name):
-    """Find a readable floating-point node for limits or live readback.
-
-    Args: nodemap is a GenICam map; name identifies the requested node.
-    Returns: The PySpin float node, or None when it cannot be read.
-    """
-    try:
-        node = PySpin.CFloatPtr(nodemap.GetNode(name))
-        return node if PySpin.IsReadable(node) else None
-    except PySpin.SpinnakerException:
-        return None
-
-
-class MirrorStream:
-    """Copy Python console output to the GUI queue and an optional log file."""
-
-    def __init__(self, original, output_queue, log_file, lock):
-        """Prepare a console mirror.
-
-        Args: original is stdout or stderr; output_queue receives GUI text;
-            log_file is an optional text file; lock serializes writes.
-        Returns: None.
-        """
-        self.original = original
-        self.output_queue = output_queue
-        self.log_file = log_file
-        self.lock = lock
-
-    def write(self, value):
-        """Forward a text chunk to console, log file, and GUI queue.
-
-        Args: value is the text to write.
-        Returns: Number of characters accepted.
-        """
-        with self.lock:
-            if self.original is not None:
-                self.original.write(value)
-            if self.log_file is not None:
-                try:
-                    self.log_file.write(value)
-                except OSError:
-                    self.log_file = None
-            if value:
-                self.output_queue.put(value)
-        return len(value)
-
-    def flush(self):
-        """Flush the underlying console and log file.
-
-        Args: None.
-        Returns: None.
-        """
-        with self.lock:
-            if self.original is not None:
-                self.original.flush()
-            if self.log_file is not None:
-                try:
-                    self.log_file.flush()
-                except OSError:
-                    self.log_file = None
-
-    def isatty(self):
-        """Report whether the underlying console is interactive.
-
-        Args: None.
-        Returns: The original stream's terminal flag.
-        """
-        return self.original.isatty() if self.original is not None else False
-
-    def __getattr__(self, name):
-        """Expose other original-stream attributes to console users.
-
-        Args: name is the requested attribute name.
-        Returns: The attribute from the underlying stream.
-        """
-        if self.original is None:
-            raise AttributeError(name)
-        return getattr(self.original, name)
-
-
-def try_setting(log, nodemap, setter, name, value):
-    """Apply a camera setting while reporting PySpin failures.
-
-    Args: log receives error messages; nodemap owns the node; setter is a
-        setting function; name and value identify the requested setting.
-    Returns: None.
-    """
-    try:
-        if not setter(nodemap, name, value):
-            log.write(f"Camera setting unavailable or read-only: {name}")
-    except PySpin.SpinnakerException as exc:
-        log.write(f"Could not set {name}: {exc}")
-
-
-def normalize_min_max(image):
-    """Map a Mono8 image's minimum and maximum to 0 and 255.
-
-    Args: image is a nonempty, single-channel uint8 NumPy array.
-    Returns: A tuple of scaled image, original minimum, and original maximum.
-        A constant image becomes zeros.
-    """
-    low, high, _, _ = cv2.minMaxLoc(image)
-    low, high = int(low), int(high)
-    if high == low:
-        return np.zeros_like(image), low, high
-    return cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX,
-                         dtype=cv2.CV_8U), low, high
-
-
-class ESPIProcessor:
-    """Keep the previous/reference frame and temporal averaging state."""
-
-    def __init__(self):
-        """Initialize empty ESPI frame state.
-
-        Args: None.
-        Returns: None.
-        """
-        self.prev = None
-        self.ref = None
-        self.avg_accum = None
-        self.avg_count = 0
-        self.avg_target = None
-
-    def reset_avg(self):
-        """Discard any partial temporal average.
-
-        Args: None.
-        Returns: None.
-        """
-        self.avg_accum = None
-        self.avg_count = 0
-        self.avg_target = None
-
-    def difference(self, frame, mode):
-        """Subtract the previous frame or the captured reference.
-
-        Args: frame is the current Mono8 array; mode is Previous or Reference.
-        Returns: A uint8 absolute-difference image, or zeros until a baseline
-            frame exists.
-        """
-        if mode == "Previous":
-            if self.prev is None or self.prev.shape != frame.shape:
-                self.prev = frame.copy()
-                return np.zeros_like(frame)
-            result = cv2.absdiff(frame, self.prev)
-            self.prev = frame.copy()
-            return result
-        if self.ref is None or self.ref.shape != frame.shape:
-            return np.zeros_like(frame)
-        return cv2.absdiff(frame, self.ref)
-
-    def average(self, image, count):
-        """Accumulate a requested number of difference frames.
-
-        Args: image is a uint8 difference frame; count is the number of frames
-            per displayed average, with one disabling averaging.
-        Returns: A uint8 average when ready, or None while accumulating.
-        """
-        if count <= 1:
-            self.reset_avg()
-            return image
-        if self.avg_accum is None or self.avg_target != count:
-            self.avg_accum = image.astype(np.float32)
-            self.avg_count = 1
-            self.avg_target = count
-        else:
-            self.avg_accum += image
-            self.avg_count += 1
-        if self.avg_count < count:
-            return None
-        result = np.clip(self.avg_accum / self.avg_count, 0, 255).astype(np.uint8)
-        self.reset_avg()
-        return result
-
-
-class DemoSource:
-    """Generate moving Mono8 test frames without a camera or SDK."""
-
-    def __init__(self, width=960, height=640):
-        """Build a repeatable test pattern with a broad brightness range.
-
-        Args: width and height are the synthetic frame dimensions in pixels.
-        Returns: None.
-        """
-        self.width = width
-        self.height = height
-        x = np.linspace(16, 215, width, dtype=np.float32)
-        gradient = np.broadcast_to(x, (height, width)).copy()
-        checker = (((np.arange(height)[:, None] // 40 +
-                     np.arange(width)[None, :] // 40) % 2) * 28)
-        self.base = np.clip(gradient + checker, 0, 255).astype(np.uint8)
-        cv2.putText(self.base, "ESPI DEMO PATTERN", (30, height - 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.15, 255, 2, cv2.LINE_AA)
-        self.start_time = time.monotonic()
-
-    def next_frame(self, exposure_us, gain_db, now):
-        """Make one moving grayscale frame using the simulated camera sliders.
-
-        Args: exposure_us and gain_db are control values; now is monotonic time.
-        Returns: A new two-dimensional uint8 frame, independent of the base.
-        """
-        frame = self.base.copy()
-        phase = now - self.start_time
-        center_x = int(self.width * (0.5 + 0.32 * math.sin(phase * 1.3)))
-        center_y = int(self.height * (0.48 + 0.23 * math.cos(phase * 0.9)))
-        cv2.circle(frame, (center_x, center_y), 65, 255, -1, cv2.LINE_AA)
-        cv2.circle(frame, (center_x, center_y), 30, 0, -1, cv2.LINE_AA)
-        cv2.rectangle(frame, (30, 90), (105, 165), 0, -1)
-        brightness = max(0.1, min(2.5, exposure_us / 8000.0))
-        brightness *= max(1.0, min(4.0, 10.0 ** (gain_db / 20.0)))
-        return cv2.convertScaleAbs(frame, alpha=brightness)
-
-
-def watermark_demo(image):
-    """Permanently mark a synthetic preview or export as dummy data.
-
-    Args: image is a grayscale or BGR display frame.
-    Returns: A marked copy of the frame, leaving its source unchanged.
-    """
-    marked = image.copy()
-    height, width = marked.shape[:2]
-    banner_height = min(height, max(42, height // 10))
-    background = 0 if marked.ndim == 2 else (0, 0, 80)
-    foreground = 255 if marked.ndim == 2 else (0, 255, 255)
-    cv2.rectangle(marked, (0, 0), (width - 1, banner_height - 1), background, -1)
-    scale = min(1.0, max(0.45, width / 900.0))
-    cv2.putText(marked, "DUMMY MODE ACTIVE", (15, max(30, banner_height - 13)),
-                cv2.FONT_HERSHEY_SIMPLEX, scale, foreground, 2, cv2.LINE_AA)
-    return marked
 
 
 class Controls:
@@ -653,62 +355,34 @@ class Controls:
         else:
             self.switch_live_button.pack_forget()
 
-    def apply_camera_limits(self, nodemap):
+    def apply_camera_limits(self, limits):
         """Clamp camera sliders to readable device limits.
 
-        Args: nodemap is the initialized camera's GenICam node map.
+        Args: limits is CameraSession.limits(): {node name: (low, high)}.
         Returns: None. Unsupported nodes retain their current UI range.
         """
-        for name, scale, variable, lower, upper, step in (
-            ("ExposureTime", self.exposure_scale, self.exposure, 0, 50000, 1),
-            ("Gain", self.gain_scale, self.gain, 0, 30, 0.1),
-            ("AcquisitionFrameRate", self.fps_scale, self.fps, 0, 60, 0.1),
+        for name, scale, variable, step in (
+            ("ExposureTime", self.exposure_scale, self.exposure, 1),
+            ("Gain", self.gain_scale, self.gain, 0.1),
+            ("AcquisitionFrameRate", self.fps_scale, self.fps, 0.1),
         ):
-            node = readable_float_node(nodemap, name)
-            if node is None:
+            if name not in limits:
                 continue
-            try:
-                low = math.ceil(max(lower, node.GetMin()) / step) * step
-                high = math.floor(min(upper, node.GetMax()) / step) * step
-            except PySpin.SpinnakerException:
-                continue
-            if high < low:
-                high = low
+            lower, upper = limits[name]
+            low = math.ceil(lower / step) * step
+            high = max(low, math.floor(upper / step) * step)
             scale.configure(from_=low, to=high)
             if not low <= variable.get() <= high:
                 scale.set(max(low, min(variable.get(), high)))
 
-    def update_camera_values(self, nodemap):
+    def update_camera_values(self, values):
         """Show applied camera settings and resulting acquisition rate.
 
-        Args: nodemap is the initialized camera's GenICam node map.
+        Args: values is CameraSession.read_values().
         Returns: None; unavailable readings appear as n/a.
         """
-        readings = [readable_float_node(nodemap, name) for name in (
-            "ExposureTime", "Gain", "AcquisitionFrameRate",
-            "AcquisitionResultingFrameRate")]
-        values = []
-        for node in readings:
-            try:
-                values.append(node.GetValue() if node is not None else None)
-            except PySpin.SpinnakerException:
-                values.append(None)
-        exposure, gain, requested, resulting = values
-        self.resulting_fps = resulting
-        def format_reading(value, unit, digits):
-            """Format a camera reading for the status label.
-
-            Args: value is a float or None; unit is a suffix; digits is the
-                decimal precision.
-            Returns: Human-readable text or n/a.
-            """
-            return f"{value:.{digits}f}{unit}" if value is not None else "n/a"
-
-        self.camera_text.set(
-            f"Applied: {format_reading(exposure, ' µs', 0)}, "
-            f"{format_reading(gain, ' dB', 1)}; "
-            f"FPS set {format_reading(requested, '', 1)}, "
-            f"resulting {format_reading(resulting, '', 1)}")
+        self.resulting_fps = values["resulting"]
+        self.camera_text.set(format_camera_values(values))
 
     def _place_windows(self):
         """Fit all controls when possible and arrange the three windows.
@@ -800,26 +474,6 @@ class Controls:
         Returns: None.
         """
         self.root.destroy()
-
-
-def configure_camera(cam, log):
-    """Configure the camera for the existing Mono8 continuous-preview defaults.
-
-    Args: cam is an initialized PySpin camera; log reports unsupported writes.
-    Returns: The camera's GenICam node map.
-    """
-    nodemap = cam.GetNodeMap()
-    for name, value in (("PixelFormat", "Mono8"),
-                        ("AcquisitionMode", "Continuous"),
-                        ("ExposureAuto", "Off"), ("GainAuto", "Off")):
-        try_setting(log, nodemap, set_enum, name, value)
-    try_setting(log, nodemap, set_float, "ExposureTime", 8000.0)
-    try_setting(log, nodemap, set_float, "Gain", 0.0)
-    try_setting(log, nodemap, set_bool, "AcquisitionFrameRateEnable", True)
-    try_setting(log, nodemap, set_float, "AcquisitionFrameRate", 30.0)
-    try_setting(log, cam.GetTLStreamNodeMap(), set_enum,
-                "StreamBufferHandlingMode", "NewestOnly")
-    return nodemap
 
 
 def make_display(measurement, controls, clahe, gamma_cache, update_range):
@@ -947,236 +601,6 @@ class Viewer:
         self.window.destroy()
 
 
-class AVIRecorder:
-    """Write a constant-rate AVI on a worker using the newest displayed frame."""
-
-    def __init__(self, path, frame, fps):
-        """Open an AVI and start its timing-controlled writer thread.
-
-        Args: path is the target AVI filename; frame is the first full-size
-            display frame; fps is the selected output frame rate.
-        Returns: None. Raises OSError if OpenCV cannot open the file.
-        """
-        height, width = frame.shape[:2]
-        self.path = path
-        self.fps = fps
-        self.writer = cv2.VideoWriter(
-            path, cv2.VideoWriter_fourcc(*"MJPG"), fps,
-            (width, height), True)
-        if not self.writer.isOpened():
-            self.writer.release()
-            raise OSError(f"Could not open AVI recording: {path}")
-        self.lock = threading.Lock()
-        self.frame = frame
-        self.sequence = 1
-        self.frames_written = 0
-        self.skipped_preview_frames = 0
-        self.late_intervals = 0
-        self.error = None
-        self.stop_time = None
-        self.stop_event = threading.Event()
-        self.done = threading.Event()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        try:
-            self.thread.start()
-        except RuntimeError:
-            self.writer.release()
-            raise
-
-    def submit(self, frame):
-        """Replace the pending recording image with the newest preview frame.
-
-        Args: frame is an immutable grayscale or BGR display image.
-        Returns: None. An older, unwritten preview frame may be skipped.
-        """
-        with self.lock:
-            self.frame = frame
-            self.sequence += 1
-
-    def stop(self):
-        """Request a clean writer-thread stop without blocking the preview.
-
-        Args: None.
-        Returns: None; completion is signaled by the done event.
-        """
-        if self.stop_time is None:
-            self.stop_time = time.monotonic()
-            self.stop_event.set()
-
-    def _write_latest(self, previous_sequence):
-        """Encode the latest available preview frame once.
-
-        Args: previous_sequence is the last frame sequence already sampled.
-        Returns: The sequence number sampled for this AVI frame.
-        """
-        with self.lock:
-            frame = self.frame
-            sequence = self.sequence
-        if sequence > previous_sequence + 1:
-            self.skipped_preview_frames += sequence - previous_sequence - 1
-        output = (frame if frame.ndim == 3 else
-                  cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR))
-        self.writer.write(output)
-        self.frames_written += 1
-        return sequence
-
-    def _run(self):
-        """Write latest frames on the AVI's constant-rate timeline.
-
-        Args: None; the thread reads submitted frames and stop_event.
-        Returns: None; sets done and records any encoder error.
-        """
-        interval = 1.0 / self.fps
-        next_tick = time.monotonic()
-        start_time = next_tick
-        previous_sequence = 0
-        try:
-            while True:
-                previous_sequence = self._write_latest(previous_sequence)
-                next_tick += interval
-                delay = next_tick - time.monotonic()
-                if delay < 0:
-                    self.late_intervals += 1
-                if self.stop_event.wait(max(0, delay)):
-                    final_frames = max(
-                        1, math.ceil((self.stop_time - start_time) * self.fps))
-                    while self.frames_written < final_frames:
-                        previous_sequence = self._write_latest(previous_sequence)
-                    break
-        except Exception as exc:
-            self.error = exc
-        finally:
-            try:
-                self.writer.release()
-            finally:
-                self.done.set()
-
-    def summary(self):
-        """Summarize finalized recording frames and timing diagnostics.
-
-        Args: None.
-        Returns: A human-readable recording summary string.
-        """
-        return (f"Saved AVI: {self.path} ({self.frames_written} frames at "
-                f"{self.fps:.1f} fps; {self.skipped_preview_frames} preview "
-                f"frames skipped, {self.late_intervals} late encoder intervals)")
-
-
-class CameraSession:
-    """Own a PySpin camera and its complete acquisition lifecycle."""
-
-    def __init__(self, controls):
-        """Initialize empty camera handles for a connection attempt.
-
-        Args: controls supplies requested settings and receives diagnostics.
-        Returns: None.
-        """
-        self.controls = controls
-        self.system = None
-        self.cam_list = None
-        self.cam = None
-        self.nodemap = None
-        self.initialized = False
-        self.acquiring = False
-
-    def open(self):
-        """Detect, initialize, configure, and start the first FLIR camera.
-
-        Args: None.
-        Returns: None. Raises when PySpin or a usable camera is unavailable.
-        """
-        global PySpin
-        if PySpin is None:
-            PySpin = importlib.import_module("PySpin")
-        try:
-            self.system = PySpin.System.GetInstance()
-            self.cam_list = self.system.GetCameras()
-            if self.cam_list.GetSize() < 1:
-                raise RuntimeError("No FLIR/Spinnaker cameras detected.")
-            self.cam = self.cam_list.GetByIndex(0)
-            self.cam.Init()
-            self.initialized = True
-            self.nodemap = configure_camera(self.cam, self.controls)
-            self.controls.apply_camera_limits(self.nodemap)
-            self.controls.update_camera_values(self.nodemap)
-            self.cam.BeginAcquisition()
-            self.acquiring = True
-        except Exception:
-            self.close()
-            raise
-
-    def close(self):
-        """Release acquisition, camera, list, and system in SDK-safe order.
-
-        Args: None.
-        Returns: None; cleanup errors are written to the app log.
-        """
-        if self.acquiring:
-            try:
-                self.cam.EndAcquisition()
-            except Exception as exc:
-                self.controls.write(f"EndAcquisition error: {exc}")
-            self.acquiring = False
-        if self.initialized:
-            try:
-                self.cam.DeInit()
-            except Exception as exc:
-                self.controls.write(f"DeInit error: {exc}")
-            self.initialized = False
-        self.cam = None
-        self.nodemap = None
-        if self.cam_list is not None:
-            try:
-                self.cam_list.Clear()
-            except Exception as exc:
-                self.controls.write(f"Camera-list cleanup error: {exc}")
-            self.cam_list = None
-        if self.system is not None:
-            try:
-                self.system.ReleaseInstance()
-            except Exception as exc:
-                self.controls.write(f"System cleanup error: {exc}")
-            self.system = None
-
-
-class WindowsPreviewTimer:
-    """Temporarily request precise Windows sleeps for preview pacing."""
-
-    def __init__(self):
-        """Prepare timer state without changing the system yet.
-
-        Args: None.
-        Returns: None.
-        """
-        self.winmm = None
-        self.active = False
-
-    def start(self):
-        """Request 1 ms sleep resolution for this visible Windows process.
-
-        Args: None.
-        Returns: True if Windows accepted the request, else False.
-        """
-        if os.name != "nt":
-            return False
-        try:
-            self.winmm = ctypes.WinDLL("winmm")
-            self.active = self.winmm.timeBeginPeriod(1) == 0
-        except OSError:
-            self.winmm = None
-        return self.active
-
-    def stop(self):
-        """Restore the previous Windows timer-resolution request.
-
-        Args: None.
-        Returns: None.
-        """
-        if self.active:
-            self.winmm.timeEndPeriod(1)
-            self.active = False
-
-
 def wait_for_input(controls, deadline):
     """Service Tk once, then sleep only the remainder of the frame interval.
 
@@ -1197,20 +621,9 @@ def main(force_demo=False):
     Returns: None. Fatal errors are logged and exit with a nonzero status.
     """
     controls = Controls()
-    log_folder = os.path.join(OUTPUT_DIR, "logs")
-    log_file = None
-    try:
-        os.makedirs(log_folder, exist_ok=True)
-        log_file = open(os.path.join(log_folder, f"espi_{timestamp()}.log"),
-                        "w", encoding="utf-8", buffering=1)
-    except OSError:
-        pass
-    original_stdout, original_stderr = sys.stdout, sys.stderr
-    stream_lock = threading.Lock()
-    sys.stdout = MirrorStream(original_stdout, controls.output_queue,
-                              log_file, stream_lock)
-    sys.stderr = MirrorStream(original_stderr, controls.output_queue,
-                              log_file, stream_lock)
+    app_log = AppLog()
+    app_log.output_queue = controls.output_queue
+    log_path = app_log.start()
     camera = None
     preview_timer = WindowsPreviewTimer()
     recorder = None
@@ -1221,8 +634,8 @@ def main(force_demo=False):
     demo = force_demo
     demo_source = None
     try:
-        if log_file is not None:
-            controls.write(f"Log file: {log_file.name}")
+        if log_path:
+            controls.write(f"Log file: {log_path}")
         if not demo:
             attempt = CameraSession(controls)
             try:
@@ -1232,6 +645,8 @@ def main(force_demo=False):
                 demo = True
             else:
                 camera = attempt
+                controls.apply_camera_limits(camera.limits())
+                controls.update_camera_values(camera.read_values())
         if demo and not force_demo:
             controls.root.update_idletasks()
             if not messagebox.askyesno(
@@ -1316,30 +731,15 @@ def main(force_demo=False):
                 frame = demo_source.next_frame(
                     controls.exposure.get(), controls.gain.get(), work_started)
             else:
-                try:
-                    image = camera.cam.GetNextImage(100)
-                except PySpin.SpinnakerException as exc:
-                    if time.monotonic() - last_camera_error_time >= 5.0:
-                        controls.write(f"Camera timeout or acquisition error: {exc}")
-                        last_camera_error_time = time.monotonic()
-                    if (time.monotonic() - last_valid_frame_time >= 1.0 and
-                            controls.speed_text.get() !=
-                            "Displayed: 0 fps    Waiting for camera frame"):
-                        controls.speed_text.set(
-                            "Displayed: 0 fps    Waiting for camera frame")
-                    controls.update()
-                    continue
-                try:
-                    if image.IsIncomplete():
+                frame, state = camera.grab(100)
+                if state != "ok":
+                    if state == "incomplete":
                         incomplete_count += 1
-                        frame = None
-                    else:
-                        frame = image.GetNDArray().copy()
-                finally:
-                    image.Release()
-                if frame is None:
-                    if incomplete_count % 30 == 1:
-                        controls.write(f"Incomplete frames: {incomplete_count}")
+                        if incomplete_count % 30 == 1:
+                            controls.write(f"Incomplete frames: {incomplete_count}")
+                    elif time.monotonic() - last_camera_error_time >= 5.0:
+                        controls.write(f"Camera timeout or acquisition error: {frame}")
+                        last_camera_error_time = time.monotonic()
                     if (time.monotonic() - last_valid_frame_time >= 1.0 and
                             controls.speed_text.get() !=
                             "Displayed: 0 fps    Waiting for camera frame"):
@@ -1353,20 +753,17 @@ def main(force_demo=False):
             now = time.monotonic()
             last_valid_frame_time = now
             if not demo and now - last_camera_read_time >= 1.0:
-                controls.update_camera_values(camera.nodemap)
+                controls.update_camera_values(camera.read_values())
                 last_camera_read_time = now
             settings = (controls.exposure.get(), controls.gain.get(),
                         controls.fps.get())
             if not demo and settings != last_settings and now - last_setting_time >= 0.1:
                 if settings[0] != last_settings[0]:
-                    try_setting(controls, camera.nodemap, set_float, "ExposureTime", settings[0])
+                    camera.set_float("ExposureTime", settings[0])
                 if settings[1] != last_settings[1]:
-                    try_setting(controls, camera.nodemap, set_float, "Gain", settings[1])
+                    camera.set_float("Gain", settings[1])
                 if settings[2] != last_settings[2]:
-                    try_setting(controls, camera.nodemap, set_bool,
-                                "AcquisitionFrameRateEnable", True)
-                    try_setting(controls, camera.nodemap, set_float,
-                                "AcquisitionFrameRate", settings[2])
+                    camera.set_float("AcquisitionFrameRate", settings[2])
                 last_settings = settings
                 last_setting_time = now
 
@@ -1390,13 +787,10 @@ def main(force_demo=False):
                     display = watermark_demo(display)
                 last_display = display
                 if controls.record.get() and recorder is None:
-                    folder = os.path.join(OUTPUT_DIR, "recordings")
-                    os.makedirs(folder, exist_ok=True)
-                    path = os.path.join(
-                        folder, f"{'dummy_' if demo else ''}espi_{mode.lower()}_{timestamp()}.avi")
                     source_fps = controls.resulting_fps or controls.fps.get()
                     recording_fps = min(30.0, max(1.0, source_fps / signature[1]))
                     try:
+                        path = recording_path(mode, demo)
                         recorder = AVIRecorder(path, display, recording_fps)
                     except OSError as exc:
                         controls.record.set(False)
@@ -1444,38 +838,9 @@ def main(force_demo=False):
                 if last_display is None:
                     controls.write("No current display frame is ready to save.")
                 else:
-                    title = controls.frame_title.get().strip()
-                    notes = controls.frame_notes.get("1.0", "end-1c").strip()
-                    # Limit the title to safe filename characters on Windows.
-                    safe_title = "".join(
-                        char if char.isalnum() or char in "-_" else "_"
-                        for char in title
-                    ).strip("_")[:80]
-                    suffix = f"_{safe_title}" if safe_title else ""
-                    prefix = "dummy_" if demo else ""
-                    folder = os.path.join(OUTPUT_DIR, "frames")
-                    path = os.path.join(
-                        folder, f"{prefix}frame_{timestamp()}{suffix}.png")
-                    try:
-                        os.makedirs(folder, exist_ok=True)
-                        if cv2.imwrite(path, last_display):
-                            controls.write(f"Saved: {path}")
-                            if title or notes:
-                                info_path = os.path.splitext(path)[0] + ".txt"
-                                try:
-                                    with open(info_path, "w", encoding="utf-8") as info:
-                                        info.write(
-                                            f"Frame: {os.path.basename(path)}\n"
-                                            f"Source: {'Demo' if demo else 'Camera'}\n"
-                                            f"Title: {title}\n\nNotes:\n{notes}\n")
-                                    controls.write(f"Saved frame info: {info_path}")
-                                except OSError as exc:
-                                    controls.write(
-                                        f"Frame saved, but could not save info: {exc}")
-                        else:
-                            controls.write(f"Could not save: {path}")
-                    except (OSError, cv2.error) as exc:
-                        controls.write(f"Could not save frame: {exc}")
+                    save_frame(last_display, controls.frame_title.get(),
+                               controls.frame_notes.get("1.0", "end-1c"),
+                               demo, controls)
             elif key == ord("r"):
                 processor.prev = None
                 controls.write("Reset previous frame.")
@@ -1506,6 +871,8 @@ def main(force_demo=False):
                     controls.record.set(False)
                     controls.record_text.set("Recording: off")
                     camera = attempt
+                    controls.apply_camera_limits(camera.limits())
+                    controls.update_camera_values(camera.read_values())
                     demo = False
                     demo_source = None
                     processor = ESPIProcessor()
@@ -1554,23 +921,18 @@ def main(force_demo=False):
             preview_timer.stop()
         finally:
             controls.drain_output()
-            sys.stdout, sys.stderr = original_stdout, original_stderr
-            if log_file is not None:
-                log_file.close()
+            app_log.close()
             controls.close()
 
 
 def cli(argv=None):
-    """Parse command-line options and run the viewer.
+    """Run the command-line entry point (see espi_live.cli).
 
-    Args: argv is an optional list of argument strings; None uses sys.argv.
-    Returns: None; main() exits the process on its own error paths.
+    Args: argv is an optional list of argument strings.
+    Returns: None.
     """
-    parser = argparse.ArgumentParser(
-        prog="espi_live", description=__doc__.splitlines()[0])
-    parser.add_argument("--demo", action="store_true",
-                        help="start synthetic video without detecting a camera")
-    main(force_demo=parser.parse_args(argv).demo)
+    from espi_live.cli import cli as run_cli
+    run_cli(argv)
 
 
 if __name__ == "__main__":
