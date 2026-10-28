@@ -176,7 +176,8 @@ class ViewNavigation:
         if self.image_size is None:
             return
         zoom = max(1.0, min(MAX_ZOOM, zoom))
-        anchor = anchor or QPointF(self.width() / 2, self.height() / 2)
+        if anchor is None:
+            anchor = QPointF(self.width() / 2, self.height() / 2)
         image_point = self.widget_to_image(anchor)
         self.zoom = zoom
         if zoom == 1.0:

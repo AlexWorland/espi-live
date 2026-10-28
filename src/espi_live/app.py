@@ -810,12 +810,9 @@ def main(force_demo=False):
 
             elapsed = time.monotonic() - speed_start_time
             if elapsed >= 1.0:
-                if processed_frames:
-                    controls.speed_text.set(
-                        f"Displayed: {displayed_frames / elapsed:.1f} fps    "
-                        f"App work: {work_time_ms / processed_frames:.1f} ms/input frame")
-                else:
-                    controls.speed_text.set("Displayed: 0 fps    Waiting for camera frame")
+                controls.speed_text.set(
+                    f"Displayed: {displayed_frames / elapsed:.1f} fps    "
+                    f"App work: {work_time_ms / processed_frames:.1f} ms/input frame")
                 speed_start_time = time.monotonic()
                 displayed_frames = 0
                 processed_frames = 0
