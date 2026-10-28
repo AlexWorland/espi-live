@@ -1,5 +1,71 @@
 # Changelog
 
+## 2026-10-28 — Zoom slider; Exposure dock removed
+
+### Previous state
+
+- Zoom was available only through the mouse wheel, double-click (toggle 4×) and the `0`/`1` keys, with no indication of the current zoom. A raw-exposure histogram dock sat beside the log.
+
+### Current state
+
+- The toolbar has a **Zoom** slider (drag, click or scroll; logarithmic, so each step is the same factor), a percentage readout (100% = whole image fits the window), and **Fit** / **1:1** buttons. Wheel zoom and drag-to-pan on the image still work and keep the slider in sync. Double-click zoom is removed.
+- The Exposure dock and its statistics are removed. "Switch to live capture" moved from the toolbar to under the dummy-mode banner, which now also says that exposure, gain and FPS are simulated, so the toolbar fits a 1280 px window.
+
+## 2026-10-28 — ESPI fringe tools: speckle filter, rolling average, reference refresh, exposure histogram
+
+### Previous state
+
+- Measurement images were the absolute difference, a block average (one image per N frames, so N = 10 showed 3 fps at 30 fps), and an exact min/max stretch that a few bright speckles could flatten. There was no spatial speckle filtering, the Reference stayed fixed until `F`, and nothing showed raw exposure or saturation.
+
+### Current state
+
+- **Speckle filter** (Gaussian or Median) with a width in pixels, applied after averaging. **Rolling average** keeps the display at the camera rate. **Ref. refresh** recaptures the Reference every N seconds to cancel slow drift. **Stretch clip** ignores a percentage of outlier pixels when stretching, and **Invert** swaps bright and dark fringes. Saved frames and recordings include all of these, as before.
+- The shortcut legend moved to the image tooltip and the View menu, and the dummy-mode banner is one line, so the Controls panel still fits without scrolling (minimum window height about 750 px).
+- Defaults leave the processing unchanged (filter 0, rolling off, refresh 0, clip 0, invert off). Recording with rolling averaging records at the source rate. New tests cover the stretch, rolling average, filters and the combined pipeline in the engine.
+
+## 2026-10-28 — Qt layout: toolbar actions and an aligned controls panel
+
+### Previous state
+
+- In the Qt UI, Save frame, Set reference, Reset and Record sat at the bottom of a scrolling Controls dock, out of view on laptop-height windows. Each settings group had its own framed form, so sliders were narrow and value boxes didn't line up. The Log dock ran under the Controls dock and shortened it.
+
+### Current state
+
+- A fixed toolbar above the image holds the view mode (Raw/Previous/Reference), Record AVI, Save frame, Set reference, Reset last and Reset average, plus "Switch to live capture" in dummy mode. These are always visible.
+- The Controls dock is one three-column grid (label, slider, value) with plain section headings instead of group frames. It keeps the full window height and no longer scrolls: every control is always visible, and the window can't be made shorter than the panel. The Log dock spans only the image. Frame title/notes are under "Saved frame details".
+- The view hint and recording state moved to the status bar. The status bar also shows the camera frame rate (the camera's `AcquisitionResultingFrameRate`, read once per second; "(simulated)" in dummy mode) ahead of the processed and displayed rates, so any drop between camera, app and screen is visible. Window layouts saved by the previous version are ignored once, so the new arrangement appears.
+- No change to defaults, processing, recording or shortcuts.
+
+## 2026-10-28 — Qt interface with GPU display and a separate processing thread
+
+### Previous state
+
+- Acquisition, ESPI processing, drawing and UI events all shared one Tk loop on the main thread, so any UI stall (including dragging a window border on Windows) paused measurement and recording. Each frame was resized, colored and copied into Tk on the CPU (~14 ms per full-resolution frame on a fast Mac), and a 60 fps demo request reached only 40–45 fps.
+- The UI was three separate Tk windows with a scrolling control panel.
+
+### Current state
+
+- New default front end (`--ui qt`, PySide6): one window with the image, dockable/floatable Controls and Log panels, a status bar with source badge, range, processing and display rates, and a pixel-value readout. Mouse-wheel zoom up to 64× with sharp pixels, drag to pan, `0` fit and `1` actual size. Single-key shortcuts are unchanged and are ignored while typing in a text field. Window layout is remembered.
+- GPU display: frames are uploaded as a Mono8 texture and a shader applies gamma and the palette through a 256-entry table; scaling and zoom are GPU work. The table comes from the same function that colors saved frames and recordings, so files match the screen exactly. Without OpenGL 3.3 (for example some remote-desktop sessions) the app uses a CPU-drawn view.
+- New `Engine` worker thread owns the camera (all PySpin calls after startup), processing, recording and saving; the UI only reads the newest frame and sends settings/commands. Code is split into `paths`, `processing`, `camera`, `recording`, `logs`, `engine`, `qt_app`, `cli`; the Tk front end (`--ui tk`, also used automatically when PySide6 is missing) now uses the same modules.
+- Faster averaging (`cv2.accumulate` and an in-place divide) with bit-identical results; demo pacing uses a fixed schedule and now reaches the requested 30 or 60 fps.
+- Removed from the Qt UI: the Display wait slider and Fast Raw preview (both existed to work around CPU drawing cost) and the Text size slider (Qt follows the system font size). They remain in the Tk UI.
+- `requirements.txt`, the Windows setup script and the binary workflow now include PySide6. `python -m espi_live --check` loads every module without a window, and CI runs it on each binary. New camera-free tests in `tests/`.
+- Defaults are unchanged (8000 µs, 0 dB, 30 fps, Raw view, same recording behavior). Verified on macOS (Apple M5 Max): tests, both front ends in demo mode, GPU and CPU views, and a locally built PyInstaller `.app`. Not verified: Windows and Linux (including their OpenGL drivers), the live-camera path through the new engine thread, and the CI workflow changes.
+
+## 2026-10-28 — Binary builds on PR merge
+
+### Previous state
+
+- The viewer ran only from source (`python -m espi_live`). The Spinnaker SDK zip, wheels and installers were git-ignored and existed only on one disk.
+
+### Current state
+
+- `.github/workflows/build-binaries.yml` builds PyInstaller binaries for Windows x64 (PySpin 4.2, Python 3.10), Linux x64 (PySpin 4.4, Ubuntu 24.04) and macOS arm64 (demo only) when a PR merges into `main` or on manual dispatch. Each binary is smoke-tested with `--help`; results are uploaded as artifacts and to the rolling `latest` pre-release.
+- SDK files under `third_party/` are now tracked in Git LFS (`.gitattributes`; `.gitignore` no longer excludes them). CI fetches and caches only the files each platform needs.
+- Frozen builds write `output/` next to the executable (next to the `.app` on macOS) instead of inside PyInstaller's temporary extraction folder.
+- Not verified: the Windows and Linux builds (only the macOS build was run locally), the bundled PySpin on either platform, and live-camera use from a frozen binary.
+
 ## 2026-10-28 — Project reorganization
 
 ### Previous state

@@ -97,6 +97,7 @@ $moduleChecks = @{
     'opencv-python' = 'cv2'
     'numpy'          = 'numpy'
     'Pillow'         = 'PIL'
+    'PySide6'        = 'PySide6.QtWidgets'
     'Tkinter'        = 'tkinter'
     'PySpin'         = 'PySpin'
 }
@@ -138,6 +139,7 @@ $pipPackages = @()
 if ($missing -contains 'opencv-python') { $pipPackages += 'opencv-python' }
 if ($missing -contains 'numpy') { $pipPackages += 'numpy' }
 if ($missing -contains 'Pillow') { $pipPackages += 'Pillow' }
+if ($missing -contains 'PySide6') { $pipPackages += 'PySide6' }
 
 if ($pipPackages.Count -gt 0) {
     if (Confirm-Action "Install or repair: $($pipPackages -join ', ')?") {
