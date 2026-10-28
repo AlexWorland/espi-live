@@ -46,7 +46,7 @@ CHANGELOG.md  AGENTS.md  CLAUDE.md  requirements.txt  run.sh
 
 ## Prebuilt binaries
 
-When a pull request merges into `main`, `.github/workflows/build-binaries.yml` builds self-contained PyInstaller binaries and publishes them to the rolling **Latest build** pre-release (and as run artifacts). Run it manually from the Actions tab to build any branch.
+Releases are made by hand: in GitHub, open **Actions > Build release > Run workflow**, pick the branch (normally `main`), optionally type release notes, and run it. `.github/workflows/build-binaries.yml` builds self-contained PyInstaller binaries and publishes them as release **Build N** (tag `build-N`, where N is the workflow run number). Merging into `main` does not build anything. Tick **Pre-release** to publish a test build that installed copies are not offered; runs from any branch other than `main` are always pre-releases.
 
 | File | Camera support |
 |------|----------------|
@@ -55,6 +55,15 @@ When a pull request merges into `main`, `.github/workflows/build-binaries.yml` b
 | `espi-live-macos-arm64.zip` | `--demo` only (no macOS PySpin wheel); unsigned, run `xattr -cr "ESPI Live.app"` after unzipping |
 
 Output goes to `output/` next to the executable (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. A fresh clone needs `git lfs install` to get the SDK files.
+
+### Automatic updates
+
+Prebuilt copies update themselves to the newest full release (pre-releases are skipped). At startup the Qt interface checks GitHub in the background; when a newer build exists, a blue **Update available** button appears in the status bar (and in the log). Clicking it downloads the build while measurement continues, verifies its SHA-256, then offers to restart: the app finishes any recording, releases the camera, swaps in the new build and starts it with the same options. Choosing not to restart installs it when you close the app. **Help > Check for updates…** checks on demand; **Help > About** shows the build number.
+
+- `espi-live --update` updates without opening a window (any interface, including `--ui tk`); `--version` prints the build; `--no-update-check` skips the startup check.
+- The program's folder must be writable: the new build is unpacked beside it, and the old copy is kept as `*.old` until the next start.
+- Builds are ordered by the workflow run number, so a copy never "updates" to an older build. Running from source never updates itself; use `git pull`.
+- The repository is private, so CI bakes a read-only GitHub token into each binary from the `UPDATE_TOKEN` repository secret: a fine-grained personal access token limited to this repository with **Contents: read-only**. Anyone with a binary can extract that token and read the repository. When it expires, installed copies report "the update token was rejected"; create a new token, update the secret, and either install the next build by hand or put the new token in `update-token.txt` beside the program (or the `ESPI_UPDATE_TOKEN` environment variable), which overrides the baked-in one.
 
 ## Using the viewer
 
