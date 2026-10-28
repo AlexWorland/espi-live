@@ -17,7 +17,7 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 | `docs/camera/` | Curated PySpin, BFS-U3-63S4M-C and acquisition notes | Yes |
 | `docs/notes/` | Development notes and reports | Yes |
 | `third_party/` | FLIR Spinnaker 4.2 (camera-PC SDK, wheel, docs, Examples) and 4.4 installers; large files are in Git LFS | Never |
-| `.github/workflows/` | `build-binaries.yml`: PyInstaller builds for Windows/Linux/macOS when a PR merges into main | Yes |
+| `.github/workflows/` | `build-binaries.yml` ("Build release"): manual-only PyInstaller builds for Windows/Linux/macOS, published as release `build-N` | Yes |
 | `reference/saba-originals/` | Preserved earlier scripts | No |
 | `research/` | Physics talks, notebooks, papers, earlier code (not source to build). Local only: git-ignored because it holds third-party and personal documents | No |
 | `archive/` | Superseded app versions, old scripts, a scratch-project zip | No |
@@ -54,7 +54,7 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 | `engine.py` | `Engine`: worker thread that owns the source, processing, recording and saving; `Settings`, `FramePacket` |
 | `qt_app.py` | Default front end: `MainWindow` (dockable controls/log, status bar), `GLImageView` (GPU), `CpuImageView` (fallback) |
 | `app.py` | Legacy Tk front end (`--ui tk`): single-threaded loop, uses the shared modules |
-| `updater.py` | Self-update of frozen builds from the rolling `latest` release: `check_for_update`, `download_update` (SHA-256 verified), `install_update` (rename swap, `*.old` backup), `relaunch`, `UpdateWorker` (background thread the UI polls). Reads `_build_info.py`, which CI generates (build number, commit, repo, asset name, read-only token); never commit it |
+| `updater.py` | Self-update of frozen builds from the newest full release (`/releases/latest`, which skips pre-releases): `check_for_update`, `download_update` (SHA-256 verified), `install_update` (rename swap, `*.old` backup), `relaunch`, `UpdateWorker` (background thread the UI polls). Reads `_build_info.py`, which CI generates (build number, commit, repo, asset name, read-only token); never commit it |
 | `cli.py` | Argument parsing, front-end choice, `--check`, `--version`, `--update`, `--no-update-check` |
 
 **Engine threading.** The front end chooses the source on its own thread before `start()` (`open_camera()` or `use_demo()`, so it can ask about demo mode); after that, every PySpin call (grab, node writes, readback, close, live switch) happens on the engine's worker thread. A `CameraSession` must only ever be used by one thread at a time. The UI talks to the engine only through `update_settings(**fields)`, `request(action, **payload)` (`save`, `reference`, `reset_previous`, `reset_average`, `switch_live`), `latest_packet()`, `status()` and the `events` queue (`camera_limits`, `record_off`, `switched_live`, `switch_failed`, `fatal`, `stopped`). Never touch Qt or Tk objects from the worker.

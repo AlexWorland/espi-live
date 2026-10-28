@@ -1,14 +1,15 @@
 # Changelog
 
-## 2026-10-28 — Automatic updates for the prebuilt binaries
+## 2026-10-28 — Automatic updates and manual releases for the prebuilt binaries
 
 ### Previous state
 
-- Prebuilt binaries had no build number and no way to update: getting a newer build meant downloading and unpacking the release by hand.
+- Every merge into `main` rebuilt the binaries and replaced a rolling "latest" pre-release. Prebuilt binaries had no build number and no way to update: getting a newer build meant downloading and unpacking the release by hand.
 
 ### Current state
 
-- Prebuilt copies check the **Latest build** release at startup (in the background) and show an **Update available** button in the status bar. Clicking it downloads and verifies the new build while measurement continues, then offers to restart; restarting finishes any recording and releases the camera before the new build starts with the same options. Otherwise the update installs when the app closes. **Help > Check for updates…** and **Help > About** were added.
+- Builds are now released by hand (**Actions > Build release > Run workflow**, with optional notes) as versioned releases **Build N**; merging into `main` no longer builds. A **Pre-release** option (always on for branches other than `main`) publishes test builds that installed copies are not offered.
+- Prebuilt copies check the newest full release at startup (in the background) and show an **Update available** button in the status bar. Clicking it downloads and verifies the new build while measurement continues, then offers to restart; restarting finishes any recording and releases the camera before the new build starts with the same options. Otherwise the update installs when the app closes. **Help > Check for updates…** and **Help > About** were added.
 - New command-line options: `--update` (install the newest build without a window), `--version`, and `--no-update-check`.
 - CI stamps each binary with the workflow run number and publishes `build-info.json` (build number, commit, SHA-256 of each archive) with the release. Because the repository is private, builds embed a read-only token from the `UPDATE_TOKEN` secret; `update-token.txt` beside the program or `ESPI_UPDATE_TOKEN` overrides it.
 - Running from source is unchanged and never updates itself.

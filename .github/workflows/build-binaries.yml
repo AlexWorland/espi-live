@@ -1,31 +1,40 @@
-name: Build binaries
+name: Build release
 
-# Builds self-contained PyInstaller binaries for Windows, Linux and macOS when a
-# pull request is merged into main, uploads them as workflow artifacts, and
-# refreshes a rolling "latest" pre-release. Run it by hand from the Actions tab
-# to build the current head of any branch (workflow_dispatch).
+# Builds self-contained PyInstaller binaries for Windows, Linux and macOS and
+# publishes them as a GitHub release. It runs only when started by hand
+# (Actions > Build release > Run workflow): merging into main does not build or
+# release anything. Pick the branch in "Use workflow from".
+#
+# Each run creates release "build-N" (N = this workflow's run number, which the
+# updater uses to order builds). Installed copies update only to the newest
+# full release; a pre-release (the checkbox, and always for branches other than
+# main) is for testing and is never offered to them.
 on:
-  pull_request:
-    types: [closed]
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      notes:
+        description: "Release notes (what changed for users)"
+        type: string
+        required: false
+        default: ""
+      prerelease:
+        description: "Pre-release: publish for testing, don't offer it to installed copies"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
-# Serialize runs so two quick merges cannot race on the rolling release.
+# One release at a time, so build numbers and releases stay in order.
 concurrency:
-  group: build-binaries
+  group: build-release
   cancel-in-progress: false
 
 env:
-  # PRs: build the merge commit (not the PR head). Manual runs: the dispatched ref.
-  BUILD_REF: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+  BUILD_REF: ${{ github.sha }}
 
 jobs:
   build:
-    # Closed-without-merging PRs also fire this event; skip them.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -215,11 +224,11 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Update "latest" release
+    name: Publish release
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create/delete the release and its tag
+      contents: write # create the release and its tag
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -246,31 +255,39 @@ jobs:
           print(json.dumps(info, indent=2))
           EOF
 
-      - name: Publish rolling release
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           SHA: ${{ env.BUILD_REF }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          BRANCH: ${{ github.ref_name }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          USER_NOTES: ${{ inputs.notes }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -n "$PR_NUMBER" ]; then
-            source="Merged PR #$PR_NUMBER"
+          flags=()
+          if [ "$PRERELEASE" = "true" ] || [ "$IS_MAIN" != "true" ]; then
+            flags+=(--prerelease)
+            kind="Pre-release (not offered to installed copies)"
           else
-            source="Manual run"
+            flags+=(--latest)
+            kind="Release"
           fi
-          cat > notes.md <<EOF
-          $source, commit \`${SHA:0:7}\`. Build log: $RUN_URL
+          {
+            if [ -n "$USER_NOTES" ]; then printf '%s\n\n' "$USER_NOTES"; fi
+            cat <<EOF
+          $kind from \`$BRANCH\`, commit \`${SHA:0:7}\`. Build log: $RUN_URL
 
           - **Windows** (\`espi-live-windows-x64.zip\`) and **Linux** (\`espi-live-linux-x64.tar.gz\`) include PySpin, so they can open a real camera. Run \`espi-live --demo\` for synthetic video without one.
           - **macOS** (\`espi-live-macos-arm64.zip\`) is demo-only: there is no macOS PySpin wheel. The app is unsigned; after unzipping run \`xattr -cr "ESPI Live.app"\` or right-click > Open.
-          - Installed copies update themselves from this release (Help > Check for updates, or \`espi-live --update\`).
+          - Installed copies update themselves to the newest full release (Help > Check for updates, or \`espi-live --update\`).
           - Output (\`output/logs\`, \`output/frames\`, \`output/recordings\`) is written next to the executable (next to the .app on macOS).
           EOF
-          # Delete and recreate so the tag follows the newest commit.
-          gh release delete latest --cleanup-tag --yes || true
-          gh release create latest release/* \
+          } > notes.md
+          gh release create "build-$BUILD_NUMBER" release/* \
             --target "$SHA" \
-            --prerelease \
-            --title "Latest build" \
-            --notes-file notes.md
+            --title "Build $BUILD_NUMBER" \
+            --notes-file notes.md \
+            "${flags[@]}"

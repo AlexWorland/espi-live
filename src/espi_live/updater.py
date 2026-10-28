@@ -1,10 +1,11 @@
-"""Self-update of the prebuilt binaries from the rolling "latest" GitHub release.
+"""Self-update of the prebuilt binaries from the newest GitHub release.
 
 Only PyInstaller builds update themselves; a source checkout updates with git.
 CI writes ``_build_info.py`` before freezing (build number, commit, repository,
 the archive name for this platform and a read-only token for the private
 repository) and publishes ``build-info.json`` with each archive's SHA-256 next
-to the archives. An update downloads the archive beside the installed copy,
+to the archives. Only the newest full release is used: GitHub's "latest"
+release excludes pre-releases and drafts, so test builds are never offered. An update downloads the archive beside the installed copy,
 verifies it, unpacks it, then renames the running executable (or the .app
 bundle) to ``*.old`` and moves the new one into its place: a running Windows
 executable can be renamed but not overwritten. ``*.old`` is removed on the
@@ -32,7 +33,6 @@ except ImportError:  # source checkout: CI generates this module
     _build_info = None
 
 API_ROOT = "https://api.github.com"
-RELEASE_TAG = "latest"
 MANIFEST_NAME = "build-info.json"
 TOKEN_FILE = "update-token.txt"
 TOKEN_ENV = "ESPI_UPDATE_TOKEN"
@@ -236,12 +236,12 @@ def check_for_update():
     token = update_token()
     repo = build_value("REPO", "")
     try:
-        with open_url(f"{API_ROOT}/repos/{repo}/releases/tags/{RELEASE_TAG}",
+        with open_url(f"{API_ROOT}/repos/{repo}/releases/latest",
                       token, "application/vnd.github+json") as response:
             release = json.load(response)
         assets = {asset["name"]: asset for asset in release.get("assets", [])}
         if MANIFEST_NAME not in assets:
-            raise UpdateError(f"the latest release has no {MANIFEST_NAME}")
+            raise UpdateError(f"the newest release has no {MANIFEST_NAME}")
         with open_url(assets[MANIFEST_NAME]["url"], token,
                       "application/octet-stream") as response:
             manifest = json.load(response)
