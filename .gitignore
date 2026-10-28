@@ -1,0 +1,28 @@
+# Python environment and caches
+.venv/
+__pycache__/
+*.pyc
+
+# macOS / editor / tool state
+.DS_Store
+.omc/
+
+# Office lock files and temp files
+~$*
+~*.tmp
+
+# Generated captures, logs and recordings (output/ at the project root, or
+# beside any standalone experiment script that was run)
+output/
+*.avi
+
+# Large binaries: SDK installers, wheels, archives, slide decks
+third_party/spinnaker-4.4/
+*.zip
+*.whl
+*.dmg
+*.tar.gz
+*.pptx
+
+# Local-only physics archive: contains third-party documents and personal files
+research/
