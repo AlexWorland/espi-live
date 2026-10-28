@@ -235,6 +235,9 @@ class EngineDemoTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
+        # The worker snapshots its starting settings when its loop begins; a
+        # change made before that is the starting state and is never logged.
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
         self.engine.update_settings(
             mode="Reference", average=4, rolling=True, ref_refresh_s=0.2,
             smoothing=5, smoothing_method="Median", clip_percent=1.0,
