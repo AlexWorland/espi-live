@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-28 — Feature-request button with optional GitHub Copilot enrichment
+
+### Previous state
+
+- There was no way to send a feature request from the app; requests had to go to the developers separately.
+
+### Current state
+
+- A **Request feature** button in the status bar (and **Help > Request a feature…**) files the request as a GitHub issue labelled `feature-request`, in the background, with the build, platform and video source attached. A dialog links to the new issue; a failed send can be edited and retried, or opened in a browser.
+- **Enrich with GitHub Copilot** adds the `enrich` label, and a new workflow (`enrich-feature-request.yml`) has GitHub Copilot append a structured spec (summary, motivation, proposed behavior, acceptance criteria, open questions) to the issue.
+- Builds embed an Issues-only token from the new `FEEDBACK_TOKEN` secret (overridable with `feedback-token.txt` or `ESPI_FEEDBACK_TOKEN`); copies without one open a prefilled GitHub page instead. Enrichment needs the `COPILOT_PAT` secret.
+
 ## 2026-10-28 — Full test coverage
 
 ### Previous state

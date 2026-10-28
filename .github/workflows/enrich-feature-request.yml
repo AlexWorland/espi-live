@@ -1,0 +1,100 @@
+name: Enrich feature request
+
+# The app's "Request feature" button files an issue labelled "enrich" when the
+# user ticks "Enrich with GitHub Copilot" (a maintainer can also add the label
+# to any issue by hand). GitHub Copilot rewrites the request into a structured
+# spec, which is appended below the original text; the label is then swapped
+# for "enriched" so it runs once.
+#
+# Needs the COPILOT_PAT secret: a fine-grained personal access token from an
+# account with a Copilot plan, with the "Copilot Requests" permission. Without
+# it the job comments that enrichment is not configured.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: enrich-issue-${{ github.event.issue.number }}
+
+jobs:
+  enrich:
+    if: github.event.label.name == 'enrich'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE: ${{ github.event.issue.number }}
+      HAS_COPILOT: ${{ secrets.COPILOT_PAT != '' }}
+    steps:
+      - name: Report missing Copilot token
+        if: env.HAS_COPILOT != 'true'
+        run: |
+          gh issue comment "$ISSUE" --body "Copilot enrichment is not configured: add a \`COPILOT_PAT\` repository secret (fine-grained token with the Copilot Requests permission)."
+          gh issue edit "$ISSUE" --remove-label enrich
+
+      # Copilot reads the repository for context about the app.
+      - uses: actions/checkout@v6
+        if: env.HAS_COPILOT == 'true'
+
+      - uses: actions/setup-node@v6
+        if: env.HAS_COPILOT == 'true'
+
+      - name: Install Copilot CLI
+        if: env.HAS_COPILOT == 'true'
+        run: npm install -g @github/copilot
+
+      # The issue text goes in through environment variables and a file, never
+      # through ${{ }} in a script, so it cannot inject shell commands.
+      - name: Write prompt
+        if: env.HAS_COPILOT == 'true'
+        env:
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          {
+            echo "Rewrite this feature request."
+            echo
+            echo "<<<REQUEST"
+            echo "Title: $TITLE"
+            echo
+            printf '%s\n' "$BODY"
+            echo "REQUEST>>>"
+          } > "$RUNNER_TEMP/prompt.txt"
+
+      - name: Ask Copilot
+        id: copilot
+        if: env.HAS_COPILOT == 'true'
+        uses: actions/ai-inference@v3
+        with:
+          prompt-file: ${{ runner.temp }}/prompt.txt
+          system-prompt-file: .github/prompts/enrich-feature-request.txt
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+
+      # Re-read the body so edits made since the issue was opened are kept.
+      - name: Append the enriched spec to the issue
+        if: env.HAS_COPILOT == 'true'
+        env:
+          RESPONSE_FILE: ${{ steps.copilot.outputs.response-file }}
+        run: |
+          body="$RUNNER_TEMP/body.md"
+          gh issue view "$ISSUE" --json body --jq .body > "$body"
+          {
+            echo
+            echo "---"
+            echo
+            echo "## Enriched by GitHub Copilot"
+            echo
+            echo "_Generated from the request above; check it before relying on it._"
+            echo
+            cat "$RESPONSE_FILE"
+          } >> "$body"
+          gh issue edit "$ISSUE" --body-file "$body"
+          gh label create enriched --color 8250df --description "Copilot added a structured spec" 2>/dev/null || true
+          gh issue edit "$ISSUE" --remove-label enrich --add-label enriched
