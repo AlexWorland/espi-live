@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-10-28 — Zoom slider; Exposure dock removed
+
+### Previous state
+
+- Zoom was available only through the mouse wheel, double-click (toggle 4×) and the `0`/`1` keys, with no indication of the current zoom. A raw-exposure histogram dock sat beside the log.
+
+### Current state
+
+- The toolbar has a **Zoom** slider (drag, click or scroll; logarithmic, so each step is the same factor), a percentage readout (100% = whole image fits the window), and **Fit** / **1:1** buttons. Wheel zoom and drag-to-pan on the image still work and keep the slider in sync. Double-click zoom is removed.
+- The Exposure dock and its statistics are removed. "Switch to live capture" moved from the toolbar to under the dummy-mode banner, which now also says that exposure, gain and FPS are simulated, so the toolbar fits a 1280 px window.
+
+## 2026-10-28 — ESPI fringe tools: speckle filter, rolling average, reference refresh, exposure histogram
+
+### Previous state
+
+- Measurement images were the absolute difference, a block average (one image per N frames, so N = 10 showed 3 fps at 30 fps), and an exact min/max stretch that a few bright speckles could flatten. There was no spatial speckle filtering, the Reference stayed fixed until `F`, and nothing showed raw exposure or saturation.
+
+### Current state
+
+- **Speckle filter** (Gaussian or Median) with a width in pixels, applied after averaging. **Rolling average** keeps the display at the camera rate. **Ref. refresh** recaptures the Reference every N seconds to cancel slow drift. **Stretch clip** ignores a percentage of outlier pixels when stretching, and **Invert** swaps bright and dark fringes. Saved frames and recordings include all of these, as before.
+- The shortcut legend moved to the image tooltip and the View menu, and the dummy-mode banner is one line, so the Controls panel still fits without scrolling (minimum window height about 750 px).
+- Defaults leave the processing unchanged (filter 0, rolling off, refresh 0, clip 0, invert off). Recording with rolling averaging records at the source rate. New tests cover the stretch, rolling average, filters and the combined pipeline in the engine.
+
+## 2026-10-28 — Qt layout: toolbar actions and an aligned controls panel
+
+### Previous state
+
+- In the Qt UI, Save frame, Set reference, Reset and Record sat at the bottom of a scrolling Controls dock, out of view on laptop-height windows. Each settings group had its own framed form, so sliders were narrow and value boxes didn't line up. The Log dock ran under the Controls dock and shortened it.
+
+### Current state
+
+- A fixed toolbar above the image holds the view mode (Raw/Previous/Reference), Record AVI, Save frame, Set reference, Reset last and Reset average, plus "Switch to live capture" in dummy mode. These are always visible.
+- The Controls dock is one three-column grid (label, slider, value) with plain section headings instead of group frames. It keeps the full window height and no longer scrolls: every control is always visible, and the window can't be made shorter than the panel. The Log dock spans only the image. Frame title/notes are under "Saved frame details".
+- The view hint and recording state moved to the status bar. The status bar also shows the camera frame rate (the camera's `AcquisitionResultingFrameRate`, read once per second; "(simulated)" in dummy mode) ahead of the processed and displayed rates, so any drop between camera, app and screen is visible. Window layouts saved by the previous version are ignored once, so the new arrangement appears.
+- No change to defaults, processing, recording or shortcuts.
+
 ## 2026-10-28 — Qt interface with GPU display and a separate processing thread
 
 ### Previous state
