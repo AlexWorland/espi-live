@@ -56,6 +56,15 @@ When a pull request merges into `main`, `.github/workflows/build-binaries.yml` b
 
 Output goes to `output/` next to the executable (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. A fresh clone needs `git lfs install` to get the SDK files.
 
+### Automatic updates
+
+Prebuilt copies update themselves from the **Latest build** release. At startup the Qt interface checks GitHub in the background; when a newer build exists, a blue **Update available** button appears in the status bar (and in the log). Clicking it downloads the build while measurement continues, verifies its SHA-256, then offers to restart: the app finishes any recording, releases the camera, swaps in the new build and starts it with the same options. Choosing not to restart installs it when you close the app. **Help > Check for updates…** checks on demand; **Help > About** shows the build number.
+
+- `espi-live --update` updates without opening a window (any interface, including `--ui tk`); `--version` prints the build; `--no-update-check` skips the startup check.
+- The program's folder must be writable: the new build is unpacked beside it, and the old copy is kept as `*.old` until the next start.
+- Builds are ordered by the workflow run number, so a copy never "updates" to an older build. Running from source never updates itself; use `git pull`.
+- The repository is private, so CI bakes a read-only GitHub token into each binary from the `UPDATE_TOKEN` repository secret: a fine-grained personal access token limited to this repository with **Contents: read-only**. Anyone with a binary can extract that token and read the repository. When it expires, installed copies report "the update token was rejected"; create a new token, update the secret, and either install the next build by hand or put the new token in `update-token.txt` beside the program (or the `ESPI_UPDATE_TOKEN` environment variable), which overrides the baked-in one.
+
 ## Using the viewer
 
 One window holds the image, a toolbar with the view mode, Record, Save frame, Set reference and the reset buttons, a **Controls** panel for camera, measurement and display settings, and a **Log** panel; both panels can be docked on any side, floated as separate windows, or hidden from the **View** menu, and the layout is remembered. The status bar shows the current view's hint, the source (Camera or DUMMY MODE), the recording state, the measurement range, processing and display rates, and the value of the pixel under the cursor.

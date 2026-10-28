@@ -4,6 +4,8 @@ import argparse
 import importlib
 import sys
 
+from espi_live import updater
+
 
 def cli(argv=None):
     """Parse options and run the selected front end.
@@ -22,9 +24,21 @@ def cli(argv=None):
     parser.add_argument("--check", action="store_true",
                         help="load the processing engine and the Qt front end "
                              "(no window, no camera), report versions, and exit")
+    parser.add_argument("--version", action="store_true",
+                        help="print the build number and exit")
+    parser.add_argument("--update", action="store_true",
+                        help="install the newest prebuilt binary from GitHub and exit")
+    parser.add_argument("--no-update-check", action="store_true",
+                        help="don't check GitHub for a newer build at startup")
     args = parser.parse_args(argv)
+    if args.version:
+        print(updater.describe_build())
+        sys.exit(0)
     if args.check:
         sys.exit(self_check())
+    if args.update:
+        sys.exit(update_now())
+    updater.cleanup_previous_update()
     ui = args.ui
     if ui in ("auto", "qt"):
         try:
@@ -36,7 +50,8 @@ def cli(argv=None):
                   file=sys.stderr)
             ui = "tk"
         else:
-            sys.exit(qt_app.run(force_demo=args.demo))
+            sys.exit(qt_app.run(force_demo=args.demo,
+                                check_updates=not args.no_update_check))
     from espi_live.app import main
     main(force_demo=args.demo)
 
@@ -54,7 +69,8 @@ def self_check():
         import cv2
         import numpy
         import PySide6
-        for module in ("espi_live.engine", "espi_live.qt_app", "espi_live.app"):
+        for module in ("espi_live.engine", "espi_live.qt_app", "espi_live.app",
+                       "espi_live.updater"):
             importlib.import_module(module)
     except Exception as exc:
         print(f"Self-check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -65,7 +81,31 @@ def self_check():
     except ImportError:
         pyspin = "PySpin not bundled (demo only)"
     print(f"Self-check OK: Python {sys.version.split()[0]}, NumPy {numpy.__version__}, "
-          f"OpenCV {cv2.__version__}, PySide6 {PySide6.__version__}; {pyspin}")
+          f"OpenCV {cv2.__version__}, PySide6 {PySide6.__version__}; {pyspin}; "
+          f"{updater.describe_build()}")
+    return 0
+
+
+def update_now():
+    """Check for, download and install a newer build without opening a window.
+
+    The new build takes effect the next time the program starts.
+
+    Args: None.
+    Returns: 0 when up to date or updated, 1 on failure (the error is printed).
+    """
+    print(updater.describe_build())
+    try:
+        info = updater.check_for_update()
+        if info is None:
+            print("Already up to date.")
+            return 0
+        print(f"Downloading {info.label()} ({info.size / 1e6:.0f} MB)…")
+        path = updater.install_update(updater.download_update(info))
+    except updater.UpdateError as exc:
+        print(f"Update failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Installed {info.label()} at {path}; start the program again to use it.")
     return 0
 
 
