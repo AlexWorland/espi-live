@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ESPI live viewer",
+      "type": "python",
+      "request": "launch",
+      "module": "espi_live",
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "ESPI live viewer (--demo, no camera)",
+      "type": "python",
+      "request": "launch",
+      "module": "espi_live",
+      "args": ["--demo"],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: Current File",
+      "type": "python",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

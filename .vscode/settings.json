@@ -1,0 +1,8 @@
+{
+  "workbench.editorAssociations": {
+    "*.md": "vscode.markdown.preview.editor"
+  },
+  "python.analysis.extraPaths": ["src"],
+  "terminal.integrated.env.windows": { "PYTHONPATH": "${workspaceFolder}\\src" },
+  "terminal.integrated.env.osx": { "PYTHONPATH": "${workspaceFolder}/src" }
+}
