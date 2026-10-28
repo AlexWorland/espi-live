@@ -125,30 +125,40 @@ def unavailable_reason():
     return None
 
 
-def update_token():
-    """Choose the GitHub token for the private repository.
+def read_token(env_name, file_name, build_name):
+    """Choose a GitHub token from the environment, a file or the build.
 
-    A token in the environment or in update-token.txt beside the installed
-    copy replaces the baked-in one, so an expired token can be renewed without
-    a reinstall.
+    A token in the environment or in a file beside the installed copy
+    replaces the baked-in one, so an expired token can be renewed without a
+    reinstall.
 
-    Args: None.
-    Returns: The token string, or "" for anonymous access.
+    Args: env_name is the environment variable; file_name is the file beside
+        the installed copy; build_name is the _build_info attribute.
+    Returns: The token string, or "" when none is set.
     """
-    token = os.environ.get(TOKEN_ENV, "").strip()
+    token = os.environ.get(env_name, "").strip()
     if token:
         return token
     target = install_target()
     if target:
         try:
-            with open(os.path.join(os.path.dirname(target), TOKEN_FILE),
+            with open(os.path.join(os.path.dirname(target), file_name),
                       encoding="utf-8") as handle:
                 token = handle.read().strip()
         except OSError:
             token = ""
         if token:
             return token
-    return build_value("TOKEN", "")
+    return build_value(build_name, "")
+
+
+def update_token():
+    """Choose the GitHub token for the private repository.
+
+    Args: None.
+    Returns: The token string, or "" for anonymous access.
+    """
+    return read_token(TOKEN_ENV, TOKEN_FILE, "TOKEN")
 
 
 def ssl_context():

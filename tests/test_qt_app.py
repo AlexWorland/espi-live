@@ -24,7 +24,7 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QLineEdit
 
-from espi_live import qt_app, updater
+from espi_live import feedback, qt_app, updater
 from espi_live.engine import Engine, FramePacket
 
 APP = QApplication.instance() or QApplication(sys.argv)
@@ -89,10 +89,11 @@ class FakeSettings:
         Returns: None.
         """
 
-    def value(self, key, default=None):
+    def value(self, key, default=None, kind=None):
         """Read a stored value.
 
-        Args: key is the setting name; default is returned when unset.
+        Args: key is the setting name; default is returned when unset; kind
+            is QSettings' optional type argument (ignored).
         Returns: The stored value or default.
         """
         return self.store.get(key, default)
@@ -1956,6 +1957,219 @@ class RunTests(unittest.TestCase):
         self.log.start = lambda: None
         qt_app.run(force_demo=True)
         self.assertFalse(any(line.startswith("Log file:") for line in self.log.lines))
+
+
+class FeatureRequestTests(WindowTestCase):
+    """The Request feature dialog, sending and result reporting, with no network."""
+
+    REQUEST = feedback.FeatureRequest(title="Export reference", description="As PNG",
+                                      enrich=True, submitter="Sam", source="camera")
+
+    def setUp(self):
+        """Build the window with a fake token and a worker that never starts a thread.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        patcher = mock.patch.object(qt_app.feedback, "feedback_token", return_value="t")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.window.feedback = mock.MagicMock(busy=False, events=queue.Queue())
+
+    def test_entry_points_exist(self):
+        """The status bar button and the Help menu entry both open the request.
+
+        Args: None.
+        Returns: None.
+        """
+        help_menu = self.window.menuBar().actions()[-1].menu()
+        entry = next(a for a in help_menu.actions() if a.text() == "Request a feature…")
+        with mock.patch.object(self.window, "_request_feature") as request:
+            entry.trigger()
+            self.window.feature_button.click()
+        self.assertEqual(request.call_count, 2)
+
+    def test_dialog_restores_a_request_and_reads_it_back(self):
+        """A previous request refills the form; Send is offered with a token.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window, self.REQUEST)
+        self.assertEqual(dialog.request("camera"), self.REQUEST)
+        self.assertEqual(dialog.findChild(qt_app.QDialogButtonBox)
+                         .button(qt_app.QDialogButtonBox.Ok).text(), "Send")
+
+    def test_dialog_defaults_come_from_settings_without_a_token(self):
+        """A fresh form uses the saved name and choice and offers the browser.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store.update({"feedback/name": "Kim", "feedback/enrich": False})
+        with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""):
+            dialog = qt_app.FeatureRequestDialog(self.window)
+        self.assertEqual(dialog.submitter.text(), "Kim")
+        self.assertFalse(dialog.enrich.isChecked())
+        self.assertEqual(dialog.findChild(qt_app.QDialogButtonBox)
+                         .button(qt_app.QDialogButtonBox.Ok).text(), "Open in browser…")
+
+    def test_accept_refuses_an_incomplete_request(self):
+        """A blank description warns and keeps the dialog open.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window)
+        dialog.title.setText("Only a title")
+        dialog.accept()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("describe", self.dialogs.warning.call_args.args[2])
+        self.assertEqual(dialog.result(), 0)
+
+    def test_accept_remembers_name_and_choice(self):
+        """A complete request closes the dialog and saves name and enrichment.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window, self.REQUEST)
+        dialog.accept()
+        self.assertEqual(dialog.result(), qt_app.QDialog.Accepted)
+        self.assertEqual(FakeSettings.store["feedback/name"], "Sam")
+        self.assertTrue(FakeSettings.store["feedback/enrich"])
+
+    def run_request(self, result):
+        """Open the request flow with the dialog's exec() returning result.
+
+        Args: result is the dialog code exec() returns.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.FeatureRequestDialog, "exec", return_value=result), \
+                mock.patch.object(qt_app.FeatureRequestDialog, "request",
+                                  return_value=self.REQUEST):
+            self.window._request_feature()
+
+    def test_request_is_sent_in_the_background(self):
+        """An accepted dialog submits through the worker and shows a busy button.
+
+        Args: None.
+        Returns: None.
+        """
+        self.run_request(qt_app.QDialog.Accepted)
+        self.window.feedback.submit.assert_called_once_with(self.REQUEST)
+        self.assertFalse(self.window.feature_button.isEnabled())
+        self.assertEqual(self.window.feature_button.text(), "Sending request…")
+        self.assertIn("Sending feature request: Export reference", self.log.lines)
+
+    def test_cancel_sends_nothing(self):
+        """A cancelled dialog submits nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.run_request(qt_app.QDialog.Rejected)
+        self.window.feedback.submit.assert_not_called()
+
+    def test_busy_worker_only_shows_status(self):
+        """A second request while one is sending is refused with a status message.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.feedback.busy = True
+        self.window._request_feature()
+        self.assertIn("still being sent", self.window.statusBar().currentMessage())
+
+    def test_without_token_the_browser_opens(self):
+        """Copies without a token open the prefilled GitHub page instead.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""), \
+                mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                                  return_value=True) as open_url:
+            self.run_request(qt_app.QDialog.Accepted)
+        self.window.feedback.submit.assert_not_called()
+        self.assertIn("/issues/new?", open_url.call_args.args[0].toString())
+        self.dialogs.warning.assert_not_called()
+
+    def test_browser_failure_warns(self):
+        """A missing browser is reported.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl", return_value=False):
+            self.window._open_request_in_browser(self.REQUEST)
+        self.dialogs.warning.assert_called_once()
+
+    def test_sent_request_links_the_issue(self):
+        """A filed request restores the button, logs and links the issue.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.feature_button.setEnabled(False)
+        url = "https://github.com/o/r/issues/9"
+        self.window.feedback.events.put(("sent", (self.REQUEST, url)))
+        self.window._handle_feedback_events()
+        self.assertTrue(self.window.feature_button.isEnabled())
+        self.assertEqual(self.window.feature_button.text(), "Request feature")
+        self.assertIn(f"Feature request filed: {url}", self.log.lines)
+        text = self.dialogs.call_args.args[2]
+        self.assertIn(url, text)
+        self.assertIn("Copilot", text)
+        self.dialogs.return_value.exec.assert_called_once()
+
+    def failed_choice(self, choice):
+        """Report a failed send and click one of the offered buttons.
+
+        Args: choice is "retry", "browser" or "cancel".
+        Returns: (request_feature mock, open_request_in_browser mock).
+        """
+        box = self.dialogs.return_value
+        buttons = {"retry": object(), "browser": object(), "cancel": object()}
+        box.addButton.side_effect = [buttons["retry"], buttons["browser"], buttons["cancel"]]
+        box.clickedButton.return_value = buttons[choice]
+        self.window.feedback.events.put(("failed", (self.REQUEST, "offline")))
+        with mock.patch.object(self.window, "_request_feature") as retry, \
+                mock.patch.object(self.window, "_open_request_in_browser") as browser:
+            self.window._handle_feedback_events()
+        self.assertIn("Feature request failed: offline", self.log.lines)
+        return retry, browser
+
+    def test_failed_request_can_be_retried(self):
+        """Edit and retry reopens the dialog with the same request.
+
+        Args: None.
+        Returns: None.
+        """
+        retry, browser = self.failed_choice("retry")
+        retry.assert_called_once_with(self.REQUEST)
+        browser.assert_not_called()
+
+    def test_failed_request_can_open_in_browser(self):
+        """Open in browser keeps the text without retyping.
+
+        Args: None.
+        Returns: None.
+        """
+        retry, browser = self.failed_choice("browser")
+        browser.assert_called_once_with(self.REQUEST)
+        retry.assert_not_called()
+
+    def test_failed_request_can_be_dismissed(self):
+        """Cancel does nothing more.
+
+        Args: None.
+        Returns: None.
+        """
+        retry, browser = self.failed_choice("cancel")
+        retry.assert_not_called()
+        browser.assert_not_called()
 
 
 if __name__ == "__main__":

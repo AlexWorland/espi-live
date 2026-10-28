@@ -17,20 +17,20 @@ import time
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QImage, QKeySequence, QOffscreenSurface,
+from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QDesktopServices, QImage, QKeySequence, QOffscreenSurface,
                            QOpenGLContext, QPainter, QSurfaceFormat, QVector4D)
 from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
-                               QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QDockWidget, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QSizePolicy, QSlider,
                                QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
-from espi_live import updater
+from espi_live import feedback, updater
 from espi_live.engine import Engine
 from espi_live.logs import AppLog
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
@@ -595,6 +595,83 @@ class ShortcutFilter(QObject):
         return self.window.handle_key(event.key())
 
 
+class FeatureRequestDialog(QDialog):
+    """Collect a feature request: title, description, name and enrichment."""
+
+    def __init__(self, parent, request=None):
+        """Build the form, prefilled from an earlier attempt or saved name.
+
+        Args: parent is the main window; request is an optional
+            FeatureRequest whose text is restored (after a failed send).
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Request a feature")
+        self.resize(560, 460)
+        settings = QSettings("ESPI", "espi_live")
+        self.title = QLineEdit(request.title if request else "")
+        self.title.setMaxLength(feedback.MAX_TITLE)
+        self.title.setPlaceholderText("Short summary, e.g. Export the reference frame")
+        self.description = QPlainTextEdit(request.description if request else "")
+        self.description.setPlaceholderText(
+            "What would you like ESPI live to do, and why? What are you "
+            "measuring when you need it?")
+        self.submitter = QLineEdit(request.submitter if request else
+                                   settings.value("feedback/name", "", str))
+        self.submitter.setPlaceholderText("Optional, so we can follow up")
+        self.enrich = QCheckBox("Enrich with GitHub Copilot")
+        self.enrich.setToolTip(
+            "After the issue is filed, GitHub Copilot adds a structured version "
+            "(summary, proposed behavior, acceptance criteria) below your text.")
+        self.enrich.setChecked(request.enrich if request else
+                               settings.value("feedback/enrich", True, bool))
+        form = QFormLayout()
+        form.addRow("Title", self.title)
+        form.addRow("Description", self.description)
+        form.addRow("Your name", self.submitter)
+        form.addRow("", self.enrich)
+        note = QLabel(f"Filed as a GitHub issue in {feedback.repository()}, with "
+                      "this build's version and platform.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText(
+            "Send" if feedback.feedback_token() else "Open in browser…")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form, 1)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+    def request(self, source):
+        """Read the form.
+
+        Args: source describes the video source ("camera" or "dummy mode").
+        Returns: A FeatureRequest.
+        """
+        return feedback.FeatureRequest(
+            title=self.title.text(), description=self.description.toPlainText(),
+            enrich=self.enrich.isChecked(), submitter=self.submitter.text(),
+            source=source)
+
+    def accept(self):
+        """Close only when the request is complete; remember name and choice.
+
+        Args: None.
+        Returns: None.
+        """
+        try:
+            feedback.validate(self.request(""))
+        except feedback.FeedbackError as exc:
+            QMessageBox.warning(self, "Request a feature", f"Please {exc}.")
+            return
+        settings = QSettings("ESPI", "espi_live")
+        settings.setValue("feedback/name", self.submitter.text().strip())
+        settings.setValue("feedback/enrich", self.enrich.isChecked())
+        super().accept()
+
+
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for one engine."""
 
@@ -615,6 +692,7 @@ class MainWindow(QMainWindow):
         self.update_manual = False  # report "up to date" and errors in dialogs
         self.pending_update = None  # unpacked build to install on exit
         self.relaunch_after_exit = False
+        self.feedback = feedback.FeedbackWorker()
         self.drawn_sequence = 0
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
@@ -953,6 +1031,11 @@ class MainWindow(QMainWindow):
         self.update_button.setStyleSheet("background:#1d4f91;color:white;font-weight:bold;")
         self.update_button.clicked.connect(self._update_clicked)
         bar.addPermanentWidget(self.update_button)
+        self.feature_button = QPushButton("Request feature")
+        self.feature_button.setFlat(True)
+        self.feature_button.setToolTip("Send a feature request to the developers (GitHub issue)")
+        self.feature_button.clicked.connect(lambda: self._request_feature())
+        bar.addPermanentWidget(self.feature_button)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
             bar.addPermanentWidget(widget)
@@ -985,6 +1068,8 @@ class MainWindow(QMainWindow):
         help_menu = self.menuBar().addMenu("&Help")
         check = help_menu.addAction("Check for updates…")
         check.triggered.connect(self._check_updates_now)
+        request = help_menu.addAction("Request a feature…")
+        request.triggered.connect(lambda: self._request_feature())
         about = help_menu.addAction("About ESPI live")
         about.triggered.connect(lambda: QMessageBox.about(
             self, "About ESPI live", updater.describe_build()))
@@ -1106,6 +1191,78 @@ class MainWindow(QMainWindow):
             self.pixel_status.setText("")
         self._handle_events()
         self._handle_update_events()
+        self._handle_feedback_events()
+
+    # ----- feature requests --------------------------------------------------
+
+    def _request_feature(self, previous=None):
+        """Ask for a feature request and send it in the background.
+
+        Without a feedback token the request opens as a prefilled GitHub page.
+
+        Args: previous is a FeatureRequest to restore after a failed send.
+        Returns: None.
+        """
+        if self.feedback.busy:
+            self.statusBar().showMessage("A feature request is still being sent…", 3000)
+            return
+        dialog = FeatureRequestDialog(self, previous)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        request = dialog.request("dummy mode" if self.engine.demo else "camera")
+        if not feedback.feedback_token():
+            self._open_request_in_browser(request)
+            return
+        self.feedback.submit(request)
+        self.feature_button.setEnabled(False)
+        self.feature_button.setText("Sending request…")
+        self.log.write(f"Sending feature request: {request.title.strip()}")
+
+    def _open_request_in_browser(self, request):
+        """Open GitHub's new-issue page prefilled with the request.
+
+        Args: request is the FeatureRequest.
+        Returns: None.
+        """
+        if not QDesktopServices.openUrl(QUrl(feedback.browser_url(request))):
+            QMessageBox.warning(self, "Request a feature",
+                                "Could not open a web browser.")
+
+    def _handle_feedback_events(self):
+        """Report feature requests that were sent or failed.
+
+        Args: None.
+        Returns: None.
+        """
+        while True:
+            try:
+                kind, (request, payload) = self.feedback.events.get_nowait()
+            except Exception:
+                return
+            self.feature_button.setEnabled(True)
+            self.feature_button.setText("Request feature")
+            if kind == "sent":
+                self.log.write(f"Feature request filed: {payload}")
+                extra = ("<br><br>GitHub Copilot will add a structured version to "
+                         "the issue in a minute or two." if request.enrich else "")
+                box = QMessageBox(QMessageBox.Information, "Request sent",
+                                  f"Thank you. Your request is filed as "
+                                  f'<a href="{payload}">{payload}</a>.{extra}', parent=self)
+                box.setTextFormat(Qt.RichText)
+                box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                box.exec()
+            else:
+                self.log.write(f"Feature request failed: {payload}")
+                box = QMessageBox(QMessageBox.Warning, "Request not sent",
+                                  f"The request could not be sent: {payload}.", parent=self)
+                retry = box.addButton("Edit and retry", QMessageBox.AcceptRole)
+                browser = box.addButton("Open in browser", QMessageBox.ActionRole)
+                box.addButton(QMessageBox.Cancel)
+                box.exec()
+                if box.clickedButton() is retry:
+                    self._request_feature(request)
+                elif box.clickedButton() is browser:
+                    self._open_request_in_browser(request)
 
     # ----- updates -----------------------------------------------------------
 

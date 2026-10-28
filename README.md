@@ -34,7 +34,8 @@ third_party/          vendor material, never edited
   flir-spinnaker-4.2/   SDK installer zip, PySpin wheel, docs, official Examples (matches the camera PC)
   spinnaker-4.4/        4.4.0.246 installers for macOS and Linux
   (the SDK zip, wheels, dmg and tarballs are stored in Git LFS)
-.github/workflows/    build-binaries.yml: PyInstaller binaries for Windows, Linux and macOS on PR merge
+.github/workflows/    build-binaries.yml: manual PyInstaller releases for Windows, Linux and macOS;
+                      enrich-feature-request.yml: Copilot enrichment of feature-request issues
 reference/            preserved earlier scripts (saba-originals/), read-only
 research/             physics background: talks, notebooks, papers, earlier code (local only, git-ignored)
 archive/              superseded app versions and old scripts, kept for history
@@ -64,6 +65,14 @@ Prebuilt copies update themselves to the newest full release (pre-releases are s
 - The program's folder must be writable: the new build is unpacked beside it, and the old copy is kept as `*.old` until the next start.
 - Builds are ordered by the workflow run number, so a copy never "updates" to an older build. Running from source never updates itself; use `git pull`.
 - The repository is private, so CI bakes a read-only GitHub token into each binary from the `UPDATE_TOKEN` repository secret: a fine-grained personal access token limited to this repository with **Contents: read-only**. Anyone with a binary can extract that token and read the repository. When it expires, installed copies report "the update token was rejected"; create a new token, update the secret, and either install the next build by hand or put the new token in `update-token.txt` beside the program (or the `ESPI_UPDATE_TOKEN` environment variable), which overrides the baked-in one.
+
+### Feature requests
+
+The **Request feature** button in the status bar (also **Help > Request a feature…**) asks for a title, a description and an optional name, then files a GitHub issue labelled `feature-request` in this repository in the background. The issue includes the build, platform and video source (camera or dummy mode). When it is sent, a dialog links to the new issue; if sending fails, you can edit and retry, or open the request in a browser without retyping it.
+
+- **Enrich with GitHub Copilot** (on by default) also adds the `enrich` label. That label starts `.github/workflows/enrich-feature-request.yml`, which asks GitHub Copilot (through `actions/ai-inference`) to rewrite the request as a structured spec (summary, motivation, proposed behavior, acceptance criteria, open questions) and appends it below the original text. The label is then replaced with `enriched`. Maintainers can add `enrich` to any issue by hand to get the same result. The system prompt is `.github/prompts/enrich-feature-request.txt`.
+- Builds file issues with a token from the `FEEDBACK_TOKEN` repository secret: a fine-grained personal access token limited to this repository with **Issues: read and write** only. It is separate from `UPDATE_TOKEN`, so it can be revoked without breaking updates; if it leaks, the worst case is unwanted issues. `feedback-token.txt` beside the program or the `ESPI_FEEDBACK_TOKEN` environment variable overrides it. Copies without a token (including source checkouts) open a prefilled GitHub new-issue page instead, which requires a GitHub login with access to the repository.
+- Enrichment needs the `COPILOT_PAT` repository secret: a fine-grained personal access token from an account with a Copilot plan, with the **Copilot Requests** permission. Without it, the workflow comments on the issue that enrichment is not configured.
 
 ## Using the viewer
 
