@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
                                QPushButton, QSizePolicy, QSlider,
                                QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
+from espi_live import updater
 from espi_live.engine import Engine
 from espi_live.logs import AppLog
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
@@ -596,17 +597,23 @@ class ShortcutFilter(QObject):
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for one engine."""
 
-    def __init__(self, engine, log, use_gl):
+    def __init__(self, engine, log, use_gl, check_updates=True):
         """Build the window and start polling the engine.
 
         Args: engine is a configured (not yet started) Engine; log is the
-            AppLog; use_gl selects the GPU view instead of the CPU fallback.
+            AppLog; use_gl selects the GPU view instead of the CPU fallback;
+            check_updates looks for a newer prebuilt binary at startup.
         Returns: None.
         """
         super().__init__()
         self.engine = engine
         self.log = log
         self.closing = False
+        self.updates = updater.UpdateWorker()
+        self.update_info = None
+        self.update_manual = False  # report "up to date" and errors in dialogs
+        self.pending_update = None  # unpacked build to install on exit
+        self.relaunch_after_exit = False
         self.drawn_sequence = 0
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
@@ -639,6 +646,8 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._poll_status)
         self.status_timer.start(200)
+        if check_updates and updater.unavailable_reason() is None:
+            self.updates.check()
 
     # ----- construction ---------------------------------------------------
 
@@ -938,6 +947,11 @@ class MainWindow(QMainWindow):
             "Displayed: frames drawn on screen")
         self.speed_status = QLabel()
         self.pixel_status = QLabel()
+        self.update_button = QPushButton()  # shown when a newer build exists
+        self.update_button.setVisible(False)
+        self.update_button.setStyleSheet("background:#1d4f91;color:white;font-weight:bold;")
+        self.update_button.clicked.connect(self._update_clicked)
+        bar.addPermanentWidget(self.update_button)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
             bar.addPermanentWidget(widget)
@@ -966,6 +980,13 @@ class MainWindow(QMainWindow):
         self.view.setToolTip("Wheel: zoom · drag: pan · 0: fit · 1: actual size\n"
                              "S save · F set reference · R reset last · "
                              "A reset average · Q/Esc quit")
+
+        help_menu = self.menuBar().addMenu("&Help")
+        check = help_menu.addAction("Check for updates…")
+        check.triggered.connect(self._check_updates_now)
+        about = help_menu.addAction("About ESPI live")
+        about.triggered.connect(lambda: QMessageBox.about(
+            self, "About ESPI live", updater.describe_build()))
 
     # ----- behavior ----------------------------------------------------------
 
@@ -1083,6 +1104,109 @@ class MainWindow(QMainWindow):
         else:
             self.pixel_status.setText("")
         self._handle_events()
+        self._handle_update_events()
+
+    # ----- updates -----------------------------------------------------------
+
+    def _check_updates_now(self):
+        """Check for a newer build on request and report the result in a dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        reason = updater.unavailable_reason()
+        if reason:
+            QMessageBox.information(self, "Updates", f"Automatic updates are off: {reason}.")
+        elif self.pending_update:
+            self._offer_restart()
+        elif self.updates.busy:
+            self.statusBar().showMessage("An update check or download is already running…", 3000)
+        else:
+            self.update_manual = True
+            self.updates.check()
+            self.statusBar().showMessage("Checking GitHub for a newer build…", 3000)
+
+    def _update_clicked(self):
+        """Download the available build, or offer to restart once it is ready.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.pending_update:
+            self._offer_restart()
+            return
+        if self.update_info is None or self.updates.busy:
+            return
+        answer = QMessageBox.question(
+            self, "Update available",
+            f"ESPI live {self.update_info.label()} is available "
+            f"(this is build {updater.current_build()}).\n\n"
+            f"Download it now ({self.update_info.size / 1e6:.0f} MB)? "
+            "Measurement and recording continue while it downloads.")
+        if answer == QMessageBox.Yes and self.updates.download(self.update_info):
+            self.update_button.setEnabled(False)
+            self.log.write(f"Downloading update {self.update_info.label()}")
+
+    def _offer_restart(self):
+        """Ask to restart into the downloaded build now or on exit.
+
+        Args: None.
+        Returns: None.
+        """
+        answer = QMessageBox.question(
+            self, "Update ready",
+            "The update is downloaded. Restart ESPI live now to install it?\n\n"
+            "A recording in progress is finished and saved first, and the camera "
+            "is released before the new version starts. If you choose No, the "
+            "update installs when you close ESPI live.")
+        if answer == QMessageBox.Yes:
+            self.relaunch_after_exit = True
+            self.close()
+
+    def _handle_update_events(self):
+        """Show update check and download results.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.updates.busy and self.update_info is not None and not self.pending_update:
+            done, total = self.updates.progress
+            percent = f" {100 * done / total:.0f}%" if total else ""
+            self.update_button.setText(f"Downloading update…{percent}")
+        while True:
+            try:
+                kind, payload = self.updates.events.get_nowait()
+            except Exception:
+                return
+            manual, self.update_manual = self.update_manual, False
+            if kind == "checked" and payload is None:
+                self.log.write(f"Up to date ({updater.describe_build()})")
+                if manual:
+                    QMessageBox.information(self, "Updates", "ESPI live is up to date.")
+            elif kind == "checked":
+                self.update_info = payload
+                self.log.write(f"Update available: {payload.label()}")
+                self.update_button.setText(f"Update available: {payload.label()}")
+                self.update_button.setToolTip("Download the new build")
+                self.update_button.setVisible(True)
+                if manual:
+                    self._update_clicked()
+            elif kind == "check_failed":
+                self.log.write(f"Update check failed: {payload}")
+                if manual:
+                    QMessageBox.warning(self, "Updates", f"Update check failed: {payload}")
+            elif kind == "downloaded":
+                self.pending_update = payload
+                self.log.write("Update downloaded; it installs when ESPI live restarts")
+                self.update_button.setText("Restart to update")
+                self.update_button.setToolTip("Restart now, or the update installs on exit")
+                self.update_button.setEnabled(True)
+                self._offer_restart()
+            elif kind == "download_failed":
+                self.log.write(f"Update download failed: {payload}")
+                self.update_button.setText(f"Update available: {self.update_info.label()}")
+                self.update_button.setEnabled(True)
+                QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
 
     def _handle_events(self):
         """React to engine events (limits, record stop, live switch, errors).
@@ -1143,10 +1267,34 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-def run(force_demo=False):
+def finish_update(window, log):
+    """Install a downloaded build after the window closed, and restart into it.
+
+    Runs once the engine has stopped, so the camera is free for the new copy.
+
+    Args: window is the closed MainWindow (or None); log is the AppLog.
+    Returns: None.
+    """
+    if window is None or not window.pending_update:
+        return
+    try:
+        path = updater.install_update(window.pending_update)
+        log.write(f"Installed update: {path}")
+        if window.relaunch_after_exit and not window.engine.wait(5.0):
+            log.write("The camera was not released in time; start ESPI live again "
+                      "to use the new build")
+        elif window.relaunch_after_exit:
+            updater.relaunch(sys.argv[1:])
+            log.write("Restarting into the new build")
+    except (updater.UpdateError, OSError) as exc:
+        log.write(f"Update could not be installed: {exc}")
+
+
+def run(force_demo=False, check_updates=True):
     """Start the Qt front end.
 
-    Args: force_demo skips camera detection and starts synthetic video.
+    Args: force_demo skips camera detection and starts synthetic video;
+        check_updates looks for a newer prebuilt binary at startup.
     Returns: The process exit code.
     """
     request_gl_format()
@@ -1178,7 +1326,7 @@ def run(force_demo=False):
         use_gl, description = opengl_available()
         log.write(f"Display: GPU ({description})" if use_gl else
                   f"Display: CPU fallback ({description})")
-        window = MainWindow(engine, log, use_gl)
+        window = MainWindow(engine, log, use_gl, check_updates)
         window.show()
         engine.start()
         return app.exec()
@@ -1186,4 +1334,5 @@ def run(force_demo=False):
         if window is None:
             engine.stop()
             engine.wait(8.0)
+        finish_update(window, log)
         log.close()

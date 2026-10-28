@@ -36,3 +36,7 @@ dist/
 
 # Local-only physics archive: contains third-party documents and personal files
 research/
+
+# Written by CI before PyInstaller (build number, update token); never commit
+src/espi_live/_build_info.py
+update-token.txt

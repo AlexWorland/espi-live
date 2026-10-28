@@ -54,7 +54,8 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 | `engine.py` | `Engine`: worker thread that owns the source, processing, recording and saving; `Settings`, `FramePacket` |
 | `qt_app.py` | Default front end: `MainWindow` (dockable controls/log, status bar), `GLImageView` (GPU), `CpuImageView` (fallback) |
 | `app.py` | Legacy Tk front end (`--ui tk`): single-threaded loop, uses the shared modules |
-| `cli.py` | Argument parsing, front-end choice, `--check` |
+| `updater.py` | Self-update of frozen builds from the rolling `latest` release: `check_for_update`, `download_update` (SHA-256 verified), `install_update` (rename swap, `*.old` backup), `relaunch`, `UpdateWorker` (background thread the UI polls). Reads `_build_info.py`, which CI generates (build number, commit, repo, asset name, read-only token); never commit it |
+| `cli.py` | Argument parsing, front-end choice, `--check`, `--version`, `--update`, `--no-update-check` |
 
 **Engine threading.** The front end chooses the source on its own thread before `start()` (`open_camera()` or `use_demo()`, so it can ask about demo mode); after that, every PySpin call (grab, node writes, readback, close, live switch) happens on the engine's worker thread. A `CameraSession` must only ever be used by one thread at a time. The UI talks to the engine only through `update_settings(**fields)`, `request(action, **payload)` (`save`, `reference`, `reset_previous`, `reset_average`, `switch_live`), `latest_packet()`, `status()` and the `events` queue (`camera_limits`, `record_off`, `switched_live`, `switch_failed`, `fatal`, `stopped`). Never touch Qt or Tk objects from the worker.
 
@@ -76,6 +77,7 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 - Put tentative work in `experiments/`; promote it into `src/espi_live/` only when it becomes the intended maintained implementation. Use descriptive, purpose-based filenames; date-based names belong in `archive/` or `reference/`.
 - Store recordings under `output/recordings/` and still frames under `output/frames/`. Don't commit generated media.
 - Keep Windows and Bash helpers in `scripts/` and update their paths whenever a referenced file moves (they resolve `third_party/` and `src/` relative to the repo root).
+- Updates must never start the new build while the camera is open: the Qt front end installs and relaunches only after the engine has stopped (`qt_app.finish_update`). Keep the release archive names, `build-info.json` and `_build_info.py` fields in `build-binaries.yml` in step with `updater.py`.
 - Don't add a virtual-environment or dependency-management system (pyproject, lockfiles) unless asked.
 - Keep `README.md` accurate when layout, entry points or setup change, and add a `CHANGELOG.md` entry for user-visible changes.
 - After edits, run `python -m py_compile` on the changed files and the tests.
