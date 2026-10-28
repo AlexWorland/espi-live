@@ -16,13 +16,23 @@ __pycache__/
 output/
 *.avi
 
-# Large binaries: SDK installers, wheels, archives, slide decks
-third_party/spinnaker-4.4/
+# Large binaries: wheels, archives, slide decks. The FLIR SDK files under
+# third_party/ are the exception: they are committed through Git LFS (see
+# .gitattributes) so CI can build the camera-capable binaries.
 *.zip
 *.whl
 *.dmg
 *.tar.gz
 *.pptx
+!third_party/**/*.zip
+!third_party/**/*.whl
+!third_party/**/*.dmg
+!third_party/**/*.tar.gz
+
+# PyInstaller build output (CI builds the release binaries)
+build/
+dist/
+*.spec
 
 # Local-only physics archive: contains third-party documents and personal files
 research/

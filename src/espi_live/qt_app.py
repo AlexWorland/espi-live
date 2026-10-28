@@ -1,0 +1,1189 @@
+"""Cross-platform PySide6 front end with GPU image display.
+
+The window is one QMainWindow: the image in the center, a dockable controls
+panel and log, and a status bar. Docks can be floated as separate windows.
+
+Display path: the engine publishes a Mono8 FramePacket; the GPU view uploads
+it as a single-channel texture, and a fragment shader applies gamma and the
+palette through a 256-entry lookup table built by processing.palette_rgb_table
+(the same function saved frames use). Scaling to the window is done by the
+GPU with mipmaps. Machines without OpenGL 3.3 (for example some remote-desktop
+sessions) fall back to a CPU-drawn view with identical controls.
+"""
+
+import math
+import sys
+import time
+
+import cv2
+import numpy as np
+from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import (QAction, QImage, QKeySequence, QOffscreenSurface,
+                           QOpenGLContext, QPainter, QSurfaceFormat, QVector4D)
+from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
+                              QOpenGLVertexArrayObject)
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
+                               QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox,
+                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QMainWindow, QMessageBox, QPlainTextEdit,
+                               QPushButton, QSizePolicy, QSlider,
+                               QTextEdit, QToolBar, QVBoxLayout, QWidget)
+
+from espi_live.engine import Engine
+from espi_live.logs import AppLog
+from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
+                                  palette_rgb_table)
+
+GL_TEXTURE_2D = 0x0DE1
+GL_R8 = 0x8229
+GL_RED = 0x1903
+GL_RGB = 0x1907
+GL_RGB8 = 0x8051
+GL_UNSIGNED_BYTE = 0x1401
+GL_TEXTURE_MIN_FILTER = 0x2801
+GL_TEXTURE_MAG_FILTER = 0x2800
+GL_TEXTURE_WRAP_S = 0x2802
+GL_TEXTURE_WRAP_T = 0x2803
+GL_CLAMP_TO_EDGE = 0x812F
+GL_NEAREST = 0x2600
+GL_LINEAR_MIPMAP_LINEAR = 0x2703
+GL_UNPACK_ALIGNMENT = 0x0CF5
+GL_TEXTURE0 = 0x84C0
+GL_TRIANGLE_STRIP = 0x0005
+GL_COLOR_BUFFER_BIT = 0x4000
+
+VERTEX_SHADER = """#version 330 core
+uniform vec4 rect;  // left, top, right, bottom in normalized device coordinates
+out vec2 uv;
+void main() {
+    vec2 corner = vec2(gl_VertexID & 1, gl_VertexID >> 1);
+    uv = corner;  // texture row 0 is the image's top row
+    gl_Position = vec4(mix(rect.x, rect.z, corner.x),
+                       mix(rect.y, rect.w, corner.y), 0.0, 1.0);
+}
+"""
+FRAGMENT_SHADER = """#version 330 core
+in vec2 uv;
+out vec4 color;
+uniform sampler2D image;  // R8 Mono8 measurement
+uniform sampler2D lut;    // 256x1 RGB: gamma + palette
+void main() {
+    int index = int(texture(image, uv).r * 255.0 + 0.5);
+    color = vec4(texelFetch(lut, ivec2(index, 0), 0).rgb, 1.0);
+}
+"""
+MAX_ZOOM = 64.0
+ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
+LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are ignored
+TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
+
+
+def request_gl_format():
+    """Ask Qt for an OpenGL 3.3 core context (macOS supplies 4.1 core).
+
+    Args: None. Must run before QApplication is created.
+    Returns: None.
+    """
+    fmt = QSurfaceFormat()
+    fmt.setVersion(3, 3)
+    fmt.setProfile(QSurfaceFormat.CoreProfile)
+    fmt.setSwapInterval(1)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
+
+def opengl_available():
+    """Check that an OpenGL 3.3+ core context can be created and used.
+
+    Args: None. Requires a QApplication.
+    Returns: (True, description) when usable, else (False, reason).
+    """
+    context = QOpenGLContext()
+    if not context.create():
+        return False, "no OpenGL context"
+    surface = QOffscreenSurface()
+    surface.setFormat(context.format())
+    surface.create()
+    if not context.makeCurrent(surface):
+        return False, "OpenGL context could not be made current"
+    try:
+        fmt = context.format()
+        version = (fmt.majorVersion(), fmt.minorVersion())
+        functions = context.functions()
+        renderer = functions.glGetString(0x1F01) or "unknown renderer"
+        if version < (3, 3):
+            return False, f"OpenGL {version[0]}.{version[1]} on {renderer} (3.3 needed)"
+        return True, f"OpenGL {version[0]}.{version[1]} on {renderer}"
+    finally:
+        context.doneCurrent()
+
+
+class ViewNavigation:
+    """Fit, zoom and pan shared by the GPU and CPU image views.
+
+    zoom is relative to fit-to-window (1.0); center is the image point shown
+    at the widget center, or None to center the image.
+    """
+
+    def init_navigation(self):
+        """Reset navigation state; call from the widget's __init__.
+
+        Args: None.
+        Returns: None.
+        """
+        self.zoom = 1.0
+        self.center = None
+        self.image_size = None  # (width, height)
+        self.drag_origin = None
+        self.setMouseTracking(True)
+
+    def display_rect(self):
+        """Compute where the image is drawn in widget coordinates.
+
+        Args: None.
+        Returns: (x, y, width, height, scale) in logical pixels, or None.
+        """
+        if self.image_size is None:
+            return None
+        image_w, image_h = self.image_size
+        widget_w, widget_h = max(1, self.width()), max(1, self.height())
+        scale = min(widget_w / image_w, widget_h / image_h) * self.zoom
+        center_x, center_y = self.center or (image_w / 2, image_h / 2)
+        x = widget_w / 2 - center_x * scale
+        y = widget_h / 2 - center_y * scale
+        return x, y, image_w * scale, image_h * scale, scale
+
+    def widget_to_image(self, pos):
+        """Map a widget position to image pixel coordinates.
+
+        Args: pos is a QPointF in widget coordinates.
+        Returns: (x, y) floats in image pixels, or None without an image.
+        """
+        rect = self.display_rect()
+        if rect is None:
+            return None
+        x, y, _, _, scale = rect
+        return (pos.x() - x) / scale, (pos.y() - y) / scale
+
+    def set_zoom(self, zoom, anchor=None):
+        """Zoom while keeping the image point under anchor fixed.
+
+        Args: zoom is relative to fit (clamped to 1..MAX_ZOOM); anchor is a
+            widget QPointF, or None for the widget center.
+        Returns: None.
+        """
+        if self.image_size is None:
+            return
+        zoom = max(1.0, min(MAX_ZOOM, zoom))
+        anchor = anchor or QPointF(self.width() / 2, self.height() / 2)
+        image_point = self.widget_to_image(anchor)
+        self.zoom = zoom
+        if zoom == 1.0:
+            self.center = None
+        else:
+            scale = self.display_rect()[4]
+            self.center = (image_point[0] - (anchor.x() - self.width() / 2) / scale,
+                           image_point[1] - (anchor.y() - self.height() / 2) / scale)
+            self._clamp_center()
+        self.update()
+        self.zoomChanged.emit(self.zoom)
+
+    def fit(self):
+        """Show the whole image.
+
+        Args: None.
+        Returns: None.
+        """
+        self.zoom, self.center = 1.0, None
+        self.update()
+        self.zoomChanged.emit(self.zoom)
+
+    def actual_size(self):
+        """Show one image pixel per screen pixel.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.image_size is None:
+            return
+        image_w, image_h = self.image_size
+        fit_scale = min(self.width() / image_w, self.height() / image_h)
+        ratio = self.devicePixelRatioF()
+        self.set_zoom(1.0 / (fit_scale * ratio))
+
+    def _clamp_center(self):
+        """Keep the view center inside the image.
+
+        Args: None.
+        Returns: None.
+        """
+        image_w, image_h = self.image_size
+        x, y = self.center
+        self.center = (min(max(x, 0.0), image_w), min(max(y, 0.0), image_h))
+
+    def wheelEvent(self, event):
+        """Zoom around the cursor with the mouse wheel or trackpad.
+
+        Args: event is the Qt wheel event.
+        Returns: None.
+        """
+        steps = event.angleDelta().y() / 120.0
+        if steps:
+            self.set_zoom(self.zoom * (1.25 ** steps), event.position())
+        event.accept()
+
+    def mousePressEvent(self, event):
+        """Start panning with the left button.
+
+        Args: event is the Qt mouse event.
+        Returns: None.
+        """
+        if event.button() == Qt.LeftButton and self.zoom > 1.0:
+            self.drag_origin = event.position()
+            self.setCursor(Qt.ClosedHandCursor)
+        self.setFocus()
+
+    def mouseMoveEvent(self, event):
+        """Pan while dragging and report the pixel under the cursor.
+
+        Args: event is the Qt mouse event.
+        Returns: None.
+        """
+        if self.drag_origin is not None and self.center is not None:
+            scale = self.display_rect()[4]
+            delta = event.position() - self.drag_origin
+            self.drag_origin = event.position()
+            self.center = (self.center[0] - delta.x() / scale,
+                           self.center[1] - delta.y() / scale)
+            self._clamp_center()
+            self.update()
+        point = self.widget_to_image(event.position())
+        if point is not None:
+            self.hovered.emit(int(point[0]), int(point[1]))
+
+    def mouseReleaseEvent(self, event):
+        """Finish panning.
+
+        Args: event is the Qt mouse event.
+        Returns: None.
+        """
+        self.drag_origin = None
+        self.unsetCursor()
+
+    def leaveEvent(self, event):
+        """Clear the pixel readout when the cursor leaves the image.
+
+        Args: event is the Qt leave event.
+        Returns: None.
+        """
+        self.hovered.emit(-1, -1)
+
+
+class GLImageView(ViewNavigation, QOpenGLWidget):
+    """Draw Mono8 frames with GPU scaling, gamma and palette."""
+
+    hovered = Signal(int, int)
+    zoomChanged = Signal(float)  # zoom relative to fit-to-window
+
+    def __init__(self, parent=None):
+        """Create the view; GL resources are made in initializeGL.
+
+        Args: parent is the owning widget.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.init_navigation()
+        self.pending = None  # (packet, rgb_table, table_key)
+        self.texture_shape = None
+        self.table_key = None
+        self.program = None
+        self.setMinimumSize(320, 240)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def show_packet(self, packet, table, table_key):
+        """Queue a frame and its color table for the next paint.
+
+        Args: packet is a FramePacket; table is a (256, 3) RGB array; table_key
+            identifies the table so unchanged tables are not re-uploaded.
+        Returns: None.
+        """
+        self.pending = (packet, table, table_key)
+        height, width = packet.image.shape
+        if self.image_size != (width, height):
+            self.image_size = (width, height)
+            self.zoom, self.center = 1.0, None
+            self.zoomChanged.emit(self.zoom)
+        self.update()
+
+    def initializeGL(self):
+        """Compile the shaders and create the image and palette textures.
+
+        Args: None.
+        Returns: None. Raises RuntimeError if the shaders cannot be built.
+        """
+        gl = self.context().functions()
+        self.program = QOpenGLShaderProgram(self)
+        if not (self.program.addShaderFromSourceCode(QOpenGLShader.Vertex, VERTEX_SHADER)
+                and self.program.addShaderFromSourceCode(QOpenGLShader.Fragment,
+                                                         FRAGMENT_SHADER)
+                and self.program.link()):
+            raise RuntimeError(f"Shader build failed: {self.program.log()}")
+        self.vao = QOpenGLVertexArrayObject(self)
+        self.vao.create()
+        names = np.zeros(2, dtype=np.uint32)
+        gl.glGenTextures(2, names)
+        self.image_texture, self.lut_texture = int(names[0]), int(names[1])
+        for texture, minify, magnify in (
+                (self.image_texture, GL_LINEAR_MIPMAP_LINEAR, GL_NEAREST),
+                (self.lut_texture, GL_NEAREST, GL_NEAREST)):
+            gl.glBindTexture(GL_TEXTURE_2D, texture)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minify)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magnify)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        self.texture_shape = None
+        self.table_key = None
+        self.context().aboutToBeDestroyed.connect(self._release_gl)
+
+    def _release_gl(self):
+        """Delete GL textures before the context goes away.
+
+        Args: None.
+        Returns: None.
+        """
+        self.makeCurrent()
+        names = np.array([self.image_texture, self.lut_texture], dtype=np.uint32)
+        self.context().functions().glDeleteTextures(2, names)
+        self.doneCurrent()
+
+    def _upload(self, gl):
+        """Send the pending frame and (if changed) color table to the GPU.
+
+        Args: gl is the context's QOpenGLFunctions.
+        Returns: None.
+        """
+        packet, table, table_key = self.pending
+        self.pending = None
+        image = np.ascontiguousarray(packet.image)
+        height, width = image.shape
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        gl.glBindTexture(GL_TEXTURE_2D, self.image_texture)
+        if self.texture_shape != (height, width):
+            gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0,
+                            GL_RED, GL_UNSIGNED_BYTE, image.tobytes())
+            self.texture_shape = (height, width)
+        else:
+            gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                               GL_RED, GL_UNSIGNED_BYTE, memoryview(image))
+        gl.glGenerateMipmap(GL_TEXTURE_2D)
+        if table_key != self.table_key:
+            rgb = np.ascontiguousarray(table, dtype=np.uint8)
+            gl.glBindTexture(GL_TEXTURE_2D, self.lut_texture)
+            gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 256, 1, 0,
+                            GL_RGB, GL_UNSIGNED_BYTE, rgb.tobytes())
+            self.table_key = table_key
+
+    def paintGL(self):
+        """Draw the newest frame centered, fitted, or zoomed.
+
+        Args: None.
+        Returns: None.
+        """
+        gl = self.context().functions()
+        background = self.palette().color(self.backgroundRole())
+        gl.glClearColor(background.redF() * 0.5, background.greenF() * 0.5,
+                        background.blueF() * 0.5, 1.0)
+        gl.glClear(GL_COLOR_BUFFER_BIT)
+        if self.pending is not None:
+            self._upload(gl)
+        rect = self.display_rect()
+        if rect is None or self.texture_shape is None:
+            return
+        x, y, width, height, _ = rect
+        widget_w, widget_h = max(1, self.width()), max(1, self.height())
+        self.program.bind()
+        self.vao.bind()
+        self.program.setUniformValue(self.program.uniformLocation("rect"), QVector4D(
+            2 * x / widget_w - 1, 1 - 2 * y / widget_h,
+            2 * (x + width) / widget_w - 1, 1 - 2 * (y + height) / widget_h))
+        gl.glActiveTexture(GL_TEXTURE0)
+        gl.glBindTexture(GL_TEXTURE_2D, self.image_texture)
+        gl.glActiveTexture(GL_TEXTURE0 + 1)
+        gl.glBindTexture(GL_TEXTURE_2D, self.lut_texture)
+        gl.glActiveTexture(GL_TEXTURE0)
+        self.program.setUniformValue1i(self.program.uniformLocation("image"), 0)
+        self.program.setUniformValue1i(self.program.uniformLocation("lut"), 1)
+        gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        self.vao.release()
+        self.program.release()
+
+
+class CpuImageView(ViewNavigation, QWidget):
+    """Fallback view: resize and colorize on the CPU, draw with QPainter."""
+
+    hovered = Signal(int, int)
+    zoomChanged = Signal(float)  # zoom relative to fit-to-window
+
+    def __init__(self, parent=None):
+        """Create the fallback view.
+
+        Args: parent is the owning widget.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.init_navigation()
+        self.packet = None
+        self.table = None
+        self.setMinimumSize(320, 240)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
+
+    def show_packet(self, packet, table, table_key):
+        """Keep the newest frame and repaint.
+
+        Args: packet is a FramePacket; table is a (256, 3) RGB array;
+            table_key is unused here.
+        Returns: None.
+        """
+        self.packet, self.table = packet, table
+        height, width = packet.image.shape
+        if self.image_size != (width, height):
+            self.image_size = (width, height)
+            self.zoom, self.center = 1.0, None
+            self.zoomChanged.emit(self.zoom)
+        self.update()
+
+    def paintEvent(self, event):
+        """Crop to the visible area, resize, apply the color table and draw.
+
+        Args: event is the Qt paint event.
+        Returns: None.
+        """
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.palette().color(self.backgroundRole()).darker(200))
+        rect = self.display_rect()
+        if rect is None or self.packet is None:
+            return
+        x, y, width, height, scale = rect
+        ratio = self.devicePixelRatioF()
+        image = self.packet.image
+        # Crop to what is visible so zooming in stays cheap.
+        left = max(0, int(-x / scale))
+        top = max(0, int(-y / scale))
+        right = min(image.shape[1], int((self.width() - x) / scale) + 2)
+        bottom = min(image.shape[0], int((self.height() - y) / scale) + 2)
+        if right <= left or bottom <= top:
+            return
+        crop = image[top:bottom, left:right]
+        target_w = max(1, round((right - left) * scale * ratio))
+        target_h = max(1, round((bottom - top) * scale * ratio))
+        shrinking = target_w < crop.shape[1]
+        resized = cv2.resize(crop, (target_w, target_h), interpolation=(
+            cv2.INTER_AREA if shrinking else cv2.INTER_NEAREST))
+        rgb = np.ascontiguousarray(self.table[resized])
+        qimage = QImage(rgb.data, target_w, target_h, 3 * target_w,
+                        QImage.Format_RGB888)
+        qimage.setDevicePixelRatio(ratio)
+        painter.drawImage(QPointF(x + left * scale, y + top * scale), qimage)
+
+
+class SliderSpin(QWidget):
+    """A slider and exact-entry spin box sharing one numeric value."""
+
+    valueChanged = Signal(float)
+
+    def __init__(self, low, high, step, decimals, value, suffix=""):
+        """Build the paired controls.
+
+        Args: low/high bound the value; step is the increment; decimals is
+            the spin-box precision; value is the initial value; suffix is a
+            unit label.
+        Returns: None.
+        """
+        super().__init__()
+        self.step = step
+        self.slider = QSlider(Qt.Horizontal)
+        self.spin = QDoubleSpinBox()
+        self.spin.setDecimals(decimals)
+        self.spin.setSingleStep(step)
+        self.spin.setSuffix(suffix)
+        self.spin.setKeyboardTracking(False)
+        self.spin.setFixedWidth(104)  # equal widths keep every value column aligned
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.slider, 1)
+        layout.addWidget(self.spin)
+        self.set_range(low, high)
+        self.set_value(value)
+        self.slider.valueChanged.connect(
+            lambda ticks: self.spin.setValue(ticks * self.step))
+        self.spin.valueChanged.connect(self._spin_changed)
+
+    def set_range(self, low, high):
+        """Change the allowed range, clamping the current value.
+
+        Args: low and high are the new bounds.
+        Returns: None.
+        """
+        self.spin.setRange(low, high)
+        self.slider.setRange(round(low / self.step), round(high / self.step))
+
+    def set_value(self, value):
+        """Set the value without emitting valueChanged.
+
+        Args: value is the new number (clamped to the range).
+        Returns: None.
+        """
+        self.spin.blockSignals(True)
+        self.slider.blockSignals(True)
+        self.spin.setValue(value)
+        self.slider.setValue(round(self.spin.value() / self.step))
+        self.spin.blockSignals(False)
+        self.slider.blockSignals(False)
+
+    def value(self):
+        """Return the current value.
+
+        Args: None.
+        Returns: The spin box's float value.
+        """
+        return self.spin.value()
+
+    def _spin_changed(self, value):
+        """Mirror a spin-box change on the slider and announce it.
+
+        Args: value is the new spin-box value.
+        Returns: None.
+        """
+        self.slider.blockSignals(True)
+        self.slider.setValue(round(value / self.step))
+        self.slider.blockSignals(False)
+        self.valueChanged.emit(value)
+
+
+class ShortcutFilter(QObject):
+    """Route single-key shortcuts unless the user is typing in a field."""
+
+    def __init__(self, window):
+        """Attach to a main window.
+
+        Args: window is the MainWindow whose handle_key receives keys.
+        Returns: None.
+        """
+        super().__init__(window)
+        self.window = window
+
+    def eventFilter(self, watched, event):
+        """Intercept key presses for the main window.
+
+        Args: watched is the receiving object; event is the Qt event.
+        Returns: True when the key was handled as a shortcut.
+        """
+        if event.type() != QEvent.KeyPress or event.modifiers() & (
+                Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            return False
+        focus = QApplication.focusWidget()
+        if focus is not None and focus.window() is not self.window:
+            return False
+        if isinstance(focus, TEXT_INPUTS):
+            if event.key() == Qt.Key_Escape:
+                focus.clearFocus()  # Esc leaves a text field instead of quitting
+                return True
+            return False
+        return self.window.handle_key(event.key())
+
+
+class MainWindow(QMainWindow):
+    """Viewer, controls, log and status for one engine."""
+
+    def __init__(self, engine, log, use_gl):
+        """Build the window and start polling the engine.
+
+        Args: engine is a configured (not yet started) Engine; log is the
+            AppLog; use_gl selects the GPU view instead of the CPU fallback.
+        Returns: None.
+        """
+        super().__init__()
+        self.engine = engine
+        self.log = log
+        self.closing = False
+        self.drawn_sequence = 0
+        self.drawn_frames = 0
+        self.fps_window_start = time.monotonic()
+        self.display_fps = 0.0
+        self.hover = (-1, -1)
+        self.view = GLImageView() if use_gl else CpuImageView()
+        self.view.hovered.connect(self._set_hover)
+        self.setCentralWidget(self.view)
+        # The controls dock takes the full window height; the log sits under
+        # the image only.
+        self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
+        self._build_toolbar()
+        self._build_controls()
+        self._build_log()
+        self._build_status_bar()
+        self._build_menus()
+        self._set_demo(engine.demo)
+        self.shortcut_filter = ShortcutFilter(self)
+        QApplication.instance().installEventFilter(self.shortcut_filter)
+
+        settings = QSettings("ESPI", "espi_live")
+        if not self.restoreGeometry(settings.value("geometry", b"")):
+            self.resize(1400, 900)
+        self.restoreState(settings.value("windowState", b""), LAYOUT_VERSION)
+
+        self.frame_timer = QTimer(self)
+        self.frame_timer.setTimerType(Qt.PreciseTimer)
+        self.frame_timer.timeout.connect(self._poll_frame)
+        self.frame_timer.start(4)
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._poll_status)
+        self.status_timer.start(200)
+
+    # ----- construction ---------------------------------------------------
+
+    def _build_toolbar(self):
+        """Create the always-visible toolbar: view mode, recording and actions.
+
+        Args: None.
+        Returns: None.
+        """
+        s = self.engine.settings()
+        bar = QToolBar("Actions", self)
+        bar.setObjectName("actions")
+        bar.setMovable(False)
+        self.addToolBar(Qt.TopToolBarArea, bar)
+        self.actions_bar = bar
+
+        self.mode_group = QButtonGroup(self)
+        for mode in VIEW_MODES:
+            button = QPushButton(mode)
+            button.setCheckable(True)
+            button.setChecked(mode == s.mode)
+            self.mode_group.addButton(button)
+            bar.addWidget(button)
+        self.mode_group.buttonClicked.connect(
+            lambda button: self.engine.update_settings(mode=button.text()))
+        bar.addSeparator()
+
+        self.record_button = QPushButton("Record AVI")
+        self.record_button.setCheckable(True)
+        self.record_button.toggled.connect(
+            lambda on: self.engine.update_settings(record=on))
+        bar.addWidget(self.record_button)
+        bar.addSeparator()
+        for label, tip, handler in (
+                ("Save frame (S)", "Save the displayed frame with its title and notes",
+                 self.save_frame),
+                ("Set reference (F)", "Use the current frame as the Reference view's base",
+                 lambda: self.engine.request("reference")),
+                ("Reset last (R)", "Restart the Previous view's difference",
+                 lambda: self.engine.request("reset_previous")),
+                ("Reset average (A)", "Discard the frames averaged so far",
+                 lambda: self.engine.request("reset_average"))):
+            button = QPushButton(label)
+            button.setToolTip(tip)
+            button.clicked.connect(handler)
+            bar.addWidget(button)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bar.addWidget(spacer)
+
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(0, ZOOM_TICKS)
+        # A wheel notch scrolls three single steps; make that one 1.25x step,
+        # matching wheel zoom on the image.
+        self.zoom_slider.setSingleStep(round(
+            ZOOM_TICKS * math.log(1.25) / math.log(MAX_ZOOM) / 3))
+        self.zoom_slider.setPageStep(ZOOM_TICKS // 6)
+        self.zoom_slider.setFixedWidth(130)
+        self.zoom_slider.setToolTip("Drag, click or scroll to zoom; the mouse "
+                                    "wheel and drag-to-pan on the image still work")
+        self.zoom_slider.valueChanged.connect(
+            lambda ticks: self.view.set_zoom(MAX_ZOOM ** (ticks / ZOOM_TICKS)))
+        self.zoom_label = QLabel()
+        self.zoom_label.setMinimumWidth(44)
+        self.zoom_label.setToolTip("100% = whole image fits the window")
+        self.view.zoomChanged.connect(self._show_zoom)
+        fit_button = QPushButton("Fit")
+        fit_button.setToolTip("Show the whole image (0)")
+        fit_button.clicked.connect(self.view.fit)
+        actual_button = QPushButton("1:1")
+        actual_button.setToolTip("One camera pixel per screen pixel (1)")
+        actual_button.clicked.connect(self.view.actual_size)
+        zoom_icon = QLabel("Zoom")
+        zoom_icon.setContentsMargins(0, 0, 4, 0)
+        bar.addWidget(zoom_icon)
+        bar.addWidget(self.zoom_slider)
+        bar.addWidget(self.zoom_label)
+        bar.addWidget(fit_button)
+        bar.addWidget(actual_button)
+
+    def _build_controls(self):
+        """Create the controls dock as one aligned grid of settings.
+
+        Args: None.
+        Returns: None.
+        """
+        s = self.engine.settings()
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(10, 8, 10, 8)
+
+        # In dummy mode the banner also replaces the camera readback line,
+        # which would only say the same thing.
+        self.demo_banner = QLabel(
+            "DUMMY MODE — synthetic video; exposure, gain and FPS are simulated")
+        self.demo_banner.setWordWrap(True)
+        self.demo_banner.setAlignment(Qt.AlignCenter)
+        self.demo_banner.setStyleSheet(
+            "background:#8b0000;color:white;font-weight:bold;padding:6px;"
+            "border-radius:4px;")
+        column.addWidget(self.demo_banner)
+        self.switch_live_button = QPushButton("Switch to live capture")
+        self.switch_live_button.clicked.connect(
+            lambda: self.engine.request("switch_live"))
+        column.addWidget(self.switch_live_button)
+
+        # One grid for every section keeps labels, sliders and values in the
+        # same three columns; headings replace group-box frames.
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(1, 1)
+        column.addLayout(grid)
+        row = 0
+
+        def heading(text):
+            """Add a section heading row.
+
+            Args: text is the section name.
+            Returns: None.
+            """
+            nonlocal row
+            label = QLabel(text)
+            label.setStyleSheet("font-weight:bold;")
+            label.setContentsMargins(0, 0 if row == 0 else 10, 0, 2)
+            grid.addWidget(label, row, 0, 1, 2)
+            row += 1
+
+        def add(widget, label=None):
+            """Add a labeled setting, or a full-width widget when unlabeled.
+
+            Args: widget is the control; label is its name, if any.
+            Returns: None.
+            """
+            nonlocal row
+            if label is None:
+                grid.addWidget(widget, row, 0, 1, 2)
+            else:
+                grid.addWidget(QLabel(label), row, 0)
+                grid.addWidget(widget, row, 1)
+            row += 1
+
+        def note(label):
+            """Style a secondary, wrapping status line and add it full width.
+
+            Args: label is the QLabel to style.
+            Returns: None.
+            """
+            label.setWordWrap(True)
+            label.setStyleSheet("color: palette(placeholder-text);")
+            add(label)
+
+        heading("Camera")
+        self.exposure = SliderSpin(0, 50000, 1, 0, s.exposure_us, " µs")
+        self.gain = SliderSpin(0, 30, 0.1, 1, s.gain_db, " dB")
+        self.fps = SliderSpin(0, 60, 0.1, 1, s.fps, " fps")
+        self.exposure.valueChanged.connect(
+            lambda v: self.engine.update_settings(exposure_us=v))
+        self.gain.valueChanged.connect(lambda v: self.engine.update_settings(gain_db=v))
+        self.fps.valueChanged.connect(lambda v: self.engine.update_settings(fps=v))
+        add(self.exposure, "Exposure")
+        add(self.gain, "Gain")
+        add(self.fps, "Requested FPS")
+        self.camera_label = QLabel()
+        note(self.camera_label)
+
+        heading("ESPI measurement")
+        self.average = SliderSpin(1, 60, 1, 0, s.average)
+        self.average.setToolTip("Frames averaged to reduce speckle noise; 1 turns averaging off")
+        self.average.valueChanged.connect(
+            lambda v: self.engine.update_settings(average=int(v)))
+        add(self.average, "Average N")
+        self.rolling = QCheckBox("Rolling average (updates every frame)")
+        self.rolling.setToolTip("Off: one image per N frames. On: a running average "
+                                "that keeps the camera's frame rate.")
+        self.rolling.setChecked(s.rolling)
+        self.rolling.toggled.connect(lambda on: self.engine.update_settings(rolling=on))
+        add(self.rolling)
+        self.ref_refresh = SliderSpin(0, 10, 0.1, 1, s.ref_refresh_s, " s")
+        self.ref_refresh.setToolTip(
+            "Reference view: recapture the reference this often so slow drift "
+            "(air, heat) cancels out. 0 keeps one reference until you press F.")
+        self.ref_refresh.valueChanged.connect(
+            lambda v: self.engine.update_settings(ref_refresh_s=v))
+        add(self.ref_refresh, "Ref. refresh")
+
+        heading("Fringe enhancement")
+        self.smoothing_combo = QComboBox()
+        self.smoothing_combo.addItems(SMOOTHING_METHODS)
+        self.smoothing_combo.setCurrentText(s.smoothing_method)
+        self.smoothing_combo.setToolTip("Gaussian: any width. Median keeps fringe "
+                                        "edges sharper and is capped at 5 px.")
+        self.smoothing_combo.currentTextChanged.connect(
+            lambda name: self.engine.update_settings(smoothing_method=name))
+        self.smoothing = SliderSpin(0, 31, 1, 0, s.smoothing, " px")
+        self.smoothing.setToolTip("Blur width that removes pixel-scale speckle; "
+                                  "keep it well below the fringe spacing. 0 = off.")
+        self.smoothing.valueChanged.connect(
+            lambda v: self.engine.update_settings(smoothing=int(v)))
+        add(self.smoothing_combo, "Speckle filter")
+        add(self.smoothing, "Filter width")
+        self.scale_range = QCheckBox("Stretch to 0–255")
+        self.scale_range.setChecked(s.scale_range)
+        self.scale_range.toggled.connect(
+            lambda on: self.engine.update_settings(scale_range=on))
+        self.invert = QCheckBox("Invert")
+        self.invert.setToolTip("Swap bright and dark fringes")
+        self.invert.setChecked(s.invert)
+        self.invert.toggled.connect(lambda on: self.engine.update_settings(invert=on))
+        toggles = QWidget()
+        toggles_row = QHBoxLayout(toggles)
+        toggles_row.setContentsMargins(0, 0, 0, 0)
+        toggles_row.addWidget(self.scale_range)
+        toggles_row.addWidget(self.invert)
+        toggles_row.addStretch(1)
+        add(toggles)
+        self.clip = SliderSpin(0, 10, 0.1, 1, s.clip_percent, " %")
+        self.clip.setToolTip("Stretch: let this share of the darkest and brightest "
+                             "pixels saturate so stray speckles don't flatten the "
+                             "contrast. 0 = exact min/max.")
+        self.clip.valueChanged.connect(
+            lambda v: self.engine.update_settings(clip_percent=v))
+        add(self.clip, "Stretch clip")
+
+        heading("Display")
+        self.palette_combo = QComboBox()
+        self.palette_combo.addItems(PALETTES)
+        self.palette_combo.setCurrentText(s.palette)
+        self.palette_combo.currentTextChanged.connect(
+            lambda name: self.engine.update_settings(palette=name))
+        self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
+        self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
+        self.clahe = QCheckBox("CLAHE (color palettes only)")
+        self.clahe.setChecked(s.clahe)
+        self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
+        add(self.palette_combo, "Palette")
+        add(self.gamma, "Gamma")
+        add(self.clahe)
+
+        heading("Saved frame details")
+        self.frame_title = QLineEdit()
+        self.frame_title.setPlaceholderText("Title (optional)")
+        self.frame_notes = QPlainTextEdit()
+        self.frame_notes.setPlaceholderText("Notes (optional)")
+        self.frame_notes.setFixedHeight(48)
+        add(self.frame_title)
+        add(self.frame_notes)
+
+        column.addStretch(1)
+
+        # No scroll area: every control is always on screen, and the window's
+        # minimum height grows to fit the panel instead.
+        panel.setMinimumWidth(320)
+        self.controls_dock = QDockWidget("Controls", self)
+        self.controls_dock.setObjectName("controls")
+        self.controls_dock.setWidget(panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
+
+    def _build_log(self):
+        """Create the log dock.
+
+        Args: None.
+        Returns: None.
+        """
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        font = self.log_view.font()
+        font.setStyleHint(font.StyleHint.Monospace)
+        font.setFamily("Menlo" if sys.platform == "darwin" else "Consolas")
+        self.log_view.setFont(font)
+        self.log_dock = QDockWidget("Log", self)
+        self.log_dock.setObjectName("log")
+        self.log_dock.setWidget(self.log_view)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        self.resizeDocks([self.log_dock], [120], Qt.Vertical)
+
+    def _build_status_bar(self):
+        """Create the status-bar readouts.
+
+        Args: None.
+        Returns: None.
+        """
+        bar = self.statusBar()
+        self.hint_label = QLabel()  # left side; elides first when space runs out
+        self.hint_label.setMinimumWidth(0)
+        self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        bar.addWidget(self.hint_label, 1)
+        self.source_badge = QLabel()
+        self.record_label = QLabel()
+        self.range_status = QLabel()
+        self.camera_fps_status = QLabel()  # sensor rate, then what the app keeps up with
+        self.camera_fps_status.setToolTip(
+            "Camera: the camera's resulting acquisition rate (AcquisitionResultingFrameRate)\n"
+            "Processed: frames the app received and processed\n"
+            "Displayed: frames drawn on screen")
+        self.speed_status = QLabel()
+        self.pixel_status = QLabel()
+        for widget in (self.source_badge, self.record_label, self.range_status,
+                       self.camera_fps_status, self.speed_status, self.pixel_status):
+            bar.addPermanentWidget(widget)
+
+    def _build_menus(self):
+        """Create the View menu (docks and zoom).
+
+        Args: None.
+        Returns: None.
+        """
+        menu = self.menuBar().addMenu("&View")
+        menu.addAction(self.controls_dock.toggleViewAction())
+        menu.addAction(self.log_dock.toggleViewAction())
+        menu.addAction(self.actions_bar.toggleViewAction())
+        menu.addSeparator()
+        for text, key, handler in (("Fit to window", "0", self.view.fit),
+                                   ("Actual size", "1", self.view.actual_size)):
+            action = QAction(text, self)
+            action.setShortcut(QKeySequence(key))
+            action.setShortcutContext(Qt.WidgetShortcut)  # keys go via handle_key
+            action.triggered.connect(handler)
+            menu.addAction(action)
+        menu.addSeparator()
+        hint = menu.addAction("Wheel to zoom, drag to pan, Q or Esc to quit")
+        hint.setEnabled(False)  # a reminder, not a command
+        self.view.setToolTip("Wheel: zoom · drag: pan · 0: fit · 1: actual size\n"
+                             "S save · F set reference · R reset last · "
+                             "A reset average · Q/Esc quit")
+
+    # ----- behavior ----------------------------------------------------------
+
+    def _set_demo(self, demo):
+        """Show or hide every dummy-mode indicator.
+
+        Args: demo is True while the engine uses synthetic video.
+        Returns: None.
+        """
+        self.setWindowTitle("ESPI live — DUMMY MODE" if demo else "ESPI live")
+        self.demo_banner.setVisible(demo)
+        self.switch_live_button.setVisible(demo)
+        self.camera_label.setVisible(not demo)
+        self.source_badge.setText("  DUMMY MODE  " if demo else "  Camera  ")
+        self.source_badge.setStyleSheet(
+            "background:#8b0000;color:white;font-weight:bold;" if demo else
+            "background:#1f6f3f;color:white;font-weight:bold;")
+        for widget in (self.exposure, self.gain, self.fps):
+            widget.setToolTip("Simulated in dummy mode" if demo else "")
+
+    def handle_key(self, key):
+        """Act on a single-key shortcut.
+
+        Args: key is a Qt.Key value.
+        Returns: True if the key was a shortcut.
+        """
+        actions = {
+            Qt.Key_S: self.save_frame,
+            Qt.Key_F: lambda: self.engine.request("reference"),
+            Qt.Key_R: lambda: self.engine.request("reset_previous"),
+            Qt.Key_A: lambda: self.engine.request("reset_average"),
+            Qt.Key_Q: self.close,
+            Qt.Key_Escape: self.close,
+            Qt.Key_0: self.view.fit,
+            Qt.Key_1: self.view.actual_size,
+        }
+        handler = actions.get(key)
+        if handler is None:
+            return False
+        handler()
+        return True
+
+    def save_frame(self):
+        """Ask the engine to save the displayed frame with the title and notes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.request("save", title=self.frame_title.text(),
+                            notes=self.frame_notes.toPlainText())
+
+    def _show_zoom(self, zoom):
+        """Sync the zoom slider and percentage with the view.
+
+        Args: zoom is the view's zoom relative to fit-to-window.
+        Returns: None.
+        """
+        self.zoom_slider.blockSignals(True)  # don't feed the value back to the view
+        self.zoom_slider.setValue(round(ZOOM_TICKS * math.log(zoom) / math.log(MAX_ZOOM)))
+        self.zoom_slider.blockSignals(False)
+        self.zoom_label.setText(f"{100 * zoom:.0f}%")
+
+    def _set_hover(self, x, y):
+        """Remember the image pixel under the cursor for the readout.
+
+        Args: x and y are image coordinates, or -1 when outside.
+        Returns: None.
+        """
+        self.hover = (x, y)
+
+    def _poll_frame(self):
+        """Draw the newest engine frame if it has not been drawn yet.
+
+        Args: None.
+        Returns: None.
+        """
+        packet = self.engine.latest_packet()
+        if packet is None or packet.sequence == self.drawn_sequence:
+            return
+        self.drawn_sequence = packet.sequence
+        key = (packet.palette, round(packet.gamma, 4))
+        if key != getattr(self, "table_key", None):
+            self.table = palette_rgb_table(packet.palette, packet.gamma)
+            self.table_key = key
+        self.view.show_packet(packet, self.table, key)
+        self.drawn_frames += 1
+
+    def _poll_status(self):
+        """Refresh status text, the log, and handle engine events.
+
+        Args: None.
+        Returns: None.
+        """
+        text = self.log.drain()
+        if text:
+            self.log_view.appendPlainText(text.rstrip("\n"))
+        now = time.monotonic()
+        if now - self.fps_window_start >= 1.0:
+            self.display_fps = self.drawn_frames / (now - self.fps_window_start)
+            self.drawn_frames = 0
+            self.fps_window_start = now
+        status = self.engine.status()
+        self.camera_label.setText(status["camera"])
+        self.hint_label.setText(status["hint"])
+        self.record_label.setText(status["record"])
+        self.range_status.setText(status["range"])
+        self.camera_fps_status.setText(status["camera_fps"])
+        self.speed_status.setText(
+            f"{status['processing']}    Displayed: {self.display_fps:.1f} fps")
+        packet = self.engine.latest_packet()
+        x, y = self.hover
+        if packet is not None and 0 <= y < packet.image.shape[0] and \
+                0 <= x < packet.image.shape[1]:
+            self.pixel_status.setText(f"x {x}, y {y}: {int(packet.image[y, x])}")
+        else:
+            self.pixel_status.setText("")
+        self._handle_events()
+
+    def _handle_events(self):
+        """React to engine events (limits, record stop, live switch, errors).
+
+        Args: None.
+        Returns: None.
+        """
+        while True:
+            try:
+                kind, payload = self.engine.events.get_nowait()
+            except Exception:
+                return
+            if kind == "camera_limits":
+                for name, widget in (("ExposureTime", self.exposure),
+                                     ("Gain", self.gain),
+                                     ("AcquisitionFrameRate", self.fps)):
+                    if name in payload:
+                        widget.set_range(*payload[name])
+            elif kind == "record_off":
+                self.record_button.blockSignals(True)
+                self.record_button.setChecked(False)
+                self.record_button.blockSignals(False)
+            elif kind == "switched_live":
+                for button in self.mode_group.buttons():
+                    button.setChecked(button.text() == "Raw")
+                self.record_button.blockSignals(True)
+                self.record_button.setChecked(False)
+                self.record_button.blockSignals(False)
+                self._set_demo(False)
+            elif kind == "switch_failed":
+                QMessageBox.warning(self, "Camera unavailable",
+                                    f"Could not start live capture: {payload}\n\n"
+                                    "Dummy mode will continue.")
+            elif kind == "fatal":
+                QMessageBox.critical(self, "ESPI stopped", payload)
+                self.close()
+            elif kind == "stopped" and not self.closing:
+                self.close()
+
+    def closeEvent(self, event):
+        """Stop the engine (finishing recordings) and save the window layout.
+
+        Args: event is the Qt close event.
+        Returns: None.
+        """
+        if not self.closing:
+            self.closing = True
+            self.statusBar().showMessage("Finishing recordings and releasing the camera…")
+            self.engine.stop()
+            deadline = time.monotonic() + 8.0
+            while not self.engine.wait(0.05) and time.monotonic() < deadline:
+                QApplication.processEvents()
+            self._poll_status()
+            settings = QSettings("ESPI", "espi_live")
+            settings.setValue("geometry", self.saveGeometry())
+            settings.setValue("windowState", self.saveState(LAYOUT_VERSION))
+        QApplication.instance().removeEventFilter(self.shortcut_filter)
+        event.accept()
+
+
+def run(force_demo=False):
+    """Start the Qt front end.
+
+    Args: force_demo skips camera detection and starts synthetic video.
+    Returns: The process exit code.
+    """
+    request_gl_format()
+    QApplication.setApplicationName("ESPI live")
+    QApplication.setOrganizationName("ESPI")
+    app = QApplication.instance() or QApplication(sys.argv)
+    log = AppLog()
+    path = log.start()
+    window = None
+    engine = Engine(log)
+    try:
+        if path:
+            log.write(f"Log file: {path}")
+        if not force_demo:
+            try:
+                engine.open_camera()
+            except Exception as exc:
+                log.write(f"Camera startup unavailable: {exc}")
+                answer = QMessageBox.question(
+                    None, "No camera detected",
+                    "No FLIR camera is available. Start dummy/demo mode with a "
+                    "synthetic example pattern?")
+                if answer != QMessageBox.Yes:
+                    log.write("No camera detected; demo mode declined.")
+                    return 0
+                engine.use_demo()
+        else:
+            engine.use_demo()
+        use_gl, description = opengl_available()
+        log.write(f"Display: GPU ({description})" if use_gl else
+                  f"Display: CPU fallback ({description})")
+        window = MainWindow(engine, log, use_gl)
+        window.show()
+        engine.start()
+        return app.exec()
+    finally:
+        if window is None:
+            engine.stop()
+            engine.wait(8.0)
+        log.close()
