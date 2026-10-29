@@ -69,6 +69,7 @@ class Channel:
         self.settings = engine.settings() if engine is not None else Settings()
         self.limits = {}  # last "camera_limits" payload: {node name: (low, high)}
         self.identity = None  # last "camera_identity" payload (CameraIdentity)
+        self.report = None  # last "camera_report" payload (camera_reports.Report)
         self.retired = []  # stopped engines that may still be finishing
 
     @property

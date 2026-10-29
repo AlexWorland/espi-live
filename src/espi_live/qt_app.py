@@ -35,12 +35,13 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
                                QPushButton, QSizePolicy, QSlider,
                                QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
-from espi_live import feedback, updater
+from espi_live import camera_reports, feedback, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.logs import AppLog
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
                                   palette_rgb_table)
 
+ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
 GL_TEXTURE_2D = 0x0DE1
 GL_R8 = 0x8229
 GL_RED = 0x1903
@@ -789,6 +790,8 @@ class MainWindow(QMainWindow):
         self.pending_update = None  # unpacked build to install on exit
         self.relaunch_after_exit = False
         self.feedback = feedback.FeedbackWorker()
+        self.reports = camera_reports.CameraReportWorker()
+        self.report_states = {}  # report key -> camera_reports.ReportState
         self.retired_channels = []  # demo channels replaced by real cameras
         self.drawn_sequence = 0
         self.drawn_frames = 0
@@ -1037,6 +1040,19 @@ class MainWindow(QMainWindow):
         self.model_label.setWordWrap(True)
         self.model_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         add(self.model_label)
+        self.report_label = QLabel()  # camera-report status for unrecognised devices
+        self.report_label.setWordWrap(True)
+        self.report_label.setTextFormat(Qt.RichText)
+        self.report_label.setOpenExternalLinks(True)
+        self.report_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.report_label.hide()
+        add(self.report_label)
+        self.report_button = QPushButton("Report this camera")
+        self.report_button.setToolTip("Open GitHub's new-issue page with this camera's "
+                                      "details; this copy cannot file reports itself")
+        self.report_button.clicked.connect(self._open_report_in_browser)
+        self.report_button.hide()
+        add(self.report_button)
         self.exposure = SliderSpin(*DEFAULT_LIMITS["ExposureTime"], 1, 0,
                                    s.exposure_us, " µs")
         self.gain = SliderSpin(*DEFAULT_LIMITS["Gain"], 0.1, 1, s.gain_db, " dB")
@@ -1049,6 +1065,17 @@ class MainWindow(QMainWindow):
         add(self.exposure, "Exposure")
         add(self.gain, "Gain")
         add(self.fps, "Requested FPS")
+        self.single_field = QCheckBox("Single field (interlaced camera)")
+        self.single_field.setToolTip(
+            "Show only the even rows of each interlaced frame, doubled to full "
+            "height: removes the 1/60 s offset between the two fields (cleaner "
+            "fringes) at half the vertical detail. Changing it clears the "
+            "reference and the averages.")
+        self.single_field.setChecked(s.single_field)
+        self.single_field.toggled.connect(
+            lambda on: self.engine.update_settings(single_field=on))
+        self.single_field.hide()
+        add(self.single_field)
         self.noise_reduction = SliderSpin(0, 95, 1, 0, s.noise_reduction, " %")
         self.noise_reduction.setToolTip(
             "Blend each camera frame with the previous ones to remove sensor "
@@ -1276,7 +1303,9 @@ class MainWindow(QMainWindow):
             channel.log.prefix = f"[{channel.info.serial}] " if several else ""
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
-        self.camera_combo.addItems([channel.label for channel in self.channels])
+        self.camera_combo.addItems([
+            channel.label if channel.supported else f"{channel.label} · not yet supported"
+            for channel in self.channels])
         self.camera_combo.blockSignals(False)
         for widget in self.camera_checks + self.camera_states:
             self.camera_rows.removeWidget(widget)
@@ -1374,7 +1403,7 @@ class MainWindow(QMainWindow):
             widget.set_value(value)
         toggles = ((self.rolling, s.rolling), (self.scale_range, s.scale_range),
                    (self.invert, s.invert), (self.clahe, s.clahe),
-                   (self.record_button, s.record))
+                   (self.record_button, s.record), (self.single_field, s.single_field))
         combos = ((self.smoothing_combo, s.smoothing_method),
                   (self.palette_combo, s.palette))
         for widget, _ in toggles + combos:
@@ -1486,6 +1515,70 @@ class MainWindow(QMainWindow):
             "background:#1f6f3f;color:white;font-weight:bold;")
         for widget in (self.exposure, self.gain, self.fps):
             widget.setToolTip("Simulated in dummy mode" if demo else "")
+        self._sync_source_controls()
+        self._show_report()
+
+    def _sync_source_controls(self):
+        """Fit the camera controls to the displayed source.
+
+        An analog camera behind a capture adapter sets its own exposure, gain
+        and frame rate, so those controls are disabled for it; interlaced
+        sources also get the single-field toggle.
+
+        Args: None.
+        Returns: None.
+        """
+        channel = self.current
+        analog = not channel.demo and channel.info.kind == "capture"
+        for widget in (self.exposure, self.gain, self.fps):
+            widget.setEnabled(not analog)
+            if analog:
+                widget.setToolTip(ANALOG_CONTROL_TIP)
+        self.single_field.setVisible(
+            not channel.demo and getattr(channel.identity, "interlaced", False))
+
+    def _show_report(self):
+        """Show the displayed camera's report status, if it has a report.
+
+        Args: None.
+        Returns: None.
+        """
+        report = None if self.current.demo else self.current.report
+        self.report_label.setVisible(report is not None)
+        self.report_button.setVisible(False)
+        if report is None:
+            return
+        state = self.report_states.get(report.key, camera_reports.ReportState())
+        self.report_label.setText(camera_reports.status_html(state))
+        self.report_button.setVisible(camera_reports.needs_button(state))
+
+    def _handle_report_events(self):
+        """Record camera-report results from the background worker.
+
+        Args: None.
+        Returns: None.
+        """
+        while True:
+            try:
+                _, (key, state) = self.reports.events.get_nowait()
+            except Exception:
+                return
+            self.report_states[key] = state
+            parts = (state.url, state.error and f"not sent ({state.error})",
+                     state.path and f"saved to {state.path}")
+            self.log.write(f"Camera report for {key}: "
+                           + "; ".join(part for part in parts if part))
+            self._show_report()
+
+    def _open_report_in_browser(self):
+        """Open GitHub's new-issue page prefilled with the displayed camera's report.
+
+        Args: None.
+        Returns: None.
+        """
+        url = camera_reports.browser_url(self.current.report)
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(self, "Report this camera", "Could not open a web browser.")
 
     def handle_key(self, key):
         """Act on a single-key shortcut.
@@ -1588,6 +1681,7 @@ class MainWindow(QMainWindow):
         self._handle_events()
         self._handle_update_events()
         self._handle_feedback_events()
+        self._handle_report_events()
 
     # ----- feature requests --------------------------------------------------
 
@@ -1805,6 +1899,11 @@ class MainWindow(QMainWindow):
             channel.identity = payload
             if displayed:
                 self._set_demo(channel.demo)
+        elif kind == "camera_report":
+            channel.report = payload
+            self.reports.submit(payload)
+            if displayed:
+                self._show_report()
         elif kind == "camera_limits":
             channel.limits = payload
             if displayed:
