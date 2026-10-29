@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-29 — Linux build installs the Spinnaker SDK again
+
+### Previous state
+
+- The Linux build failed while installing the Spinnaker 4.4 packages (FLIR's installer stopped at its license and analytics questions, which CI cannot answer), so no release could be published: the workflow only publishes when all three builds succeed.
+
+### Current state
+
+- The workflow records the license acceptance up front and installs without naming a user, so the installer skips the analytics question and sends no install analytics. Windows, Linux and macOS builds all complete, and the release is published with all three archives.
+
 ## 2026-10-29 — Release workflow renamed, generated notes, pip cache
 
 ### Previous state

@@ -214,7 +214,13 @@ jobs:
           # libgentl's preinst shows the FLIR EULA through debconf and exits 2 when it
           # can't (no terminal here); a preseeded acceptance makes it skip the dialog.
           echo "libspinnaker libspinnaker/accepted-flir-eula boolean true" | sudo debconf-set-selections
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./libgentl_*.deb ./libspinnaker_*.deb ./libspinvideo_*.deb \
+          # It then asks for analytics consent for the installing user (logname, else
+          # $SUDO_USER) under set -e, and db_input exits 30 when nothing can be shown;
+          # the answer can't be preseeded because the script resets it first. Without
+          # SUDO_USER (logname finds no user here) libgentl skips the question and
+          # libspinnaker's postinst skips its analytics ping.
+          sudo env -u SUDO_USER DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            ./libgentl_*.deb ./libspinnaker_*.deb ./libspinvideo_*.deb \
             ./libspinnaker-c_*.deb ./libspinvideo-c_*.deb
           sudo ldconfig
 
