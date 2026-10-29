@@ -171,6 +171,18 @@ class EngineDemoTests(unittest.TestCase):
         self.assertEqual(int(packet.image[:20, :].min()), 0)  # banner background
         self.assertEqual(int(packet.image[:42, :].max()), 255)  # banner text
 
+    def test_noise_reduction_filters_the_raw_feed(self):
+        """Noise reduction runs on camera frames, so Raw view uses it too.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(noise_reduction=80)
+        self.assertTrue(wait_until(lambda: (
+            self.engine.latest_packet() is not None and
+            self.engine.latest_packet().sequence > 3)))
+        self.assertEqual(self.engine.latest_packet().mode, "Raw")
+
     def test_measurement_save_and_recording(self):
         """Averaged differences publish, a save writes PNG+notes, AVI records.
 

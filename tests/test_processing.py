@@ -7,8 +7,9 @@ import unittest
 
 import numpy as np
 
-from espi_live.processing import (DemoSource, ESPIProcessor, normalize_min_max,
-                                  stretch_contrast, watermark_demo)
+from espi_live.processing import (MAX_DENOISE_STRENGTH, DemoSource, ESPIProcessor,
+                                  normalize_min_max, stretch_contrast,
+                                  watermark_demo)
 
 
 class NormalizeTests(unittest.TestCase):
@@ -116,6 +117,62 @@ class ProcessorTests(unittest.TestCase):
         proc.rolling_average(np.zeros((2, 2), dtype=np.uint8), 2)
         result = proc.rolling_average(np.full((2, 2), 100, dtype=np.uint8), 2)
         self.assertTrue((result == 50).all())
+
+    def test_denoise_off_passes_frame_through_and_clears_history(self):
+        """Zero strength returns the input itself and drops the running history.
+
+        Args: None.
+        Returns: None.
+        """
+        proc = ESPIProcessor()
+        frame = np.full((2, 2), 40, dtype=np.uint8)
+        proc.denoise(frame, 0.5)
+        self.assertIsNotNone(proc.denoised)
+        self.assertIs(proc.denoise(frame, 0), frame)
+        self.assertIsNone(proc.denoised)
+
+    def test_denoise_blends_frames_and_restarts_on_new_size(self):
+        """Each frame keeps the requested share of history; a resize restarts it.
+
+        Args: None.
+        Returns: None.
+        """
+        proc = ESPIProcessor()
+        first = np.zeros((2, 2), dtype=np.uint8)
+        self.assertIs(proc.denoise(first, 0.75), first)
+        result = proc.denoise(np.full((2, 2), 200, dtype=np.uint8), 0.75)
+        self.assertTrue((result == 50).all())
+        bigger = np.full((3, 3), 9, dtype=np.uint8)
+        self.assertIs(proc.denoise(bigger, 0.75), bigger)
+        self.assertEqual(proc.denoised.shape, (3, 3))
+
+    def test_denoise_caps_strength_so_the_feed_still_moves(self):
+        """Strength above MAX_DENOISE_STRENGTH still lets new frames through.
+
+        Args: None.
+        Returns: None.
+        """
+        proc = ESPIProcessor()
+        proc.denoise(np.zeros((2, 2), dtype=np.uint8), 1.0)
+        result = proc.denoise(np.full((2, 2), 200, dtype=np.uint8), 1.0)
+        expected = round(200 * (1 - MAX_DENOISE_STRENGTH))
+        self.assertTrue((result == expected).all())
+
+    def test_denoise_reduces_random_noise_on_a_static_scene(self):
+        """Blending frames of a fixed speckle pattern lowers the noise around it.
+
+        Args: None.
+        Returns: None.
+        """
+        rng = np.random.default_rng(0)
+        speckle = rng.integers(40, 200, (64, 64)).astype(np.float32)
+        proc = ESPIProcessor()
+        for _ in range(40):
+            noisy = np.clip(speckle + rng.normal(0, 12, speckle.shape), 0, 255)
+            result = proc.denoise(noisy.astype(np.uint8), 0.8)
+        raw_error = np.abs(noisy - speckle).mean()
+        filtered_error = np.abs(result.astype(np.float32) - speckle).mean()
+        self.assertLess(filtered_error, raw_error / 2)
 
     def test_block_average_returns_none_until_full_then_mean(self):
         """Block averaging withholds output until the count is reached.

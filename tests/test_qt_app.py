@@ -1036,6 +1036,7 @@ class MainWindowBuildTests(WindowTestCase):
         w.exposure.spin.setValue(1234)
         w.gain.spin.setValue(3.5)
         w.fps.spin.setValue(12.5)
+        w.noise_reduction.spin.setValue(60)
         w.average.spin.setValue(5)
         w.ref_refresh.spin.setValue(2.5)
         w.smoothing.spin.setValue(3)
@@ -1043,6 +1044,7 @@ class MainWindowBuildTests(WindowTestCase):
         w.gamma.spin.setValue(1.7)
         s = self.engine.settings()
         self.assertEqual((s.exposure_us, s.gain_db, s.fps), (1234, 3.5, 12.5))
+        self.assertEqual(s.noise_reduction, 60)
         self.assertEqual((s.average, s.ref_refresh_s, s.smoothing), (5, 2.5, 3))
         self.assertEqual((s.clip_percent, s.gamma), (1.5, 1.7))
 

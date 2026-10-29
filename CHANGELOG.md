@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-28 — Noise reduction slider for the camera feed
+
+### Previous state
+
+- Noise filtering (Average N, Speckle filter) only applied to the Previous and Reference difference images; the Raw view and the frames used as references kept the camera's full sensor noise.
+
+### Current state
+
+- A **Noise reduction** slider in the Camera controls (Qt and Tk) blends each incoming camera frame with the previous ones, 0–95% (default 0 = off, so existing behavior is unchanged). It removes random sensor noise in every view and in captured references, recordings and saved frames, and keeps the speckle pattern ESPI needs. High values trail motion and weaken Previous-view fringes.
+
 ## 2026-10-28 — Automatic camera model detection
 
 ### Previous state

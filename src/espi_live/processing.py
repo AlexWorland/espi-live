@@ -24,6 +24,9 @@ SMOOTHING_METHODS = ("Gaussian", "Median")
 # OpenCV's vectorized median handles widths up to 5; wider uint8 medians take
 # ~30 ms per 6 MP frame, which would cut the camera's 30 fps.
 MAX_MEDIAN_WIDTH = 5
+# Camera-feed noise reduction keeps at most this share of the history per
+# frame (about a 20-frame memory), so the live image never freezes.
+MAX_DENOISE_STRENGTH = 0.95
 
 
 def normalize_min_max(image):
@@ -143,6 +146,7 @@ class ESPIProcessor:
         self.avg_count = 0
         self.avg_target = None
         self.rolling = None
+        self.denoised = None
 
     def reset_avg(self):
         """Discard any partial temporal average.
@@ -154,6 +158,30 @@ class ESPIProcessor:
         self.avg_count = 0
         self.avg_target = None
         self.rolling = None
+
+    def denoise(self, frame, strength):
+        """Reduce sensor noise in the camera feed by blending frames over time.
+
+        A running average keeps the static speckle that ESPI relies on and
+        averages out random shot and read noise; a spatial blur would erase
+        the speckle. Moving objects leave a trail that grows with strength.
+
+        Args: frame is the current Mono8 array; strength is the share (0..1)
+            of the running history kept in each output frame, with 0 meaning
+            off. Values are capped at MAX_DENOISE_STRENGTH so the feed still
+            follows changes.
+        Returns: The rounded uint8 filtered frame, or the input itself when off
+            or on the first frame of a new size.
+        """
+        if strength <= 0:
+            self.denoised = None
+            return frame
+        if self.denoised is None or self.denoised.shape != frame.shape:
+            self.denoised = frame.astype(np.float32)
+            return frame
+        weight = 1.0 - min(strength, MAX_DENOISE_STRENGTH)
+        cv2.accumulateWeighted(frame, self.denoised, weight)
+        return cv2.convertScaleAbs(self.denoised)
 
     def set_reference(self, frame, now):
         """Store a copy of a frame as the Reference baseline.
