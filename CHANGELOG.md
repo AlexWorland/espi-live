@@ -1,17 +1,20 @@
 # Changelog
 
-## 2026-10-29 — Windows and Linux builds ship as a folder
+## 2026-10-29 — Builds ship as a folder; every merge into main is released
 
 ### Previous state
 
 - The Windows and Linux builds were one self-extracting file (`espi-live.exe`, `espi-live`) that unpacked its libraries (about 390 MB) to a temporary folder on every start.
 - An update downloaded the new file and swapped it for the running one.
+- Merging into `main` released nothing: a release came from publishing the draft release or from **Actions > Release > Run workflow**, and every run of that workflow published a release, so it could not test a branch's builds without releasing them.
 
 ### Current state
 
 - The Windows and Linux archives hold an `espi-live` folder: the executable plus `_internal-N`, the libraries of build N. The program starts without unpacking anything. Keep the folder together; `output/` is still written next to the executable, now inside that folder. The macOS app was already a folder (`.app`) and is unchanged.
 - An update moves the new build's `_internal-N` folder in beside the running one and swaps only the executable, because Windows cannot overwrite or delete a running program's libraries. The next start deletes the old executable (`espi-live.exe.old`) and, once that is gone, the old `_internal-N` folder.
 - Copies that are a single file (build 6 and earlier) cannot update themselves to the folder layout: their update check reports `build N has no espi-live-windows-x64.zip`. Download a current release once by hand. `build-info.json` now lists the checksums under `archives`; the `sha256` key those copies read is left out, so they never put the new folder where their executable was.
+- Every merge into `main` builds and publishes a release, which installed copies are offered at once. Its version comes from the merged pull requests' labels (the release workflow rewrites the draft release first, so it counts the merge just made) and its notes from GitHub's generated release notes. A merge that lands while a release is building is released after it, together with any others that waited. `release-drafter.yml` no longer runs on merges; the release workflow updates the draft itself.
+- **Actions > Release > Run workflow** has a **Publish** checkbox: untick it to test and build a branch without releasing anything; the archives stay on the run's page as artifacts.
 
 ## 2026-10-29 — Releases started by hand get version tags
 

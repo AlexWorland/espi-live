@@ -1,29 +1,37 @@
 name: Release
 
 # Builds self-contained PyInstaller binaries for Windows, Linux and macOS and
-# attaches them to a GitHub release. Merging into main does not build or
-# release anything. It runs in one of two ways:
+# attaches them to a GitHub release. It runs in one of three ways:
 #
-# 1. Publishing a release (the normal way). release-drafter.yml keeps a draft
-#    release with the next version tag and the notes; publishing it (Releases >
-#    the draft > Edit > Publish release) creates the tag on main and starts this
-#    workflow. Tick "Set as a pre-release" when publishing to keep it from
-#    installed copies. The "hold" job turns the release back into a draft at
-#    once, so nobody sees a release without binaries (the updater would find no
+# 1. Every merge (push) into main (the normal way): the "version" job rewrites
+#    the draft release with release-drafter, which proposes the next version
+#    tag from the merged pull requests' labels, and the release is created
+#    with that tag once the tests and builds pass. Its notes are GitHub's
+#    generated notes (pull requests merged since the previous release, grouped
+#    by .github/release.yml). A merge that lands while a release is building
+#    waits for it; when several wait, GitHub keeps only the newest run, whose
+#    release then covers all of them.
+#
+# 2. Publishing the draft release by hand (Releases > the draft > Edit >
+#    Publish release) creates the tag on main and starts this workflow. Tick
+#    "Set as a pre-release" when publishing to keep it from installed copies.
+#    The "hold" job turns the release back into a draft at once, so nobody
+#    sees a release without binaries (the updater would find no
 #    build-info.json); the "publish" job uploads the archives and publishes it
 #    again. If the tests or a build fail, the release stays a draft: delete its
 #    tag (git push origin --delete vX.Y.Z), fix the problem and publish again.
 #
-# 2. By hand (Actions > Release > Run workflow), for a test build of any
-#    branch ("Use workflow from"). This creates the release itself, tagged
-#    with a version: the "version" input, or else the version the draft release
-#    proposes, or else the next patch version (see the "version" job). Runs from
-#    branches other than main, and the checkbox, make a pre-release tagged
-#    vX.Y.Z-pre.N, which leaves vX.Y.Z for the real release.
-#    Its notes are GitHub's generated notes (pull requests merged since the
-#    previous release, grouped by .github/release.yml), after any typed notes.
+# 3. By hand (Actions > Release > Run workflow), for a test build of any
+#    branch ("Use workflow from"). Untick "Publish" to only test and build:
+#    the archives stay on the run's page as artifacts and nothing is released.
+#    Otherwise this creates the release like a merge does, tagged with the
+#    "version" input, or else the version the draft release proposes, or else
+#    the next patch version (see the "version" job), with any typed notes above
+#    the generated ones. Runs from branches other than main, and the
+#    "Pre-release" checkbox, make a pre-release tagged vX.Y.Z-pre.N, which
+#    leaves vX.Y.Z for the real release.
 #
-# Either way, N is this workflow's run number, which build-info.json records and
+# Every way, N is this workflow's run number, which build-info.json records and
 # the updater uses to order builds, so the tag name does not matter to it.
 # Installed copies update only to the newest full release; a pre-release is for
 # testing and is never offered to them.
@@ -31,6 +39,8 @@ name: Release
 # The test job runs first; if a test fails or line coverage is below 100%,
 # nothing is built or released.
 on:
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -49,11 +59,16 @@ on:
         description: "Pre-release: publish for testing, don't offer it to installed copies"
         type: boolean
         default: false
+      publish:
+        description: "Publish a release (untick to only test and build; the archives stay on the run's page)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
-# One release at a time, so build numbers and releases stay in order.
+# One release at a time, so build numbers and releases stay in order, and each
+# run's "version" job sees the release before it.
 concurrency:
   group: build-release
   cancel-in-progress: false
@@ -82,20 +97,31 @@ jobs:
         run: gh release edit "$RELEASE_TAG" --draft
 
   # Picks the release tag first, so a bad "version" input fails before the
-  # builds. A published release already has its tag. A hand-started run uses
-  # the "version" input, else the version release-drafter's draft proposes
-  # (from the merged pull requests' labels), else the next patch after the
-  # newest vX.Y.Z release; versions whose tag already exists are skipped. A
+  # builds. A published release already has its tag. A merge or a hand-started
+  # run uses the "version" input, else the version release-drafter's draft
+  # proposes (from the merged pull requests' labels), else the next patch after
+  # the newest vX.Y.Z release; versions whose tag already exists are skipped. A
   # pre-release gets "-pre.N" (N = run number) on that version.
   version:
     name: Choose the version tag
     runs-on: ubuntu-latest
     permissions:
-      contents: write # only reads, but draft releases are visible only with write access
+      contents: write # update the draft; drafts are visible only with write access
+      pull-requests: read # the drafter reads the merged pull requests' labels
     outputs:
       tag: ${{ steps.pick.outputs.tag }}
       prerelease: ${{ steps.pick.outputs.prerelease }}
     steps:
+      # After a merge, rewrite the draft first so the version it proposes counts
+      # the pull request just merged. This step, not a run of
+      # release-drafter.yml, does it so the two cannot race; runs of this
+      # workflow never overlap, so the drafter always sees the previous release.
+      - name: Update the draft release
+        if: github.event_name == 'push'
+        uses: release-drafter/release-drafter@978bb0b30c5ee8cdd332ced253758157150d43f0 # v7.10.0
+        with:
+          config-name: release-drafter.yml
+
       - name: Choose the tag
         id: pick
         env:
@@ -433,10 +459,11 @@ jobs:
 
   publish:
     name: Publish release
-    # "hold" is skipped for hand-started runs, which would otherwise skip this
-    # job too; it only has to be finished so it cannot undo the publishing.
+    # "hold" is skipped unless a draft was published by hand, which would
+    # otherwise skip this job too; it only has to be finished so it cannot undo
+    # the publishing. A hand-started run with "Publish" unticked stops before it.
     needs: [version, build, hold]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.publish) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create or edit the release (and its tag)
@@ -474,10 +501,11 @@ jobs:
 
       # A published draft already exists (named, tagged and described by
       # release-drafter): attach the archives, append the build facts to its
-      # notes and publish it. A hand-started run creates the release itself,
-      # tagged by the "version" job, with GitHub's generated notes appended to
-      # the typed notes and build facts; after a full release it re-runs
-      # release-drafter so the draft proposes the version after this one.
+      # notes and publish it. A merge or a hand-started run creates the release
+      # itself, tagged by the "version" job, with GitHub's generated notes
+      # appended to any typed notes and the build facts; after a full release
+      # it re-runs release-drafter so the draft proposes the version after this
+      # one.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

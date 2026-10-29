@@ -30,8 +30,8 @@ docs/
   camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition research notes
   notes/              development notes and reports
 third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
-.github/workflows/    release-drafter.yml: keeps a draft release (next version, notes) up to date;
-                      build-binaries.yml: tests and builds PyInstaller binaries when a release is published;
+.github/workflows/    build-binaries.yml: tests, builds and releases PyInstaller binaries after every merge into main;
+                      release-drafter.yml: regenerates the draft release (next version, notes) after a release or by hand;
                       enrich-feature-request.yml: Copilot enrichment of feature-request issues
 research/             physics background: talks, notebooks, papers, earlier code (local only, git-ignored)
 archive/              superseded app versions and old scripts, kept for history
@@ -47,13 +47,15 @@ The FLIR Spinnaker SDK (installers, PySpin wheels, docs and official Examples) i
 
 Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed. The Windows and Linux archives each hold an `espi-live` folder: run `espi-live.exe` (`espi-live` on Linux) inside it, and keep the folder together, because the program loads its libraries from the `_internal-N` folder beside it (N is the build number). Nothing is unpacked at startup, unlike the single-file builds up to build 6, which extracted everything to a temporary folder on every start.
 
-Releases are approved by publishing a draft:
+Every merge into `main` is released:
 
-1. `.github/workflows/release-drafter.yml` keeps one **draft release** up to date. After every merge into `main` it lists the merged pull requests as the notes and proposes the next version tag (`vX.Y.Z`) from their labels: `enhancement` raises the minor version, `major` the major version, anything else the patch version; `skip-changelog` leaves a pull request out. The notes are rewritten on every merge, so change a pull request's title or labels rather than editing the draft.
-2. To release, open **Releases**, open the draft, check the tag and notes, and click **Publish release** (tick **Set as a pre-release** for a test build that installed copies are not offered). Publishing creates the tag on `main` and starts `.github/workflows/build-binaries.yml`.
-3. That workflow turns the release back into a draft while it works, runs the test suite on Linux, builds self-contained PyInstaller binaries for Windows, Linux and macOS, attaches them and publishes the release again. If a test fails or line coverage of `src/espi_live/` is below 100%, or a build fails, nothing is attached and the release stays a draft: delete its tag (`git push origin --delete vX.Y.Z`), fix the problem and publish again.
+1. `.github/workflows/build-binaries.yml` (**Release** in Actions) runs after every merge. It first rewrites the **draft release** with release-drafter: the pull requests merged since the last release become the draft's notes, and their labels pick the next version tag (`vX.Y.Z`): `enhancement` raises the minor version, `major` the major version, anything else the patch version; `skip-changelog` leaves a pull request out. Label a pull request before merging it.
+2. It runs the test suite on Linux, builds self-contained PyInstaller binaries for Windows, Linux and macOS, and creates the release with that tag, the binaries attached and GitHub's generated release notes (the pull requests merged since the previous release, grouped by `.github/release.yml` with the same labels as the drafter). Installed copies are offered it at once. If a test fails or line coverage of `src/espi_live/` is below 100%, or a build fails, nothing is released, and the next merge's release includes this one's changes.
+3. A merge that lands while a release is building waits for it. When several wait, GitHub keeps only the newest run, and its release covers all of them.
 
-Merging into `main` does not build anything. A release can also be started by hand: open **Actions > Release > Run workflow**, pick the branch and run it. It is tagged with a version: the one typed into **Version** (`vX.Y.Z`), or else the version the draft proposes, or else the next patch version after the newest release; a version whose tag already exists is skipped. When the branch is not `main` or **Pre-release** is ticked it is a pre-release tagged `vX.Y.Z-pre.N` (N is the workflow run number), which installed copies are not offered and which leaves `vX.Y.Z` for the real release. After a full release the draft is refreshed to propose the next version. Its notes are GitHub's generated release notes (the pull requests merged since the previous release, grouped by `.github/release.yml` with the same labels as the drafter), below anything typed into **Notes**.
+The draft release (on **Releases**) previews the next version. Publishing it by hand still works: it creates the tag on `main` and starts the same workflow, which turns the release back into a draft while it works and publishes it again with the binaries attached (tick **Set as a pre-release** for a test build that installed copies are not offered). If that build fails the release stays a draft: delete its tag (`git push origin --delete vX.Y.Z`), fix the problem and publish again.
+
+A release can also be started by hand: open **Actions > Release > Run workflow**, pick the branch and run it. Untick **Publish** to only test and build the branch: the archives stay on the run's page as artifacts and nothing is released. Otherwise the release is tagged with a version: the one typed into **Version** (`vX.Y.Z`), or else the version the draft proposes, or else the next patch version after the newest release; a version whose tag already exists is skipped. When the branch is not `main` or **Pre-release** is ticked it is a pre-release tagged `vX.Y.Z-pre.N` (N is the workflow run number), which installed copies are not offered and which leaves `vX.Y.Z` for the real release. After a full release the draft is refreshed to propose the next version. Its notes are GitHub's generated release notes, below anything typed into **Notes**.
 
 | File | Camera support |
 |------|----------------|
