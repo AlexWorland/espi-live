@@ -8,7 +8,8 @@
 
 ### Current state
 
-- The workflow records the license acceptance up front and installs without naming a user, so the installer skips the analytics question and sends no install analytics. Windows, Linux and macOS builds all complete, and the release is published with all three archives.
+- The workflow records the license acceptance up front and installs without naming a user, so the installer skips the analytics question and sends no install analytics.
+- It also installs the two runtime pieces PySpin needs that the FLIR packages leave out: `spinupdate` (`libSpinUpdate`) and FFmpeg (`libavcodec60`, `libavformat60`, `libavutil58`, `libswscale7`, which `libSpinVideo` links against without declaring them). Before that the Linux binary failed its PySpin import check, so Windows, Linux and macOS now all build and the release is published with all three archives.
 
 ## 2026-10-29 — Release workflow renamed, generated notes, pip cache
 
