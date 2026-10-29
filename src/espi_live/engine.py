@@ -31,7 +31,7 @@ import numpy as np
 from espi_live import sources
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
-                                  gamma_lut, smooth_speckle,
+                                  gamma_lut, single_field, smooth_speckle,
                                   stretch_contrast, watermark_demo)
 from espi_live.recording import AVIRecorder, recording_path, save_frame
 
@@ -64,6 +64,7 @@ class Settings:
     gamma: float = 1.0
     clahe: bool = True
     record: bool = False
+    single_field: bool = True     # interlaced sources: even rows only, line-doubled
 
 
 @dataclass(frozen=True)
@@ -413,6 +414,7 @@ class Engine:
         last_range_time = 0.0
         last_rolling = applied.rolling
         last_refresh = applied.ref_refresh_s
+        last_single_field = applied.single_field
         last_readback = time.monotonic()
         last_error_log = 0.0
         last_valid = time.monotonic()
@@ -451,6 +453,13 @@ class Engine:
             if s.rolling != last_rolling:
                 processor.reset_avg()
                 last_rolling = s.rolling
+            if s.single_field != last_single_field:
+                processor.reset_avg()  # field geometry changed: start over
+                processor.prev = None
+                processor.ref = None
+                self.log.write("Fields: single field (even rows, line-doubled)"
+                               if s.single_field else "Fields: full interlaced frames")
+                last_single_field = s.single_field
             if s.ref_refresh_s != last_refresh:
                 self.log.write(f"Reference auto-refresh: every {s.ref_refresh_s:.1f} s"
                                if s.ref_refresh_s > 0 else "Reference auto-refresh: off")
@@ -486,6 +495,8 @@ class Engine:
                 frame = grabbed
             if frame.ndim != 2 or frame.dtype != np.uint8:
                 raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
+            if s.single_field and self.camera is not None and self.camera.interlaced:
+                frame = single_field(frame)
 
             frame = processor.denoise(frame, s.noise_reduction / 100.0)
             now = time.monotonic()

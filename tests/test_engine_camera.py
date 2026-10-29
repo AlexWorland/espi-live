@@ -16,7 +16,8 @@ import numpy as np
 from espi_live import camera, capture, engine, paths
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine, WindowsPreviewTimer
-from fake_capture import FakeCaptureFactory, FakeEnumerator, bgr_frame, usb_live2
+from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
+                          interlaced_frame, usb_live2)
 from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
 
@@ -923,3 +924,57 @@ class CaptureEngineTests(CameraEngineCase):
         self.assertTrue(engine_._thread.is_alive())
         errors = [line for line in self.log.lines if "acquisition error" in line]
         self.assertEqual(len(errors), 1)
+
+    def test_engine_applies_single_field_to_interlaced_source(self):
+        """Single field is on by default for the USB-Live2 and can be turned off.
+
+        Args: None.
+        Returns: None.
+        """
+        self.factory.frames = [interlaced_frame()]
+        engine_ = self.capture_engine()
+        self.assertTrue(engine_.settings().single_field)
+        engine_.start()
+        self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
+        self.assertEqual(int(engine_.latest_packet().image.max()), 0)
+        engine_.update_settings(single_field=False)
+        self.assertTrue(wait_until(
+            lambda: int(engine_.latest_packet().image[1].max()) == 255))
+        self.assertTrue(self.log.has("Fields: full interlaced frames"))
+
+    def test_toggle_resets_reference(self):
+        """Switching fields drops the reference, which must be captured again.
+
+        Args: None.
+        Returns: None.
+        """
+        engine_ = self.capture_engine()
+        engine_.update_settings(mode="Reference")
+        engine_.start()
+        self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
+        engine_.request("reference")
+        self.assertTrue(wait_until(lambda: "press F" not in engine_.status()["hint"]))
+        engine_.update_settings(single_field=False)
+        self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
+        engine_.update_settings(single_field=True)
+        self.assertTrue(wait_until(
+            lambda: self.log.has("Fields: single field (even rows, line-doubled)")))
+
+
+class SingleFieldFlirTests(CameraEngineCase):
+    """Single-field mode never touches progressive FLIR frames."""
+
+    def test_single_field_ignored_for_blackfly(self):
+        """Odd rows of a FLIR frame survive with single field on.
+
+        Args: None.
+        Returns: None.
+        """
+        frame = np.zeros((48, 64), dtype=np.uint8)
+        frame[1::2] = 255
+        self.cam.frame_source = lambda: FakeImage(frame.copy())
+        self.engine.open_camera()
+        self.assertTrue(self.engine.settings().single_field)
+        self.engine.start()
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        self.assertEqual(int(self.engine.latest_packet().image[1].max()), 255)
