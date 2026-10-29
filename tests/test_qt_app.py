@@ -14,8 +14,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import queue
 import sys
+import tempfile
 import time
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
@@ -24,8 +26,10 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QLineEdit
 
-from espi_live import feedback, qt_app, updater
+from espi_live import feedback, paths, qt_app, updater
+from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
+from espi_live.channels import Channel, demo_channels
 from espi_live.engine import Engine, FramePacket
 
 APP = QApplication.instance() or QApplication(sys.argv)
@@ -164,6 +168,30 @@ def make_packet(sequence=1, width=64, height=48, palette="Gray", gamma=1.0):
     """
     image = np.tile(np.arange(width, dtype=np.uint8) * 3, (height, 1))
     return FramePacket(sequence, image, palette, gamma, "Raw", True)
+
+
+def wait_for(predicate, timeout=5.0):
+    """Poll a condition until it is true or a timeout passes.
+
+    Args: predicate is a zero-argument callable; timeout is in seconds.
+    Returns: The final value of predicate().
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not predicate():
+        time.sleep(0.01)
+    return predicate()
+
+
+def demo_window(engine, log, use_gl=False, check_updates=False):
+    """Build a MainWindow around one demo engine.
+
+    Args: engine is a demo Engine (not started); log is the FakeLog; use_gl
+        and check_updates are passed to MainWindow.
+    Returns: The MainWindow.
+    """
+    channel = Channel(log, CameraInfo("DEMO1", "Synthetic camera"), demo=True,
+                      engine=engine)
+    return qt_app.MainWindow([channel], log, use_gl, check_updates)
 
 
 def make_info(size=5_000_000):
@@ -612,6 +640,23 @@ class CpuImageViewPaintTests(unittest.TestCase):
         self.assertLess(self.center_pixel(), 255)
 
 
+class ViewClearTests(unittest.TestCase):
+    """clear() on both views, used when the displayed camera changes."""
+
+    def test_both_views_forget_the_image(self):
+        """After clear() neither view has an image to draw.
+
+        Args: None.
+        Returns: None.
+        """
+        for view in (qt_app.CpuImageView(), qt_app.GLImageView()):
+            view.show_packet(make_packet(), np.zeros((256, 3), np.uint8), None)
+            view.clear()
+            self.assertIsNone(view.image_size)
+            self.assertIsNone(view.display_rect())
+            view.deleteLater()
+
+
 class GLImageViewTests(unittest.TestCase):
     """GLImageView driven with a mocked GL context (none exists offscreen)."""
 
@@ -891,8 +936,7 @@ class WindowTestCase(unittest.TestCase):
         self.log = FakeLog()
         self.engine = Engine(self.log)
         self.engine.use_demo()
-        self.window = qt_app.MainWindow(self.engine, self.log, self.use_gl,
-                                        check_updates=False)
+        self.window = demo_window(self.engine, self.log, self.use_gl)
         self.addCleanup(self.cleanup_window)
 
     def cleanup_window(self):
@@ -975,7 +1019,7 @@ class MainWindowBuildTests(WindowTestCase):
         Returns: None.
         """
         with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
-            window = qt_app.MainWindow(self.engine, self.log, False, True)
+            window = demo_window(self.engine, self.log, check_updates=True)
         self.addCleanup(window.deleteLater)
         window.frame_timer.stop()
         window.status_timer.stop()
@@ -1487,6 +1531,280 @@ class EngineEventTests(WindowTestCase):
         close.assert_called_once()
 
 
+class MultiCameraTests(unittest.TestCase):
+    """Several cameras: the drop-down, process checkboxes and per-camera settings."""
+
+    def setUp(self):
+        """Build a window over three synthetic cameras (only the first open).
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        self.dialogs = make_dialogs()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        self.channels = demo_channels(self.log, 3)
+        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.addCleanup(self.cleanup_window)
+
+    def cleanup_window(self):
+        """Close the window, which stops and waits for every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_single_camera_hides_the_camera_list(self):
+        """With one camera there is no drop-down and no log prefix.
+
+        Args: None.
+        Returns: None.
+        """
+        engine = Engine(self.log)
+        engine.use_demo()
+        window = demo_window(engine, self.log)
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        self.assertTrue(window.cameras_box.isHidden())
+        self.assertEqual(window.windowTitle(), "ESPI live — DUMMY MODE")
+
+    def test_cameras_are_listed_with_the_displayed_one_locked_on(self):
+        """The drop-down lists every camera; the shown one must keep processing.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertFalse(window.cameras_box.isHidden())
+        self.assertEqual(window.camera_combo.count(), 3)
+        self.assertEqual([c.isChecked() for c in window.camera_checks], [True, False, False])
+        self.assertEqual([c.isEnabled() for c in window.camera_checks], [False, True, True])
+        self.assertIn("(DEMO1) — DUMMY MODE", window.windowTitle())
+        self.assertEqual(self.channels[1].log.prefix, "[DEMO2] ")
+
+    def test_process_checkbox_starts_and_stops_a_background_camera(self):
+        """Checking starts the camera's engine; unchecking stops it, keeping settings.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.channels[1]
+        self.window.camera_checks[1].setChecked(True)
+        self.assertTrue(second.active)
+        self.assertTrue(wait_for(lambda: second.engine.latest_packet() is not None))
+        second.engine.update_settings(gain_db=6.0)
+        self.window.camera_checks[1].setChecked(False)
+        self.assertFalse(second.active)
+        self.assertEqual(second.settings.gain_db, 6.0)
+        self.assertIn("Processing off: Synthetic camera (DEMO2) (settings kept)",
+                      self.log.lines)
+
+    def test_the_displayed_camera_cannot_be_turned_off(self):
+        """A request to stop the displayed camera is ignored.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._set_processing(self.channels[0], False)
+        self.assertTrue(self.channels[0].active)
+        self.assertTrue(self.window.camera_checks[0].isChecked())
+
+    def test_choosing_a_camera_shows_its_own_settings(self):
+        """The controls switch to the chosen camera's settings and limits.
+
+        Args: None.
+        Returns: None.
+        """
+        window, second = self.window, self.channels[1]
+        second.settings = replace(second.settings, exposure_us=2500.0, mode="Previous",
+                                  palette="Jet", rolling=True, noise_reduction=40.0)
+        second.limits = {"Gain": (0.0, 12.0)}
+        window.exposure.set_value(4000.0)
+        window.exposure.valueChanged.emit(4000.0)
+        window.camera_combo.setCurrentIndex(1)
+        self.assertIs(window.current, second)
+        self.assertTrue(second.active)
+        self.assertEqual(window.exposure.value(), 2500.0)
+        self.assertEqual(window.noise_reduction.value(), 40.0)
+        self.assertEqual(window.gain.spin.maximum(), 12.0)
+        self.assertEqual(window.palette_combo.currentText(), "Jet")
+        self.assertTrue(window.rolling.isChecked())
+        checked = [b.text() for b in window.mode_group.buttons() if b.isChecked()]
+        self.assertEqual(checked, ["Previous"])
+        self.assertEqual([c.isEnabled() for c in window.camera_checks], [True, False, True])
+        window.gain.valueChanged.emit(5.0)  # controls now act on the second camera
+        self.assertEqual(second.engine.settings().gain_db, 5.0)
+        self.assertEqual(self.channels[0].engine.settings().gain_db, 0.0)
+        self.assertEqual(self.channels[0].engine.settings().exposure_us, 4000.0)
+        window.camera_combo.setCurrentIndex(0)
+        self.assertEqual(window.exposure.value(), 4000.0)
+        self.assertEqual(window.gain.spin.maximum(), 30.0)
+
+    def test_choosing_the_same_or_no_camera_does_nothing(self):
+        """Re-selecting the shown camera or an empty index changes nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window, "_load_settings") as load:
+            self.window._camera_chosen(-1)
+            self.window.show_channel(self.channels[0])
+        load.assert_not_called()
+
+    def test_status_column_shows_display_rate_and_recording(self):
+        """Each row shows displayed, processed fps, REC, or off.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.camera_checks[1].setChecked(True)
+        self.channels[1].engine.update_settings(record=True)
+        self.window._poll_status()
+        states = [label.text() for label in self.window.camera_states]
+        self.assertTrue(states[0].startswith("displayed · "))
+        self.assertTrue(states[1].endswith(" · REC"))
+        self.assertEqual(states[2], "off")
+
+    def test_background_events_do_not_change_the_shown_controls(self):
+        """Limits are stored and record_off ignored for a camera not shown.
+
+        Args: None.
+        Returns: None.
+        """
+        window, second = self.window, self.channels[1]
+        window.camera_checks[1].setChecked(True)
+        window.record_button.setChecked(True)
+        second.engine.events.put(("camera_limits", {"Gain": (0.0, 9.0)}))
+        second.engine.events.put(("record_off", None))
+        window._handle_events()
+        self.assertEqual(second.limits, {"Gain": (0.0, 9.0)})
+        self.assertEqual(window.gain.spin.maximum(), 30.0)
+        self.assertTrue(window.record_button.isChecked())
+
+    def test_each_camera_keeps_its_own_model(self):
+        """A background camera's model is stored; the title follows the display.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first, second = self.window, self.channels[0], self.channels[1]
+        window.camera_checks[1].setChecked(True)
+        for channel in (first, second):  # pretend both are real cameras
+            source, channel.engine.demo_source = channel.engine.demo_source, None
+            self.addCleanup(setattr, channel.engine, "demo_source", source)
+        first.engine.events.put(("camera_identity", CameraIdentity(
+            model="Blackfly S BFS-U3-63S4M", serial="DEMO1")))
+        second.engine.events.put(("camera_identity", CameraIdentity(
+            model="Blackfly S BFS-U3-70S7C", serial="DEMO2")))
+        window._handle_events()
+        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-63S4M (DEMO1)")
+        self.assertEqual(second.identity.model, "Blackfly S BFS-U3-70S7C")
+        window.camera_combo.setCurrentIndex(1)
+        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-70S7C (DEMO2)")
+        self.assertIn("⚠ Colour camera", window.model_label.text())
+
+    def test_failed_open_of_the_shown_camera_returns_to_another(self):
+        """open_failed warns, turns that camera off and shows a running one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.camera_combo.setCurrentIndex(2)
+        third = self.channels[2]
+        third.engine.events.put(("open_failed", "busy"))
+        window._handle_events()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("busy", self.dialogs.warning.call_args.args[2])
+        self.assertFalse(third.active)
+        self.assertIs(window.current, self.channels[0])
+        self.assertEqual(window.camera_combo.currentIndex(), 0)
+
+    def test_fatal_error_in_a_background_camera_keeps_the_window(self):
+        """A background camera's error names it and turns it off only.
+
+        Args: None.
+        Returns: None.
+        """
+        window, second = self.window, self.channels[1]
+        window.camera_checks[1].setChecked(True)
+        second.engine.events.put(("fatal", "kaboom"))
+        with mock.patch.object(window, "close") as close:
+            window._handle_events()
+        close.assert_not_called()
+        self.assertIn("Synthetic camera (DEMO2): kaboom",
+                      self.dialogs.critical.call_args.args[2])
+        self.assertFalse(second.active)
+        self.assertFalse(window.camera_checks[1].isChecked())
+        self.assertIs(window.current, self.channels[0])
+
+    def test_unexpected_stop_of_the_shown_camera_shows_another(self):
+        """If the shown camera stops while another runs, that one is shown.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.camera_checks[1].setChecked(True)
+        self.channels[0].engine.events.put(("stopped", None))
+        window._handle_events()
+        self.assertIs(window.current, self.channels[1])
+        self.assertFalse(self.channels[0].active)
+
+    def test_going_live_replaces_synthetic_cameras_with_real_ones(self):
+        """switched_live keeps the shown channel and lists the real cameras.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.camera_checks[1].setChecked(True)
+        demo_two = self.channels[1]
+        shown = self.channels[0]
+        shown.engine.camera_info = CameraInfo("111", "BFS")
+        cameras = [CameraInfo("111", "BFS"), CameraInfo("222", "BFS")]
+        shown.engine.events.put(("switched_live", cameras))
+        window._handle_events()
+        self.assertEqual([c.info.serial for c in window.channels], ["111", "222"])
+        self.assertIs(window.channels[0], shown)
+        self.assertEqual(shown.engine.tag, "111")
+        self.assertFalse(window.channels[1].active)
+        self.assertFalse(demo_two.active)
+        self.assertIn(demo_two, window.retired_channels)
+        self.assertEqual(window.camera_combo.itemText(1), "BFS (222)")
+        self.assertIn("ESPI live — BFS (111)", window.windowTitle())
+
+    def test_close_stops_every_engine(self):
+        """Closing stops the running and the retired engines.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.camera_checks[1].setChecked(True)
+        self.window.camera_checks[1].setChecked(False)
+        self.window.camera_checks[2].setChecked(True)
+        engines = self.window._all_engines()
+        self.assertEqual(len(engines), 3)
+        self.window.close()
+        self.assertTrue(all(engine._stop.is_set() for engine in engines))
+        self.assertTrue(self.window.wait_for_engines(5.0))
+
+
 class UpdateFlowTests(WindowTestCase):
     """Update checks, downloads and restart offers, with no network."""
 
@@ -1761,7 +2079,7 @@ class CloseTests(WindowTestCase):
         self.window.close()
         engine = Engine(self.log)
         engine.use_demo()
-        window = qt_app.MainWindow(engine, self.log, False, False)
+        window = demo_window(engine, self.log)
         self.addCleanup(window.deleteLater)
         self.addCleanup(window.status_timer.stop)
         self.addCleanup(window.frame_timer.stop)
@@ -1794,10 +2112,8 @@ class FinishUpdateTests(unittest.TestCase):
         Args: relaunch is relaunch_after_exit; wait_result is engine.wait's result.
         Returns: A SimpleNamespace window.
         """
-        engine = mock.MagicMock()
-        engine.wait.return_value = wait_result
         return SimpleNamespace(pending_update="staged", relaunch_after_exit=relaunch,
-                               engine=engine)
+                               wait_for_engines=mock.MagicMock(return_value=wait_result))
 
     def test_nothing_happens_without_window_or_pending_update(self):
         """No window, or nothing staged, installs nothing.
@@ -1880,7 +2196,7 @@ class ShortcutFilterConstructionTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
-    """run() startup logic with the engine, window and dialogs faked."""
+    """run() startup logic with the channels, window and dialogs faked."""
 
     def setUp(self):
         """Patch everything run() touches that would block or hit hardware.
@@ -1890,6 +2206,10 @@ class RunTests(unittest.TestCase):
         """
         self.log = FakeLog()
         self.engine = mock.MagicMock()
+        self.channel = mock.MagicMock(active=True, engine=self.engine)
+        self.idle = mock.MagicMock(active=False)
+        self.cameras = mock.MagicMock(return_value=[self.channel, self.idle])
+        self.demos = mock.MagicMock(return_value=[self.channel])
         self.window = mock.MagicMock()
         self.dialogs = make_dialogs(qt_app.QMessageBox.Yes)
         self.opengl = mock.MagicMock(return_value=(True, "OpenGL 4.1 on X"))
@@ -1898,7 +2218,8 @@ class RunTests(unittest.TestCase):
         for patcher in (
                 mock.patch.object(qt_app, "request_gl_format"),
                 mock.patch.object(qt_app, "AppLog", return_value=self.log),
-                mock.patch.object(qt_app, "Engine", return_value=self.engine),
+                mock.patch.object(qt_app, "open_camera_channels", self.cameras),
+                mock.patch.object(qt_app, "demo_channels", self.demos),
                 mock.patch.object(qt_app, "QMessageBox", self.dialogs),
                 mock.patch.object(qt_app, "opengl_available", self.opengl),
                 mock.patch.object(qt_app, "MainWindow", self.main_window),
@@ -1913,10 +2234,11 @@ class RunTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        code = qt_app.run(force_demo=True, check_updates=False)
+        code = qt_app.run(force_demo=True, check_updates=False, demo_cameras=2)
         self.assertEqual(code, 7)
-        self.engine.open_camera.assert_not_called()
-        self.engine.use_demo.assert_called_once()
+        self.cameras.assert_not_called()
+        self.demos.assert_called_once_with(self.log, 2)
+        self.assertEqual(self.main_window.call_args.args[0], [self.channel])
         self.assertEqual(self.main_window.call_args.args[2:], (True, False))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
@@ -1935,15 +2257,18 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.main_window.call_args.args[2], False)
         self.assertIn("Display: CPU fallback (no OpenGL context)", self.log.lines)
 
-    def test_camera_is_used_when_it_opens(self):
-        """When the camera opens the demo source is not used.
+    def test_cameras_are_used_when_one_opens(self):
+        """Detected cameras are shown; only the opened one is started.
 
         Args: None.
         Returns: None.
         """
         qt_app.run()
-        self.engine.open_camera.assert_called_once()
-        self.engine.use_demo.assert_not_called()
+        self.cameras.assert_called_once_with(self.log)
+        self.demos.assert_not_called()
+        self.assertEqual(self.main_window.call_args.args[0], [self.channel, self.idle])
+        self.engine.start.assert_called_once()
+        self.idle.engine.start.assert_not_called()
 
     def test_missing_camera_with_accepted_prompt_falls_back_to_demo(self):
         """No camera plus Yes at the prompt starts demo mode.
@@ -1951,25 +2276,37 @@ class RunTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        self.engine.open_camera.side_effect = RuntimeError("no camera")
+        self.cameras.side_effect = RuntimeError("no camera")
         self.assertEqual(qt_app.run(), 7)
         self.dialogs.question.assert_called_once()
-        self.engine.use_demo.assert_called_once()
+        self.demos.assert_called_once_with(self.log, 1)
         self.assertTrue(any("Camera startup unavailable" in line
                             for line in self.log.lines))
 
     def test_missing_camera_with_declined_prompt_exits_cleanly(self):
-        """No camera plus No at the prompt exits 0 and releases the engine.
+        """No camera plus No at the prompt exits 0 without a window.
 
         Args: None.
         Returns: None.
         """
-        self.engine.open_camera.side_effect = RuntimeError("no camera")
+        self.cameras.side_effect = RuntimeError("no camera")
         self.dialogs.question.return_value = self.dialogs.No
         self.assertEqual(qt_app.run(), 0)
         self.main_window.assert_not_called()
+        self.finish.assert_called_once_with(None, self.log)
+
+    def test_opened_engines_are_released_when_the_window_fails(self):
+        """If building the window raises, opened engines are stopped and waited for.
+
+        Args: None.
+        Returns: None.
+        """
+        self.main_window.side_effect = RuntimeError("no window")
+        with self.assertRaises(RuntimeError):
+            qt_app.run()
         self.engine.stop.assert_called_once()
         self.engine.wait.assert_called_once_with(8.0)
+        self.idle.engine.stop.assert_not_called()
         self.finish.assert_called_once_with(None, self.log)
 
     def test_log_file_path_is_reported_when_available(self):

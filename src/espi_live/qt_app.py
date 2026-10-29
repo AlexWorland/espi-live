@@ -9,6 +9,11 @@ palette through a 256-entry lookup table built by processing.palette_rgb_table
 (the same function saved frames use). Scaling to the window is done by the
 GPU with mipmaps. Machines without OpenGL 3.3 (for example some remote-desktop
 sessions) fall back to a CPU-drawn view with identical controls.
+
+Several cameras: the window owns one Channel per detected camera. A drop-down
+picks the camera on screen, and a "process" checkbox per camera keeps others
+acquiring, processing and recording in the background. Every control acts on
+the displayed camera's own engine and settings.
 """
 
 import math
@@ -31,7 +36,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
                                QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
 from espi_live import feedback, updater
-from espi_live.engine import Engine
+from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.logs import AppLog
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
                                   palette_rgb_table)
@@ -78,6 +83,9 @@ MAX_ZOOM = 64.0
 ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
 LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are ignored
 TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
+# Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
+DEFAULT_LIMITS = {"ExposureTime": (0, 50000), "Gain": (0, 30),
+                  "AcquisitionFrameRate": (0, 60)}
 
 
 def request_gl_format():
@@ -317,6 +325,17 @@ class GLImageView(ViewNavigation, QOpenGLWidget):
             self.zoomChanged.emit(self.zoom)
         self.update()
 
+    def clear(self):
+        """Show no image until the next frame (used when the camera changes).
+
+        Args: None.
+        Returns: None.
+        """
+        self.pending = None
+        self.texture_shape = None
+        self.image_size = None
+        self.update()
+
     def initializeGL(self):
         """Compile the shaders and create the image and palette textures.
 
@@ -453,6 +472,16 @@ class CpuImageView(ViewNavigation, QWidget):
             self.image_size = (width, height)
             self.zoom, self.center = 1.0, None
             self.zoomChanged.emit(self.zoom)
+        self.update()
+
+    def clear(self):
+        """Show no image until the next frame (used when the camera changes).
+
+        Args: None.
+        Returns: None.
+        """
+        self.packet = None
+        self.image_size = None
         self.update()
 
     def paintEvent(self, event):
@@ -673,18 +702,21 @@ class FeatureRequestDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    """Viewer, controls, log and status for one engine."""
+    """Viewer, controls, log and status for the displayed camera's engine."""
 
-    def __init__(self, engine, log, use_gl, check_updates=True):
-        """Build the window and start polling the engine.
+    def __init__(self, channels, log, use_gl, check_updates=True):
+        """Build the window and start polling the engines.
 
-        Args: engine is a configured (not yet started) Engine; log is the
-            AppLog; use_gl selects the GPU view instead of the CPU fallback;
-            check_updates looks for a newer prebuilt binary at startup.
+        Args: channels is a list of Channel, at least one of them active
+            (opened, not yet started); the first active one is displayed;
+            log is the AppLog; use_gl selects the GPU view instead of the CPU
+            fallback; check_updates looks for a newer prebuilt binary at
+            startup.
         Returns: None.
         """
         super().__init__()
-        self.engine = engine
+        self.channels = list(channels)
+        self.current = next(channel for channel in self.channels if channel.active)
         self.log = log
         self.closing = False
         self.updates = updater.UpdateWorker()
@@ -693,7 +725,7 @@ class MainWindow(QMainWindow):
         self.pending_update = None  # unpacked build to install on exit
         self.relaunch_after_exit = False
         self.feedback = feedback.FeedbackWorker()
-        self.camera_identity = None  # set by the engine's camera_identity event
+        self.retired_channels = []  # demo channels replaced by real cameras
         self.drawn_sequence = 0
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
@@ -710,7 +742,8 @@ class MainWindow(QMainWindow):
         self._build_log()
         self._build_status_bar()
         self._build_menus()
-        self._set_demo(engine.demo)
+        self._rebuild_cameras()
+        self._set_demo(self.current.demo)
         self.shortcut_filter = ShortcutFilter(self)
         QApplication.instance().installEventFilter(self.shortcut_filter)
 
@@ -728,6 +761,33 @@ class MainWindow(QMainWindow):
         self.status_timer.start(200)
         if check_updates and updater.unavailable_reason() is None:
             self.updates.check()
+
+    @property
+    def camera_identity(self):
+        """The displayed camera's detected model.
+
+        Args: None.
+        Returns: A CameraIdentity, or None before the camera reported one.
+        """
+        return self.current.identity
+
+    @camera_identity.setter
+    def camera_identity(self, identity):
+        """Set the displayed camera's detected model.
+
+        Args: identity is a CameraIdentity or None.
+        Returns: None.
+        """
+        self.current.identity = identity
+
+    @property
+    def engine(self):
+        """The displayed camera's engine; every control acts on it.
+
+        Args: None.
+        Returns: An Engine.
+        """
+        return self.current.engine
 
     # ----- construction ---------------------------------------------------
 
@@ -820,6 +880,33 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(panel)
         column.setContentsMargins(10, 8, 10, 8)
 
+        # Shown only when there is more than one camera.
+        self.cameras_box = QWidget()
+        cameras = QVBoxLayout(self.cameras_box)
+        cameras.setContentsMargins(0, 0, 0, 6)
+        title = QLabel("Cameras")
+        title.setStyleSheet("font-weight:bold;")
+        cameras.addWidget(title)
+        display_row = QHBoxLayout()
+        display_row.addWidget(QLabel("Display"))
+        self.camera_combo = QComboBox()
+        self.camera_combo.setToolTip("Camera shown in the window; the controls "
+                                     "below change this camera's settings")
+        self.camera_combo.currentIndexChanged.connect(self._camera_chosen)
+        display_row.addWidget(self.camera_combo, 1)
+        cameras.addLayout(display_row)
+        process_note = QLabel("Process (keeps acquiring and recording when not displayed)")
+        process_note.setWordWrap(True)
+        process_note.setStyleSheet("color: palette(placeholder-text);")
+        cameras.addWidget(process_note)
+        self.camera_rows = QGridLayout()
+        self.camera_rows.setColumnStretch(0, 1)
+        self.camera_rows.setVerticalSpacing(2)
+        cameras.addLayout(self.camera_rows)
+        self.camera_checks = []
+        self.camera_states = []
+        column.addWidget(self.cameras_box)
+
         # In dummy mode the banner also replaces the camera readback line,
         # which would only say the same thing.
         self.demo_banner = QLabel(
@@ -886,9 +973,11 @@ class MainWindow(QMainWindow):
         self.model_label.setWordWrap(True)
         self.model_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         add(self.model_label)
-        self.exposure = SliderSpin(0, 50000, 1, 0, s.exposure_us, " µs")
-        self.gain = SliderSpin(0, 30, 0.1, 1, s.gain_db, " dB")
-        self.fps = SliderSpin(0, 60, 0.1, 1, s.fps, " fps")
+        self.exposure = SliderSpin(*DEFAULT_LIMITS["ExposureTime"], 1, 0,
+                                   s.exposure_us, " µs")
+        self.gain = SliderSpin(*DEFAULT_LIMITS["Gain"], 0.1, 1, s.gain_db, " dB")
+        self.fps = SliderSpin(*DEFAULT_LIMITS["AcquisitionFrameRate"], 0.1, 1,
+                              s.fps, " fps")
         self.exposure.valueChanged.connect(
             lambda v: self.engine.update_settings(exposure_us=v))
         self.gain.valueChanged.connect(lambda v: self.engine.update_settings(gain_db=v))
@@ -1087,21 +1176,215 @@ class MainWindow(QMainWindow):
         about.triggered.connect(lambda: QMessageBox.about(
             self, "About ESPI live", updater.describe_build()))
 
+    # ----- cameras -------------------------------------------------------------
+
+    def _rebuild_cameras(self):
+        """Fill the camera drop-down and process checkboxes from self.channels.
+
+        Args: None.
+        Returns: None.
+        """
+        several = len(self.channels) > 1
+        for channel in self.channels:
+            channel.log.prefix = f"[{channel.info.serial}] " if several else ""
+        self.camera_combo.blockSignals(True)
+        self.camera_combo.clear()
+        self.camera_combo.addItems([channel.label for channel in self.channels])
+        self.camera_combo.blockSignals(False)
+        for widget in self.camera_checks + self.camera_states:
+            self.camera_rows.removeWidget(widget)
+            widget.deleteLater()
+        self.camera_checks, self.camera_states = [], []
+        for row, channel in enumerate(self.channels):
+            check = QCheckBox(channel.info.serial)
+            check.setToolTip(f"{channel.label}: acquire, process and (when Record is "
+                             "on) record this camera even while another one is "
+                             "displayed. The displayed camera always processes.")
+            check.toggled.connect(
+                lambda on, channel=channel: self._set_processing(channel, on))
+            state = QLabel()
+            state.setStyleSheet("color: palette(placeholder-text);")
+            self.camera_rows.addWidget(check, row, 0)
+            self.camera_rows.addWidget(state, row, 1)
+            self.camera_checks.append(check)
+            self.camera_states.append(state)
+        self.cameras_box.setVisible(several)
+        self._sync_cameras()
+
+    def _sync_cameras(self):
+        """Show which camera is displayed and which ones are processing.
+
+        The displayed camera always processes, so its checkbox is locked on.
+
+        Args: None.
+        Returns: None.
+        """
+        self.camera_combo.blockSignals(True)
+        self.camera_combo.setCurrentIndex(self.channels.index(self.current))
+        self.camera_combo.blockSignals(False)
+        for channel, check in zip(self.channels, self.camera_checks):
+            check.blockSignals(True)
+            check.setChecked(channel.active)
+            check.blockSignals(False)
+            check.setEnabled(channel is not self.current)
+
+    def _camera_chosen(self, index):
+        """Display the camera picked in the drop-down.
+
+        Args: index is the drop-down position (one per channel).
+        Returns: None.
+        """
+        if 0 <= index < len(self.channels):
+            self.show_channel(self.channels[index])
+
+    def show_channel(self, channel):
+        """Display a camera, starting its processing if it was off.
+
+        Args: channel is one of self.channels.
+        Returns: None.
+        """
+        if channel is self.current:
+            return
+        if not channel.active:
+            self.log.write(f"Processing on: {channel.label}")
+            channel.start()
+        self.current = channel
+        self.drawn_sequence = 0
+        self.view.clear()
+        self._load_settings(self.engine.settings(), channel.limits)
+        self._set_demo(channel.demo)
+        self._sync_cameras()
+        self.log.write(f"Displaying {channel.label}")
+
+    def _set_processing(self, channel, on):
+        """Start or stop a camera that is not displayed.
+
+        Args: channel is one of self.channels; on is the checkbox state.
+        Returns: None.
+        """
+        if on and not channel.active:
+            self.log.write(f"Processing on: {channel.label}")
+            channel.start()
+        elif not on and channel.active and channel is not self.current:
+            self.log.write(f"Processing off: {channel.label} (settings kept)")
+            channel.stop()
+        self._sync_cameras()
+
+    def _load_settings(self, s, limits):
+        """Show a camera's settings and limits without sending them back.
+
+        Args: s is that camera's Settings; limits is its {node name: (low,
+            high)}, missing names using DEFAULT_LIMITS.
+        Returns: None.
+        """
+        self._apply_limits({**DEFAULT_LIMITS, **limits})
+        for widget, value in ((self.exposure, s.exposure_us), (self.gain, s.gain_db),
+                              (self.fps, s.fps), (self.noise_reduction, s.noise_reduction),
+                              (self.average, s.average),
+                              (self.ref_refresh, s.ref_refresh_s),
+                              (self.smoothing, s.smoothing), (self.clip, s.clip_percent),
+                              (self.gamma, s.gamma)):
+            widget.set_value(value)
+        toggles = ((self.rolling, s.rolling), (self.scale_range, s.scale_range),
+                   (self.invert, s.invert), (self.clahe, s.clahe),
+                   (self.record_button, s.record))
+        combos = ((self.smoothing_combo, s.smoothing_method),
+                  (self.palette_combo, s.palette))
+        for widget, _ in toggles + combos:
+            widget.blockSignals(True)
+        for widget, on in toggles:
+            widget.setChecked(on)
+        for widget, text in combos:
+            widget.setCurrentText(text)
+        for widget, _ in toggles + combos:
+            widget.blockSignals(False)
+        for button in self.mode_group.buttons():
+            button.setChecked(button.text() == s.mode)
+
+    def _apply_limits(self, limits):
+        """Set the camera sliders to device limits.
+
+        Args: limits is {node name: (low, high)} for the names to change.
+        Returns: None.
+        """
+        for name, widget in (("ExposureTime", self.exposure), ("Gain", self.gain),
+                             ("AcquisitionFrameRate", self.fps)):
+            if name in limits:
+                widget.set_range(*limits[name])
+
+    def _camera_state(self, channel):
+        """Summarize a camera for its row in the camera list.
+
+        Args: channel is one of self.channels.
+        Returns: Short text such as "displayed · 29.8 fps · REC", or "off".
+        """
+        if not channel.active:
+            return "off"
+        shown = "displayed · " if channel is self.current else ""
+        recording = " · REC" if channel.engine.settings().record else ""
+        return f"{shown}{channel.engine.status()['processed_fps']:.1f} fps{recording}"
+
+    def _adopt_live_cameras(self, channel, cameras):
+        """After a demo channel switched to a camera, list the real cameras.
+
+        Other synthetic cameras are stopped and removed; the other detected
+        cameras are added with processing off.
+
+        Args: channel is the channel that went live; cameras is the list of
+            CameraInfo the engine found (may be empty).
+        Returns: None.
+        """
+        channel.demo_source = False
+        if channel.engine.camera_info is not None:
+            channel.info = channel.engine.camera_info
+            channel.engine.tag = channel.info.serial
+        for other in self.channels:
+            if other is not channel and other.demo_source:
+                other.stop()
+                self.retired_channels.append(other)
+        self.channels = [channel] + [
+            Channel(self.log, info) for info in cameras
+            if info.serial != channel.info.serial]
+        self._rebuild_cameras()
+
+    def wait_for_engines(self, timeout):
+        """Wait until every camera has been released.
+
+        Args: timeout is the maximum wait in seconds per engine.
+        Returns: True when every engine has stopped.
+        """
+        return all([engine.wait(timeout) for engine in self._all_engines()])
+
+    def _all_engines(self):
+        """List every engine the window started, running or stopping.
+
+        Args: None.
+        Returns: A list of Engine objects.
+        """
+        return [engine for channel in self.channels + self.retired_channels
+                for engine in channel.engines()]
+
     # ----- behavior ----------------------------------------------------------
 
     def _set_demo(self, demo):
         """Show or hide every dummy-mode indicator.
 
-        Args: demo is True while the engine uses synthetic video.
+        Args: demo is True while the displayed camera uses synthetic video.
         Returns: None.
         """
         identity = None if demo else self.camera_identity
         name = identity.short_name() if identity else "Camera"
         lines = identity.description() if identity else []
+        several = len(self.channels) > 1
         if demo:
-            self.setWindowTitle("ESPI live — DUMMY MODE")
+            title = f"ESPI live — {self.current.label}" if several else "ESPI live"
+            self.setWindowTitle(f"{title} — DUMMY MODE")
+        elif identity:  # the serial tells same-model cameras apart
+            serial = f" ({self.current.info.serial})" if several else ""
+            self.setWindowTitle(f"ESPI live — {name}{serial}")
         else:
-            self.setWindowTitle(f"ESPI live — {name}" if identity else "ESPI live")
+            self.setWindowTitle(f"ESPI live — {self.current.label}" if several
+                                else "ESPI live")
         self.demo_banner.setVisible(demo)
         self.switch_live_button.setVisible(demo)
         self.camera_label.setVisible(not demo)
@@ -1213,6 +1496,8 @@ class MainWindow(QMainWindow):
             self.pixel_status.setText(f"x {x}, y {y}: {int(packet.image[y, x])}")
         else:
             self.pixel_status.setText("")
+        for channel, state in zip(self.channels, self.camera_states):
+            state.setText(self._camera_state(channel))
         self._handle_events()
         self._handle_update_events()
         self._handle_feedback_events()
@@ -1391,45 +1676,82 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
 
     def _handle_events(self):
-        """React to engine events (limits, record stop, live switch, errors).
+        """React to every camera's engine events.
 
         Args: None.
         Returns: None.
         """
-        while True:
-            try:
-                kind, payload = self.engine.events.get_nowait()
-            except Exception:
-                return
-            if kind == "camera_identity":
-                self.camera_identity = payload
-                self._set_demo(self.engine.demo)
-            elif kind == "camera_limits":
-                for name, widget in (("ExposureTime", self.exposure),
-                                     ("Gain", self.gain),
-                                     ("AcquisitionFrameRate", self.fps)):
-                    if name in payload:
-                        widget.set_range(*payload[name])
-            elif kind == "record_off":
-                self.record_button.blockSignals(True)
-                self.record_button.setChecked(False)
-                self.record_button.blockSignals(False)
-            elif kind == "switched_live":
-                for button in self.mode_group.buttons():
-                    button.setChecked(button.text() == "Raw")
-                self.record_button.blockSignals(True)
-                self.record_button.setChecked(False)
-                self.record_button.blockSignals(False)
-                self._set_demo(False)
-            elif kind == "switch_failed":
-                QMessageBox.warning(self, "Camera unavailable",
-                                    f"Could not start live capture: {payload}\n\n"
-                                    "Dummy mode will continue.")
-            elif kind == "fatal":
-                QMessageBox.critical(self, "ESPI stopped", payload)
-                self.close()
-            elif kind == "stopped" and not self.closing:
-                self.close()
+        for channel in list(self.channels):
+            engine = channel.engine
+            while engine is not None and channel.engine is engine:
+                try:
+                    kind, payload = engine.events.get_nowait()
+                except Exception:
+                    break
+                self._handle_event(channel, kind, payload)
+
+    def _handle_event(self, channel, kind, payload):
+        """React to one engine event (model, limits, record stop, live switch, errors).
+
+        Args: channel is the Channel whose engine sent it; kind and payload
+            are the event.
+        Returns: None.
+        """
+        displayed = channel is self.current
+        name = f"{channel.label}: " if len(self.channels) > 1 else ""
+        if kind == "camera_identity":
+            channel.identity = payload
+            if displayed:
+                self._set_demo(channel.demo)
+        elif kind == "camera_limits":
+            channel.limits = payload
+            if displayed:
+                self._apply_limits(payload)
+        elif kind == "record_off" and displayed:
+            self.record_button.blockSignals(True)
+            self.record_button.setChecked(False)
+            self.record_button.blockSignals(False)
+        elif kind == "switched_live":
+            self._adopt_live_cameras(channel, payload or [])
+            for button in self.mode_group.buttons():
+                button.setChecked(button.text() == "Raw")
+            self.record_button.blockSignals(True)
+            self.record_button.setChecked(False)
+            self.record_button.blockSignals(False)
+            self._set_demo(False)
+        elif kind == "switch_failed":
+            QMessageBox.warning(self, "Camera unavailable",
+                                f"Could not start live capture: {payload}\n\n"
+                                "Dummy mode will continue.")
+        elif kind == "open_failed":
+            QMessageBox.warning(self, "Camera unavailable",
+                                f"Could not start {channel.label}: {payload}")
+            self._channel_ended(channel)
+        elif kind == "fatal":
+            QMessageBox.critical(self, "ESPI stopped", f"{name}{payload}")
+            self._channel_ended(channel)
+        elif kind == "stopped" and not self.closing:
+            self._channel_ended(channel)
+
+    def _channel_ended(self, channel):
+        """Handle a camera whose engine stopped on its own.
+
+        With other cameras still running, the window stays open and shows
+        one of them; when it was the last one, the window closes.
+
+        Args: channel is the Channel whose engine stopped or failed.
+        Returns: None.
+        """
+        others = [other for other in self.channels
+                  if other.active and other is not channel]
+        if not others:
+            self.close()
+            return
+        channel.stop()
+        if channel is self.current:
+            self.show_channel(others[0])
+        else:
+            self._sync_cameras()
 
     def closeEvent(self, event):
         """Stop the engine (finishing recordings) and save the window layout.
@@ -1440,9 +1762,10 @@ class MainWindow(QMainWindow):
         if not self.closing:
             self.closing = True
             self.statusBar().showMessage("Finishing recordings and releasing the camera…")
-            self.engine.stop()
+            for engine in self._all_engines():
+                engine.stop()
             deadline = time.monotonic() + 8.0
-            while not self.engine.wait(0.05) and time.monotonic() < deadline:
+            while not self.wait_for_engines(0.05) and time.monotonic() < deadline:
                 QApplication.processEvents()
             self._poll_status()
             settings = QSettings("ESPI", "espi_live")
@@ -1465,7 +1788,7 @@ def finish_update(window, log):
     try:
         path = updater.install_update(window.pending_update)
         log.write(f"Installed update: {path}")
-        if window.relaunch_after_exit and not window.engine.wait(5.0):
+        if window.relaunch_after_exit and not window.wait_for_engines(5.0):
             log.write("The camera was not released in time; start ESPI live again "
                       "to use the new build")
         elif window.relaunch_after_exit:
@@ -1475,11 +1798,12 @@ def finish_update(window, log):
         log.write(f"Update could not be installed: {exc}")
 
 
-def run(force_demo=False, check_updates=True):
+def run(force_demo=False, check_updates=True, demo_cameras=1):
     """Start the Qt front end.
 
     Args: force_demo skips camera detection and starts synthetic video;
-        check_updates looks for a newer prebuilt binary at startup.
+        check_updates looks for a newer prebuilt binary at startup;
+        demo_cameras is how many synthetic cameras demo mode simulates.
     Returns: The process exit code.
     """
     request_gl_format()
@@ -1489,13 +1813,13 @@ def run(force_demo=False, check_updates=True):
     log = AppLog()
     path = log.start()
     window = None
-    engine = Engine(log)
+    channels = []
     try:
         if path:
             log.write(f"Log file: {path}")
         if not force_demo:
             try:
-                engine.open_camera()
+                channels = open_camera_channels(log)
             except Exception as exc:
                 log.write(f"Camera startup unavailable: {exc}")
                 answer = QMessageBox.question(
@@ -1505,19 +1829,22 @@ def run(force_demo=False, check_updates=True):
                 if answer != QMessageBox.Yes:
                     log.write("No camera detected; demo mode declined.")
                     return 0
-                engine.use_demo()
-        else:
-            engine.use_demo()
+        if not channels:
+            channels = demo_channels(log, demo_cameras)
         use_gl, description = opengl_available()
         log.write(f"Display: GPU ({description})" if use_gl else
                   f"Display: CPU fallback ({description})")
-        window = MainWindow(engine, log, use_gl, check_updates)
+        window = MainWindow(channels, log, use_gl, check_updates)
         window.show()
-        engine.start()
+        for channel in channels:
+            if channel.active:
+                channel.engine.start()
         return app.exec()
     finally:
         if window is None:
-            engine.stop()
-            engine.wait(8.0)
+            for channel in channels:
+                if channel.active:
+                    channel.engine.stop()
+                    channel.engine.wait(8.0)
         finish_update(window, log)
         log.close()

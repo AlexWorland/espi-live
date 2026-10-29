@@ -118,20 +118,23 @@ class CliDispatchTests(unittest.TestCase):
         qt = types.SimpleNamespace(run=mock.Mock(return_value=5))
         with fake_submodule("qt_app", qt):
             code, _, _ = run_cli([])
-        qt.run.assert_called_once_with(force_demo=False, check_updates=True)
+        qt.run.assert_called_once_with(force_demo=False, check_updates=True,
+                                       demo_cameras=1)
         self.cleanup.assert_called_once_with()
         self.assertEqual(code, 5)
 
     def test_demo_and_no_update_check_reach_qt(self):
-        """--demo and --no-update-check are passed to the Qt front end.
+        """--demo, --demo-cameras and --no-update-check reach the Qt front end.
 
         Args: None.
         Returns: None.
         """
         qt = types.SimpleNamespace(run=mock.Mock(return_value=0))
         with fake_submodule("qt_app", qt):
-            code, _, _ = run_cli(["--ui", "qt", "--demo", "--no-update-check"])
-        qt.run.assert_called_once_with(force_demo=True, check_updates=False)
+            code, _, _ = run_cli(["--ui", "qt", "--demo", "--demo-cameras", "3",
+                                   "--no-update-check"])
+        qt.run.assert_called_once_with(force_demo=True, check_updates=False,
+                                       demo_cameras=3)
         self.assertEqual(code, 0)
 
     def test_auto_falls_back_to_tk_without_pyside(self):

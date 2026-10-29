@@ -1,8 +1,9 @@
 """In-memory stand-in for PySpin so camera code runs without the SDK.
 
 Only the surface that espi_live.camera uses is modelled: System, camera
-lists, cameras, node maps, nodes with IsReadable/IsWritable, images, the
-pointer-cast helpers and SpinnakerException.
+lists, cameras (with serial numbers on the transport-layer device map), node
+maps, nodes with IsReadable/IsWritable, images, the pointer-cast helpers and
+SpinnakerException.
 """
 
 import time
@@ -227,11 +228,13 @@ def steady_frames():
 class FakeCamera:
     """A camera whose lifecycle calls can be made to fail."""
 
-    def __init__(self, frame_source=None):
+    def __init__(self, frame_source=None, serial="21234567",
+                 model="Blackfly S BFS-U3-63S4M"):
         """Create a camera with the default node set.
 
         Args: frame_source is a callable returning an image, or raising
-            FakeSpinnakerException; None uses steady_frames().
+            FakeSpinnakerException; None uses steady_frames(); serial and
+            model fill DeviceSerialNumber and DeviceModelName.
         Returns: None.
         """
         nodes, stream = default_nodes()
@@ -240,8 +243,8 @@ class FakeCamera:
         self.stream_nodemap = FakeNodeMap(stream)
         self.tl_device_nodemap = FakeNodeMap({
             "DeviceVendorName": FakeNode("FLIR", writable=False),
-            "DeviceModelName": FakeNode("Blackfly S BFS-U3-63S4M", writable=False),
-            "DeviceSerialNumber": FakeNode("21234567", writable=False),
+            "DeviceModelName": FakeNode(model, writable=False),
+            "DeviceSerialNumber": FakeNode(serial, writable=False),
         })
         self.frame_source = frame_source or steady_frames()
         self.fail = set()
@@ -375,12 +378,14 @@ class FakeSystem:
         self.camera_list = FakeCameraList(cameras)
         self.fail_release = False
         self.released = False
+        self.instances = 0  # GetInstance calls
+        self.releases = 0   # ReleaseInstance calls
 
     def GetCameras(self):
         """Enumerate cameras.
 
         Args: None.
-        Returns: The FakeCameraList.
+        Returns: The FakeCameraList (shared, like the SDK's cameras).
         """
         return self.camera_list
 
@@ -391,6 +396,7 @@ class FakeSystem:
         Returns: None. Raises RuntimeError when fail_release is set.
         """
         self.released = True
+        self.releases += 1
         if self.fail_release:
             raise RuntimeError("release failed")
 
@@ -401,8 +407,17 @@ def make_pyspin(system):
     Args: system is the FakeSystem that System.GetInstance() returns.
     Returns: A namespace with the PySpin names camera.py uses.
     """
+    def get_instance():
+        """Count and return the system, like PySpin.System.GetInstance.
+
+        Args: None.
+        Returns: The FakeSystem.
+        """
+        system.instances += 1
+        return system
+
     return types.SimpleNamespace(
-        System=types.SimpleNamespace(GetInstance=lambda: system),
+        System=types.SimpleNamespace(GetInstance=get_instance),
         CEnumerationPtr=lambda node: node,
         CEnumEntryPtr=lambda node: node,
         CBooleanPtr=lambda node: node,

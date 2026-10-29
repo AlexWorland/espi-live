@@ -597,3 +597,137 @@ class ReadIdentityTests(FakeSpinTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedSystemTests(FakeSpinTestCase):
+    """acquire_system/release_system and several sessions at once."""
+
+    def test_two_sessions_share_one_system_until_the_last_closes(self):
+        """The SDK is released only after every camera has been closed.
+
+        Args: None.
+        Returns: None.
+        """
+        second = FakeCamera(serial="87654321")
+        self.system.camera_list.cameras.append(second)
+        first_session = camera.CameraSession(self.log, "21234567")
+        second_session = camera.CameraSession(self.log, "87654321")
+        first_session.open()
+        second_session.open()
+        self.assertEqual(self.system.instances, 1)
+        self.assertEqual(second.calls, ["Init", "BeginAcquisition"])
+        first_session.close()
+        self.assertEqual(self.system.releases, 0)
+        second_session.close()
+        self.assertEqual(self.system.releases, 1)
+
+    def test_extra_release_is_ignored(self):
+        """Releasing without a reference neither fails nor releases twice.
+
+        Args: None.
+        Returns: None.
+        """
+        camera.acquire_system()
+        camera.release_system()
+        camera.release_system()
+        self.assertEqual(self.system.releases, 1)
+
+    def test_a_new_pyspin_module_gets_a_fresh_system(self):
+        """A reference held for another PySpin module is not reused.
+
+        Args: None.
+        Returns: None.
+        """
+        camera.acquire_system()
+        other = FakeSystem([])
+        with mock.patch.object(camera, "PySpin", make_pyspin(other)):
+            self.assertIs(camera.acquire_system(), other)
+            camera.release_system()
+        self.assertEqual(other.releases, 1)
+
+
+class CameraSelectionTests(FakeSpinTestCase):
+    """Choosing a camera by serial number and naming it."""
+
+    def test_open_by_serial_picks_that_camera_and_records_its_info(self):
+        """The camera whose serial matches is opened, not the first one.
+
+        Args: None.
+        Returns: None.
+        """
+        second = FakeCamera(serial="87654321", model="Blackfly S")
+        self.system.camera_list.cameras.append(second)
+        session = camera.CameraSession(self.log, "87654321")
+        session.open()
+        self.addCleanup(session.close)
+        self.assertEqual(self.cam.calls, [])
+        self.assertEqual(session.info, camera.CameraInfo("87654321", "Blackfly S"))
+
+    def test_open_with_a_missing_serial_raises_and_releases(self):
+        """A camera that was unplugged is reported and the SDK released.
+
+        Args: None.
+        Returns: None.
+        """
+        session = camera.CameraSession(self.log, "99999999")
+        with self.assertRaisesRegex(RuntimeError, "99999999 is no longer connected"):
+            session.open()
+        self.assertEqual(self.system.releases, 1)
+
+    def test_labels_include_the_model_when_known(self):
+        """CameraInfo.label is "model (serial)", or just the serial.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(camera.CameraInfo("1", "BFS").label, "BFS (1)")
+        self.assertEqual(camera.CameraInfo("1").label, "1")
+
+    def test_unreadable_serial_falls_back_to_the_list_position(self):
+        """Without a readable serial the camera is named by its position.
+
+        Args: None.
+        Returns: None.
+        """
+        self.cam.tl_device_nodemap.nodes["DeviceSerialNumber"].readable = False
+        self.cam.tl_device_nodemap.raising.add("DeviceModelName")
+        self.assertEqual(camera.camera_info(self.cam, 1), camera.CameraInfo("camera 2", ""))
+
+
+class ListCamerasTests(FakeSpinTestCase):
+    """list_cameras enumerates without opening."""
+
+    def test_lists_every_camera_and_releases_the_sdk(self):
+        """Each camera is identified; none is initialized; everything is released.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.append(FakeCamera(serial="2", model="M"))
+        cameras = camera.list_cameras(self.log)
+        self.assertEqual(cameras, [camera.CameraInfo("21234567", "Blackfly S BFS-U3-63S4M"),
+                                   camera.CameraInfo("2", "M")])
+        self.assertEqual(self.cam.calls, [])
+        self.assertTrue(self.system.camera_list.cleared)
+        self.assertEqual(self.system.releases, 1)
+
+    def test_release_errors_are_logged(self):
+        """A failing ReleaseInstance is logged and the list still returned.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.fail_release = True
+        self.assertEqual(len(camera.list_cameras(self.log)), 1)
+        self.assertEqual(self.log.lines, ["System cleanup error: release failed"])
+
+    def test_enumeration_errors_propagate_after_cleanup(self):
+        """If GetCameras fails the error is raised and the SDK released.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.GetCameras = mock.Mock(side_effect=FakeSpinnakerException("bus"))
+        with self.assertRaises(FakeSpinnakerException):
+            camera.list_cameras(self.log)
+        self.assertEqual(self.system.releases, 1)

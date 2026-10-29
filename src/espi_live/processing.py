@@ -263,10 +263,11 @@ class ESPIProcessor:
 class DemoSource:
     """Generate moving Mono8 test frames without a camera or SDK."""
 
-    def __init__(self, width=960, height=640):
+    def __init__(self, width=960, height=640, label=None):
         """Build a repeatable test pattern with a broad brightness range.
 
-        Args: width and height are the synthetic frame dimensions in pixels.
+        Args: width and height are the synthetic frame dimensions in pixels;
+            label is optional text that replaces the pattern's caption.
         Returns: None.
         """
         self.width = width
@@ -276,7 +277,7 @@ class DemoSource:
         checker = (((np.arange(height)[:, None] // 40 +
                      np.arange(width)[None, :] // 40) % 2) * 28)
         self.base = np.clip(gradient + checker, 0, 255).astype(np.uint8)
-        cv2.putText(self.base, "ESPI DEMO PATTERN", (30, height - 40),
+        cv2.putText(self.base, label or "ESPI DEMO PATTERN", (30, height - 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.15, 255, 2, cv2.LINE_AA)
         self.start_time = time.monotonic()
 

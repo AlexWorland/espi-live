@@ -125,37 +125,47 @@ class AVIRecorder:
                 f"frames skipped, {self.late_intervals} late encoder intervals)")
 
 
-def recording_path(mode, demo):
+def safe_name(text):
+    """Reduce text to characters that are safe in file names on Windows.
+
+    Args: text is any user or camera text.
+    Returns: Letters, digits, "-" and "_" only (others become "_"), at most
+        80 characters, without leading or trailing "_".
+    """
+    return "".join(char if char.isalnum() or char in "-_" else "_"
+                   for char in text.strip()).strip("_")[:80]
+
+
+def recording_path(mode, demo, tag=""):
     """Choose a new AVI path under output/recordings.
 
-    Args: mode is the view mode name; demo marks synthetic video.
+    Args: mode is the view mode name; demo marks synthetic video; tag names
+        the camera (for example its serial number) when several are used.
     Returns: An absolute .avi path. Raises OSError if the folder is unusable.
     """
     prefix = "dummy_" if demo else ""
+    camera = f"{safe_name(tag)}_" if safe_name(tag) else ""
     return os.path.join(output_folder("recordings"),
-                        f"{prefix}espi_{mode.lower()}_{timestamp()}.avi")
+                        f"{prefix}espi_{mode.lower()}_{camera}{timestamp()}.avi")
 
 
-def save_frame(display, title, notes, demo, log):
+def save_frame(display, title, notes, demo, log, tag=""):
     """Save a displayed frame as PNG plus an optional title/notes sidecar.
 
     Args: display is the grayscale or BGR image exactly as shown; title and
         notes are optional user text; demo marks synthetic video; log has a
-        write(message) method.
+        write(message) method; tag names the camera when several are used.
     Returns: The PNG path when saved, otherwise None (the reason is logged).
     """
     title = title.strip()
     notes = notes.strip()
-    # Limit the title to safe filename characters on Windows.
-    safe_title = "".join(
-        char if char.isalnum() or char in "-_" else "_"
-        for char in title
-    ).strip("_")[:80]
+    safe_title = safe_name(title)
     suffix = f"_{safe_title}" if safe_title else ""
     prefix = "dummy_" if demo else ""
+    camera = f"{safe_name(tag)}_" if safe_name(tag) else ""
     try:
         folder = output_folder("frames")
-        path = os.path.join(folder, f"{prefix}frame_{timestamp()}{suffix}.png")
+        path = os.path.join(folder, f"{prefix}frame_{camera}{timestamp()}{suffix}.png")
         if not cv2.imwrite(path, display):
             log.write(f"Could not save: {path}")
             return None
@@ -169,7 +179,8 @@ def save_frame(display, title, notes, demo, log):
             with open(info_path, "w", encoding="utf-8") as info:
                 info.write(
                     f"Frame: {os.path.basename(path)}\n"
-                    f"Source: {'Demo' if demo else 'Camera'}\n"
+                    f"Source: {'Demo' if demo else 'Camera'}"
+                    f"{f' {tag}' if tag else ''}\n"
                     f"Title: {title}\n\nNotes:\n{notes}\n")
             log.write(f"Saved frame info: {info_path}")
         except OSError as exc:

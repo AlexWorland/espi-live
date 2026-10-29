@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-28 — Several cameras at once
+
+### Previous state
+
+- The app used the first FLIR camera it found; other connected cameras were ignored. There was one set of settings, one reference frame and one recording.
+
+### Current state
+
+- With more than one camera connected, a **Cameras** section in the Controls panel has a **Display** drop-down for the camera on screen and a **Process** checkbox per camera. Checked cameras keep acquiring, processing and recording in the background while another is displayed; each row shows its frame rate and `REC`.
+- Each camera has its own settings (exposure, gain, frame rate, noise reduction, view mode, reference, averaging, fringe and display options, Record). Switching the display loads that camera's settings into the controls; unchecking Process stops the camera but keeps its settings.
+- Recordings and saved frames include the camera serial number in their filenames (`espi_raw_<serial>_<time>.avi`, `frame_<serial>_<time>.png`), and the frame-notes file names the camera. Demo files use `DEMO1`, `DEMO2`, ...
+- With several cameras, log lines start with the camera serial, and an error in one camera turns only that camera off instead of closing the app.
+- `--demo-cameras N` simulates N cameras in demo mode. **Switch to live capture** now lists every connected camera afterwards.
+- Defaults are unchanged: exposure 8000 µs, gain 0 dB, 30 fps; at startup only the first camera that opens is processed. The legacy Tk interface still uses one camera.
+
 ## 2026-10-28 — Noise reduction slider for the camera feed
 
 ### Previous state
