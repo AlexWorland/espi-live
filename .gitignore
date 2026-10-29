@@ -16,18 +16,16 @@ __pycache__/
 output/
 *.avi
 
-# Large binaries: wheels, archives, slide decks. The FLIR SDK files under
-# third_party/ are the exception: they are committed through Git LFS (see
-# .gitattributes) so CI can build the camera-capable binaries.
+# Large binaries: wheels, archives, slide decks
 *.zip
 *.whl
 *.dmg
 *.tar.gz
 *.pptx
-!third_party/**/*.zip
-!third_party/**/*.whl
-!third_party/**/*.dmg
-!third_party/**/*.tar.gz
+
+# FLIR Spinnaker SDK: a clone of the private espi-live-sdk repository (never
+# commit it here; this repository is public)
+third_party/
 
 # PyInstaller build output (CI builds the release binaries)
 build/

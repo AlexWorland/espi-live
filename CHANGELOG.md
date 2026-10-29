@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-29 — Public source, private SDK
+
+### Previous state
+
+- The repository was private, so a release could only be downloaded by people with a GitHub account and access to it, and every build carried a read-only token to fetch updates.
+- The FLIR Spinnaker SDK (installers, PySpin wheels, docs, Examples) was committed under `third_party/` through Git LFS.
+
+### Current state
+
+- The source is public under the GPL-3.0 (`LICENSE`), so anyone can download a build from the Releases page without an account, and installed copies update without a token (`UPDATE_TOKEN` is optional).
+- The SDK lives in the private `espi-live-sdk` repository. CI checks it out into `third_party/` with a read-only deploy key (`SDK_DEPLOY_KEY`), and lab members clone it there; `third_party/` is git-ignored. It, and the preserved `reference/` scripts, were removed from this repository's whole history.
+
 ## 2026-10-28 — Several cameras at once
 
 ### Previous state

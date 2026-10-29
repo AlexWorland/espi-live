@@ -2,7 +2,7 @@
 
 Only PyInstaller builds update themselves; a source checkout updates with git.
 CI writes ``_build_info.py`` before freezing (build number, commit, repository,
-the archive name for this platform and a read-only token for the private
+the archive name for this platform and an optional read-only token for the
 repository) and publishes ``build-info.json`` with each archive's SHA-256 next
 to the archives. Only the newest full release is used: GitHub's "latest"
 release excludes pre-releases and drafts, so test builds are never offered. An update downloads the archive beside the installed copy,
@@ -153,7 +153,7 @@ def read_token(env_name, file_name, build_name):
 
 
 def update_token():
-    """Choose the GitHub token for the private repository.
+    """Choose the optional GitHub token for reading releases.
 
     Args: None.
     Returns: The token string, or "" for anonymous access.

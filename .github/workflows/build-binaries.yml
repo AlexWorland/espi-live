@@ -40,7 +40,7 @@ jobs:
   # Gate for the whole release: no binary is built or published unless the
   # camera-free suite passes and covers every line of src/espi_live/
   # (.coveragerc sets fail_under = 100, so `coverage report` exits non-zero
-  # below that). No LFS files are needed: the tests use a fake PySpin.
+  # below that). The SDK is not needed: the tests use a fake PySpin.
   test:
     name: Tests and 100% coverage
     runs-on: ubuntu-24.04
@@ -48,7 +48,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.BUILD_REF }}
-          lfs: false
 
       - uses: actions/setup-python@v5
         with:
@@ -88,54 +87,68 @@ jobs:
             python: "3.10"
             pip_deps: numpy opencv-python pillow PySide6 certifi pyinstaller
             asset: espi-live-windows-x64.zip
-            lfs_include: third_party/flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
+            sdk_files: flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
           # Linux: ubuntu-24.04 is "noble", the distro the Spinnaker 4.4 packages target.
           - name: linux-x64
             os: ubuntu-24.04
             python: "3.12"
             pip_deps: -r requirements.txt certifi pyinstaller
             asset: espi-live-linux-x64.tar.gz
-            lfs_include: third_party/spinnaker-4.4/spinnaker_python-4.4.0.246-cp312-cp312-linux_x86_64.tar.gz,third_party/spinnaker-4.4/spinnaker-4.4.0.246-noble-amd64-pkg.tar.gz
+            sdk_files: spinnaker-4.4/spinnaker_python-4.4.0.246-cp312-cp312-linux_x86_64.tar.gz,spinnaker-4.4/spinnaker-4.4.0.246-noble-amd64-pkg.tar.gz
           # macOS has no PySpin wheel, so this build runs --demo only.
           - name: macos-arm64
             os: macos-latest
             python: "3.12"
             pip_deps: -r requirements.txt certifi pyinstaller
             asset: espi-live-macos-arm64.zip
-            lfs_include: ""
+            sdk_files: ""
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.BUILD_REF }}
+
+      # The FLIR Spinnaker SDK is not in this public repository: it lives in the
+      # private AlexWorland/espi-live-sdk, checked out into third_party/ (where
+      # the paths below and the scripts expect it) with a read-only deploy key,
+      # the SDK_DEPLOY_KEY secret. Without that secret only the macOS (demo)
+      # build works.
+      - name: Check out the FLIR SDK
+        if: matrix.sdk_files != ''
+        uses: actions/checkout@v4
+        with:
+          repository: AlexWorland/espi-live-sdk
+          ssh-key: ${{ secrets.SDK_DEPLOY_KEY }}
+          path: third_party
           lfs: false # fetch only the SDK files this platform needs, below
 
-      # Git LFS bandwidth is metered (1 GB/month on the free plan), so cache the
-      # LFS objects keyed by their content hashes: unchanged SDK files are never
-      # re-downloaded.
+      # Git LFS bandwidth is metered, so cache the LFS objects keyed by their
+      # content hashes: unchanged SDK files are never re-downloaded.
       - name: Compute LFS cache key
-        if: matrix.lfs_include != ''
+        if: matrix.sdk_files != ''
         id: lfs
         shell: bash
+        working-directory: third_party
         env:
-          LFS_INCLUDE: ${{ matrix.lfs_include }}
+          SDK_FILES: ${{ matrix.sdk_files }}
         run: |
-          key=$(git lfs ls-files --long --include="$LFS_INCLUDE" | awk '{print $1}' | sort | sha256sum | cut -c1-16)
+          key=$(git lfs ls-files --long --include="$SDK_FILES" | awk '{print $1}' | sort | sha256sum | cut -c1-16)
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Restore LFS cache
-        if: matrix.lfs_include != ''
+        if: matrix.sdk_files != ''
         uses: actions/cache@v4
         with:
-          path: .git/lfs
+          path: third_party/.git/lfs
           key: lfs-${{ matrix.name }}-${{ steps.lfs.outputs.key }}
 
       - name: Fetch SDK files (Git LFS)
-        if: matrix.lfs_include != ''
+        if: matrix.sdk_files != ''
         shell: bash
+        working-directory: third_party
         env:
-          LFS_INCLUDE: ${{ matrix.lfs_include }}
-        run: git lfs pull --include="$LFS_INCLUDE"
+          SDK_FILES: ${{ matrix.sdk_files }}
+        run: git lfs pull --include="$SDK_FILES"
 
       - uses: actions/setup-python@v5
         with:
@@ -179,15 +192,14 @@ jobs:
 
       # Fail here, not in the field, if the SDK did not install correctly.
       - name: Check PySpin imports
-        if: matrix.lfs_include != ''
+        if: matrix.sdk_files != ''
         shell: bash
         run: python -c "import PySpin; print('PySpin loaded from', PySpin.__file__)"
 
       # Build facts the updater compares against build-info.json in the release.
-      # The run number only increases, so it orders builds. UPDATE_TOKEN is a
-      # fine-grained read-only token (Contents: read on this repository) that
-      # lets installed copies read releases of this private repository; without
-      # the secret, updates work only if the repository is public.
+      # The run number only increases, so it orders builds. The repository is
+      # public, so installed copies read releases anonymously; UPDATE_TOKEN is
+      # optional (an empty secret is fine) and only raises the API rate limit.
       # FEEDBACK_TOKEN is a separate fine-grained token with only Issues: read &
       # write, used by the Request feature button; without it the button opens
       # a prefilled GitHub page instead of filing the issue itself.
@@ -222,7 +234,7 @@ jobs:
         run: |
           args=(--noconfirm --clean --paths src --distpath dist --workpath build)
           # camera.py imports PySpin lazily through importlib, so PyInstaller cannot see it.
-          if [ -n "${{ matrix.lfs_include }}" ]; then
+          if [ -n "${{ matrix.sdk_files }}" ]; then
             args+=(--hidden-import PySpin --collect-all PySpin)
           fi
           if [ "$RUNNER_OS" = "macOS" ]; then

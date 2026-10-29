@@ -32,22 +32,22 @@ experiments/          candidate, test and older working scripts
 docs/
   camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition research notes
   notes/              development notes and reports
-third_party/          vendor material, never edited
-  flir-spinnaker-4.2/   SDK installer zip, PySpin wheel, docs, official Examples (matches the camera PC)
-  spinnaker-4.4/        4.4.0.246 installers for macOS and Linux
-  (the SDK zip, wheels, dmg and tarballs are stored in Git LFS)
+third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
 .github/workflows/    build-binaries.yml: manual PyInstaller releases for Windows, Linux and macOS;
                       enrich-feature-request.yml: Copilot enrichment of feature-request issues
-reference/            preserved earlier scripts (saba-originals/), read-only
 research/             physics background: talks, notebooks, papers, earlier code (local only, git-ignored)
 archive/              superseded app versions and old scripts, kept for history
 output/               logs, frames and recordings written at run time (git-ignored)
 CHANGELOG.md  AGENTS.md  CLAUDE.md  requirements.txt  run.sh
 ```
 
+The FLIR Spinnaker SDK (installers, PySpin wheels, docs and official Examples) is not part of this public repository. Lab members with access clone the private SDK repository into `third_party/`, where the scripts and docs expect it: `git clone git@github.com:AlexWorland/espi-live-sdk.git third_party`.
+
 `.venv` (Python 3.14, the packages in `requirements.txt`) is only for camera-free work on a Mac. There is no macOS PySpin wheel, so the camera path runs only on the Windows camera PC (SDK 4.2).
 
 ## Prebuilt binaries
+
+Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed.
 
 Releases are made by hand: in GitHub, open **Actions > Build release > Run workflow**, pick the branch (normally `main`), optionally type release notes, and run it. `.github/workflows/build-binaries.yml` builds self-contained PyInstaller binaries and publishes them as release **Build N** (tag `build-N`, where N is the workflow run number). Merging into `main` does not build anything. The run first executes the test suite on Linux; if any test fails or line coverage of `src/espi_live/` is below 100%, nothing is built or released. Tick **Pre-release** to publish a test build that installed copies are not offered; runs from any branch other than `main` are always pre-releases.
 
@@ -57,7 +57,7 @@ Releases are made by hand: in GitHub, open **Actions > Build release > Run workf
 | `espi-live-linux-x64.tar.gz` | PySpin 4.4 bundled (Ubuntu 24.04 build) |
 | `espi-live-macos-arm64.zip` | `--demo` only (no macOS PySpin wheel); unsigned, run `xattr -cr "ESPI Live.app"` after unzipping |
 
-Output goes to `output/` next to the executable (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. A fresh clone needs `git lfs install` to get the SDK files.
+Output goes to `output/` next to the executable (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
 
 ### Automatic updates
 
@@ -66,14 +66,14 @@ Prebuilt copies update themselves to the newest full release (pre-releases are s
 - `espi-live --update` updates without opening a window (any interface, including `--ui tk`); `--version` prints the build; `--no-update-check` skips the startup check.
 - The program's folder must be writable: the new build is unpacked beside it, and the old copy is kept as `*.old` until the next start.
 - Builds are ordered by the workflow run number, so a copy never "updates" to an older build. Running from source never updates itself; use `git pull`.
-- The repository is private, so CI bakes a read-only GitHub token into each binary from the `UPDATE_TOKEN` repository secret: a fine-grained personal access token limited to this repository with **Contents: read-only**. Anyone with a binary can extract that token and read the repository. When it expires, installed copies report "the update token was rejected"; create a new token, update the secret, and either install the next build by hand or put the new token in `update-token.txt` beside the program (or the `ESPI_UPDATE_TOKEN` environment variable), which overrides the baked-in one.
+- The repository is public, so installed copies read releases without a token. The optional `UPDATE_TOKEN` repository secret (a fine-grained token with **Contents: read-only**) is baked in when set and only raises GitHub's API rate limit; `update-token.txt` beside the program or the `ESPI_UPDATE_TOKEN` environment variable overrides it.
 
 ### Feature requests
 
 The **Request feature** button in the status bar (also **Help > Request a feature…**) asks for a title, a description and an optional name, then files a GitHub issue labelled `feature-request` in this repository in the background. The issue includes the build, platform and video source (camera or dummy mode). When it is sent, a dialog links to the new issue; if sending fails, you can edit and retry, or open the request in a browser without retyping it.
 
 - **Enrich with GitHub Copilot** (on by default) also adds the `enrich` label. That label starts `.github/workflows/enrich-feature-request.yml`, which asks GitHub Copilot (through `actions/ai-inference`) to rewrite the request as a structured spec (summary, motivation, proposed behavior, acceptance criteria, open questions) and appends it below the original text. The label is then replaced with `enriched`. Maintainers can add `enrich` to any issue by hand to get the same result. The system prompt is `.github/prompts/enrich-feature-request.txt`.
-- Builds file issues with a token from the `FEEDBACK_TOKEN` repository secret: a fine-grained personal access token limited to this repository with **Issues: read and write** only. It is separate from `UPDATE_TOKEN`, so it can be revoked without breaking updates; if it leaks, the worst case is unwanted issues. `feedback-token.txt` beside the program or the `ESPI_FEEDBACK_TOKEN` environment variable overrides it. Copies without a token (including source checkouts) open a prefilled GitHub new-issue page instead, which requires a GitHub login with access to the repository.
+- Builds file issues with a token from the `FEEDBACK_TOKEN` repository secret: a fine-grained personal access token limited to this repository with **Issues: read and write** only. It is separate from `UPDATE_TOKEN`, so it can be revoked without breaking updates; anyone can extract it from a public binary, so the worst case is unwanted issues (and, through the `enrich` label, Copilot runs on them). `feedback-token.txt` beside the program or the `ESPI_FEEDBACK_TOKEN` environment variable overrides it. Copies without a token (including source checkouts) open a prefilled GitHub new-issue page instead, which requires a GitHub login.
 - Enrichment needs the `COPILOT_PAT` repository secret: a fine-grained personal access token from an account with a Copilot plan, with the **Copilot Requests** permission. Without it, the workflow comments on the issue that enrichment is not configured.
 
 ## Using the viewer
@@ -120,3 +120,7 @@ Double-click `scripts/windows/SETUP AND START ESPI.bat`. It checks for Python 3.
 `experiments/espi_live_bfs_u3_200s6m.py` is a standalone full copy of the viewer adapted for the 20 MP BFS-U3-200S6M-C (15 fps default, 1000 ms image timeout). It predates the package layout and has not been reconciled with the package.
 
 See [CHANGELOG.md](CHANGELOG.md) for history and [AGENTS.md](AGENTS.md) for contributor and agent guidance.
+
+## License
+
+ESPI live is free software under the GNU General Public License v3.0; see `LICENSE`. The FLIR Spinnaker SDK and PySpin are Teledyne FLIR's proprietary software under their own license and are not covered by it.
