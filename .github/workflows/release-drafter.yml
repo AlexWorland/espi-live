@@ -4,7 +4,7 @@ name: Release drafter
 # merged pull requests and proposes the next version tag (config:
 # .github/release-drafter.yml). The draft is not public and builds nothing.
 # Publishing it (Releases > the draft > Edit > Publish release) creates the
-# tag on main and starts "Build release" (build-binaries.yml), which tests,
+# tag on main and starts "Release" (build-binaries.yml), which tests,
 # builds and attaches the binaries.
 #
 # The notes are rewritten on every merge, so edits made to the draft by hand
