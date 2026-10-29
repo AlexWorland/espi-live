@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-29 — Check for updates button
+
+### Previous state
+
+- Checking for a newer build on demand meant finding **Help > Check for updates…**; the status bar showed nothing about updates unless the startup check had already found a newer build.
+
+### Current state
+
+- A **Check for updates** button in the status bar, next to **Request feature**, checks GitHub on demand like the Help menu item and reports the result in a dialog. It reads **Checking for updates…** and is greyed out while a check runs, including the automatic one at startup, and gives way to the blue **Update available** button once a newer build is found.
+
 ## 2026-10-29 — Builds ship as a folder; every merge into main is released
 
 ### Previous state
