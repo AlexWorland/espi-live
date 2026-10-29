@@ -24,7 +24,7 @@ from unittest import mock
 import numpy as np
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QSurfaceFormat
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
 from espi_live import feedback, paths, qt_app, updater
 from espi_live.camera import CameraInfo
@@ -1367,6 +1367,73 @@ class PollingTests(WindowTestCase):
         self.assertEqual(self.window.record_label.text(), status["record"])
         self.assertEqual(self.window.hint_label.text(), status["hint"])
         self.assertIn("Displayed:", self.window.speed_status.text())
+
+    def test_status_bar_items_keep_their_positions(self):
+        """No readout value, however long, moves another status-bar item.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        items = (window.update_slot, window.feature_button, window.source_badge,
+                 window.record_label, window.range_status, window.camera_fps_status,
+                 window.speed_status, window.pixel_status)
+
+        def geometry():
+            QApplication.processEvents()
+            return [(w.x(), w.width()) for w in items]
+
+        before = geometry()
+        window.camera_fps_status.setText("Camera: 1000000000.0 fps (simulated)")
+        window.speed_status.setText("Processed: 1000000000.0 fps    Work: 0.0 ms/frame"
+                                    "    Displayed: 1000000000.0 fps")
+        window.record_label.setText("Recording: 1000000000.0 fps")
+        window.range_status.setText("")
+        window.pixel_status.setText("x 123456, y 123456: 255")
+        self.assertEqual(geometry(), before)
+        window.update_button.setText("Update available: build 9999 (abcdef0)")
+        window.check_button.setVisible(False)
+        window.update_button.setVisible(True)
+        self.assertEqual(geometry(), before)
+        window.check_button.setText("Checking for updates…")
+        window.check_button.setVisible(True)
+        window.update_button.setVisible(False)
+        self.assertEqual(geometry(), before)
+
+    def test_fixed_label_keeps_full_text_but_shows_an_ellipsis(self):
+        """A label too narrow for its text shows "…" yet still reports the full string.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.FixedLabel("Camera: 9.9 fps")
+        label.resize(label.sizeHint())
+        hint = label.sizeHint().width()
+        label.setText("Camera: 1000000000.0 fps")
+        self.assertEqual(label.text(), "Camera: 1000000000.0 fps")
+        self.assertTrue(QLabel.text(label).endswith("…"))
+        self.assertEqual(label.sizeHint().width(), hint)  # the text never changes it
+        label.setText("Camera: 1.0 fps")
+        self.assertEqual(QLabel.text(label), "Camera: 1.0 fps")
+
+    def test_fixed_label_shortens_again_when_the_window_narrows(self):
+        """Shrinking the label re-elides its text; it may shrink to nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.FixedLabel("Camera: 999.9 fps")
+        label.resize(label.sizeHint())
+        label.show()  # a hidden widget gets its resize events only when shown
+        self.addCleanup(label.close)
+        label.setText("Camera: 30.0 fps")
+        self.assertEqual(QLabel.text(label), "Camera: 30.0 fps")
+        label.resize(30, label.height())
+        self.assertTrue(QLabel.text(label).endswith("…"))
+        self.assertEqual(label.text(), "Camera: 30.0 fps")
+        self.assertEqual(label.minimumSizeHint().width(), 0)
 
     def test_poll_status_computes_display_fps_after_a_second(self):
         """After a second the displayed fps is frames over elapsed time.
