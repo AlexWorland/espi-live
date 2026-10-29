@@ -30,7 +30,8 @@ docs/
   camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition research notes
   notes/              development notes and reports
 third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
-.github/workflows/    build-binaries.yml: manual PyInstaller releases for Windows, Linux and macOS;
+.github/workflows/    release-drafter.yml: keeps a draft release (next version, notes) up to date;
+                      build-binaries.yml: tests and builds PyInstaller binaries when a release is published;
                       enrich-feature-request.yml: Copilot enrichment of feature-request issues
 research/             physics background: talks, notebooks, papers, earlier code (local only, git-ignored)
 archive/              superseded app versions and old scripts, kept for history
@@ -46,7 +47,13 @@ The FLIR Spinnaker SDK (installers, PySpin wheels, docs and official Examples) i
 
 Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed.
 
-Releases are made by hand: in GitHub, open **Actions > Build release > Run workflow**, pick the branch (normally `main`), optionally type release notes, and run it. `.github/workflows/build-binaries.yml` builds self-contained PyInstaller binaries and publishes them as release **Build N** (tag `build-N`, where N is the workflow run number). Merging into `main` does not build anything. The run first executes the test suite on Linux; if any test fails or line coverage of `src/espi_live/` is below 100%, nothing is built or released. Tick **Pre-release** to publish a test build that installed copies are not offered; runs from any branch other than `main` are always pre-releases.
+Releases are approved by publishing a draft:
+
+1. `.github/workflows/release-drafter.yml` keeps one **draft release** up to date. After every merge into `main` it lists the merged pull requests as the notes and proposes the next version tag (`vX.Y.Z`) from their labels: `enhancement` raises the minor version, `major` the major version, anything else the patch version; `skip-changelog` leaves a pull request out. The notes are rewritten on every merge, so change a pull request's title or labels rather than editing the draft.
+2. To release, open **Releases**, open the draft, check the tag and notes, and click **Publish release** (tick **Set as a pre-release** for a test build that installed copies are not offered). Publishing creates the tag on `main` and starts `.github/workflows/build-binaries.yml`.
+3. That workflow turns the release back into a draft while it works, runs the test suite on Linux, builds self-contained PyInstaller binaries for Windows, Linux and macOS, attaches them and publishes the release again. If a test fails or line coverage of `src/espi_live/` is below 100%, or a build fails, nothing is attached and the release stays a draft: delete its tag (`git push origin --delete vX.Y.Z`), fix the problem and publish again.
+
+Merging into `main` does not build anything. For a test build of any branch, open **Actions > Build release > Run workflow**, pick the branch and run it: it publishes release **Build N** (tag `build-N`, where N is the workflow run number) as a pre-release when the branch is not `main` or **Pre-release** is ticked.
 
 | File | Camera support |
 |------|----------------|

@@ -1,0 +1,52 @@
+# Release Drafter configuration (see .github/workflows/release-drafter.yml).
+#
+# After every merge into main, the draft release is rewritten: the next version
+# is picked from the labels of the pull requests merged since the last release,
+# and their titles become the notes. Publishing the draft starts
+# .github/workflows/build-binaries.yml, which tests, builds and attaches the
+# binaries.
+#
+# Only "v..." releases count as previous releases. The "build-N" releases made
+# by hand-started test builds are ignored; otherwise their number would be read
+# as a version (build-12 -> 12.0.0).
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+tag-prefix: 'v'
+
+change-template: '- $TITLE (#$NUMBER)'
+# Escape characters in pull request titles that Markdown would interpret.
+change-title-escapes: '\<*_&'
+
+categories:
+  - type: pre-exclude
+    when:
+      label: skip-changelog
+
+  - title: 'Features'
+    semver-increment: minor
+    when:
+      label: enhancement
+  - title: 'Fixes'
+    when:
+      label: bug
+  - title: 'Documentation'
+    when:
+      label: documentation
+  - title: 'Dependencies'
+    when:
+      label: dependencies
+
+  # A pull request labelled "major" (a breaking change, such as a changed
+  # settings or output format) raises the major version; anything else is at
+  # least a patch release.
+  - type: version-resolver
+    semver-increment: major
+    when:
+      label: major
+  - type: version-resolver
+    semver-increment: patch
+
+template: |
+  ## What's changed
+
+  $CHANGES
