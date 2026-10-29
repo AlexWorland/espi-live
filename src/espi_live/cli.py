@@ -1,4 +1,4 @@
-"""Command-line entry point: choose the Qt or Tk front end."""
+"""Command-line entry point for the Qt front end."""
 
 import argparse
 import importlib
@@ -8,10 +8,11 @@ from espi_live import updater
 
 
 def cli(argv=None):
-    """Parse options and run the selected front end.
+    """Parse options and run the Qt front end.
 
     Args: argv is an optional list of argument strings; None uses sys.argv.
-    Returns: None; exits with the front end's status code.
+    Returns: None; exits with the front end's status code, or with a message
+        when PySide6 is missing.
     """
     parser = argparse.ArgumentParser(
         prog="espi_live",
@@ -19,11 +20,8 @@ def cli(argv=None):
     parser.add_argument("--demo", action="store_true",
                         help="start synthetic video without detecting a camera")
     parser.add_argument("--demo-cameras", type=int, default=1, metavar="N",
-                        help="number of synthetic cameras in demo mode (Qt UI; "
-                             "default 1)")
-    parser.add_argument("--ui", choices=("auto", "qt", "tk"), default="auto",
-                        help="front end: qt (GPU display), tk (legacy), or auto "
-                             "(qt when PySide6 is installed, else tk)")
+                        help="number of synthetic cameras in demo mode "
+                             "(default 1)")
     parser.add_argument("--check", action="store_true",
                         help="load the processing engine and the Qt front end "
                              "(no window, no camera), report versions, and exit")
@@ -42,22 +40,13 @@ def cli(argv=None):
     if args.update:
         sys.exit(update_now())
     updater.cleanup_previous_update()
-    ui = args.ui
-    if ui in ("auto", "qt"):
-        try:
-            from espi_live import qt_app
-        except ImportError as exc:
-            if ui == "qt":
-                raise SystemExit(f"The Qt front end needs PySide6: {exc}")
-            print(f"PySide6 unavailable ({exc}); using the legacy Tk front end.",
-                  file=sys.stderr)
-            ui = "tk"
-        else:
-            sys.exit(qt_app.run(force_demo=args.demo,
-                                check_updates=not args.no_update_check,
-                                demo_cameras=args.demo_cameras))
-    from espi_live.app import main
-    main(force_demo=args.demo)
+    try:
+        from espi_live import qt_app
+    except ImportError as exc:
+        raise SystemExit(f"ESPI live needs PySide6 (pip install -r requirements.txt): {exc}")
+    sys.exit(qt_app.run(force_demo=args.demo,
+                        check_updates=not args.no_update_check,
+                        demo_cameras=args.demo_cameras))
 
 
 def self_check():
@@ -73,8 +62,7 @@ def self_check():
         import cv2
         import numpy
         import PySide6
-        for module in ("espi_live.engine", "espi_live.qt_app", "espi_live.app",
-                       "espi_live.updater"):
+        for module in ("espi_live.engine", "espi_live.qt_app", "espi_live.updater"):
             importlib.import_module(module)
     except Exception as exc:
         print(f"Self-check failed: {type(exc).__name__}: {exc}", file=sys.stderr)

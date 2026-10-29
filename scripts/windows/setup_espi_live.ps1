@@ -96,9 +96,7 @@ Write-Status "Using Python: $($python.Command) $($python.Prefix -join ' ')"
 $moduleChecks = @{
     'opencv-python' = 'cv2'
     'numpy'          = 'numpy'
-    'Pillow'         = 'PIL'
     'PySide6'        = 'PySide6.QtWidgets'
-    'Tkinter'        = 'tkinter'
     'PySpin'         = 'PySpin'
 }
 $missing = [System.Collections.Generic.List[string]]::new()
@@ -119,11 +117,6 @@ if ($missing.Count -eq 0) {
 
 Write-Status "Missing or unusable dependencies: $($missing -join ', ')"
 
-if ($missing -contains 'Tkinter') {
-    Write-Status 'Tkinter is normally included with the official Windows Python installer and cannot be added with pip.'
-    Write-Status 'Repair or reinstall Python 3.10 with the Tcl/Tk option selected, then run this helper again.'
-}
-
 if ($missing -contains 'PySpin') {
     if (-not (Test-Path $sdkInstaller)) {
         throw "The bundled Spinnaker SDK installer helper was not found: $sdkInstaller"
@@ -138,7 +131,6 @@ if ($missing -contains 'PySpin') {
 $pipPackages = @()
 if ($missing -contains 'opencv-python') { $pipPackages += 'opencv-python' }
 if ($missing -contains 'numpy') { $pipPackages += 'numpy' }
-if ($missing -contains 'Pillow') { $pipPackages += 'Pillow' }
 if ($missing -contains 'PySide6') { $pipPackages += 'PySide6' }
 
 if ($pipPackages.Count -gt 0) {

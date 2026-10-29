@@ -4,14 +4,14 @@ Guidance for AI coding agents and developers working in this repository. See `RE
 
 ## Overview
 
-A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI measurements, written in Python with PySpin/Spinnaker, OpenCV, NumPy and PySide6 (Qt), with a legacy Tk front end. It must stay cross-platform (Windows camera PC, macOS and Linux). The camera runtime is a Windows PC (Python 3.10 with PySpin, SDK 4.2); the macOS checkout is for editing and camera-free `--demo` runs.
+A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI measurements, written in Python with PySpin/Spinnaker, OpenCV, NumPy and PySide6 (Qt). It must stay cross-platform (Windows camera PC, macOS and Linux). The camera runtime is a Windows PC (Python 3.10 with PySpin, SDK 4.2); the macOS checkout is for editing and camera-free `--demo` runs.
 
 ## Layout
 
 | Path | Contents | Edit? |
 |------|----------|-------|
 | `src/espi_live/` | The application package (see Architecture). `__main__.py` → `cli.py` is the entry point. | Yes: single source of truth |
-| `tests/` | Camera-free `unittest` suite with 100% line coverage of `src/espi_live/`: both front ends (Qt offscreen, withdrawn Tk roots), the engine and camera code against an in-memory PySpin (`fake_pyspin.py`), and the updater with mocked network | Yes |
+| `tests/` | Camera-free `unittest` suite with 100% line coverage of `src/espi_live/`: the Qt front end (offscreen), the engine and camera code against an in-memory PySpin (`fake_pyspin.py`), and the updater with mocked network | Yes |
 | `scripts/windows/`, `scripts/bash/` | Camera-PC setup and launch helpers; `scripts/camera_live_control.py` is a standalone camera-control helper | Yes; keep their paths current when files move |
 | `experiments/` | Tentative work and older scripts, including `espi_live_bfs_u3_200s6m.py` (a 20 MP-camera variant of the viewer, not reconciled with the package) | Yes |
 | `docs/camera/` | Curated PySpin, BFS-U3-63S4M-C, other-model and acquisition notes | Yes |
@@ -29,15 +29,14 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 ```sh
 ./run.sh --demo                                    # Qt UI, synthetic video, no camera or PySpin
 ./run.sh                                           # try a real camera; offers demo mode if none found
-./run.sh --demo --ui tk                            # legacy Tk UI
 PYTHONPATH=src python -m espi_live --check         # import everything (Qt, engine, PySpin if present), no window
 PYTHONPATH=src python -m unittest discover -s tests   # camera-free tests
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen python -m coverage run -m unittest discover -s tests && python -m coverage report   # must stay at 100% (.coveragerc)
 python -m py_compile src/espi_live/*.py            # required check after edits (no display or camera needed)
 ```
 
-- `.venv` (Python 3.14) holds numpy, opencv-python, pillow and PySide6 from `requirements.txt`. PySpin is imported lazily by `camera.load_pyspin()`.
-- `--ui auto` (default) uses Qt when PySide6 imports, otherwise Tk.
+- `.venv` (Python 3.14) holds numpy, opencv-python and PySide6 from `requirements.txt`. PySpin is imported lazily by `camera.load_pyspin()`.
+- PySide6 is required: there is no other front end (the legacy Tk UI was removed). Without it the program exits with a message.
 - Windows camera PC: `scripts/windows/SETUP AND START ESPI.bat` validates and installs dependencies (including PySide6), then launches the app with `PYTHONPATH=src`.
 - Do not run camera-acquisition code without the user's direction; the camera may be absent or in use. `--demo` and `--check` never open a camera.
 - Outputs go to `<project>/output/{logs,frames,recordings}/` (`paths.OUTPUT_DIR`, independent of the working directory; next to the executable in PyInstaller builds); demo files are prefixed `dummy_`.
@@ -55,14 +54,13 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 | `engine.py` | `Engine`: worker thread that owns the source, processing, recording and saving; `Settings`, `FramePacket` |
 | `channels.py` | `Channel`: one camera (or synthetic source) with its own `Engine`, saved `Settings` and limits; processing on/off (`start`/`stop`); `open_camera_channels`/`demo_channels` for startup; `PrefixedLog` |
 | `qt_app.py` | Default front end: `MainWindow` (dockable controls/log, status bar), `GLImageView` (GPU), `CpuImageView` (fallback) |
-| `app.py` | Legacy Tk front end (`--ui tk`): single-threaded loop, uses the shared modules |
 | `updater.py` | Self-update of frozen builds from the newest full release (`/releases/latest`, which skips pre-releases): `check_for_update`, `download_update` (SHA-256 verified), `install_update` (rename swap, `*.old` backup), `relaunch`, `UpdateWorker` (background thread the UI polls). Reads `_build_info.py`, which CI generates (build number, commit, repo, asset name, read-only token); never commit it |
 | `feedback.py` | Feature requests to GitHub issues: `FeatureRequest`, `issue_payload` (labels `feature-request` and optional `enrich`), `submit` (POST with the Issues-only `FEEDBACK_TOKEN`), `browser_url` (prefilled page when there is no token), `FeedbackWorker` (background thread the UI polls) |
 | `cli.py` | Argument parsing, front-end choice, `--check`, `--version`, `--update`, `--no-update-check` |
 
-**Engine threading.** The front end chooses the source on its own thread before `start()` (`open_camera()` or `use_demo()`, so it can ask about demo mode), or calls `open_on_start(after=old_engine)` so the worker opens the camera itself (used when a camera is turned on while the window runs); after that, every PySpin call (grab, node writes, readback, close, live switch) happens on the engine's worker thread. A `CameraSession` must only ever be used by one thread at a time. The UI talks to the engine only through `update_settings(**fields)`, `request(action, **payload)` (`save`, `reference`, `reset_previous`, `reset_average`, `switch_live`), `latest_packet()`, `status()` and the `events` queue (`camera_identity`, `camera_limits`, `record_off`, `switched_live` (payload: every detected `CameraInfo`), `switch_failed`, `open_failed`, `fatal`, `stopped`). Never touch Qt or Tk objects from the worker.
+**Engine threading.** The front end chooses the source on its own thread before `start()` (`open_camera()` or `use_demo()`, so it can ask about demo mode), or calls `open_on_start(after=old_engine)` so the worker opens the camera itself (used when a camera is turned on while the window runs); after that, every PySpin call (grab, node writes, readback, close, live switch) happens on the engine's worker thread. A `CameraSession` must only ever be used by one thread at a time. The UI talks to the engine only through `update_settings(**fields)`, `request(action, **payload)` (`save`, `reference`, `reset_previous`, `reset_average`, `switch_live`), `latest_packet()`, `status()` and the `events` queue (`camera_identity`, `camera_limits`, `record_off`, `switched_live` (payload: every detected `CameraInfo`), `switch_failed`, `open_failed`, `fatal`, `stopped`). Never touch Qt objects from the worker.
 
-**Several cameras.** Each camera is a `Channel` with its own `Engine` and worker thread, so settings, reference, averaging and recording are per camera. The Qt `MainWindow` owns the list, displays `self.current` (its `engine` and `camera_identity` properties are the displayed channel's, which every control uses) and keeps the displayed channel processing. Sessions share the PySpin `System` through `acquire_system()`/`release_system()`, because `System.ReleaseInstance()` fails while any camera is still referenced; never call `GetInstance`/`ReleaseInstance` directly in package code. An error in one channel stops only that channel; the window closes when none is left. The Tk front end stays single-camera.
+**Several cameras.** Each camera is a `Channel` with its own `Engine` and worker thread, so settings, reference, averaging and recording are per camera. The Qt `MainWindow` owns the list, displays `self.current` (its `engine` and `camera_identity` properties are the displayed channel's, which every control uses) and keeps the displayed channel processing. Sessions share the PySpin `System` through `acquire_system()`/`release_system()`, because `System.ReleaseInstance()` fails while any camera is still referenced; never call `GetInstance`/`ReleaseInstance` directly in package code. An error in one channel stops only that channel; the window closes when none is left.
 
 **Frame flow.** Each worker iteration: grab (`CameraSession.grab(100)` or `DemoSource.next_frame` on a fixed schedule) → apply changed camera settings (rate-limited to 0.1 s; readback every 1 s) → Raw passes the frame through; Previous/Reference run `difference` → `average` (block) or `rolling_average` → `smooth_speckle` → optional `stretch_contrast` (min/max or percentile clip) → optional invert → (CLAHE path: gamma + CLAHE on the CPU) → demo watermark → publish an immutable `FramePacket` (newest wins; older ones are dropped) → feed the recorder → handle queued actions. A mode change resets averaging; `average` returns `None` until N frames accumulate (`rolling_average` returns every frame). Reference auto-refresh recaptures the baseline every `ref_refresh_s`.
 
@@ -75,9 +73,9 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 - Before changing PySpin, camera lifecycle, node-map or image-buffer code, read `docs/camera/README.md` and the files it points to: `spinnaker-pyspin.md` always, `blackfly-bfs-u3-63s4m-c.md` for model-specific settings, `acquisition-and-performance.md` for streaming, ROI, pixel format, frame rate, preview latency, recording or triggering.
 - Verify a node is readable/writable before writing it and clamp numeric values to device limits (`set_enum`/`set_bool`/`set_float` wrapped by `try_setting` do this). Release every `GetNextImage` result in a `finally` (`CameraSession.grab` does), and `.copy()` `GetNDArray()` data that outlives the image. Preserve safe lifecycle handling on errors.
 - Don't change default exposure (8000 µs), gain (0 dB), frame rate (30 fps) or recording behavior without calling out the impact. Don't assume the displayed rate equals the camera's acquisition rate.
-- Keep processing, camera and recording code free of GUI imports so both front ends and the tests share it. Keep display color defined only in `processing.apply_palette`.
+- Keep processing, camera and recording code free of GUI imports so the front end and the tests share it. Keep display color defined only in `processing.apply_palette`.
 - Keep it cross-platform: no platform-only GUI SDKs; guard OS-specific calls (as `WindowsPreviewTimer` does). The GPU path needs only OpenGL 3.3 core through Qt; keep the CPU fallback working.
-- Don't reintroduce OpenCV HighGUI windows: mixing them with another toolkit caused fatal Windows crashes. In the legacy Tk UI, keep painting inside each frame's deadline and don't add a second Tk event pass per frame (that capped a 30 fps demo at ~21 fps).
+- Don't reintroduce OpenCV HighGUI windows: mixing them with another toolkit caused fatal Windows crashes.
 - Every function needs a docstring in the existing `Args: ... / Returns: ...` format.
 - Put tentative work in `experiments/`; promote it into `src/espi_live/` only when it becomes the intended maintained implementation. Use descriptive, purpose-based filenames; date-based names belong in `archive/`.
 - Store recordings under `output/recordings/` and still frames under `output/frames/`. Don't commit generated media.

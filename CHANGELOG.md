@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-29 — Tk interface removed
+
+### Previous state
+
+- Besides the Qt interface, the app had a legacy Tk interface (`--ui tk`, also used automatically when PySide6 was missing). It was the only user of Pillow, which had 41 open security advisories at the pinned 12.3.0; the fix, Pillow 13, no longer supports the camera PC's Python 3.10.
+
+### Current state
+
+- The Qt interface is the only one. `--ui` is gone; without PySide6 the program exits with a message. Pillow is no longer a dependency of the app or the builds, which clears those advisories on every platform.
+
 ## 2026-10-29 — Public source, private SDK
 
 ### Previous state
