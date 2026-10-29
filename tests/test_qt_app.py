@@ -2032,6 +2032,50 @@ class UpdateFlowTests(WindowTestCase):
         self.window._handle_update_events()
         self.assertEqual(self.window.update_button.text(), "Downloading update…")
 
+    def test_check_button_runs_a_manual_check(self):
+        """The status-bar button checks like Help > Check for updates….
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            self.window.check_button.click()
+        self.assertEqual(self.window.updates.checks, 1)
+        self.assertTrue(self.window.update_manual)
+
+    def test_check_button_greys_out_while_a_check_runs(self):
+        """A running check (startup or manual) disables the button until it ends.
+
+        Args: None.
+        Returns: None.
+        """
+        for kind, payload in (("checked", None), ("check_failed", "offline")):
+            with self.subTest(kind=kind):
+                self.window.updates.busy = True
+                self.window._handle_update_events()
+                self.assertFalse(self.window.check_button.isEnabled())
+                self.assertIn("Checking", self.window.check_button.text())
+                self.window.updates.busy = False
+                self.post(kind, payload)
+                self.assertTrue(self.window.check_button.isEnabled())
+                self.assertEqual(self.window.check_button.text(), "Check for updates")
+
+    def test_check_button_gives_way_to_a_found_build(self):
+        """Once a newer build is known only the blue button shows, through its download.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("checked", make_info())
+        self.assertTrue(self.window.check_button.isHidden())
+        self.assertFalse(self.window.update_button.isHidden())
+        self.window.updates.busy = True  # downloads run on the same worker
+        self.window._handle_update_events()
+        self.assertTrue(self.window.check_button.isHidden())
+        self.window.updates.busy = False
+        self.post("downloaded", "staged-path")
+        self.assertTrue(self.window.check_button.isHidden())
+
 
 class CloseTests(WindowTestCase):
     """closeEvent and a real engine round trip."""

@@ -1133,6 +1133,11 @@ class MainWindow(QMainWindow):
         self.update_button.setStyleSheet("background:#1d4f91;color:white;font-weight:bold;")
         self.update_button.clicked.connect(self._update_clicked)
         bar.addPermanentWidget(self.update_button)
+        self.check_button = QPushButton("Check for updates")  # until a newer build is found
+        self.check_button.setFlat(True)
+        self.check_button.setToolTip("Check GitHub for a newer build of ESPI live")
+        self.check_button.clicked.connect(self._check_updates_now)
+        bar.addPermanentWidget(self.check_button)
         self.feature_button = QPushButton("Request feature")
         self.feature_button.setFlat(True)
         self.feature_button.setToolTip("Send a feature request to the developers (GitHub issue)")
@@ -1644,7 +1649,7 @@ class MainWindow(QMainWindow):
             try:
                 kind, payload = self.updates.events.get_nowait()
             except Exception:
-                return
+                break
             manual, self.update_manual = self.update_manual, False
             if kind == "checked" and payload is None:
                 self.log.write(f"Up to date ({updater.describe_build()})")
@@ -1674,6 +1679,21 @@ class MainWindow(QMainWindow):
                 self.update_button.setText(f"Update available: {self.update_info.label()}")
                 self.update_button.setEnabled(True)
                 QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
+        self._sync_check_button()
+
+    def _sync_check_button(self):
+        """Show on the Check for updates button what the update worker is doing.
+
+        Called every status poll, after update events are handled.
+
+        Args: None.
+        Returns: None.
+        """
+        found = self.update_info is not None or bool(self.pending_update)
+        checking = self.updates.busy and not found  # downloads use the same worker
+        self.check_button.setVisible(not found)  # the blue update button takes over
+        self.check_button.setEnabled(not checking)
+        self.check_button.setText("Checking for updates…" if checking else "Check for updates")
 
     def _handle_events(self):
         """React to every camera's engine events.
