@@ -202,11 +202,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          # libgl1: OpenCV; libegl1/libxkbcommon*/libfontconfig1/libdbus-1-3: Qt (PySide6) runtime.
+          # libgl1: OpenCV; libegl1/libxkbcommon*/libfontconfig1/libdbus-1-3: Qt (PySide6) runtime;
+          # libav*/libswscale7: FFmpeg, which libSpinVideo links against but its package does not declare.
           sudo apt-get update
           sudo apt-get install -y libgl1 libegl1 libxkbcommon0 \
-            libxkbcommon-x11-0 libfontconfig1 libdbus-1-3
-          # Spinnaker runtime libraries that PySpin links against; apt resolves their dependencies.
+            libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 \
+            libavcodec60 libavformat60 libavutil58 libswscale7
+          # Spinnaker runtime libraries that PySpin links against (_PySpin needs
+          # libSpinUpdate from spinupdate too); apt resolves their dependencies.
           mkdir -p "$RUNNER_TEMP/spinnaker"
           tar xzf third_party/spinnaker-4.4/spinnaker-4.4.0.246-noble-amd64-pkg.tar.gz \
             -C "$RUNNER_TEMP/spinnaker" --strip-components=1
@@ -221,7 +224,7 @@ jobs:
           # libspinnaker's postinst skips its analytics ping.
           sudo env -u SUDO_USER DEBIAN_FRONTEND=noninteractive apt-get install -y \
             ./libgentl_*.deb ./libspinnaker_*.deb ./libspinvideo_*.deb \
-            ./libspinnaker-c_*.deb ./libspinvideo-c_*.deb
+            ./libspinnaker-c_*.deb ./libspinvideo-c_*.deb ./spinupdate_*.deb
           sudo ldconfig
 
       - name: Install Python dependencies
