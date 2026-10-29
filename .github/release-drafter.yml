@@ -6,9 +6,11 @@
 # .github/workflows/build-binaries.yml, which tests, builds and attaches the
 # binaries.
 #
-# Only "v..." releases count as previous releases. The "build-N" releases made
-# by hand-started test builds are ignored; otherwise their number would be read
-# as a version (build-12 -> 12.0.0).
+# Only "v..." releases count as previous releases; the old "build-N" releases
+# are ignored, otherwise their number would be read as a version (build-12 ->
+# 12.0.0). Pre-releases (hand-started test builds, tagged vX.Y.Z-pre.N) are not
+# counted either. A full release started by hand (tagged vX.Y.Z) is, and the
+# build workflow re-runs this drafter afterwards so the draft moves on.
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 tag-prefix: 'v'

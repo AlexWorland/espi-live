@@ -1,7 +1,7 @@
 # Categories for GitHub's generated release notes: the "Generate release notes"
-# button on the Releases page and hand-started "build-N" releases
-# (build-binaries.yml, gh release create --generate-notes). Published "v..."
-# releases get their notes from release-drafter instead
+# button on the Releases page and releases started by hand from Actions
+# (build-binaries.yml, gh release create --generate-notes). Releases published
+# from the draft get their notes from release-drafter instead
 # (.github/release-drafter.yml); keep the labels here in step with it.
 changelog:
   exclude:
