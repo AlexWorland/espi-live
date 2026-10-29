@@ -1,6 +1,6 @@
 # ESPI Sequential Subtraction (Python) - Overview
 
-This note walks through `saba-originals/for-my-camera/espi_sequential_subtraction.py`, explains how the script is structured, and how frames move through the live ESPI difference viewer.
+This note walks through `espi_sequential_subtraction.py`, an earlier lab script (not included in this repository), explains how the script is structured, and how frames move through the live ESPI difference viewer.
 
 ## What the script does
 - Opens the first PySpin camera, forces 8-bit mono pixels, and disables auto gain/exposure.
