@@ -45,6 +45,7 @@ class Settings:
     exposure_us: float = 8000.0
     gain_db: float = 0.0
     fps: float = 30.0
+    noise_reduction: float = 0.0  # % of history blended into each camera frame; 0 = off
     average: int = 1
     rolling: bool = False         # running average instead of one image per N frames
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
@@ -430,6 +431,7 @@ class Engine:
             if frame.ndim != 2 or frame.dtype != np.uint8:
                 raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
 
+            frame = processor.denoise(frame, s.noise_reduction / 100.0)
             now = time.monotonic()
             last_valid = now
             if not self.demo:

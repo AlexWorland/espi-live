@@ -896,6 +896,14 @@ class MainWindow(QMainWindow):
         add(self.exposure, "Exposure")
         add(self.gain, "Gain")
         add(self.fps, "Requested FPS")
+        self.noise_reduction = SliderSpin(0, 95, 1, 0, s.noise_reduction, " %")
+        self.noise_reduction.setToolTip(
+            "Blend each camera frame with the previous ones to remove sensor "
+            "noise in every view; speckle is kept. Higher values smooth more "
+            "but trail motion and weaken Previous-view fringes. 0 = off.")
+        self.noise_reduction.valueChanged.connect(
+            lambda v: self.engine.update_settings(noise_reduction=v))
+        add(self.noise_reduction, "Noise reduction")
         self.camera_label = QLabel()
         note(self.camera_label)
 

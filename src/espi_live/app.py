@@ -67,6 +67,7 @@ class Controls:
         self.exposure = tk.IntVar(value=8000)
         self.gain = tk.DoubleVar(value=0.0)
         self.fps = tk.DoubleVar(value=30.0)
+        self.noise_reduction = tk.IntVar(value=0)
         self.avg = tk.IntVar(value=1)
         self.palette = tk.StringVar(value="Gray")
         self.gamma = tk.DoubleVar(value=1.0)
@@ -174,6 +175,8 @@ class Controls:
             camera_group, "Gain (dB)", self.gain, 0.0, 30.0, resolution=0.1)
         self.fps_scale = self._scale(
             camera_group, "Requested FPS", self.fps, 0.0, 60.0, resolution=0.1)
+        self._scale(camera_group, "Noise reduction (%; 0 = off)",
+                    self.noise_reduction, 0, 95)
 
         measurement_group = tk.LabelFrame(
             self.sliders, text="ESPI measurement", font=self.font)
@@ -763,6 +766,7 @@ def main(force_demo=False):
                     continue
             if frame.ndim != 2 or frame.dtype != np.uint8:
                 raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
+            frame = processor.denoise(frame, controls.noise_reduction.get() / 100.0)
 
             now = time.monotonic()
             last_valid_frame_time = now

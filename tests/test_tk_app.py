@@ -133,6 +133,7 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(controls.exposure.get(), 8000)
         self.assertEqual(controls.gain.get(), 0.0)
         self.assertEqual(controls.fps.get(), 30.0)
+        self.assertEqual(controls.noise_reduction.get(), 0)
         self.assertEqual(controls.record_text.get(), "Recording: off")
         self.assertGreaterEqual(controls.viewer_width, 320)
 
