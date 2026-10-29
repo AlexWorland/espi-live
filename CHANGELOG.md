@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-29 — Releases are approved by publishing a draft
+
+### Previous state
+
+- Releases were started by hand with **Actions > Build release > Run workflow** and typed-in notes; each was tagged `build-N` after the workflow run number.
+
+### Current state
+
+- A new `release-drafter.yml` workflow keeps a draft release up to date after every merge into `main`: the next `vX.Y.Z` tag (minor for `enhancement`, major for `major`, otherwise patch) and notes made from the merged pull requests. Publishing the draft starts `build-binaries.yml`, which tests (100% coverage gate), builds and attaches the Windows, Linux and macOS archives. Until the archives are attached the release is held as a draft, so installed copies never see a release without `build-info.json`; if a test or build fails it stays a draft.
+- Running **Build release** by hand still works for test builds of any branch and still creates `build-N` releases. Installed copies are unaffected: they order builds by the build number in `build-info.json`, not by tag.
+
 ## 2026-10-29 — Tk interface removed
 
 ### Previous state
