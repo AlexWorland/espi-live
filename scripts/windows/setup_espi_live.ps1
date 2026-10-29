@@ -97,6 +97,7 @@ $moduleChecks = @{
     'opencv-python' = 'cv2'
     'numpy'          = 'numpy'
     'PySide6'        = 'PySide6.QtWidgets'
+    'cv2_enumerate_cameras' = 'cv2_enumerate_cameras'
     'PySpin'         = 'PySpin'
 }
 $missing = [System.Collections.Generic.List[string]]::new()
@@ -132,6 +133,7 @@ $pipPackages = @()
 if ($missing -contains 'opencv-python') { $pipPackages += 'opencv-python' }
 if ($missing -contains 'numpy') { $pipPackages += 'numpy' }
 if ($missing -contains 'PySide6') { $pipPackages += 'PySide6' }
+if ($missing -contains 'cv2_enumerate_cameras') { $pipPackages += 'cv2_enumerate_cameras' }
 
 if ($pipPackages.Count -gt 0) {
     if (Confirm-Action "Install or repair: $($pipPackages -join ', ')?") {

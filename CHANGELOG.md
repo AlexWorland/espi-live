@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
+
+### Previous state
+
+- Only FLIR/Spinnaker cameras could be used. The lab's second camera, an analog Sony XC-ST50 connected through a Hauppauge USB-Live2 capture stick, was not seen at all.
+- A camera the viewer did not know was only mentioned in the log.
+
+### Current state
+
+- **XC-ST50 through a USB-Live2:**
+  - The stick appears in the camera list as **Hauppauge USB-Live2 (video N)**, next to any Blackfly or on its own, and works with every view, averaging, saving and recording feature.
+  - Startup opens a Blackfly first; with none connected it opens the USB-Live2. **Switch to live capture** in demo mode follows the same order.
+- **Fixed controls:** exposure, gain and frame rate are set on the analog camera itself, so those controls are disabled for it. The status line shows the capture size and the measured frame rate. The viewer selects the composite input and asks for 720 × 480; a different delivered size (for example PAL 720 × 576) gets a warning.
+- **Single field (interlaced camera)**, on by default, shows one field of each interlaced frame repeated to full height, so the 1/60 s between fields cannot blur the fringes; it halves the vertical detail. Changing it clears the reference and the averages.
+- **Other video devices** (webcams, other capture sticks) are listed as **not yet supported** and are never opened unless chosen. Compressed video gets an "unsuitable for ESPI" warning.
+- **Camera reports:** switching on an unrecognised video device files a GitHub issue labelled `camera-support` with what the device reports, once per device type across all PCs. The status appears under the camera information. Copies without a feedback token save the report to `output/logs/camera-report-*.md` and offer **Report this camera** instead.
+- **Packaging:** builds include `cv2_enumerate_cameras` to list video devices by name and USB ID, and `--check` reports whether it is present.
+
 ## 2026-10-29 — Fixed-position status bar
 
 ### Previous state

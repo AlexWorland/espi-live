@@ -225,7 +225,7 @@ jobs:
           - name: windows-x64
             os: windows-latest
             python: "3.10"
-            pip_deps: numpy opencv-python PySide6 certifi pyinstaller
+            pip_deps: numpy opencv-python PySide6 cv2_enumerate_cameras==1.4.0 certifi pyinstaller
             asset: espi-live-windows-x64.zip
             sdk_files: flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
           # Linux: ubuntu-24.04 is "noble", the distro the Spinnaker 4.4 packages target.
@@ -394,6 +394,10 @@ jobs:
           # camera.py imports PySpin lazily through importlib, so PyInstaller cannot see it.
           if [ -n "${{ matrix.sdk_files }}" ]; then
             args+=(--hidden-import PySpin --collect-all PySpin)
+          fi
+          # Lists video devices (the analog-camera capture adapter); not used on macOS.
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            args+=(--hidden-import cv2_enumerate_cameras --collect-all cv2_enumerate_cameras)
           fi
           if [ "$RUNNER_OS" = "macOS" ]; then
             # A .app bundle (onedir) is the supported macOS GUI form.

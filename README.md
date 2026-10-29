@@ -4,6 +4,8 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI (e
 
 The connected camera's model is detected automatically (from its GenICam identity nodes) and shown in the window title, status badge and Camera controls. Other FLIR/Teledyne models (other Blackfly S sensors, Grasshopper, Chameleon, Oryx) are named and run with the limits they report, with a note in the log when a model is untested or colour; see `docs/camera/supported-models.md`.
 
+The analog **Sony XC-ST50** works too, through a **Hauppauge USB-Live2** capture stick, alongside a Blackfly or on its own; see [Analog camera](#analog-camera-sony-xc-st50) below.
+
 ## Quick start
 
 ```sh
@@ -27,7 +29,7 @@ scripts/
   camera_live_control.py   standalone live camera-control helper
 experiments/          candidate, test and older working scripts
 docs/
-  camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition research notes
+  camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition / XC-ST50 + USB-Live2 notes
   notes/              development notes and reports
 third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
 .github/workflows/    build-binaries.yml: tests, builds and releases PyInstaller binaries after every merge into main;
@@ -108,9 +110,15 @@ Each camera has its own settings: exposure, gain, frame rate, noise reduction, v
 
 Several 6.3 MP cameras streaming at once can exceed one USB 3 controller's bandwidth; watch each row's frame rate, and lower the frame rate or put the cameras on separate controllers if it drops. `--demo --demo-cameras 3` simulates three cameras for trying this without hardware.
 
+### Analog camera (Sony XC-ST50)
+
+The XC-ST50's composite video goes through a Hauppauge USB-Live2 into the PC, and the stick appears in the camera list as **Hauppauge USB-Live2 (video N)**. Close WinTV and Hauppauge Capture first: the stick serves one program at a time. Exposure, gain and frame rate are set by the camera's own switches, so those controls are disabled for it, and the status line shows the measured capture rate. **Single field (interlaced camera)**, on by default, shows only one of the two interlaced fields (repeated to full height), which keeps the 1/60 s between fields from blurring the fringes at the cost of half the vertical detail. Images look about 12 % wide because NTSC pixels are not square; they are not resampled. Expect coarser fringes than with the Blackfly. Wiring, driver settings and details: `docs/camera/sony-xc-st50-usb-live2.md`.
+
+Other video devices (webcams, other capture sticks) are listed as **not yet supported** and are never opened unless you choose one. When you switch one on, it runs as delivered, and the viewer files a GitHub issue (label `camera-support`) with what the device reports, once per device type. A copy without a feedback token saves the report to `output/logs/camera-report-*.md` and shows a **Report this camera** button instead.
+
 ### Demo mode
 
-If no FLIR camera is detected (or PySpin is unavailable), startup offers **dummy/demo mode**, and `--demo` starts it directly without touching a camera. It opens the same windows with a moving synthetic grayscale pattern; exposure, gain and FPS are simulated. A persistent **DUMMY MODE ACTIVE** banner appears in the viewer and in saved frames and recordings, which also get `dummy_` filename prefixes. **Switch to live capture** retries camera detection without restarting: if no camera is available, demo continues; if one connects, measurement baselines reset to Raw view and any demo recording stops so synthetic and live frames never share a file. Demo mode is for interface and processing checks, not camera-performance measurements.
+If no FLIR camera or recognised capture adapter is detected (or PySpin is unavailable and no adapter is connected), startup offers **dummy/demo mode**, and `--demo` starts it directly without touching a camera. It opens the same windows with a moving synthetic grayscale pattern; exposure, gain and FPS are simulated. A persistent **DUMMY MODE ACTIVE** banner appears in the viewer and in saved frames and recordings, which also get `dummy_` filename prefixes. **Switch to live capture** retries camera detection without restarting: if no camera is available, demo continues; if one connects, measurement baselines reset to Raw view and any demo recording stops so synthetic and live frames never share a file. Demo mode is for interface and processing checks, not camera-performance measurements.
 
 ### Windows notes
 

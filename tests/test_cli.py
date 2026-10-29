@@ -16,7 +16,7 @@ import warnings
 from unittest import mock
 
 import espi_live
-from espi_live import camera, cli, updater
+from espi_live import camera, capture, cli, updater
 
 
 @contextlib.contextmanager
@@ -171,6 +171,29 @@ class SelfCheckTests(unittest.TestCase):
                 status = cli.self_check()
         self.assertEqual(status, 0)
         self.assertIn("PySpin not bundled (demo only)", out.getvalue())
+
+    def test_check_reports_video_enumeration(self):
+        """The check says whether video devices can be listed, without listing them.
+
+        Args: None.
+        Returns: None.
+        """
+        for enumerator, expected in (
+                (types.ModuleType("cv2_enumerate_cameras"),
+                 "Video devices: cv2_enumerate_cameras available"),
+                (None, "Video devices: cv2_enumerate_cameras not installed")):
+            with mock.patch.object(cli.importlib, "import_module"), \
+                    mock.patch.object(camera, "load_pyspin",
+                                      side_effect=ImportError("no PySpin")), \
+                    mock.patch.object(capture, "load_enumerator",
+                                      return_value=enumerator), \
+                    mock.patch.object(capture, "list_capture_devices") as listing:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    status = cli.self_check()
+            self.assertEqual(status, 0)
+            self.assertIn(expected, out.getvalue())
+            listing.assert_not_called()
 
     def test_fails_when_a_module_cannot_import(self):
         """A broken bundled module returns 1 and prints the error.
