@@ -739,3 +739,114 @@ class DirectWorkerTests(CameraEngineCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenOnStartTests(CameraEngineCase):
+    """open_on_start: opening a camera on the worker thread."""
+
+    def test_camera_opens_on_the_worker_and_streams(self):
+        """The camera is opened after start() and frames follow.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine = Engine(self.log, serial="21234567", tag="21234567")
+        self.engine.open_on_start()
+        self.engine.start()
+        self.assertEqual(self.wait_event("camera_limits")["Gain"], (0.0, 30.0))
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        self.assertEqual(self.engine.camera_info.serial, "21234567")
+
+    def test_open_failure_is_reported_and_the_worker_stops(self):
+        """A missing camera sends open_failed, then stopped.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine = Engine(self.log, serial="99999999")
+        self.engine.open_on_start()
+        self.engine.start()
+        self.assertIn("no longer connected", self.wait_event("open_failed"))
+        self.wait_event("stopped")
+        self.assertTrue(self.log.has("Could not open the camera"))
+
+    def test_waits_for_the_previous_engine_first(self):
+        """A predecessor that never stops blocks the open with a clear reason.
+
+        Args: None.
+        Returns: None.
+        """
+        stuck = mock.Mock()
+        stuck.wait.return_value = False
+        self.engine.open_on_start(after=stuck)
+        with mock.patch.object(engine, "PREDECESSOR_TIMEOUT_S", 0.01):
+            self.engine.start()
+            self.assertIn("still in use", self.wait_event("open_failed"))
+        stuck.wait.assert_called_once_with(0.01)
+
+    def test_start_without_a_source_names_every_option(self):
+        """start() before choosing a source explains all three choices.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaisesRegex(RuntimeError, "open_on_start"):
+            self.engine.start()
+
+
+class CameraTagTests(CameraEngineCase):
+    """File names carry the camera tag."""
+
+    def test_recordings_and_frames_are_tagged(self):
+        """The engine's tag goes into recording and saved-frame names.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.tag = "CAM7"
+        self.engine.use_demo("CAM7")
+        self.engine.update_settings(record=True)
+        self.engine.start()
+        self.assertTrue(wait_until(lambda: self.log.has("Recording AVI")))
+        self.engine.request("save", title="", notes="")
+        self.assertTrue(wait_until(lambda: self.log.has("Saved: ")))
+        self.assertTrue(self.log.has("dummy_espi_raw_CAM7_"))
+        self.assertTrue(self.log.has("dummy_frame_CAM7_"))
+
+
+class SwitchLiveCameraListTests(CameraEngineCase):
+    """The switched_live event lists the connected cameras."""
+
+    def setUp(self):
+        """Prepare a demo engine and a second fake camera.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        self.system.camera_list.cameras.append(FakeCamera(serial="2"))
+        self.engine.use_demo()
+        self.engine._recorder = None  # as _run() sets up before the loop
+        self.engine._retired = []
+
+    def test_switched_live_carries_every_camera(self):
+        """Both detected cameras are reported with the switch.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine._switch_live(None, None)
+        cameras = self.wait_event("switched_live")
+        self.assertEqual([info.serial for info in cameras], ["21234567", "2"])
+        self.assertEqual(self.engine.camera_info.serial, "21234567")
+
+    def test_listing_failure_still_switches(self):
+        """If the cameras cannot be listed the switch still succeeds.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(engine, "list_cameras", side_effect=RuntimeError("bus")):
+            self.engine._switch_live(None, None)
+        self.assertEqual(self.wait_event("switched_live"), [])
+        self.assertTrue(self.log.has("Could not list the other cameras: bus"))

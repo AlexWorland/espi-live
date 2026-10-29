@@ -249,6 +249,17 @@ class RecordingPathTests(unittest.TestCase):
         self.assertTrue(live.endswith(".avi"))
         self.assertEqual(os.path.dirname(live), os.path.join(tmp, "recordings"))
 
+    def test_camera_tag_is_sanitized_into_the_name(self):
+        """A camera tag is added after the mode, with unsafe characters replaced.
+
+        Args: None.
+        Returns: None.
+        """
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(paths, "OUTPUT_DIR", tmp):
+            path = recording.recording_path("Raw", False, "cam 1/a")
+        self.assertTrue(os.path.basename(path).startswith("espi_raw_cam_1_a_"))
+
 
 class SaveFrameTests(unittest.TestCase):
     """PNG saving and the title/notes sidecar."""
@@ -302,6 +313,17 @@ class SaveFrameTests(unittest.TestCase):
         self.assertTrue(os.path.basename(path).startswith("dummy_frame_"))
         with open(os.path.splitext(path)[0] + ".txt", encoding="utf-8") as handle:
             self.assertIn("Source: Demo", handle.read())
+
+    def test_camera_tag_names_the_file_and_sidecar_source(self):
+        """A camera tag goes into the PNG name and the sidecar's source line.
+
+        Args: None.
+        Returns: None.
+        """
+        path = recording.save_frame(self.image, "t", "", False, self.log, "12345678")
+        self.assertTrue(os.path.basename(path).startswith("frame_12345678_"))
+        with open(os.path.splitext(path)[0] + ".txt", encoding="utf-8") as handle:
+            self.assertIn("Source: Camera 12345678", handle.read())
 
     def test_imwrite_returning_false_logs_and_returns_none(self):
         """A refused PNG write is logged and returns None.

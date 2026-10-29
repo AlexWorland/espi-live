@@ -4,10 +4,15 @@ PySpin is imported lazily (see load_pyspin) so demo mode and tests never need
 the SDK. Read docs/camera/ before changing anything here.
 
 Threading rule: a CameraSession must only be used by one thread at a time.
-The engine opens it, uses it, and closes it on its worker thread.
+The engine opens it, uses it, and closes it on its worker thread. Several
+sessions (one per camera, each on its own engine thread) share the PySpin
+System singleton through acquire_system()/release_system(), because
+System.ReleaseInstance() fails while any other camera is still referenced.
 """
 
 import importlib
+import threading
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -23,6 +28,29 @@ CAMERA_RANGES = {
 }
 
 
+_system_lock = threading.Lock()
+_system = None
+_system_module = None  # the PySpin module _system came from
+_system_users = 0
+
+
+@dataclass(frozen=True)
+class CameraInfo:
+    """Identity of one detected camera (or one synthetic demo source)."""
+
+    serial: str
+    model: str = ""
+
+    @property
+    def label(self):
+        """Name the camera for menus and log lines.
+
+        Args: None.
+        Returns: "model (serial)", or just the serial without a model name.
+        """
+        return f"{self.model} ({self.serial})" if self.model else self.serial
+
+
 def load_pyspin():
     """Import PySpin on first use.
 
@@ -33,6 +61,75 @@ def load_pyspin():
     if PySpin is None:
         PySpin = importlib.import_module("PySpin")
     return PySpin
+
+
+def acquire_system():
+    """Take a shared reference to the PySpin System singleton.
+
+    Args: None. PySpin must already be loaded.
+    Returns: The System instance; pair every call with release_system().
+    """
+    global _system, _system_module, _system_users
+    with _system_lock:
+        if _system is None or _system_module is not PySpin:
+            _system = PySpin.System.GetInstance()
+            _system_module = PySpin
+            _system_users = 0
+        _system_users += 1
+        return _system
+
+
+def release_system():
+    """Drop a reference from acquire_system(); the last one releases the SDK.
+
+    Args: None.
+    Returns: None. Raises whatever System.ReleaseInstance() raises; the
+        reference is dropped either way.
+    """
+    global _system, _system_users
+    with _system_lock:
+        _system_users = max(0, _system_users - 1)
+        if _system_users or _system is None:
+            return
+        system, _system = _system, None
+        system.ReleaseInstance()
+
+
+def camera_info(cam, index):
+    """Identify a camera from its transport-layer node map (no Init needed).
+
+    Args: cam is a PySpin camera; index is its list position, used as the
+        name when the serial number cannot be read.
+    Returns: A CameraInfo.
+    """
+    nodemap = cam.GetTLDeviceNodeMap()
+    serial = read_string(nodemap, "DeviceSerialNumber") or f"camera {index + 1}"
+    return CameraInfo(serial, read_string(nodemap, "DeviceModelName"))
+
+
+def list_cameras(log):
+    """Enumerate the connected FLIR cameras without opening them.
+
+    Args: log has a write(message) method for cleanup errors.
+    Returns: A list of CameraInfo in SDK order. Raises ImportError without
+        PySpin, or the SDK's error when enumeration fails.
+    """
+    load_pyspin()
+    system = acquire_system()
+    cam_list = None
+    try:
+        cam_list = system.GetCameras()
+        return [camera_info(cam_list.GetByIndex(index), index)
+                for index in range(cam_list.GetSize())]
+    finally:
+        try:
+            if cam_list is not None:
+                cam_list.Clear()
+        finally:
+            try:
+                release_system()
+            except Exception as exc:
+                log.write(f"System cleanup error: {exc}")
 
 
 def set_enum(nodemap, name, entry_name):
@@ -187,13 +284,16 @@ def configure_camera(cam, log):
 class CameraSession:
     """Own a PySpin camera and its complete acquisition lifecycle."""
 
-    def __init__(self, log):
+    def __init__(self, log, serial=None):
         """Initialize empty camera handles for a connection attempt.
 
-        Args: log has a write(message) method for diagnostics.
+        Args: log has a write(message) method for diagnostics; serial picks
+            a camera by DeviceSerialNumber, or None for the first camera.
         Returns: None.
         """
         self.log = log
+        self.serial = serial
+        self.info = None
         self.system = None
         self.cam_list = None
         self.cam = None
@@ -203,19 +303,27 @@ class CameraSession:
         self.acquiring = False
 
     def open(self):
-        """Detect, initialize, configure, and start the first FLIR camera.
+        """Detect, initialize, configure, and start the selected FLIR camera.
 
         Args: None.
-        Returns: None. Raises when PySpin or a usable camera is unavailable;
-            any partially opened resources are released first.
+        Returns: None; self.info identifies the opened camera. Raises when
+            PySpin or the camera is unavailable; any partially opened
+            resources are released first.
         """
         load_pyspin()
         try:
-            self.system = PySpin.System.GetInstance()
+            self.system = acquire_system()
             self.cam_list = self.system.GetCameras()
             if self.cam_list.GetSize() < 1:
                 raise RuntimeError("No FLIR/Spinnaker cameras detected.")
-            self.cam = self.cam_list.GetByIndex(0)
+            for index in range(self.cam_list.GetSize()):
+                cam = self.cam_list.GetByIndex(index)
+                info = camera_info(cam, index)
+                if self.serial is None or info.serial == self.serial:
+                    self.cam, self.info = cam, info
+                    break
+            else:
+                raise RuntimeError(f"Camera {self.serial} is no longer connected.")
             self.cam.Init()
             self.initialized = True
             self.identity = read_identity(self.cam)
@@ -323,7 +431,7 @@ class CameraSession:
             self.cam_list = None
         if self.system is not None:
             try:
-                self.system.ReleaseInstance()
+                release_system()
             except Exception as exc:
                 self.log.write(f"System cleanup error: {exc}")
             self.system = None

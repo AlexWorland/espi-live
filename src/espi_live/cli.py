@@ -18,6 +18,9 @@ def cli(argv=None):
         description="Live Blackfly Mono8 preview and ESPI measurement viewer.")
     parser.add_argument("--demo", action="store_true",
                         help="start synthetic video without detecting a camera")
+    parser.add_argument("--demo-cameras", type=int, default=1, metavar="N",
+                        help="number of synthetic cameras in demo mode (Qt UI; "
+                             "default 1)")
     parser.add_argument("--ui", choices=("auto", "qt", "tk"), default="auto",
                         help="front end: qt (GPU display), tk (legacy), or auto "
                              "(qt when PySide6 is installed, else tk)")
@@ -51,7 +54,8 @@ def cli(argv=None):
             ui = "tk"
         else:
             sys.exit(qt_app.run(force_demo=args.demo,
-                                check_updates=not args.no_update_check))
+                                check_updates=not args.no_update_check,
+                                demo_cameras=args.demo_cameras))
     from espi_live.app import main
     main(force_demo=args.demo)
 

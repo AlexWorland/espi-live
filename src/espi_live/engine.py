@@ -3,7 +3,8 @@
 The engine knows nothing about any GUI toolkit. A front end:
 
 1. creates an Engine with an AppLog, then calls open_camera() or use_demo()
-   on its own thread before start(), so it can ask the user about demo mode;
+   on its own thread before start(), so it can ask the user about demo mode
+   (or open_on_start() to open the camera on the worker instead);
 2. calls start(); from then on every PySpin call happens on the worker thread;
 3. polls latest_packet() / status() / events from a UI timer, and sends
    update_settings(...) and request(...) from widget handlers;
@@ -11,6 +12,9 @@ The engine knows nothing about any GUI toolkit. A front end:
 
 The worker publishes the newest FramePacket and drops older ones, so a slow
 display never delays acquisition (the camera also uses NewestOnly buffering).
+
+With several cameras, each one gets its own Engine (see channels.py), so each
+has its own settings, reference frame, averaging and recording.
 """
 
 import ctypes
@@ -24,7 +28,7 @@ from dataclasses import dataclass, replace
 import cv2
 import numpy as np
 
-from espi_live.camera import CameraSession, format_camera_values
+from espi_live.camera import CameraSession, format_camera_values, list_cameras
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
                                   gamma_lut, smooth_speckle,
                                   stretch_contrast, watermark_demo)
@@ -35,6 +39,7 @@ SETTING_INTERVAL_S = 0.1
 READBACK_INTERVAL_S = 1.0
 RANGE_INTERVAL_S = 0.5
 RECORDER_FINISH_TIMEOUT_S = 5.0
+PREDECESSOR_TIMEOUT_S = 10.0  # open_on_start waits this long for the old engine
 
 
 @dataclass
@@ -126,13 +131,19 @@ class WindowsPreviewTimer:
 class Engine:
     """Run camera or demo acquisition, ESPI processing and capture off the UI."""
 
-    def __init__(self, log):
+    def __init__(self, log, serial=None, tag=""):
         """Create an idle engine.
 
-        Args: log is an AppLog (or any object with write(message)).
+        Args: log is an AppLog (or any object with write(message)); serial
+            selects a camera by serial number (None: the first camera); tag
+            is added to saved file names to tell cameras apart ("" for none).
         Returns: None.
         """
         self.log = log
+        self.serial = serial
+        self.tag = tag
+        self.camera_info = None  # CameraInfo of the opened camera
+        self._open_after = None  # (predecessor engine,) when opening on the worker
         self.events = queue.SimpleQueue()
         self._settings = Settings()
         self._settings_lock = threading.Lock()
@@ -172,17 +183,31 @@ class Engine:
         Returns: None. Raises if PySpin or a camera is unavailable; the
             engine is then unchanged and use_demo() may be called.
         """
-        attempt = CameraSession(self.log)
+        attempt = CameraSession(self.log, self.serial)
         attempt.open()
         self._attach_camera(attempt)
 
-    def use_demo(self):
-        """Switch the source to synthetic video; call before start().
+    def open_on_start(self, after=None):
+        """Open the camera on the worker thread once start() is called.
 
-        Args: None.
+        Use this to add a camera while the window runs, so a slow Init does
+        not freeze the display. A failure is reported as an "open_failed"
+        event followed by "stopped".
+
+        Args: after is an earlier Engine for the same camera that is still
+            stopping; the worker waits for it to release the camera first.
         Returns: None.
         """
-        self.demo_source = DemoSource()
+        self._open_after = (after,)
+
+    def use_demo(self, label=None):
+        """Switch the source to synthetic video; call before start().
+
+        Args: label is optional text drawn into the pattern, so several
+            synthetic cameras look different.
+        Returns: None.
+        """
+        self.demo_source = DemoSource(label=label)
         self._set_status(demo=True, camera=(
             "DUMMY MODE ACTIVE — exposure, gain, and FPS are simulated"))
         self.log.write("DUMMY MODE ACTIVE: synthetic video; no camera acquired.")
@@ -195,6 +220,7 @@ class Engine:
             the device limits as a "camera_limits" event.
         """
         self.camera = session
+        self.camera_info = session.info
         self.demo_source = None
         identity = session.identity
         self.log.write("Camera: " + " | ".join(identity.description()))
@@ -213,8 +239,10 @@ class Engine:
         Args: None.
         Returns: None. Raises RuntimeError if no source was chosen.
         """
-        if self.camera is None and self.demo_source is None:
-            raise RuntimeError("Call open_camera() or use_demo() before start().")
+        if (self.camera is None and self.demo_source is None
+                and self._open_after is None):
+            raise RuntimeError("Call open_camera(), open_on_start() or use_demo() "
+                               "before start().")
         if self.preview_timer.start():
             self.log.write("Windows timer: 1 ms resolution while the app is open.")
         self._thread = threading.Thread(target=self._run, name="espi-engine",
@@ -268,7 +296,8 @@ class Engine:
         """Queue a one-shot command for the worker.
 
         Args: action is "save" (payload title, notes), "reference",
-            "reset_previous", "reset_average" or "switch_live".
+            "reset_previous", "reset_average" or "switch_live" (the
+            "switched_live" event then carries every detected CameraInfo).
         Returns: None.
         """
         self._actions.put((action, payload))
@@ -312,6 +341,8 @@ class Engine:
         self._recorder = None
         self._retired = []
         try:
+            if self._open_after is not None and not self._open_deferred():
+                return
             self._loop()
         except Exception as exc:
             self.log.write(f"Stopped: {type(exc).__name__}: {exc}")
@@ -340,6 +371,27 @@ class Engine:
                     self.camera = None
                 self.preview_timer.stop()
                 self.events.put(("stopped", None))
+
+    def _open_deferred(self):
+        """Open the camera requested by open_on_start(), on the worker thread.
+
+        Args: None.
+        Returns: True when the camera is open; False after an "open_failed"
+            event (the worker then stops).
+        """
+        (after,) = self._open_after
+        self._open_after = None
+        if after is not None and not after.wait(PREDECESSOR_TIMEOUT_S):
+            message = "the camera is still in use by its previous session"
+        else:
+            try:
+                self.open_camera()
+                return True
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+        self.log.write(f"Could not open the camera: {message}")
+        self.events.put(("open_failed", message))
+        return False
 
     def _loop(self):
         """Grab, process, publish and record frames until stop() is called.
@@ -556,7 +608,7 @@ class Engine:
         frames_per_image = 1 if signature[2] else signature[1]  # rolling: every frame
         fps = min(30.0, max(1.0, source_fps / frames_per_image))
         try:
-            path = recording_path(s.mode, self.demo)
+            path = recording_path(s.mode, self.demo, self.tag)
             self._recorder = AVIRecorder(path, packet.render(), fps)
         except OSError as exc:
             self.update_settings(record=False)
@@ -600,7 +652,8 @@ class Engine:
                     self.log.write("No current display frame is ready to save.")
                 else:
                     save_frame(packet.render(), payload.get("title", ""),
-                               payload.get("notes", ""), packet.demo, self.log)
+                               payload.get("notes", ""), packet.demo, self.log,
+                               self.tag)
             elif action == "reset_previous":
                 processor.prev = None
                 self.log.write("Reset previous frame.")
@@ -642,7 +695,12 @@ class Engine:
         self._attach_camera(attempt)
         self._set_status(record="Recording: off",
                          range="Raw Mono8: no brightness scaling")
-        self.events.put(("switched_live", None))
+        try:  # enumerate here so every PySpin call stays on this thread
+            cameras = list_cameras(self.log)
+        except Exception as exc:
+            self.log.write(f"Could not list the other cameras: {exc}")
+            cameras = []
+        self.events.put(("switched_live", cameras))
         self.log.write("LIVE CAPTURE ACTIVE: camera connected; demo ended.")
         self.log.write("Recording stopped for the source change; restart it if needed.")
         return ESPIProcessor(), None

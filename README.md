@@ -91,9 +91,17 @@ Camera acquisition and ESPI processing run on their own thread, so moving, resiz
 - **Capture**: **Record AVI** writes the displayed image on a steady timeline (intermediate frames are skipped when acquisition outruns encoding; the last frame is repeated when it is slower); changing view mode or averaging starts a new file, and the log reports skipped frames and late encoder intervals. **Save frame** writes exactly what is on screen; an optional **Frame title** is added to the PNG's filename, and a title or notes also write a matching `.txt` file.
 - **Shortcuts** (when not typing in a text field): `S` save, `F` set reference, `R` reset last, `A` reset average, `Q`/Esc quit (Esc in a text field just leaves the field).
 
-Output goes to `output/logs/`, `output/frames/` and `output/recordings/`.
+Output goes to `output/logs/`, `output/frames/` and `output/recordings/`. Recordings and saved frames carry the camera's serial number in the filename (for example `espi_raw_12345678_<time>.avi`).
 
-The legacy Tk interface (`--ui tk`) has the same controls in three separate windows, without zoom or the separate processing thread.
+### Several cameras
+
+When more than one FLIR camera is connected, a **Cameras** section appears at the top of the Controls panel. **Display** picks the camera shown in the window. Each camera also has a **Process** checkbox: a checked camera keeps acquiring, processing and (when Record is on for it) recording while another camera is displayed. The displayed camera always processes, so its checkbox is locked on; choosing an unchecked camera in **Display** turns it on. Each row shows that camera's processed frame rate and `REC` while it records.
+
+Each camera has its own settings: exposure, gain, frame rate, noise reduction, view mode, reference frame, averaging, fringe and display options, and its own Record state. The controls, toolbar and shortcuts always act on the displayed camera. Unchecking **Process** stops that camera (finishing its recording and releasing it) but keeps its settings for the next time; its reference frame and running average start fresh. At startup only the first camera that opens is processed. Log lines from each camera start with its serial number, and an error in one camera turns only that camera off.
+
+Several 6.3 MP cameras streaming at once can exceed one USB 3 controller's bandwidth; watch each row's frame rate, and lower the frame rate or put the cameras on separate controllers if it drops. `--demo --demo-cameras 3` simulates three cameras for trying this without hardware.
+
+The legacy Tk interface (`--ui tk`) has the same controls in three separate windows, without zoom, the separate processing thread or multi-camera support (it uses the first camera).
 
 ### Demo mode
 
