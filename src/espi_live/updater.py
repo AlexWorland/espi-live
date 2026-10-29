@@ -14,11 +14,15 @@ running program's executable and loaded libraries be renamed but not
 overwritten or deleted, so the new build's ``_internal-<build>`` is moved in
 beside the running one, which is left alone, and only the executable is
 swapped: the running one is renamed to ``*.old``. On macOS the whole .app
-bundle is swapped that way. The next start deletes ``*.old`` and, once it is
-gone (proof on Windows that the old build has exited), the old build's
-``_internal-*`` folder. No GUI imports: the front ends drive this module.
+bundle is swapped that way. When the new build starts (StartupCleanup), it
+deletes ``*.old`` and, once that is gone (proof on Windows that the old build
+has exited), the old build's ``_internal-*`` folder, retrying in the
+background while the old build is still closing; it also deletes old
+single-file copies (build 6 and earlier) just above its folder. No GUI
+imports: the front ends drive this module.
 """
 
+import glob
 import hashlib
 import json
 import os
@@ -26,6 +30,7 @@ import queue
 import re
 import shutil
 import ssl
+import struct
 import subprocess
 import sys
 import tarfile
@@ -53,6 +58,15 @@ CONTENTS_PREFIX = "_internal-"
 CONTENTS_PATTERN = re.compile(re.escape(CONTENTS_PREFIX) + "[0-9]+")
 RENAME_ATTEMPTS = 10
 RENAME_WAIT_S = 0.5
+# Startup cleanup retries while the previous build is still exiting.
+CLEANUP_ATTEMPTS = 30
+CLEANUP_WAIT_S = 2.0
+# PyInstaller's archive format: a single-file program ends with an archive
+# whose trailer ("cookie") locates its table of contents.
+PYINSTALLER_MAGIC = b"MEI\014\013\012\013\016"
+PYINSTALLER_COOKIE = struct.Struct("!8sIIii64s")
+PYINSTALLER_ENTRY = struct.Struct("!IIIIBc")
+PYINSTALLER_TAIL_BYTES = 1 << 20
 TIMEOUT_S = 20
 CHUNK_BYTES = 1 << 20
 
@@ -383,6 +397,16 @@ def discard(path):
     return not os.path.lexists(path)
 
 
+def remove_all(paths):
+    """Delete those of some files or folders that exist (best effort).
+
+    Args: paths are files or folders.
+    Returns: (the paths removed, True when none of them is left).
+    """
+    removed = [path for path in paths if os.path.lexists(path) and discard(path)]
+    return removed, not any(os.path.lexists(path) for path in paths)
+
+
 def move(source, destination):
     """Rename a file or folder, retrying for a few seconds on Windows.
 
@@ -432,6 +456,73 @@ def running_contents():
     """
     folder = getattr(sys, "_MEIPASS", None)
     return os.path.abspath(folder) if folder else None
+
+
+def is_single_file_copy(path):
+    """Tell whether a file is a single-file build of this program.
+
+    Builds up to 6 were single-file PyInstaller programs: an executable that
+    ends with an archive whose table of contents lists every library as a
+    binary (type code b), PySide6's among them. A folder build's executable
+    lists none, and other files have no such archive.
+
+    Args: path is the file to inspect.
+    Returns: True for a single-file build of ESPI live.
+    """
+    if not os.path.isfile(path) or os.path.islink(path):
+        return False
+    try:
+        with open(path, "rb") as handle:
+            start = max(0, handle.seek(0, os.SEEK_END) - PYINSTALLER_TAIL_BYTES)
+            handle.seek(start)
+            tail = handle.read()
+            found = tail.rfind(PYINSTALLER_MAGIC)
+            if found < 0 or found + PYINSTALLER_COOKIE.size > len(tail):
+                return False
+            _, length, toc_offset, toc_length, _, _ = PYINSTALLER_COOKIE.unpack_from(tail, found)
+            toc_start = start + found + PYINSTALLER_COOKIE.size - length + toc_offset
+            if toc_start < 0:
+                return False
+            handle.seek(toc_start)
+            toc = handle.read(toc_length)
+    except OSError:
+        return False
+    position = 0
+    while position + PYINSTALLER_ENTRY.size <= len(toc):
+        size, _, _, _, _, kind = PYINSTALLER_ENTRY.unpack_from(toc, position)
+        if size < PYINSTALLER_ENTRY.size:
+            return False
+        name = toc[position + PYINSTALLER_ENTRY.size:position + size]
+        if kind == b"b" and name.startswith(b"PySide6"):
+            return True
+        position += size
+    return False
+
+
+def single_file_copies(target):
+    """Find old single-file copies of this program beside its folder.
+
+    A single-file build (build 6 and earlier) cannot update itself to the
+    folder layout, so the new build is unpacked by hand, usually where the old
+    one was: the old executable then sits in the folder above the program
+    folder or, after Windows' "Extract all" (which adds a folder named after
+    the archive), in the one above that. Its update backup (*.old) and
+    staging folders go with it; its output/ folder is never included.
+
+    Args: target is the running executable.
+    Returns: The paths to delete.
+    """
+    name = os.path.basename(target)
+    above = os.path.dirname(os.path.dirname(target))
+    found = []
+    for folder in dict.fromkeys((above, os.path.dirname(above))):
+        old = os.path.join(folder, name)
+        if is_single_file_copy(old):
+            found.append(old)
+            found += glob.glob(os.path.join(glob.escape(folder), STAGING_PREFIX + "*"))
+        if is_single_file_copy(old + OLD_SUFFIX):
+            found.append(old + OLD_SUFFIX)
+    return found
 
 
 def replace_entry(new, target):
@@ -521,38 +612,55 @@ def install_update(staged, target=None):
     return target
 
 
-def cleanup_previous_update(target=None, keep_backup=False):
-    """Remove leftovers of an earlier update (best effort).
+def cleanup_previous_update(target=None, keep_backup=False, report=None):
+    """Remove what earlier builds left behind (best effort).
 
-    Old library folders go only after the old executable (*.old): Windows
-    cannot delete an executable while it runs, so a build that is still
-    shutting down keeps its libraries until a later start.
+    Staging folders go first, then *.old. Old library folders go only once
+    *.old is gone: Windows cannot delete an executable while it runs, so a
+    build that is still shutting down keeps its libraries for now. A folder
+    build also removes old single-file copies beside its folder
+    (single_file_copies). Recordings, frames, logs and token files are never
+    touched.
 
-    Args: target overrides install_target() (tests); keep_backup leaves the
-        *.old copy and every library folder, which are in use right after an
-        install.
-    Returns: None.
+    Args: target overrides install_target() (tests); keep_backup leaves *.old
+        and every library folder, which are in use right after an install;
+        report, if given, is called with a message for each thing removed.
+    Returns: True when nothing that should go is left, False while something
+        is still in use.
     """
     target = target or install_target()
     if target is None:
-        return
+        return True
     folder = os.path.dirname(target)
     try:
         names = os.listdir(folder)
     except OSError:
-        return
-    for name in names:
-        if name.startswith(STAGING_PREFIX):
-            discard(os.path.join(folder, name))
-    if keep_backup or not discard(target + OLD_SUFFIX):
-        return
+        return True
+    _, done = remove_all([os.path.join(folder, name) for name in names
+                          if name.startswith(STAGING_PREFIX)])
+    if keep_backup:
+        return done
+    removed, backup_gone = remove_all([target + OLD_SUFFIX])
+    copies = []
     own = running_contents()
-    if own is None or not same_path(os.path.dirname(own), folder):
-        return  # only a build running from a library folder here tidies them
-    for name in names:
-        path = os.path.join(folder, name)
-        if is_contents_folder(name) and not same_path(path, own):
-            discard(path)
+    if own is not None and same_path(os.path.dirname(own), folder):
+        if backup_gone:
+            libraries, done_libraries = remove_all([
+                os.path.join(folder, name) for name in names
+                if is_contents_folder(name) and not same_path(os.path.join(folder, name), own)])
+            removed += libraries
+            done = done and done_libraries
+        copies, done_copies = remove_all(single_file_copies(target))
+        done = done and done_copies
+    if report and removed:
+        report("Removed the previous build: "
+               + ", ".join(os.path.basename(path) for path in removed))
+    for path in copies:
+        output = os.path.join(os.path.dirname(path), "output")
+        if report and not os.path.basename(path).startswith(STAGING_PREFIX):
+            report(f"Removed the old single-file copy {path}"
+                   + (f"; its recordings stay in {output}" if os.path.isdir(output) else ""))
+    return done and backup_gone
 
 
 def relaunch(args, target=None):
@@ -576,6 +684,65 @@ def relaunch(args, target=None):
                          creationflags=subprocess.CREATE_NEW_CONSOLE)
     else:
         subprocess.Popen([exe, *args], env=env, close_fds=True, start_new_session=True)
+
+
+class StartupCleanup:
+    """Remove what earlier builds left behind, retrying while it is in use.
+
+    Right after an update the new build starts while the old one is still
+    exiting, and Windows cannot delete a running program, so the first pass
+    often leaves *.old and the old library folder behind; a daemon thread
+    retries for about a minute. Call stop() before installing an update, so
+    a cleanup never runs during an install.
+    """
+
+    def __init__(self, report, target=None):
+        """Prepare a cleanup; nothing is removed until start().
+
+        Args: report is called with a message for each thing removed, from
+            any thread; target overrides install_target() (tests).
+        Returns: None.
+        """
+        self.report = report
+        self.target = target
+        self.stopping = threading.Event()
+        self.thread = None
+
+    def start(self):
+        """Clean up now, and keep retrying in the background if something is in use.
+
+        Args: None.
+        Returns: True when a background retry was started.
+        """
+        if cleanup_previous_update(self.target, report=self.report):
+            return False
+        self.thread = threading.Thread(target=self._retry, name="espi-cleanup", daemon=True)
+        self.thread.start()
+        return True
+
+    def _retry(self):
+        """Thread body: retry until nothing is left, stop() is called or time runs out.
+
+        Args: None.
+        Returns: None.
+        """
+        for _ in range(CLEANUP_ATTEMPTS):
+            if self.stopping.wait(CLEANUP_WAIT_S):
+                return
+            if cleanup_previous_update(self.target, report=self.report):
+                return
+        self.report("Some files of an earlier build are still in use; "
+                    "they are removed at the next start")
+
+    def stop(self):
+        """Stop retrying, after a pass in progress has finished.
+
+        Args: None.
+        Returns: None.
+        """
+        self.stopping.set()
+        if self.thread is not None:
+            self.thread.join()
 
 
 class UpdateWorker:

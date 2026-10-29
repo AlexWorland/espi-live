@@ -39,7 +39,6 @@ def cli(argv=None):
         sys.exit(self_check())
     if args.update:
         sys.exit(update_now())
-    updater.cleanup_previous_update()
     try:
         from espi_live import qt_app
     except ImportError as exc:

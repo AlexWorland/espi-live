@@ -65,16 +65,6 @@ def run_cli(argv):
 class CliDispatchTests(unittest.TestCase):
     """Argument parsing and front-end selection."""
 
-    def setUp(self):
-        """Replace the updater's startup cleanup with a mock.
-
-        Args: None.
-        Returns: None.
-        """
-        patcher = mock.patch.object(updater, "cleanup_previous_update")
-        self.cleanup = patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_version_prints_build_and_exits_zero(self):
         """--version prints the build description and exits 0.
 
@@ -85,7 +75,6 @@ class CliDispatchTests(unittest.TestCase):
                                return_value="build 7"):
             code, out, _ = run_cli(["--version"])
         self.assertEqual((code, out), (0, "build 7\n"))
-        self.cleanup.assert_not_called()
 
     def test_check_exits_with_self_check_status(self):
         """--check exits with the value self_check returns.
@@ -120,7 +109,6 @@ class CliDispatchTests(unittest.TestCase):
             code, _, _ = run_cli([])
         qt.run.assert_called_once_with(force_demo=False, check_updates=True,
                                        demo_cameras=1)
-        self.cleanup.assert_called_once_with()
         self.assertEqual(code, 5)
 
     def test_demo_and_no_update_check_reach_qt(self):

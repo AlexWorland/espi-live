@@ -127,7 +127,9 @@ class InstallTests(unittest.TestCase):
         Returns: None.
         """
         self.tmp = tempfile.TemporaryDirectory()
-        self.folder = os.path.join(self.tmp.name, "espi-live")
+        # Two levels down, so the folders cleanup searches for old single-file
+        # copies (the two above the program folder) stay inside the temp tree.
+        self.folder = os.path.join(self.tmp.name, "lab", "espi-live")
         self.target = os.path.join(self.folder, "espi-live")
         self.old_library = os.path.join(self.folder, "_internal-6")
         self.new_library = os.path.join(self.folder, "_internal-7")
@@ -186,9 +188,12 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(handle.read(), b"lib 7")
         self.assertFalse(any(name.startswith(updater.STAGING_PREFIX)
                              for name in os.listdir(self.folder)))
+        messages = []
         with running_from(self.new_library):  # the next start runs build 7
-            updater.cleanup_previous_update(self.target)
+            self.assertTrue(updater.cleanup_previous_update(self.target,
+                                                            report=messages.append))
         self.assertEqual(sorted(os.listdir(self.folder)), ["_internal-7", "espi-live"])
+        self.assertEqual(messages, ["Removed the previous build: espi-live.old, _internal-6"])
 
     def test_checksum_mismatch_leaves_program_untouched(self):
         """A corrupt download raises and does not touch the installed copy.
