@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 from espi_live import app
+from espi_live.camera_models import CameraIdentity
 
 REAL_TK = tk.Tk
 REAL_CONTROLS = app.Controls
@@ -845,6 +846,24 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(self.viewer.window.winfo_exists(), 0)
 
 
+class AnnounceCameraTests(unittest.TestCase):
+    """Logging the detected camera in the Tk front end."""
+
+    def test_logs_model_and_notes_and_names_viewer(self):
+        """The model, its notes and a model-specific viewer title are produced.
+
+        Args: None.
+        Returns: None.
+        """
+        controls = mock.Mock()
+        title = app.announce_camera(
+            controls, CameraIdentity(model="Blackfly S BFS-U3-31S4C"))
+        self.assertEqual(title, "BFS-U3-31S4C ESPI")
+        lines = [call.args[0] for call in controls.write.call_args_list]
+        self.assertTrue(lines[0].startswith("Camera: Blackfly S BFS-U3-31S4C"))
+        self.assertTrue(lines[1].startswith("Camera note: Colour camera"))
+
+
 class WaitForInputTests(unittest.TestCase):
     """Frame pacing between Tk service passes."""
 
@@ -1021,6 +1040,7 @@ class FakeCamera:
         self.factory = factory
         self.controls = controls
         self.open_error = open_error
+        self.identity = CameraIdentity(model="Blackfly S BFS-U3-63S4M")
         self.closed = False
         self.grab_calls = 0
         self.read_calls = 0
@@ -1952,7 +1972,7 @@ class MainLoopTests(unittest.TestCase):
         camera = self.cameras.cameras[0]
         self.assertEqual(seen, {
             "root": "ESPI controls", "log": "ESPI log",
-            "viewer": "Blackfly ESPI", "mode": "Raw",
+            "viewer": "BFS-U3-63S4M ESPI", "mode": "Raw",
             "record": "Recording: off", "button": "", "limit": 20000.0,
             "range": "Raw Mono8: no brightness scaling"})
         self.assertGreaterEqual(camera.grab_calls, 1)

@@ -536,5 +536,64 @@ class FormatCameraValuesTests(unittest.TestCase):
             text, "Applied: n/a, n/a; FPS set n/a, resulting n/a")
 
 
+class ReadIdentityTests(FakeSpinTestCase):
+    """Model detection from the camera's identity nodes."""
+
+    def test_reads_tl_and_device_nodes(self):
+        """Vendor, model and serial come from the TL map; the rest from the device.
+
+        Args: None.
+        Returns: None.
+        """
+        identity = camera.read_identity(self.cam)
+        self.assertEqual((identity.vendor, identity.model, identity.serial),
+                         ("FLIR", "Blackfly S BFS-U3-63S4M", "21234567"))
+        self.assertEqual((identity.width, identity.height), (3072, 2048))
+        self.assertTrue(identity.sensor.startswith("Sony IMX178"))
+        self.assertEqual(identity.firmware, "1907.0.390.0")
+
+    def test_falls_back_to_device_map_and_width_max(self):
+        """Missing TL nodes and sensor sizes use the device map and WidthMax.
+
+        Args: None.
+        Returns: None.
+        """
+        from fake_pyspin import FakeNode
+        self.cam.tl_device_nodemap.nodes.clear()
+        nodes = self.cam.nodemap.nodes
+        nodes["DeviceModelName"] = FakeNode("Blackfly S BFS-U3-200S6M")
+        del nodes["SensorWidth"], nodes["SensorHeight"]
+        nodes["WidthMax"] = FakeNode(5472)
+        nodes["HeightMax"] = FakeNode(3648)
+        identity = camera.read_identity(self.cam)
+        self.assertEqual(identity.model, "Blackfly S BFS-U3-200S6M")
+        self.assertEqual(identity.vendor, "")
+        self.assertEqual((identity.width, identity.height), (5472, 3648))
+
+    def test_node_errors_leave_fields_empty(self):
+        """Nodes that raise SpinnakerException read as empty values.
+
+        Args: None.
+        Returns: None.
+        """
+        self.cam.tl_device_nodemap.raising.add("DeviceModelName")
+        self.cam.nodemap.raising.update({"DeviceModelName", "SensorWidth",
+                                         "WidthMax"})
+        identity = camera.read_identity(self.cam)
+        self.assertEqual((identity.model, identity.width), ("", 0))
+        self.assertEqual(identity.serial, "21234567")
+
+    def test_open_records_identity(self):
+        """CameraSession.open() stores the detected model.
+
+        Args: None.
+        Returns: None.
+        """
+        session = camera.CameraSession(self.log)
+        session.open()
+        self.addCleanup(session.close)
+        self.assertEqual(session.identity.short_name(), "BFS-U3-63S4M")
+
+
 if __name__ == "__main__":
     unittest.main()

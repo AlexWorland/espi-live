@@ -601,6 +601,19 @@ class Viewer:
         self.window.destroy()
 
 
+def announce_camera(controls, identity):
+    """Log the detected camera model and any notes about it.
+
+    Args: controls has a write(message) method; identity is the opened
+        session's CameraIdentity.
+    Returns: The viewer window title naming the model.
+    """
+    controls.write("Camera: " + " | ".join(identity.description()))
+    for warning in identity.warnings():
+        controls.write(f"Camera note: {warning}")
+    return f"{identity.short_name()} ESPI"
+
+
 def wait_for_input(controls, deadline):
     """Service Tk once, then sleep only the remainder of the frame interval.
 
@@ -645,6 +658,7 @@ def main(force_demo=False):
                 demo = True
             else:
                 camera = attempt
+                image_window = announce_camera(controls, camera.identity)
                 controls.apply_camera_limits(camera.limits())
                 controls.update_camera_values(camera.read_values())
         if demo and not force_demo:
@@ -883,7 +897,7 @@ def main(force_demo=False):
                     controls.range_text.set("Raw Mono8: no brightness scaling")
                     controls.root.title("ESPI controls")
                     controls.log_window.title("ESPI log")
-                    viewer.window.title("Blackfly ESPI")
+                    viewer.window.title(announce_camera(controls, camera.identity))
                     controls.set_demo_state(False)
                     controls.write("LIVE CAPTURE ACTIVE: camera connected; demo ended.")
                     controls.write("Recording stopped for the source change; restart it if needed.")

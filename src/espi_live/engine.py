@@ -190,10 +190,16 @@ class Engine:
         """Make an opened camera session the frame source.
 
         Args: session is an opened CameraSession.
-        Returns: None; publishes the device limits as a "camera_limits" event.
+        Returns: None; publishes the model as a "camera_identity" event and
+            the device limits as a "camera_limits" event.
         """
         self.camera = session
         self.demo_source = None
+        identity = session.identity
+        self.log.write("Camera: " + " | ".join(identity.description()))
+        for warning in identity.warnings():
+            self.log.write(f"Camera note: {warning}")
+        self.events.put(("camera_identity", identity))
         self._set_status(demo=False, camera=format_camera_values(
             session.read_values()))
         self.events.put(("camera_limits", session.limits()))

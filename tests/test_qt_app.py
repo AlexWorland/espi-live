@@ -25,6 +25,7 @@ from PySide6.QtGui import QKeyEvent, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from espi_live import feedback, qt_app, updater
+from espi_live.camera_models import CameraIdentity
 from espi_live.engine import Engine, FramePacket
 
 APP = QApplication.instance() or QApplication(sys.argv)
@@ -1377,6 +1378,36 @@ class EngineEventTests(WindowTestCase):
         self.assertEqual(self.window.exposure.spin.maximum(), 20000)
         self.assertEqual(self.window.gain.spin.maximum(), 12)
         self.assertEqual(self.window.fps.spin.maximum(), 60)
+
+    def test_camera_identity_names_the_model(self):
+        """camera_identity puts the model in the title, badge and controls.
+
+        Args: None.
+        Returns: None.
+        """
+        source, self.engine.demo_source = self.engine.demo_source, None
+        self.addCleanup(setattr, self.engine, "demo_source", source)
+        self.engine.events.put(("camera_identity", CameraIdentity(
+            vendor="FLIR", model="Blackfly S BFS-U3-70S7C", serial="42")))
+        self.window._handle_events()
+        self.assertEqual(self.window.windowTitle(), "ESPI live — BFS-U3-70S7C")
+        self.assertEqual(self.window.source_badge.text(), "  BFS-U3-70S7C  ")
+        self.assertIn("S/N 42", self.window.source_badge.toolTip())
+        self.assertFalse(self.window.model_label.isHidden())
+        self.assertIn("⚠ Colour camera", self.window.model_label.text())
+
+    def test_camera_identity_is_hidden_in_dummy_mode(self):
+        """A known camera is not advertised while synthetic video runs.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.camera_identity = CameraIdentity(model="BFS-U3-63S4M")
+        self.window._set_demo(True)
+        self.assertIn("DUMMY MODE", self.window.windowTitle())
+        self.assertTrue(self.window.model_label.isHidden())
+        self.assertEqual(self.window.source_badge.toolTip(),
+                         "Synthetic video: no camera data")
 
     def test_camera_limits_set_frame_rate_range(self):
         """camera_limits can also set the frame-rate range.

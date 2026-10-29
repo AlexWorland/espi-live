@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-28 — Automatic camera model detection
+
+### Previous state
+
+- The viewer assumed a BFS-U3-63S4M-C: the window and badge said only "ESPI live" / "Camera" (Tk: "Blackfly ESPI"), and nothing reported which camera was actually connected.
+
+### Current state
+
+- On connection the app reads the camera's vendor, model, serial number, firmware, sensor and full-sensor size and shows the model in the window title, the status-bar badge (hover for details) and the Camera controls; the Tk viewer title names it too. The log records the description.
+- Other FLIR/Teledyne models are recognised from their part number. Colour cameras and models not yet tested with the viewer get a note in the log and controls; exposure, gain and frame rate still follow the limits the camera reports. Defaults (8000 µs, 0 dB, 30 fps) are unchanged.
+- New notes on similar Blackfly S models and the part-number scheme: `docs/camera/supported-models.md`.
+
 ## 2026-10-28 — Feature-request button with optional GitHub Copilot enrichment
 
 ### Previous state

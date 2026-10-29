@@ -12,6 +12,7 @@ ranges, and SDK names can differ with firmware and installed Spinnaker version.
 | Any PySpin lifecycle, node-map, image-buffer, or error-handling code | `spinnaker-pyspin.md` |
 | Features, settings, or limits specific to the BFS-U3-63S4M-C | `blackfly-bfs-u3-63s4m-c.md` |
 | Preview latency, USB throughput, frame rate, ROI, pixel format, or triggering | `acquisition-and-performance.md` |
+| Model detection, other FLIR models, or `camera_models.py` | `supported-models.md` |
 
 For camera edits, load the first file plus the file(s) matching the changed
 feature. The vendored examples in `third_party/flir-spinnaker-4.2/Examples/Python3/` are
