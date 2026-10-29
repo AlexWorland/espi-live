@@ -1,4 +1,4 @@
-"""ESPI image processing shared by the engine, the Qt UI and the Tk UI.
+"""ESPI image processing shared by the engine and the Qt UI.
 
 Nothing here touches a GUI toolkit or PySpin, so it is safe to call from any
 thread and from camera-free tests.

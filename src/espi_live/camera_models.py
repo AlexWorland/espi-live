@@ -1,6 +1,6 @@
 """Identify the connected FLIR/Teledyne camera and describe it for display.
 
-Pure data and text: no PySpin or GUI imports, so both front ends and the
+Pure data and text: no PySpin or GUI imports, so the front end and the
 tests share it. camera.read_identity() fills a CameraIdentity from the
 device's GenICam nodes; this module interprets the reported model name.
 

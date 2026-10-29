@@ -131,57 +131,20 @@ class CliDispatchTests(unittest.TestCase):
         """
         qt = types.SimpleNamespace(run=mock.Mock(return_value=0))
         with fake_submodule("qt_app", qt):
-            code, _, _ = run_cli(["--ui", "qt", "--demo", "--demo-cameras", "3",
-                                   "--no-update-check"])
+            code, _, _ = run_cli(["--demo", "--demo-cameras", "3", "--no-update-check"])
         qt.run.assert_called_once_with(force_demo=True, check_updates=False,
                                        demo_cameras=3)
         self.assertEqual(code, 0)
 
-    def test_auto_falls_back_to_tk_without_pyside(self):
-        """--ui auto uses Tk and warns on stderr when Qt cannot import.
-
-        Args: None.
-        Returns: None.
-        """
-        tk_app = types.SimpleNamespace(main=mock.Mock())
-        with fake_submodule("qt_app", None), fake_submodule("app", tk_app):
-            code, _, err = run_cli(["--demo"])
-        tk_app.main.assert_called_once_with(force_demo=True)
-        self.assertIsNone(code)
-        self.assertIn("PySide6 unavailable", err)
-
-    def test_explicit_qt_without_pyside_exits_with_message(self):
-        """--ui qt exits with an explanatory message when Qt is missing.
+    def test_missing_pyside_exits_with_message(self):
+        """Without PySide6 the program exits with an explanatory message.
 
         Args: None.
         Returns: None.
         """
         with fake_submodule("qt_app", None):
-            code, _, _ = run_cli(["--ui", "qt"])
-        self.assertIn("The Qt front end needs PySide6", code)
-
-    def test_tk_runs_legacy_front_end_directly(self):
-        """--ui tk skips Qt entirely and runs the Tk main.
-
-        Args: None.
-        Returns: None.
-        """
-        tk_app = types.SimpleNamespace(main=mock.Mock())
-        with fake_submodule("app", tk_app):
-            code, _, err = run_cli(["--ui", "tk"])
-        tk_app.main.assert_called_once_with(force_demo=False)
-        self.assertIsNone(code)
-        self.assertEqual(err, "")
-
-    def test_invalid_ui_choice_is_rejected(self):
-        """An unknown --ui value makes argparse exit with status 2.
-
-        Args: None.
-        Returns: None.
-        """
-        code, _, err = run_cli(["--ui", "gtk"])
-        self.assertEqual(code, 2)
-        self.assertIn("invalid choice", err)
+            code, _, _ = run_cli(["--demo"])
+        self.assertIn("ESPI live needs PySide6", code)
 
 
 class SelfCheckTests(unittest.TestCase):
