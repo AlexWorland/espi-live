@@ -10,8 +10,11 @@ output/logs/ and offer a prefilled new-issue page instead. No GUI imports;
 network calls run only on the background worker the front end polls.
 """
 
+import html
 import os
+import queue
 import re
+import threading
 import urllib.parse
 from dataclasses import dataclass
 
@@ -178,3 +181,109 @@ def file_report(report, token):
     return feedback.github_request(
         "POST", f"/repos/{feedback.repository()}/issues", token,
         {"title": report.title, "body": report.body, "labels": [LABEL]})
+
+
+@dataclass(frozen=True)
+class ReportState:
+    """Where a report stands: filed or found, saved locally, or failed."""
+
+    url: str = ""          # the issue that holds the report
+    created: bool = False  # this run filed it
+    path: str = ""         # local copy saved for a copy without a token
+    error: str = ""        # why it could not be filed
+
+
+def resolve(report):
+    """Find or file one report, or save it when this copy has no token.
+
+    Args: report is a Report.
+    Returns: A ReportState. Raises only for failures outside GitHub, such as
+        a report that cannot be saved.
+    """
+    token = feedback.feedback_token()
+    try:
+        issue = find_report(report.key, token)
+        if issue is not None:
+            return ReportState(url=issue["html_url"])
+        if token:
+            return ReportState(url=file_report(report, token)["html_url"], created=True)
+        return ReportState(path=save_report(report))
+    except feedback.FeedbackError as exc:
+        return ReportState(error=str(exc), path="" if token else save_report(report))
+
+
+class CameraReportWorker:
+    """File camera reports on one background thread for a front end.
+
+    The front end polls ``events`` for ("state", (key, ReportState)), one per
+    submitted report, in submission order.
+    """
+
+    def __init__(self):
+        """Create an idle worker; its thread starts with the first report.
+
+        Args: None.
+        Returns: None.
+        """
+        self.events = queue.Queue()
+        self._jobs = queue.Queue()
+        self._seen = set()  # keys submitted this run (front-end thread only)
+        self._thread = None
+
+    def submit(self, report):
+        """Queue a report unless its key was already submitted this run.
+
+        Args: report is a Report.
+        Returns: True when queued, False for a repeat.
+        """
+        if report.key in self._seen:
+            return False
+        self._seen.add(report.key)
+        self._jobs.put(report)
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="espi-camera-report",
+                                            daemon=True)
+            self._thread.start()
+        return True
+
+    def _run(self):
+        """Thread body: resolve queued reports one at a time, forever.
+
+        Args: None.
+        Returns: None (the daemon thread ends with the program).
+        """
+        while True:
+            report = self._jobs.get()
+            try:
+                state = resolve(report)
+            except Exception as exc:
+                state = ReportState(error=f"{type(exc).__name__}: {exc}")
+            self.events.put(("state", (report.key, state)))
+
+
+def status_html(state):
+    """Describe a report's state for the camera information panel.
+
+    Args: state is a ReportState.
+    Returns: Rich text with the issue link where there is one.
+    """
+    if state.url:
+        link = (f'<a href="{html.escape(state.url, quote=True)}">'
+                f"{html.escape(state.url)}</a>")
+        return (f"Reported to GitHub as {link}." if state.created
+                else f"Already reported as {link}.")
+    if state.error:
+        return f"Report not sent: {html.escape(state.error)}."
+    if state.path:
+        return ("This copy cannot file reports on GitHub; the report is saved to "
+                f"{html.escape(state.path)}.")
+    return "Reporting this camera to GitHub…"
+
+
+def needs_button(state):
+    """Decide whether to offer filing the report in a browser.
+
+    Args: state is a ReportState.
+    Returns: True when no issue exists and filing failed or is impossible.
+    """
+    return not state.url and bool(state.error or state.path)

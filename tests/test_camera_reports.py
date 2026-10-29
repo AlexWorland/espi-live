@@ -226,5 +226,155 @@ class EnvironmentLinesTests(unittest.TestCase):
         self.assertTrue(lines[1].startswith("- Platform: "))
 
 
+class WorkerTests(unittest.TestCase):
+    """Filing in the background, once per key, with or without a token."""
+
+    def setUp(self):
+        """Redirect outputs and give this copy a token by default.
+
+        Args: None.
+        Returns: None.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.token = "secret"
+        self.find = mock.Mock(return_value=None)
+        self.file = mock.Mock(return_value={"html_url": "https://example/issues/1"})
+        for patcher in (mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
+                        mock.patch.object(camera_reports.feedback, "feedback_token",
+                                          side_effect=lambda: self.token),
+                        mock.patch.object(camera_reports, "find_report", self.find),
+                        mock.patch.object(camera_reports, "file_report", self.file)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.worker = camera_reports.CameraReportWorker()
+
+    def next_state(self):
+        """Wait for the worker's next state event.
+
+        Args: None.
+        Returns: (key, ReportState).
+        """
+        kind, payload = self.worker.events.get(timeout=5)
+        self.assertEqual(kind, "state")
+        return payload
+
+    def test_same_key_twice_files_once(self):
+        """Two cameras of one type file one issue.
+
+        Args: None.
+        Returns: None.
+        """
+        report = webcam_report()
+        self.assertTrue(self.worker.submit(report))
+        self.assertFalse(self.worker.submit(report))
+        key, state = self.next_state()
+        self.assertEqual(key, report.key)
+        self.assertEqual(state, camera_reports.ReportState(
+            url="https://example/issues/1", created=True))
+        self.file.assert_called_once_with(report, "secret")
+        self.assertTrue(self.worker.events.empty())
+        self.assertEqual(self.worker._thread.name, "espi-camera-report")
+
+    def test_existing_issue_not_refiled(self):
+        """An issue from another PC is reused, not filed again.
+
+        Args: None.
+        Returns: None.
+        """
+        self.find.return_value = {"html_url": "https://example/issues/7"}
+        self.worker.submit(webcam_report())
+        _, state = self.next_state()
+        self.assertEqual(state, camera_reports.ReportState(url="https://example/issues/7"))
+        self.file.assert_not_called()
+
+    def test_no_token_saves_and_never_posts(self):
+        """Without a token nothing is posted; the report is saved for the user.
+
+        Args: None.
+        Returns: None.
+        """
+        self.token = ""
+        self.worker.submit(webcam_report())
+        _, state = self.next_state()
+        self.find.assert_called_once_with("Webcam C270 (046d:0825)", "")
+        self.file.assert_not_called()
+        self.assertEqual((state.url, state.error), ("", ""))
+        self.assertTrue(state.path.startswith(self.tmp))
+        self.assertTrue(os.path.exists(state.path))
+
+    def test_error_state(self):
+        """GitHub errors are reported; token-less copies still save the report.
+
+        Args: None.
+        Returns: None.
+        """
+        self.find.side_effect = feedback.FeedbackError("cannot reach GitHub: offline")
+        self.worker.submit(webcam_report())
+        _, state = self.next_state()
+        self.assertEqual(state, camera_reports.ReportState(
+            error="cannot reach GitHub: offline"))
+        self.token = ""
+        self.worker.submit(webcam_report(identity=CaptureIdentity(name="Other")))
+        _, state = self.next_state()
+        self.assertEqual(state.error, "cannot reach GitHub: offline")
+        self.assertTrue(os.path.exists(state.path))
+
+    def test_unexpected_failure_becomes_error_state(self):
+        """A failure outside GitHub (here a full disk) still reports a state.
+
+        Args: None.
+        Returns: None.
+        """
+        self.token = ""
+        with mock.patch.object(camera_reports, "save_report",
+                               side_effect=OSError("disk full")):
+            self.worker.submit(webcam_report())
+            _, state = self.next_state()
+        self.assertEqual(state, camera_reports.ReportState(error="OSError: disk full"))
+
+    def test_jobs_run_in_order(self):
+        """Reports for different devices are handled in submission order.
+
+        Args: None.
+        Returns: None.
+        """
+        first = webcam_report()
+        second = webcam_report(identity=CaptureIdentity(name="Capture stick"),
+                               info=CameraInfo("video 2", "Capture stick", kind="capture"))
+        self.worker.submit(first)
+        self.worker.submit(second)
+        self.assertEqual([self.next_state()[0], self.next_state()[0]],
+                         [first.key, "Capture stick"])
+
+
+class StatusTests(unittest.TestCase):
+    """The status line and the browser button for each report state."""
+
+    def test_status_html_and_button(self):
+        """Each state reads correctly and only unfiled reports offer the button.
+
+        Args: None.
+        Returns: None.
+        """
+        state = camera_reports.ReportState
+        url = "https://example/issues/1"
+        cases = (
+            (state(url=url, created=True),
+             f'Reported to GitHub as <a href="{url}">{url}</a>.', False),
+            (state(url=url), f'Already reported as <a href="{url}">{url}</a>.', False),
+            (state(error="<b>offline</b>", path="p"),
+             "Report not sent: &lt;b&gt;offline&lt;/b&gt;.", True),
+            (state(path="C:\\out & logs\\r.md"),
+             "This copy cannot file reports on GitHub; the report is saved to "
+             "C:\\out &amp; logs\\r.md.", True),
+            (state(), "Reporting this camera to GitHub…", False),
+        )
+        for current, text, button in cases:
+            self.assertEqual(camera_reports.status_html(current), text)
+            self.assertEqual(camera_reports.needs_button(current), button)
+
+
 if __name__ == "__main__":
     unittest.main()
