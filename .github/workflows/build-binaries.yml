@@ -211,7 +211,10 @@ jobs:
           tar xzf third_party/spinnaker-4.4/spinnaker-4.4.0.246-noble-amd64-pkg.tar.gz \
             -C "$RUNNER_TEMP/spinnaker" --strip-components=1
           cd "$RUNNER_TEMP/spinnaker"
-          sudo apt-get install -y ./libgentl_*.deb ./libspinnaker_*.deb ./libspinvideo_*.deb \
+          # libgentl's preinst shows the FLIR EULA through debconf and exits 2 when it
+          # can't (no terminal here); a preseeded acceptance makes it skip the dialog.
+          echo "libspinnaker libspinnaker/accepted-flir-eula boolean true" | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./libgentl_*.deb ./libspinnaker_*.deb ./libspinvideo_*.deb \
             ./libspinnaker-c_*.deb ./libspinvideo-c_*.deb
           sudo ldconfig
 
