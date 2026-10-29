@@ -151,6 +151,21 @@ def default_nodes():
     return nodes, stream
 
 
+def identity_nodes():
+    """Build the device-map identity nodes a BFS-U3-63S4M reports.
+
+    Args: None.
+    Returns: A dict of read-only string and integer nodes.
+    """
+    return {
+        "DeviceFirmwareVersion": FakeNode("1907.0.390.0", writable=False),
+        "SensorDescription": FakeNode("Sony IMX178 (1/1.8\" Mono CMOS)",
+                                      writable=False),
+        "SensorWidth": FakeNode(3072, writable=False),
+        "SensorHeight": FakeNode(2048, writable=False),
+    }
+
+
 class FakeImage:
     """A grabbed image buffer."""
 
@@ -220,8 +235,14 @@ class FakeCamera:
         Returns: None.
         """
         nodes, stream = default_nodes()
+        nodes.update(identity_nodes())
         self.nodemap = FakeNodeMap(nodes)
         self.stream_nodemap = FakeNodeMap(stream)
+        self.tl_device_nodemap = FakeNodeMap({
+            "DeviceVendorName": FakeNode("FLIR", writable=False),
+            "DeviceModelName": FakeNode("Blackfly S BFS-U3-63S4M", writable=False),
+            "DeviceSerialNumber": FakeNode("21234567", writable=False),
+        })
         self.frame_source = frame_source or steady_frames()
         self.fail = set()
         self.calls = []
@@ -275,6 +296,14 @@ class FakeCamera:
         Returns: The FakeNodeMap.
         """
         return self.nodemap
+
+    def GetTLDeviceNodeMap(self):
+        """Return the transport-layer device node map.
+
+        Args: None.
+        Returns: The FakeNodeMap with vendor, model and serial.
+        """
+        return self.tl_device_nodemap
 
     def GetTLStreamNodeMap(self):
         """Return the transport-layer stream node map.
@@ -378,6 +407,8 @@ def make_pyspin(system):
         CEnumEntryPtr=lambda node: node,
         CBooleanPtr=lambda node: node,
         CFloatPtr=lambda node: node,
+        CStringPtr=lambda node: node,
+        CIntegerPtr=lambda node: node,
         IsReadable=lambda node: node.readable,
         IsWritable=lambda node: node.writable,
         SpinnakerException=FakeSpinnakerException,

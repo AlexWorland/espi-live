@@ -227,7 +227,7 @@ class SetupTests(CameraEngineCase):
             self.engine.start()
 
     def test_open_camera_publishes_limits_and_status(self):
-        """A successful open attaches the camera and emits its limits.
+        """A successful open attaches the camera and emits its model and limits.
 
         Args: None.
         Returns: None.
@@ -235,9 +235,27 @@ class SetupTests(CameraEngineCase):
         self.engine.open_camera()
         self.assertFalse(self.engine.demo)
         self.assertIn("Applied: 8000", self.engine.status()["camera"])
-        kind, limits = self.events()[0]
-        self.assertEqual(kind, "camera_limits")
+        (kind, identity), (kind2, limits) = self.events()[:2]
+        self.assertEqual(kind, "camera_identity")
+        self.assertEqual(identity.short_name(), "BFS-U3-63S4M")
+        self.assertEqual(identity.serial, "21234567")
+        self.assertEqual(kind2, "camera_limits")
         self.assertIn("Gain", limits)
+
+    def test_open_camera_logs_model_notes(self):
+        """An untested colour model is named in the log with its notes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.cam.tl_device_nodemap.nodes["DeviceModelName"].value = (
+            "Blackfly S BFS-U3-70S7C")
+        with mock.patch.object(self.engine.log, "write") as write:
+            self.engine.open_camera()
+        text = "\n".join(call.args[0] for call in write.call_args_list)
+        self.assertIn("Camera: Blackfly S BFS-U3-70S7C (FLIR)", text)
+        self.assertIn("Camera note: Colour camera", text)
+        self.assertIn("BFS-U3-70S7C has not been tested", text)
 
     def test_open_camera_failure_leaves_engine_unchanged(self):
         """No camera raises and the engine may still choose demo.

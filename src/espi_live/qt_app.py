@@ -693,6 +693,7 @@ class MainWindow(QMainWindow):
         self.pending_update = None  # unpacked build to install on exit
         self.relaunch_after_exit = False
         self.feedback = feedback.FeedbackWorker()
+        self.camera_identity = None  # set by the engine's camera_identity event
         self.drawn_sequence = 0
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
@@ -881,6 +882,10 @@ class MainWindow(QMainWindow):
             add(label)
 
         heading("Camera")
+        self.model_label = QLabel()  # detected model; hidden in dummy mode
+        self.model_label.setWordWrap(True)
+        self.model_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        add(self.model_label)
         self.exposure = SliderSpin(0, 50000, 1, 0, s.exposure_us, " µs")
         self.gain = SliderSpin(0, 30, 0.1, 1, s.gain_db, " dB")
         self.fps = SliderSpin(0, 60, 0.1, 1, s.fps, " fps")
@@ -1082,11 +1087,22 @@ class MainWindow(QMainWindow):
         Args: demo is True while the engine uses synthetic video.
         Returns: None.
         """
-        self.setWindowTitle("ESPI live — DUMMY MODE" if demo else "ESPI live")
+        identity = None if demo else self.camera_identity
+        name = identity.short_name() if identity else "Camera"
+        lines = identity.description() if identity else []
+        if demo:
+            self.setWindowTitle("ESPI live — DUMMY MODE")
+        else:
+            self.setWindowTitle(f"ESPI live — {name}" if identity else "ESPI live")
         self.demo_banner.setVisible(demo)
         self.switch_live_button.setVisible(demo)
         self.camera_label.setVisible(not demo)
-        self.source_badge.setText("  DUMMY MODE  " if demo else "  Camera  ")
+        self.model_label.setVisible(bool(lines))
+        self.model_label.setText("\n".join(
+            lines + [f"⚠ {note}" for note in identity.warnings()]) if lines else "")
+        self.source_badge.setText("  DUMMY MODE  " if demo else f"  {name}  ")
+        self.source_badge.setToolTip(
+            "Synthetic video: no camera data" if demo else "\n".join(lines))
         self.source_badge.setStyleSheet(
             "background:#8b0000;color:white;font-weight:bold;" if demo else
             "background:#1f6f3f;color:white;font-weight:bold;")
@@ -1377,7 +1393,10 @@ class MainWindow(QMainWindow):
                 kind, payload = self.engine.events.get_nowait()
             except Exception:
                 return
-            if kind == "camera_limits":
+            if kind == "camera_identity":
+                self.camera_identity = payload
+                self._set_demo(self.engine.demo)
+            elif kind == "camera_limits":
                 for name, widget in (("ExposureTime", self.exposure),
                                      ("Gain", self.gain),
                                      ("AcquisitionFrameRate", self.fps)):

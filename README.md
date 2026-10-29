@@ -2,6 +2,8 @@
 
 A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI (electronic speckle pattern interferometry) measurements. Python, PySpin/Spinnaker, OpenCV and Qt (PySide6), with GPU-accelerated display; runs on Windows, macOS and Linux.
 
+The connected camera's model is detected automatically (from its GenICam identity nodes) and shown in the window title, status badge and Camera controls. Other FLIR/Teledyne models (other Blackfly S sensors, Grasshopper, Chameleon, Oryx) are named and run with the limits they report, with a note in the log when a model is untested or colour; see `docs/camera/supported-models.md`.
+
 ## Quick start
 
 ```sh
@@ -28,7 +30,7 @@ scripts/
   camera_live_control.py   standalone live camera-control helper
 experiments/          candidate, test and older working scripts
 docs/
-  camera/             curated PySpin / BFS-U3-63S4M-C / acquisition research notes
+  camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition research notes
   notes/              development notes and reports
 third_party/          vendor material, never edited
   flir-spinnaker-4.2/   SDK installer zip, PySpin wheel, docs, official Examples (matches the camera PC)

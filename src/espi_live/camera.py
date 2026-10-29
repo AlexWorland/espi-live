@@ -11,6 +11,8 @@ import importlib
 
 import numpy as np
 
+from .camera_models import CameraIdentity
+
 PySpin = None  # Imported only when a real camera is requested.
 
 # Device-limit query names and the UI ranges they are clipped to.
@@ -105,6 +107,63 @@ def try_setting(log, nodemap, setter, name, value):
         log.write(f"Could not set {name}: {exc}")
 
 
+def read_string(nodemap, name):
+    """Read a GenICam string node, tolerating absent or unreadable nodes.
+
+    Args: nodemap is a GenICam map; name identifies the node.
+    Returns: The stripped value, or "" when it cannot be read.
+    """
+    try:
+        node = PySpin.CStringPtr(nodemap.GetNode(name))
+        return str(node.GetValue()).strip() if PySpin.IsReadable(node) else ""
+    except PySpin.SpinnakerException:
+        return ""
+
+
+def read_int(nodemap, name):
+    """Read a GenICam integer node, tolerating absent or unreadable nodes.
+
+    Args: nodemap is a GenICam map; name identifies the node.
+    Returns: The value, or 0 when it cannot be read.
+    """
+    try:
+        node = PySpin.CIntegerPtr(nodemap.GetNode(name))
+        return int(node.GetValue()) if PySpin.IsReadable(node) else 0
+    except PySpin.SpinnakerException:
+        return 0
+
+
+def read_identity(cam):
+    """Ask an initialized camera what model it is.
+
+    Vendor, model and serial come from the transport-layer device map (as in
+    the SDK's Enumeration example), falling back to the device map; sensor,
+    firmware and full-sensor size come from the device map.
+
+    Args: cam is an initialized PySpin camera.
+    Returns: A CameraIdentity; fields the camera does not report are empty.
+    """
+    device = cam.GetNodeMap()
+    maps = (cam.GetTLDeviceNodeMap(), device)
+
+    def first(name):
+        """Read a string from the first map that has it.
+
+        Args: name identifies the node.
+        Returns: The value, or "".
+        """
+        return next((value for value in (read_string(m, name) for m in maps)
+                     if value), "")
+
+    return CameraIdentity(
+        vendor=first("DeviceVendorName"), model=first("DeviceModelName"),
+        serial=first("DeviceSerialNumber"),
+        firmware=read_string(device, "DeviceFirmwareVersion"),
+        sensor=read_string(device, "SensorDescription"),
+        width=read_int(device, "SensorWidth") or read_int(device, "WidthMax"),
+        height=read_int(device, "SensorHeight") or read_int(device, "HeightMax"))
+
+
 def configure_camera(cam, log):
     """Configure the camera for the existing Mono8 continuous-preview defaults.
 
@@ -139,6 +198,7 @@ class CameraSession:
         self.cam_list = None
         self.cam = None
         self.nodemap = None
+        self.identity = CameraIdentity()
         self.initialized = False
         self.acquiring = False
 
@@ -158,6 +218,7 @@ class CameraSession:
             self.cam = self.cam_list.GetByIndex(0)
             self.cam.Init()
             self.initialized = True
+            self.identity = read_identity(self.cam)
             self.nodemap = configure_camera(self.cam, self.log)
             self.cam.BeginAcquisition()
             self.acquiring = True
