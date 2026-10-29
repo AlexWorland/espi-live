@@ -2215,7 +2215,10 @@ class RunTests(unittest.TestCase):
         self.opengl = mock.MagicMock(return_value=(True, "OpenGL 4.1 on X"))
         self.finish = mock.MagicMock()
         self.main_window = mock.MagicMock(return_value=self.window)
+        self.cleanup = mock.MagicMock()
+        self.startup_cleanup = mock.MagicMock(return_value=self.cleanup)
         for patcher in (
+                mock.patch.object(qt_app.updater, "StartupCleanup", self.startup_cleanup),
                 mock.patch.object(qt_app, "request_gl_format"),
                 mock.patch.object(qt_app, "AppLog", return_value=self.log),
                 mock.patch.object(qt_app, "open_camera_channels", self.cameras),
@@ -2308,6 +2311,21 @@ class RunTests(unittest.TestCase):
         self.engine.wait.assert_called_once_with(8.0)
         self.idle.engine.stop.assert_not_called()
         self.finish.assert_called_once_with(None, self.log)
+
+    def test_startup_cleanup_logs_and_stops_before_an_update_installs(self):
+        """Old copies are cleaned up with messages to the log, and the cleanup
+        stops before finish_update can install a new build.
+
+        Args: None.
+        Returns: None.
+        """
+        order = mock.MagicMock()
+        order.attach_mock(self.cleanup.stop, "stop")
+        order.attach_mock(self.finish, "finish")
+        qt_app.run(force_demo=True)
+        self.startup_cleanup.assert_called_once_with(self.log.write)
+        self.cleanup.start.assert_called_once_with()
+        self.assertEqual([name for name, _, _ in order.mock_calls], ["stop", "finish"])
 
     def test_log_file_path_is_reported_when_available(self):
         """The log file path from AppLog.start is written to the log.

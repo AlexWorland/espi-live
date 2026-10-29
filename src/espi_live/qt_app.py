@@ -1812,11 +1812,13 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
     app = QApplication.instance() or QApplication(sys.argv)
     log = AppLog()
     path = log.start()
+    cleanup = updater.StartupCleanup(log.write)
     window = None
     channels = []
     try:
         if path:
             log.write(f"Log file: {path}")
+        cleanup.start()
         if not force_demo:
             try:
                 channels = open_camera_channels(log)
@@ -1846,5 +1848,6 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
                 if channel.active:
                     channel.engine.stop()
                     channel.engine.wait(8.0)
+        cleanup.stop()
         finish_update(window, log)
         log.close()

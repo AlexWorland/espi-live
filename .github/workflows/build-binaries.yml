@@ -1,29 +1,37 @@
 name: Release
 
 # Builds self-contained PyInstaller binaries for Windows, Linux and macOS and
-# attaches them to a GitHub release. Merging into main does not build or
-# release anything. It runs in one of two ways:
+# attaches them to a GitHub release. It runs in one of three ways:
 #
-# 1. Publishing a release (the normal way). release-drafter.yml keeps a draft
-#    release with the next version tag and the notes; publishing it (Releases >
-#    the draft > Edit > Publish release) creates the tag on main and starts this
-#    workflow. Tick "Set as a pre-release" when publishing to keep it from
-#    installed copies. The "hold" job turns the release back into a draft at
-#    once, so nobody sees a release without binaries (the updater would find no
+# 1. Every merge (push) into main (the normal way): the "version" job rewrites
+#    the draft release with release-drafter, which proposes the next version
+#    tag from the merged pull requests' labels, and the release is created
+#    with that tag once the tests and builds pass. Its notes are GitHub's
+#    generated notes (pull requests merged since the previous release, grouped
+#    by .github/release.yml). A merge that lands while a release is building
+#    waits for it; when several wait, GitHub keeps only the newest run, whose
+#    release then covers all of them.
+#
+# 2. Publishing the draft release by hand (Releases > the draft > Edit >
+#    Publish release) creates the tag on main and starts this workflow. Tick
+#    "Set as a pre-release" when publishing to keep it from installed copies.
+#    The "hold" job turns the release back into a draft at once, so nobody
+#    sees a release without binaries (the updater would find no
 #    build-info.json); the "publish" job uploads the archives and publishes it
 #    again. If the tests or a build fail, the release stays a draft: delete its
 #    tag (git push origin --delete vX.Y.Z), fix the problem and publish again.
 #
-# 2. By hand (Actions > Release > Run workflow), for a test build of any
-#    branch ("Use workflow from"). This creates the release itself, tagged
-#    with a version: the "version" input, or else the version the draft release
-#    proposes, or else the next patch version (see the "version" job). Runs from
-#    branches other than main, and the checkbox, make a pre-release tagged
-#    vX.Y.Z-pre.N, which leaves vX.Y.Z for the real release.
-#    Its notes are GitHub's generated notes (pull requests merged since the
-#    previous release, grouped by .github/release.yml), after any typed notes.
+# 3. By hand (Actions > Release > Run workflow), for a test build of any
+#    branch ("Use workflow from"). Untick "Publish" to only test and build:
+#    the archives stay on the run's page as artifacts and nothing is released.
+#    Otherwise this creates the release like a merge does, tagged with the
+#    "version" input, or else the version the draft release proposes, or else
+#    the next patch version (see the "version" job), with any typed notes above
+#    the generated ones. Runs from branches other than main, and the
+#    "Pre-release" checkbox, make a pre-release tagged vX.Y.Z-pre.N, which
+#    leaves vX.Y.Z for the real release.
 #
-# Either way, N is this workflow's run number, which build-info.json records and
+# Every way, N is this workflow's run number, which build-info.json records and
 # the updater uses to order builds, so the tag name does not matter to it.
 # Installed copies update only to the newest full release; a pre-release is for
 # testing and is never offered to them.
@@ -31,6 +39,8 @@ name: Release
 # The test job runs first; if a test fails or line coverage is below 100%,
 # nothing is built or released.
 on:
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -49,11 +59,16 @@ on:
         description: "Pre-release: publish for testing, don't offer it to installed copies"
         type: boolean
         default: false
+      publish:
+        description: "Publish a release (untick to only test and build; the archives stay on the run's page)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
-# One release at a time, so build numbers and releases stay in order.
+# One release at a time, so build numbers and releases stay in order, and each
+# run's "version" job sees the release before it.
 concurrency:
   group: build-release
   cancel-in-progress: false
@@ -82,20 +97,31 @@ jobs:
         run: gh release edit "$RELEASE_TAG" --draft
 
   # Picks the release tag first, so a bad "version" input fails before the
-  # builds. A published release already has its tag. A hand-started run uses
-  # the "version" input, else the version release-drafter's draft proposes
-  # (from the merged pull requests' labels), else the next patch after the
-  # newest vX.Y.Z release; versions whose tag already exists are skipped. A
+  # builds. A published release already has its tag. A merge or a hand-started
+  # run uses the "version" input, else the version release-drafter's draft
+  # proposes (from the merged pull requests' labels), else the next patch after
+  # the newest vX.Y.Z release; versions whose tag already exists are skipped. A
   # pre-release gets "-pre.N" (N = run number) on that version.
   version:
     name: Choose the version tag
     runs-on: ubuntu-latest
     permissions:
-      contents: write # only reads, but draft releases are visible only with write access
+      contents: write # update the draft; drafts are visible only with write access
+      pull-requests: read # the drafter reads the merged pull requests' labels
     outputs:
       tag: ${{ steps.pick.outputs.tag }}
       prerelease: ${{ steps.pick.outputs.prerelease }}
     steps:
+      # After a merge, rewrite the draft first so the version it proposes counts
+      # the pull request just merged. This step, not a run of
+      # release-drafter.yml, does it so the two cannot race; runs of this
+      # workflow never overlap, so the drafter always sees the previous release.
+      - name: Update the draft release
+        if: github.event_name == 'push'
+        uses: release-drafter/release-drafter@978bb0b30c5ee8cdd332ced253758157150d43f0 # v7.10.0
+        with:
+          config-name: release-drafter.yml
+
       - name: Choose the tag
         id: pick
         env:
@@ -361,6 +387,8 @@ jobs:
 
       - name: Build with PyInstaller
         shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
           args=(--noconfirm --clean --paths src --distpath dist --workpath build)
           # camera.py imports PySpin lazily through importlib, so PyInstaller cannot see it.
@@ -371,34 +399,52 @@ jobs:
             # A .app bundle (onedir) is the supported macOS GUI form.
             args+=(--name "ESPI Live" --windowed --onedir --osx-bundle-identifier io.github.alexworland.espi-live)
           else
+            # A folder (onedir) starts at once, where a single self-extracting
+            # file unpacks everything to a temporary folder on every start. Each
+            # build keeps its libraries in its own _internal-N (N = build number)
+            # beside the executable: Windows cannot overwrite or delete the DLLs a
+            # running copy has loaded, so an update moves the new folder in beside
+            # the old one and swaps only the executable (see updater.py).
             # Keep the console: the app mirrors its log there and Windows users start it from a shortcut or terminal.
-            args+=(--name espi-live --console --onefile)
+            args+=(--name espi-live --console --onedir --contents-directory "_internal-$BUILD_NUMBER")
           fi
           python -m PyInstaller "${args[@]}" src/espi_live/__main__.py
 
       # --help exercises the launcher; --check also imports the Qt front end, the
       # engine, OpenCV, NumPy and PySpin (when bundled) without opening a window,
       # so it catches a binary that is missing bundled modules or shared libraries.
+      # The program folder must hold only the executable and _internal-N, the
+      # layout the updater accepts (updater.move_in_library).
       - name: Smoke test the binary
         shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
           case "$RUNNER_OS" in
-            Windows) exe=dist/espi-live.exe ;;
+            Windows) exe=dist/espi-live/espi-live.exe ;;
             macOS)   exe="dist/ESPI Live.app/Contents/MacOS/ESPI Live" ;;
-            *)       exe=dist/espi-live ;;
+            *)       exe=dist/espi-live/espi-live ;;
           esac
           "$exe" --help
           "$exe" --version
           "$exe" --check
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            shopt -s dotglob
+            entries=(dist/espi-live/*)
+            if [ "${#entries[@]}" -ne 2 ] || [ ! -f "$exe" ] || [ ! -d "dist/espi-live/_internal-$BUILD_NUMBER" ]; then
+              echo "::error::dist/espi-live must hold only $(basename "$exe") and _internal-$BUILD_NUMBER, not: ${entries[*]##*/}"
+              exit 1
+            fi
+          fi
 
-      # Each archive holds exactly one entry (the executable or the .app),
-      # which is what the updater expects to unpack.
+      # Each archive holds one entry, which the updater unpacks: the espi-live
+      # program folder (Windows, Linux) or the .app bundle (macOS).
       - name: Package
         shell: bash
         run: |
           mkdir release
           case "$RUNNER_OS" in
-            Windows) (cd dist && 7z a -tzip "../release/${{ matrix.asset }}" espi-live.exe) ;;
+            Windows) (cd dist && 7z a -tzip "../release/${{ matrix.asset }}" espi-live) ;;
             macOS)   ditto -c -k --keepParent "dist/ESPI Live.app" "release/${{ matrix.asset }}" ;;
             *)       tar czf "release/${{ matrix.asset }}" -C dist espi-live ;;
           esac
@@ -413,10 +459,11 @@ jobs:
 
   publish:
     name: Publish release
-    # "hold" is skipped for hand-started runs, which would otherwise skip this
-    # job too; it only has to be finished so it cannot undo the publishing.
+    # "hold" is skipped unless a draft was published by hand, which would
+    # otherwise skip this job too; it only has to be finished so it cannot undo
+    # the publishing. A hand-started run with "Publish" unticked stops before it.
     needs: [version, build, hold]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.publish) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create or edit the release (and its tag)
@@ -428,7 +475,12 @@ jobs:
           pattern: espi-live-*
           merge-multiple: true
 
-      # The updater reads this to decide whether to update and to verify the download.
+      # The updater reads this to decide whether to update and to verify the
+      # download. The archives' sums go under "archives". The single-file builds
+      # (build 6 and earlier) read "sha256" instead, which is left out on
+      # purpose: their updater would put the new program folder where their
+      # executable was, so they must find no archive (they report "build N has
+      # no <archive>" and are downloaded once by hand).
       - name: Write build-info.json
         env:
           BUILD_NUMBER: ${{ github.run_number }}
@@ -441,7 +493,7 @@ jobs:
               with open(os.path.join("release", name), "rb") as handle:
                   sums[name] = hashlib.sha256(handle.read()).hexdigest()
           info = {"build": int(os.environ["BUILD_NUMBER"]), "commit": os.environ["SHA"],
-                  "sha256": sums}
+                  "archives": sums}
           with open("release/build-info.json", "w") as out:
               json.dump(info, out, indent=2)
           print(json.dumps(info, indent=2))
@@ -449,10 +501,11 @@ jobs:
 
       # A published draft already exists (named, tagged and described by
       # release-drafter): attach the archives, append the build facts to its
-      # notes and publish it. A hand-started run creates the release itself,
-      # tagged by the "version" job, with GitHub's generated notes appended to
-      # the typed notes and build facts; after a full release it re-runs
-      # release-drafter so the draft proposes the version after this one.
+      # notes and publish it. A merge or a hand-started run creates the release
+      # itself, tagged by the "version" job, with GitHub's generated notes
+      # appended to any typed notes and the build facts; after a full release
+      # it re-runs release-drafter so the draft proposes the version after this
+      # one.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -484,10 +537,10 @@ jobs:
             cat <<EOF
           $kind from $source, commit \`${SHA:0:7}\`, build $BUILD_NUMBER. Build log: $RUN_URL
 
-          - **Windows** (\`espi-live-windows-x64.zip\`) and **Linux** (\`espi-live-linux-x64.tar.gz\`) include PySpin, so they can open a real camera. Run \`espi-live --demo\` for synthetic video without one.
+          - **Windows** (\`espi-live-windows-x64.zip\`) and **Linux** (\`espi-live-linux-x64.tar.gz\`) include PySpin, so they can open a real camera. Each unpacks to an \`espi-live\` folder: run \`espi-live.exe\` (\`espi-live\` on Linux) inside it, and keep the folder together, since the program loads its libraries from the \`_internal-$BUILD_NUMBER\` folder beside it. Add \`--demo\` for synthetic video without a camera.
           - **macOS** (\`espi-live-macos-arm64.zip\`) is demo-only: there is no macOS PySpin wheel. The app is unsigned; after unzipping run \`xattr -cr "ESPI Live.app"\` or right-click > Open.
-          - Installed copies update themselves to the newest full release (Help > Check for updates, or \`espi-live --update\`).
-          - Output (\`output/logs\`, \`output/frames\`, \`output/recordings\`) is written next to the executable (next to the .app on macOS).
+          - Installed copies update themselves to the newest full release (Help > Check for updates, or \`espi-live --update\`). Copies that are a single \`espi-live.exe\` file (build 6 and earlier) cannot update to the folder layout: download this release once by hand.
+          - Output (\`output/logs\`, \`output/frames\`, \`output/recordings\`) is written in the \`espi-live\` folder, next to the executable (next to the .app on macOS).
           EOF
           } > notes.md
 

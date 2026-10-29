@@ -30,8 +30,8 @@ docs/
   camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition research notes
   notes/              development notes and reports
 third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
-.github/workflows/    release-drafter.yml: keeps a draft release (next version, notes) up to date;
-                      build-binaries.yml: tests and builds PyInstaller binaries when a release is published;
+.github/workflows/    build-binaries.yml: tests, builds and releases PyInstaller binaries after every merge into main;
+                      release-drafter.yml: regenerates the draft release (next version, notes) after a release or by hand;
                       enrich-feature-request.yml: Copilot enrichment of feature-request issues
 research/             physics background: talks, notebooks, papers, earlier code (local only, git-ignored)
 archive/              superseded app versions and old scripts, kept for history
@@ -45,15 +45,17 @@ The FLIR Spinnaker SDK (installers, PySpin wheels, docs and official Examples) i
 
 ## Prebuilt binaries
 
-Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed.
+Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed. The Windows and Linux archives each hold an `espi-live` folder: run `espi-live.exe` (`espi-live` on Linux) inside it, and keep the folder together, because the program loads its libraries from the `_internal-N` folder beside it (N is the build number). Nothing is unpacked at startup, unlike the single-file builds up to build 6, which extracted everything to a temporary folder on every start.
 
-Releases are approved by publishing a draft:
+Every merge into `main` is released:
 
-1. `.github/workflows/release-drafter.yml` keeps one **draft release** up to date. After every merge into `main` it lists the merged pull requests as the notes and proposes the next version tag (`vX.Y.Z`) from their labels: `enhancement` raises the minor version, `major` the major version, anything else the patch version; `skip-changelog` leaves a pull request out. The notes are rewritten on every merge, so change a pull request's title or labels rather than editing the draft.
-2. To release, open **Releases**, open the draft, check the tag and notes, and click **Publish release** (tick **Set as a pre-release** for a test build that installed copies are not offered). Publishing creates the tag on `main` and starts `.github/workflows/build-binaries.yml`.
-3. That workflow turns the release back into a draft while it works, runs the test suite on Linux, builds self-contained PyInstaller binaries for Windows, Linux and macOS, attaches them and publishes the release again. If a test fails or line coverage of `src/espi_live/` is below 100%, or a build fails, nothing is attached and the release stays a draft: delete its tag (`git push origin --delete vX.Y.Z`), fix the problem and publish again.
+1. `.github/workflows/build-binaries.yml` (**Release** in Actions) runs after every merge. It first rewrites the **draft release** with release-drafter: the pull requests merged since the last release become the draft's notes, and their labels pick the next version tag (`vX.Y.Z`): `enhancement` raises the minor version, `major` the major version, anything else the patch version; `skip-changelog` leaves a pull request out. Label a pull request before merging it.
+2. It runs the test suite on Linux, builds self-contained PyInstaller binaries for Windows, Linux and macOS, and creates the release with that tag, the binaries attached and GitHub's generated release notes (the pull requests merged since the previous release, grouped by `.github/release.yml` with the same labels as the drafter). Installed copies are offered it at once. If a test fails or line coverage of `src/espi_live/` is below 100%, or a build fails, nothing is released, and the next merge's release includes this one's changes.
+3. A merge that lands while a release is building waits for it. When several wait, GitHub keeps only the newest run, and its release covers all of them.
 
-Merging into `main` does not build anything. A release can also be started by hand: open **Actions > Release > Run workflow**, pick the branch and run it. It is tagged with a version: the one typed into **Version** (`vX.Y.Z`), or else the version the draft proposes, or else the next patch version after the newest release; a version whose tag already exists is skipped. When the branch is not `main` or **Pre-release** is ticked it is a pre-release tagged `vX.Y.Z-pre.N` (N is the workflow run number), which installed copies are not offered and which leaves `vX.Y.Z` for the real release. After a full release the draft is refreshed to propose the next version. Its notes are GitHub's generated release notes (the pull requests merged since the previous release, grouped by `.github/release.yml` with the same labels as the drafter), below anything typed into **Notes**.
+The draft release (on **Releases**) previews the next version. Publishing it by hand still works: it creates the tag on `main` and starts the same workflow, which turns the release back into a draft while it works and publishes it again with the binaries attached (tick **Set as a pre-release** for a test build that installed copies are not offered). If that build fails the release stays a draft: delete its tag (`git push origin --delete vX.Y.Z`), fix the problem and publish again.
+
+A release can also be started by hand: open **Actions > Release > Run workflow**, pick the branch and run it. Untick **Publish** to only test and build the branch: the archives stay on the run's page as artifacts and nothing is released. Otherwise the release is tagged with a version: the one typed into **Version** (`vX.Y.Z`), or else the version the draft proposes, or else the next patch version after the newest release; a version whose tag already exists is skipped. When the branch is not `main` or **Pre-release** is ticked it is a pre-release tagged `vX.Y.Z-pre.N` (N is the workflow run number), which installed copies are not offered and which leaves `vX.Y.Z` for the real release. After a full release the draft is refreshed to propose the next version. Its notes are GitHub's generated release notes, below anything typed into **Notes**.
 
 | File | Camera support |
 |------|----------------|
@@ -61,14 +63,15 @@ Merging into `main` does not build anything. A release can also be started by ha
 | `espi-live-linux-x64.tar.gz` | PySpin 4.4 bundled (Ubuntu 24.04 build) |
 | `espi-live-macos-arm64.zip` | `--demo` only (no macOS PySpin wheel); unsigned, run `xattr -cr "ESPI Live.app"` after unzipping |
 
-Output goes to `output/` next to the executable (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
+Output goes to `output/` next to the executable, inside the `espi-live` folder (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
 
 ### Automatic updates
 
 Prebuilt copies update themselves to the newest full release (pre-releases are skipped). At startup the Qt interface checks GitHub in the background; when a newer build exists, a blue **Update available** button appears in the status bar (and in the log). Clicking it downloads the build while measurement continues, verifies its SHA-256, then offers to restart: the app finishes any recording, releases the camera, swaps in the new build and starts it with the same options. Choosing not to restart installs it when you close the app. **Help > Check for updates…** checks on demand; **Help > About** shows the build number.
 
 - `espi-live --update` updates without opening a window; `--version` prints the build; `--no-update-check` skips the startup check.
-- The program's folder must be writable: the new build is unpacked beside it, and the old copy is kept as `*.old` until the next start.
+- The program's folder must be writable: the new build is unpacked there, its `_internal-N` folder is moved in beside the running build's, and the executable is swapped, the running one being kept as `espi-live.exe.old` (Windows cannot overwrite or delete a running program or the libraries it has loaded). When the new build starts it deletes the old executable and then the old `_internal-N` folder by itself; while the old build is still closing it retries in the background for about a minute, and anything still in use then goes at the next start. `output/` and the token files are never touched, and the log lists what was removed.
+- Copies that are a single file (build 6 and earlier) cannot update themselves to the folder layout: their check reports `build N has no espi-live-windows-x64.zip` (or the Linux archive). Download a current release once by hand and unpack it where the old copy is. When the new build starts, it deletes an old single-file `espi-live.exe` (`espi-live` on Linux) in the folder above its own folder or the one above that (where Windows' **Extract all** puts it), with that copy's update leftovers. It deletes only files it recognizes as single-file builds of ESPI live, and the old copy's `output/` folder (recordings, frames, logs) stays where it is.
 - Builds are ordered by the workflow run number, so a copy never "updates" to an older build. Running from source never updates itself; use `git pull`.
 - The repository is public, so installed copies read releases without a token. The optional `UPDATE_TOKEN` repository secret (a fine-grained token with **Contents: read-only**) is baked in when set and only raises GitHub's API rate limit; `update-token.txt` beside the program or the `ESPI_UPDATE_TOKEN` environment variable overrides it.
 

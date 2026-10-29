@@ -1,16 +1,17 @@
-# Release Drafter configuration (see .github/workflows/release-drafter.yml).
+# Release Drafter configuration (used by .github/workflows/build-binaries.yml
+# and .github/workflows/release-drafter.yml).
 #
-# After every merge into main, the draft release is rewritten: the next version
-# is picked from the labels of the pull requests merged since the last release,
-# and their titles become the notes. Publishing the draft starts
-# .github/workflows/build-binaries.yml, which tests, builds and attaches the
-# binaries.
+# After every merge into main, build-binaries.yml rewrites the draft release
+# (the next version is picked from the labels of the pull requests merged
+# since the last release, and their titles become the notes), then tests,
+# builds and releases that version with the binaries attached. Publishing the
+# draft by hand starts the same workflow.
 #
 # Only "v..." releases count as previous releases; the old "build-N" releases
 # are ignored, otherwise their number would be read as a version (build-12 ->
 # 12.0.0). Pre-releases (hand-started test builds, tagged vX.Y.Z-pre.N) are not
-# counted either. A full release started by hand (tagged vX.Y.Z) is, and the
-# build workflow re-runs this drafter afterwards so the draft moves on.
+# counted either. Every full release (tagged vX.Y.Z) is, and the build
+# workflow re-runs this drafter afterwards so the draft moves on.
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 tag-prefix: 'v'
