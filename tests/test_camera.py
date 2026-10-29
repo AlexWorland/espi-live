@@ -535,6 +535,30 @@ class FormatCameraValuesTests(unittest.TestCase):
         self.assertEqual(
             text, "Applied: n/a, n/a; FPS set n/a, resulting n/a")
 
+    def test_session_describe_and_interlace(self):
+        """A Spinnaker session describes readings like the status line and is progressive.
+
+        Args: None.
+        Returns: None.
+        """
+        session = camera.CameraSession(ListLog())
+        values = {"exposure": 8000.0, "gain": 0.0, "requested": 30.0, "resulting": 29.9}
+        self.assertEqual(session.describe(values), camera.format_camera_values(values))
+        self.assertFalse(session.interlaced)
+
+    def test_camera_info_kinds(self):
+        """CameraInfo defaults to a Spinnaker camera; capture fields are optional.
+
+        Args: None.
+        Returns: None.
+        """
+        info = camera.CameraInfo("1", "BFS")
+        self.assertEqual((info.kind, info.index, info.backend, info.vid, info.pid, info.path),
+                         ("spinnaker", None, None, None, None, ""))
+        video = camera.CameraInfo("video 1", "USB-Live2", kind="capture", index=700,
+                                  backend=700, vid=0x2040, pid=0xC200, path="p")
+        self.assertEqual(video.label, "USB-Live2 (video 1)")
+
 
 class ReadIdentityTests(FakeSpinTestCase):
     """Model detection from the camera's identity nodes."""
