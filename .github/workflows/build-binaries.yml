@@ -15,8 +15,11 @@ name: Release
 #    tag (git push origin --delete vX.Y.Z), fix the problem and publish again.
 #
 # 2. By hand (Actions > Release > Run workflow), for a test build of any
-#    branch ("Use workflow from"). This creates release "build-N" itself; runs
-#    from branches other than main, and the checkbox, make it a pre-release.
+#    branch ("Use workflow from"). This creates the release itself, tagged
+#    with a version: the "version" input, or else the version the draft release
+#    proposes, or else the next patch version (see the "version" job). Runs from
+#    branches other than main, and the checkbox, make a pre-release tagged
+#    vX.Y.Z-pre.N, which leaves vX.Y.Z for the real release.
 #    Its notes are GitHub's generated notes (pull requests merged since the
 #    previous release, grouped by .github/release.yml), after any typed notes.
 #
@@ -32,6 +35,11 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      version:
+        description: "Version tag, e.g. v1.2.0 (optional: default is the draft release's version, or the next patch)"
+        type: string
+        required: false
+        default: ""
       notes:
         description: "Notes to put above the generated release notes (optional)"
         type: string
@@ -73,6 +81,73 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: gh release edit "$RELEASE_TAG" --draft
 
+  # Picks the release tag first, so a bad "version" input fails before the
+  # builds. A published release already has its tag. A hand-started run uses
+  # the "version" input, else the version release-drafter's draft proposes
+  # (from the merged pull requests' labels), else the next patch after the
+  # newest vX.Y.Z release; versions whose tag already exists are skipped. A
+  # pre-release gets "-pre.N" (N = run number) on that version.
+  version:
+    name: Choose the version tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only reads, but draft releases are visible only with write access
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      prerelease: ${{ steps.pick.outputs.prerelease }}
+    steps:
+      - name: Choose the tag
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          if [ "$EVENT" = "release" ]; then
+            echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "prerelease=$RELEASE_PRERELEASE" >> "$GITHUB_OUTPUT"
+            echo "Release $RELEASE_TAG"
+            exit 0
+          fi
+          prerelease=false
+          if [ "$PRERELEASE" = "true" ] || [ "$IS_MAIN" != "true" ]; then prerelease=true; fi
+
+          plain='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          tag_exists() { gh api "repos/$GH_REPO/git/ref/tags/$1" --silent 2>/dev/null; }
+          next_patch() { local ma mi pa; IFS=. read -r ma mi pa <<< "${1#v}"; echo "v$ma.$mi.$((pa + 1))"; }
+          releases() { gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select($1) | .tag_name"; }
+
+          if [ -n "$VERSION" ]; then
+            if [ "$prerelease" = "true" ]; then pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; else pattern="$plain"; fi
+            if ! [[ "$VERSION" =~ $pattern ]]; then
+              echo "::error::Version must look like v1.2.3 (a pre-release may add a suffix such as -pre.1), got '$VERSION'"
+              exit 1
+            fi
+            tag="$VERSION"
+          else
+            version=$(releases '.draft' | grep -E "$plain" | sort -V | tail -n 1 || true)
+            if [ -z "$version" ]; then
+              last=$(releases '(.draft or .prerelease) | not' | grep -E "$plain" | sort -V | tail -n 1 || true)
+              version=$(next_patch "${last:-v0.0.0}")
+            fi
+            while tag_exists "$version"; do version=$(next_patch "$version"); done
+            tag="$version"
+            if [ "$prerelease" = "true" ]; then tag="$version-pre.$BUILD_NUMBER"; fi
+          fi
+          if tag_exists "$tag"; then
+            echo "::error::Tag $tag already exists; pick another version"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Release $tag (pre-release: $prerelease)"
+
   # Gate for the whole release: no binary is built or published unless the
   # camera-free suite passes and covers every line of src/espi_live/
   # (.coveragerc sets fail_under = 100, so `coverage report` exits non-zero
@@ -113,7 +188,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
-    needs: test
+    needs: [test, version]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -340,11 +415,12 @@ jobs:
     name: Publish release
     # "hold" is skipped for hand-started runs, which would otherwise skip this
     # job too; it only has to be finished so it cannot undo the publishing.
-    needs: [build, hold]
+    needs: [version, build, hold]
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create or edit the release (and its tag)
+      actions: write # re-run release-drafter after a hand-started release
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -373,8 +449,10 @@ jobs:
 
       # A published draft already exists (named, tagged and described by
       # release-drafter): attach the archives, append the build facts to its
-      # notes and publish it. A hand-started run creates "build-N" instead,
-      # with GitHub's generated notes appended to the typed notes and build facts.
+      # notes and publish it. A hand-started run creates the release itself,
+      # tagged by the "version" job, with GitHub's generated notes appended to
+      # the typed notes and build facts; after a full release it re-runs
+      # release-drafter so the draft proposes the version after this one.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -383,25 +461,20 @@ jobs:
           SHA: ${{ env.BUILD_REF }}
           BUILD_NUMBER: ${{ github.run_number }}
           BRANCH: ${{ github.ref_name }}
-          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
-          PRERELEASE: ${{ inputs.prerelease }}
           USER_NOTES: ${{ inputs.notes }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          TAG: ${{ needs.version.outputs.tag }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
           RELEASE_BODY: ${{ github.event.release.body }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ "$EVENT" = "release" ]; then
-            prerelease="$RELEASE_PRERELEASE"
-            source="tag \`$RELEASE_TAG\`"
+            source="tag \`$TAG\`"
             intro="$RELEASE_BODY"
           else
-            prerelease=false
-            if [ "$PRERELEASE" = "true" ] || [ "$IS_MAIN" != "true" ]; then prerelease=true; fi
             source="\`$BRANCH\`"
             intro="$USER_NOTES"
           fi
-          if [ "$prerelease" = "true" ]; then
+          if [ "$PRERELEASE" = "true" ]; then
             kind="Pre-release (not offered to installed copies)"
           else
             kind="Release"
@@ -419,17 +492,19 @@ jobs:
           } > notes.md
 
           if [ "$EVENT" = "release" ]; then
-            gh release upload "$RELEASE_TAG" release/* --clobber
-            flags=(--draft=false --notes-file notes.md --prerelease="$prerelease")
-            if [ "$prerelease" != "true" ]; then flags+=(--latest); fi
-            gh release edit "$RELEASE_TAG" "${flags[@]}"
+            gh release upload "$TAG" release/* --clobber
+            flags=(--draft=false --notes-file notes.md --prerelease="$PRERELEASE")
+            if [ "$PRERELEASE" != "true" ]; then flags+=(--latest); fi
+            gh release edit "$TAG" "${flags[@]}"
           else
             flags=()
-            if [ "$prerelease" = "true" ]; then flags+=(--prerelease); else flags+=(--latest); fi
-            gh release create "build-$BUILD_NUMBER" release/* \
+            if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); else flags+=(--latest); fi
+            gh release create "$TAG" release/* \
               --target "$SHA" \
-              --title "Build $BUILD_NUMBER" \
+              --title "$TAG" \
               --notes-file notes.md \
               --generate-notes \
               "${flags[@]}"
+            # A run started with the workflow's token is allowed for workflow_dispatch.
+            if [ "$PRERELEASE" != "true" ]; then gh workflow run release-drafter.yml --ref main; fi
           fi

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-29 — Releases started by hand get version tags
+
+### Previous state
+
+- A release started with **Actions > Release > Run workflow** was named **Build N** and tagged `build-N` after the workflow run number, while releases published from the draft were tagged `vX.Y.Z`.
+
+### Current state
+
+- Every release is tagged with a version. A hand-started run uses the new **Version** field (`vX.Y.Z`), or else the version the draft release proposes, or else the next patch version after the newest release, and skips any version whose tag already exists. The release is named after its tag.
+- Pre-releases (runs from a branch other than `main`, or with **Pre-release** ticked) are tagged `vX.Y.Z-pre.N`, so test builds don't use up the version number.
+- After a full release started by hand, the draft release is refreshed so it proposes the following version.
+- Installed copies are unaffected: they still order builds by the build number in `build-info.json`, not by tag, so they update from `build-N` releases to the new ones as usual.
+
 ## 2026-10-29 — Linux build installs the Spinnaker SDK again
 
 ### Previous state
