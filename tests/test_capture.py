@@ -225,6 +225,18 @@ class SessionStreamTests(CaptureTestCase):
         self.assertEqual(state, "error")
         self.assertIsInstance(error, RuntimeError)
 
+    def test_failed_read_waits_like_a_timeout(self):
+        """A failed read waits out the timeout, so an unplugged device cannot spin the loop.
+
+        Args: None.
+        Returns: None.
+        """
+        session, _, _ = self.open_session(frames=[bgr_frame(), None])
+        with mock.patch.object(capture.time, "sleep") as sleep:
+            _, state = session.grab(100)
+        self.assertEqual(state, "error")
+        sleep.assert_called_once_with(0.1)
+
     def test_grab_reports_opencv_errors(self):
         """An exception from the driver is returned as an error status.
 

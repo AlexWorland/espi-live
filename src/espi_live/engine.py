@@ -28,7 +28,8 @@ from dataclasses import dataclass, replace
 import cv2
 import numpy as np
 
-from espi_live.camera import CameraSession, format_camera_values, list_cameras
+from espi_live import sources
+from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
                                   gamma_lut, smooth_speckle,
                                   stretch_contrast, watermark_demo)
@@ -131,17 +132,20 @@ class WindowsPreviewTimer:
 class Engine:
     """Run camera or demo acquisition, ESPI processing and capture off the UI."""
 
-    def __init__(self, log, serial=None, tag=""):
+    def __init__(self, log, serial=None, tag="", info=None):
         """Create an idle engine.
 
         Args: log is an AppLog (or any object with write(message)); serial
-            selects a camera by serial number (None: the first camera); tag
-            is added to saved file names to tell cameras apart ("" for none).
+            selects a FLIR camera by serial number (None: the first camera);
+            tag is added to saved file names to tell cameras apart ("" for
+            none); info, when given, is the CameraInfo to open instead (a
+            FLIR camera or a video-capture device).
         Returns: None.
         """
         self.log = log
         self.serial = serial
         self.tag = tag
+        self.info = info
         self.camera_info = None  # CameraInfo of the opened camera
         self._open_after = None  # (predecessor engine,) when opening on the worker
         self.events = queue.SimpleQueue()
@@ -183,7 +187,8 @@ class Engine:
         Returns: None. Raises if PySpin or a camera is unavailable; the
             engine is then unchanged and use_demo() may be called.
         """
-        attempt = CameraSession(self.log, self.serial)
+        attempt = (sources.make_session(self.log, self.info) if self.info is not None
+                   else CameraSession(self.log, self.serial))
         attempt.open()
         self._attach_camera(attempt)
 
@@ -227,8 +232,7 @@ class Engine:
         for warning in identity.warnings():
             self.log.write(f"Camera note: {warning}")
         self.events.put(("camera_identity", identity))
-        self._set_status(demo=False, camera=format_camera_values(
-            session.read_values()))
+        self._set_status(demo=False, camera=session.describe(session.read_values()))
         self.events.put(("camera_limits", session.limits()))
 
     # ----- thread control ----------------------------------------------
@@ -491,7 +495,7 @@ class Engine:
                     values = self.camera.read_values()
                     resulting_fps = values["resulting"]
                     self._set_status(
-                        camera=format_camera_values(values),
+                        camera=self.camera.describe(values),
                         camera_fps=("Camera: n/a" if resulting_fps is None else
                                     f"Camera: {resulting_fps:.1f} fps"))
                     last_readback = now
@@ -677,10 +681,9 @@ class Engine:
         Returns: (processor, frame); fresh state on success, unchanged on
             failure so the synthetic stream keeps running.
         """
-        self.log.write("Searching for a FLIR camera to switch to live capture...")
-        attempt = CameraSession(self.log)
+        self.log.write("Searching for a camera to switch to live capture...")
         try:
-            attempt.open()
+            attempt = sources.open_first_live(self.log)
         except Exception as exc:
             self.log.write(f"Still in dummy mode: {exc}")
             self.events.put(("switch_failed", str(exc)))
@@ -695,12 +698,8 @@ class Engine:
         self._attach_camera(attempt)
         self._set_status(record="Recording: off",
                          range="Raw Mono8: no brightness scaling")
-        try:  # enumerate here so every PySpin call stays on this thread
-            cameras = list_cameras(self.log)
-        except Exception as exc:
-            self.log.write(f"Could not list the other cameras: {exc}")
-            cameras = []
-        self.events.put(("switched_live", cameras))
+        # enumerate here so every PySpin call stays on this thread
+        self.events.put(("switched_live", sources.detect_cameras(self.log)))
         self.log.write("LIVE CAPTURE ACTIVE: camera connected; demo ended.")
         self.log.write("Recording stopped for the source change; restart it if needed.")
         return ESPIProcessor(), None

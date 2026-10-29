@@ -1928,8 +1928,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
                 log.write(f"Camera startup unavailable: {exc}")
                 answer = QMessageBox.question(
                     None, "No camera detected",
-                    "No FLIR camera is available. Start dummy/demo mode with a "
-                    "synthetic example pattern?")
+                    "No FLIR camera or recognised capture adapter is available. "
+                    "Start dummy/demo mode with a synthetic example pattern?")
                 if answer != QMessageBox.Yes:
                     log.write("No camera detected; demo mode declined.")
                     return 0

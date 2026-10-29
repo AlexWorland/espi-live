@@ -13,7 +13,8 @@ and shows one of them.
 
 from dataclasses import asdict, replace
 
-from espi_live.camera import CameraInfo, list_cameras
+from espi_live import sources
+from espi_live.camera import CameraInfo
 from espi_live.engine import Engine, Settings
 
 
@@ -89,6 +90,16 @@ class Channel:
         return self.engine is not None
 
     @property
+    def supported(self):
+        """Report whether the viewer supports this channel's camera.
+
+        Args: None.
+        Returns: True for demo sources, FLIR cameras and recognised capture
+            adapters; False for other video devices.
+        """
+        return self.demo or sources.is_supported(self.info)
+
+    @property
     def demo(self):
         """Report whether the channel shows synthetic video.
 
@@ -105,8 +116,9 @@ class Channel:
         Args: None.
         Returns: An Engine whose settings match self.settings, recording off.
         """
-        engine = Engine(self.log, serial=None if self.demo_source else self.info.serial,
-                        tag=self.info.serial)
+        demo = bool(self.demo_source)
+        engine = Engine(self.log, serial=None if demo else self.info.serial,
+                        tag=self.info.serial, info=None if demo else self.info)
         engine.update_settings(**asdict(replace(self.settings, record=False)))
         return engine
 
@@ -181,19 +193,24 @@ class Channel:
 def open_camera_channels(log):
     """Detect the cameras and open the first one that works, for startup.
 
+    FLIR cameras are tried first, then recognised capture adapters; other
+    video devices are listed but never opened here.
+
     Args: log is the shared AppLog.
     Returns: A list of Channel, one per camera, with the first openable one
-        active (opened, not started). Raises when there is no camera or none
-        of them opens.
+        active (opened, not started). Raises when no camera may be opened
+        or none of them opens.
     """
-    channels = [Channel(log, info) for info in list_cameras(log)]
-    if not channels:
-        raise RuntimeError("No FLIR/Spinnaker cameras detected.")
+    infos = sources.detect_cameras(log)
+    channels = [Channel(log, info) for info in infos]
+    candidates = [channels[infos.index(info)] for info in sources.auto_open_order(infos)]
+    if not candidates:
+        raise RuntimeError("No FLIR camera or recognised capture adapter detected.")
     if len(channels) > 1:
         log.write(f"{len(channels)} cameras detected: "
                   + ", ".join(channel.label for channel in channels))
     error = None
-    for channel in channels:
+    for channel in candidates:
         try:
             channel.open()
             return channels

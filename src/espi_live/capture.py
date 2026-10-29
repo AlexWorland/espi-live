@@ -171,8 +171,9 @@ class CaptureSession:
     def grab(self, timeout_ms):
         """Wait for the next frame and convert it to Mono8.
 
-        Args: timeout_ms is accepted for CameraSession compatibility; OpenCV's
-            read() blocks for about one frame and cannot be bounded.
+        Args: timeout_ms is how long a failed read waits before returning, so
+            an unplugged device cannot spin the caller; OpenCV's read() itself
+            blocks for about one frame and cannot be bounded.
         Returns: (frame, "ok") with a 2-D uint8 array, or (exception,
             "error") when the device sent nothing or an unusable frame.
         """
@@ -181,6 +182,7 @@ class CaptureSession:
         except cv2.error as exc:
             return exc, "error"
         if not ok or frame is None:
+            time.sleep(timeout_ms / 1000.0)
             return RuntimeError("the capture device returned no frame"), "error"
         try:
             image = to_mono8(frame)
