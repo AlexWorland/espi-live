@@ -53,7 +53,7 @@ Releases are approved by publishing a draft:
 2. To release, open **Releases**, open the draft, check the tag and notes, and click **Publish release** (tick **Set as a pre-release** for a test build that installed copies are not offered). Publishing creates the tag on `main` and starts `.github/workflows/build-binaries.yml`.
 3. That workflow turns the release back into a draft while it works, runs the test suite on Linux, builds self-contained PyInstaller binaries for Windows, Linux and macOS, attaches them and publishes the release again. If a test fails or line coverage of `src/espi_live/` is below 100%, or a build fails, nothing is attached and the release stays a draft: delete its tag (`git push origin --delete vX.Y.Z`), fix the problem and publish again.
 
-Merging into `main` does not build anything. For a test build of any branch, open **Actions > Release > Run workflow**, pick the branch and run it: it publishes release **Build N** (tag `build-N`, where N is the workflow run number) as a pre-release when the branch is not `main` or **Pre-release** is ticked.
+Merging into `main` does not build anything. For a test build of any branch, open **Actions > Release > Run workflow**, pick the branch and run it: it publishes release **Build N** (tag `build-N`, where N is the workflow run number) as a pre-release when the branch is not `main` or **Pre-release** is ticked. Its notes are GitHub's generated release notes (the pull requests merged since the previous release, grouped by `.github/release.yml` with the same labels as the drafter), below anything typed into **Notes**.
 
 | File | Camera support |
 |------|----------------|

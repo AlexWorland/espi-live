@@ -17,6 +17,8 @@ name: Release
 # 2. By hand (Actions > Release > Run workflow), for a test build of any
 #    branch ("Use workflow from"). This creates release "build-N" itself; runs
 #    from branches other than main, and the checkbox, make it a pre-release.
+#    Its notes are GitHub's generated notes (pull requests merged since the
+#    previous release, grouped by .github/release.yml), after any typed notes.
 #
 # Either way, N is this workflow's run number, which build-info.json records and
 # the updater uses to order builds, so the tag name does not matter to it.
@@ -31,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       notes:
-        description: "Release notes (what changed for users)"
+        description: "Notes to put above the generated release notes (optional)"
         type: string
         required: false
         default: ""
@@ -359,7 +361,8 @@ jobs:
 
       # A published draft already exists (named, tagged and described by
       # release-drafter): attach the archives, append the build facts to its
-      # notes and publish it. A hand-started run creates "build-N" instead.
+      # notes and publish it. A hand-started run creates "build-N" instead,
+      # with GitHub's generated notes appended to the typed notes and build facts.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -415,5 +418,6 @@ jobs:
               --target "$SHA" \
               --title "Build $BUILD_NUMBER" \
               --notes-file notes.md \
+              --generate-notes \
               "${flags[@]}"
           fi
