@@ -1,4 +1,4 @@
-name: Build release
+name: Release
 
 # Builds self-contained PyInstaller binaries for Windows, Linux and macOS and
 # attaches them to a GitHub release. Merging into main does not build or
@@ -14,7 +14,7 @@ name: Build release
 #    again. If the tests or a build fail, the release stays a draft: delete its
 #    tag (git push origin --delete vX.Y.Z), fix the problem and publish again.
 #
-# 2. By hand (Actions > Build release > Run workflow), for a test build of any
+# 2. By hand (Actions > Release > Run workflow), for a test build of any
 #    branch ("Use workflow from"). This creates release "build-N" itself; runs
 #    from branches other than main, and the checkbox, make it a pre-release.
 #
