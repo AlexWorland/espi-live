@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-29 — Open in Codex
+
+### Previous state
+
+- Someone curious about how ESPI live works had to find the repository and read Python, and could suggest a change only in words, through **Request feature**.
+
+### Current state
+
+- Prebuilt copies download the source code of their own build into `espi-live-source/` next to the program, checked at every start (skipped with `--no-update-check`). A copy holding unsent changes is kept across updates.
+- An **Open in Codex** button in the status bar (and **Help > Ask Codex about the source code…**) opens OpenAI's Codex app on that folder, with instructions that make Codex answer from the real code in plain words. A first-use dialog explains it and links to the Codex download.
+- When the user asks Codex for a change and approves it, Codex runs the new `--send-changes` option, which files the change as a `codex-change` GitHub issue; the new `codex-change.yml` workflow applies it to a `codex/issue-<n>` branch and opens a pull request for the developers to review. The program still holds only an Issues token.
+
 ## 2026-10-29 — Fixed-position status bar
 
 ### Previous state
