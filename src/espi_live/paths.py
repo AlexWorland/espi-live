@@ -9,9 +9,9 @@ def resolve_project_root():
     """Find the folder that holds the run-time ``output/`` directory.
 
     From source this file lives at <project>/src/espi_live/paths.py. In a
-    PyInstaller build ``__file__`` points into a temporary extraction folder
-    that is deleted on exit, so outputs go beside the executable instead (or
-    beside the .app bundle on macOS).
+    PyInstaller build ``__file__`` points into the build's library folder
+    (``_internal-<build>``, deleted after the next update), so outputs go
+    beside the executable instead (or beside the .app bundle on macOS).
 
     Args: None.
     Returns: The absolute path of the output parent folder.

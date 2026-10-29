@@ -361,6 +361,8 @@ jobs:
 
       - name: Build with PyInstaller
         shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
           args=(--noconfirm --clean --paths src --distpath dist --workpath build)
           # camera.py imports PySpin lazily through importlib, so PyInstaller cannot see it.
@@ -371,34 +373,52 @@ jobs:
             # A .app bundle (onedir) is the supported macOS GUI form.
             args+=(--name "ESPI Live" --windowed --onedir --osx-bundle-identifier io.github.alexworland.espi-live)
           else
+            # A folder (onedir) starts at once, where a single self-extracting
+            # file unpacks everything to a temporary folder on every start. Each
+            # build keeps its libraries in its own _internal-N (N = build number)
+            # beside the executable: Windows cannot overwrite or delete the DLLs a
+            # running copy has loaded, so an update moves the new folder in beside
+            # the old one and swaps only the executable (see updater.py).
             # Keep the console: the app mirrors its log there and Windows users start it from a shortcut or terminal.
-            args+=(--name espi-live --console --onefile)
+            args+=(--name espi-live --console --onedir --contents-directory "_internal-$BUILD_NUMBER")
           fi
           python -m PyInstaller "${args[@]}" src/espi_live/__main__.py
 
       # --help exercises the launcher; --check also imports the Qt front end, the
       # engine, OpenCV, NumPy and PySpin (when bundled) without opening a window,
       # so it catches a binary that is missing bundled modules or shared libraries.
+      # The program folder must hold only the executable and _internal-N, the
+      # layout the updater accepts (updater.move_in_library).
       - name: Smoke test the binary
         shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
           case "$RUNNER_OS" in
-            Windows) exe=dist/espi-live.exe ;;
+            Windows) exe=dist/espi-live/espi-live.exe ;;
             macOS)   exe="dist/ESPI Live.app/Contents/MacOS/ESPI Live" ;;
-            *)       exe=dist/espi-live ;;
+            *)       exe=dist/espi-live/espi-live ;;
           esac
           "$exe" --help
           "$exe" --version
           "$exe" --check
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            shopt -s dotglob
+            entries=(dist/espi-live/*)
+            if [ "${#entries[@]}" -ne 2 ] || [ ! -f "$exe" ] || [ ! -d "dist/espi-live/_internal-$BUILD_NUMBER" ]; then
+              echo "::error::dist/espi-live must hold only $(basename "$exe") and _internal-$BUILD_NUMBER, not: ${entries[*]##*/}"
+              exit 1
+            fi
+          fi
 
-      # Each archive holds exactly one entry (the executable or the .app),
-      # which is what the updater expects to unpack.
+      # Each archive holds one entry, which the updater unpacks: the espi-live
+      # program folder (Windows, Linux) or the .app bundle (macOS).
       - name: Package
         shell: bash
         run: |
           mkdir release
           case "$RUNNER_OS" in
-            Windows) (cd dist && 7z a -tzip "../release/${{ matrix.asset }}" espi-live.exe) ;;
+            Windows) (cd dist && 7z a -tzip "../release/${{ matrix.asset }}" espi-live) ;;
             macOS)   ditto -c -k --keepParent "dist/ESPI Live.app" "release/${{ matrix.asset }}" ;;
             *)       tar czf "release/${{ matrix.asset }}" -C dist espi-live ;;
           esac
@@ -428,7 +448,12 @@ jobs:
           pattern: espi-live-*
           merge-multiple: true
 
-      # The updater reads this to decide whether to update and to verify the download.
+      # The updater reads this to decide whether to update and to verify the
+      # download. The archives' sums go under "archives". The single-file builds
+      # (build 6 and earlier) read "sha256" instead, which is left out on
+      # purpose: their updater would put the new program folder where their
+      # executable was, so they must find no archive (they report "build N has
+      # no <archive>" and are downloaded once by hand).
       - name: Write build-info.json
         env:
           BUILD_NUMBER: ${{ github.run_number }}
@@ -441,7 +466,7 @@ jobs:
               with open(os.path.join("release", name), "rb") as handle:
                   sums[name] = hashlib.sha256(handle.read()).hexdigest()
           info = {"build": int(os.environ["BUILD_NUMBER"]), "commit": os.environ["SHA"],
-                  "sha256": sums}
+                  "archives": sums}
           with open("release/build-info.json", "w") as out:
               json.dump(info, out, indent=2)
           print(json.dumps(info, indent=2))
@@ -484,10 +509,10 @@ jobs:
             cat <<EOF
           $kind from $source, commit \`${SHA:0:7}\`, build $BUILD_NUMBER. Build log: $RUN_URL
 
-          - **Windows** (\`espi-live-windows-x64.zip\`) and **Linux** (\`espi-live-linux-x64.tar.gz\`) include PySpin, so they can open a real camera. Run \`espi-live --demo\` for synthetic video without one.
+          - **Windows** (\`espi-live-windows-x64.zip\`) and **Linux** (\`espi-live-linux-x64.tar.gz\`) include PySpin, so they can open a real camera. Each unpacks to an \`espi-live\` folder: run \`espi-live.exe\` (\`espi-live\` on Linux) inside it, and keep the folder together, since the program loads its libraries from the \`_internal-$BUILD_NUMBER\` folder beside it. Add \`--demo\` for synthetic video without a camera.
           - **macOS** (\`espi-live-macos-arm64.zip\`) is demo-only: there is no macOS PySpin wheel. The app is unsigned; after unzipping run \`xattr -cr "ESPI Live.app"\` or right-click > Open.
-          - Installed copies update themselves to the newest full release (Help > Check for updates, or \`espi-live --update\`).
-          - Output (\`output/logs\`, \`output/frames\`, \`output/recordings\`) is written next to the executable (next to the .app on macOS).
+          - Installed copies update themselves to the newest full release (Help > Check for updates, or \`espi-live --update\`). Copies that are a single \`espi-live.exe\` file (build 6 and earlier) cannot update to the folder layout: download this release once by hand.
+          - Output (\`output/logs\`, \`output/frames\`, \`output/recordings\`) is written in the \`espi-live\` folder, next to the executable (next to the .app on macOS).
           EOF
           } > notes.md
 

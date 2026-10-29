@@ -5,23 +5,32 @@ CI writes ``_build_info.py`` before freezing (build number, commit, repository,
 the archive name for this platform and an optional read-only token for the
 repository) and publishes ``build-info.json`` with each archive's SHA-256 next
 to the archives. Only the newest full release is used: GitHub's "latest"
-release excludes pre-releases and drafts, so test builds are never offered. An update downloads the archive beside the installed copy,
-verifies it, unpacks it, then renames the running executable (or the .app
-bundle) to ``*.old`` and moves the new one into its place: a running Windows
-executable can be renamed but not overwritten. ``*.old`` is removed on the
-next start. No GUI imports: the front ends drive this module.
+release excludes pre-releases and drafts, so test builds are never offered.
+
+An update downloads the archive beside the installed copy, verifies it and
+unpacks it. On Windows and Linux the program is a folder holding the
+executable and ``_internal-<build>``, that build's libraries. Windows lets a
+running program's executable and loaded libraries be renamed but not
+overwritten or deleted, so the new build's ``_internal-<build>`` is moved in
+beside the running one, which is left alone, and only the executable is
+swapped: the running one is renamed to ``*.old``. On macOS the whole .app
+bundle is swapped that way. The next start deletes ``*.old`` and, once it is
+gone (proof on Windows that the old build has exited), the old build's
+``_internal-*`` folder. No GUI imports: the front ends drive this module.
 """
 
 import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import ssl
 import subprocess
 import sys
 import tarfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -38,6 +47,12 @@ TOKEN_FILE = "update-token.txt"
 TOKEN_ENV = "ESPI_UPDATE_TOKEN"
 OLD_SUFFIX = ".old"
 STAGING_PREFIX = ".espi-update-"
+# Each build's libraries, beside its executable (PyInstaller's
+# --contents-directory, set in build-binaries.yml).
+CONTENTS_PREFIX = "_internal-"
+CONTENTS_PATTERN = re.compile(re.escape(CONTENTS_PREFIX) + "[0-9]+")
+RENAME_ATTEMPTS = 10
+RENAME_WAIT_S = 0.5
 TIMEOUT_S = 20
 CHUNK_BYTES = 1 << 20
 
@@ -100,8 +115,9 @@ def install_target():
     """Find what an update replaces.
 
     Args: None.
-    Returns: The executable path, the .app bundle path on macOS, or None when
-        running from source.
+    Returns: The executable path (its build's _internal-<build> folder is
+        beside it), the .app bundle path on macOS, or None when running from
+        source.
     """
     if not getattr(sys, "frozen", False):
         return None
@@ -224,7 +240,10 @@ def select_update(manifest, assets, local_build, asset_name):
     remote_build = int(manifest.get("build", 0))
     if remote_build <= local_build:
         return None
-    digest = manifest.get("sha256", {}).get(asset_name)
+    # The single-file builds (build 6 and earlier) read the sums from "sha256",
+    # which newer manifests leave out: those builds would put the new program
+    # folder where their executable was, so they must not find an archive.
+    digest = manifest.get("archives", {}).get(asset_name)
     asset = assets.get(asset_name)
     if not digest or asset is None:
         raise UpdateError(f"build {remote_build} has no {asset_name}")
@@ -281,8 +300,9 @@ def unpack(archive, folder):
     permissions a .app bundle needs (zipfile drops both).
 
     Args: archive is a .zip or .tar.gz path; folder is an empty destination.
-    Returns: The path of the archive's single top-level entry. Raises
-        UpdateError if the archive is unreadable or holds something else.
+    Returns: The path of the archive's single top-level entry (the program
+        folder, or the .app bundle on macOS). Raises UpdateError if the
+        archive is unreadable or holds something else.
     """
     os.makedirs(folder, exist_ok=True)
     try:
@@ -350,31 +370,153 @@ def download_update(info, progress=None, target=None):
     return unpack(archive, os.path.join(staging, "unpacked"))
 
 
-def install_update(staged, target=None):
-    """Swap the unpacked build into place, keeping the old one as *.old.
+def discard(path):
+    """Delete a file or folder if possible (best effort).
 
-    Args: staged is the path download_update() returned; target overrides
-        install_target() (tests).
-    Returns: The installed path. Raises UpdateError if the swap fails (the
-        old copy is put back).
+    Args: path is the file or folder.
+    Returns: True when nothing is left at path.
     """
-    target = target or install_target()
-    if target is None:
-        raise UpdateError("running from source; update with git pull")
+    try:
+        remove_path(path)
+    except OSError:
+        pass  # still in use (Windows); retried on the next start
+    return not os.path.lexists(path)
+
+
+def move(source, destination):
+    """Rename a file or folder, retrying for a few seconds on Windows.
+
+    Antivirus and search indexing briefly open freshly unpacked files, and
+    while they do, Windows can refuse to rename them or the folder they are in.
+
+    Args: source and destination are paths on the same drive.
+    Returns: None. Raises OSError when the last attempt fails.
+    """
+    for attempt in range(RENAME_ATTEMPTS):
+        try:
+            os.rename(source, destination)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == RENAME_ATTEMPTS - 1:
+                raise
+            time.sleep(RENAME_WAIT_S)
+
+
+def same_path(first, second):
+    """Tell whether two paths name the same place.
+
+    Args: first and second are paths.
+    Returns: True when they are equal once made absolute (ignoring case on
+        Windows).
+    """
+    return (os.path.normcase(os.path.abspath(first))
+            == os.path.normcase(os.path.abspath(second)))
+
+
+def is_contents_folder(name):
+    """Tell whether a name is a build's library folder.
+
+    Args: name is a file or folder name.
+    Returns: True for names such as "_internal-12".
+    """
+    return CONTENTS_PATTERN.fullmatch(name) is not None
+
+
+def running_contents():
+    """Find the library folder the running build loaded.
+
+    Args: None.
+    Returns: PyInstaller's sys._MEIPASS as an absolute path (the
+        _internal-<build> folder of a Windows or Linux build), or None from
+        source.
+    """
+    folder = getattr(sys, "_MEIPASS", None)
+    return os.path.abspath(folder) if folder else None
+
+
+def replace_entry(new, target):
+    """Swap a file or folder into place, keeping the current one as *.old.
+
+    A running Windows executable can be renamed but not overwritten, so the
+    current one is renamed out of the way first.
+
+    Args: new is the replacement; target is the path it takes.
+    Returns: None. Raises UpdateError if the swap fails (target is put back).
+    """
     backup = target + OLD_SUFFIX
     try:
         remove_path(backup)
-        os.rename(target, backup)
+        move(target, backup)
     except OSError as exc:
         raise UpdateError(f"cannot replace {target} ({exc}); close other "
                           "running copies and try again") from exc
     try:
-        os.rename(staged, target)
+        move(new, target)
     except OSError as exc:
-        os.rename(backup, target)
+        move(backup, target)
         raise UpdateError(f"cannot install the new build: {exc}") from exc
-    if os.path.isfile(target) and os.name != "nt":
-        os.chmod(target, 0o755)
+
+
+def move_in_library(staged, target):
+    """Move a new build's _internal-<build> folder in beside the running one.
+
+    The unpacked program folder must hold exactly the executable and one
+    library folder (what CI packs), and that folder must not be the running
+    build's own.
+
+    Args: staged is the unpacked program folder; target is the installed
+        executable.
+    Returns: The path of the library folder now beside target. Raises
+        UpdateError if the update holds anything else or the move fails.
+    """
+    program = os.path.basename(target)
+    if os.path.isdir(staged):
+        names = sorted(os.listdir(staged))
+    else:
+        names = [os.path.basename(staged)]
+    libraries = [name for name in names if is_contents_folder(name)]
+    if len(libraries) != 1 or sorted([program, *libraries]) != names:
+        raise UpdateError(f"unexpected update contents {names}; expected {program} "
+                          f"and one {CONTENTS_PREFIX}<build> folder")
+    library = os.path.join(os.path.dirname(target), libraries[0])
+    own = running_contents()
+    if own and same_path(library, own):
+        raise UpdateError(f"the update would replace {libraries[0]}, which the "
+                          "running build uses")
+    try:
+        remove_path(library)  # left over from an interrupted update
+        move(os.path.join(staged, libraries[0]), library)
+    except OSError as exc:
+        raise UpdateError(f"cannot move {libraries[0]} into place: {exc}") from exc
+    return library
+
+
+def install_update(staged, target=None):
+    """Put the unpacked build in place, keeping the running one as *.old.
+
+    For an executable, the new build's library folder is moved in beside the
+    running build's first and the executable is swapped second; the old
+    library folder stays until the next start. A .app bundle is swapped whole.
+
+    Args: staged is the path download_update() returned; target overrides
+        install_target() (tests).
+    Returns: The installed path. Raises UpdateError if the swap fails (the
+        running copy is left as it was).
+    """
+    target = target or install_target()
+    if target is None:
+        raise UpdateError("running from source; update with git pull")
+    if target.endswith(".app"):
+        replace_entry(staged, target)
+    else:
+        library = move_in_library(staged, target)
+        try:
+            replace_entry(os.path.join(staged, os.path.basename(target)), target)
+        except UpdateError:
+            discard(library)
+            raise
+        if os.name != "nt":
+            os.chmod(target, 0o755)
     cleanup_previous_update(target, keep_backup=True)
     return target
 
@@ -382,32 +524,43 @@ def install_update(staged, target=None):
 def cleanup_previous_update(target=None, keep_backup=False):
     """Remove leftovers of an earlier update (best effort).
 
+    Old library folders go only after the old executable (*.old): Windows
+    cannot delete an executable while it runs, so a build that is still
+    shutting down keeps its libraries until a later start.
+
     Args: target overrides install_target() (tests); keep_backup leaves the
-        *.old copy, which is still running right after an install.
+        *.old copy and every library folder, which are in use right after an
+        install.
     Returns: None.
     """
     target = target or install_target()
     if target is None:
         return
     folder = os.path.dirname(target)
-    leftovers = [] if keep_backup else [target + OLD_SUFFIX]
     try:
-        leftovers += [os.path.join(folder, name) for name in os.listdir(folder)
-                      if name.startswith(STAGING_PREFIX)]
+        names = os.listdir(folder)
     except OSError:
         return
-    for path in leftovers:
-        try:
-            remove_path(path)
-        except OSError:
-            pass  # still in use (Windows); retried on the next start
+    for name in names:
+        if name.startswith(STAGING_PREFIX):
+            discard(os.path.join(folder, name))
+    if keep_backup or not discard(target + OLD_SUFFIX):
+        return
+    own = running_contents()
+    if own is None or not same_path(os.path.dirname(own), folder):
+        return  # only a build running from a library folder here tidies them
+    for name in names:
+        path = os.path.join(folder, name)
+        if is_contents_folder(name) and not same_path(path, own):
+            discard(path)
 
 
 def relaunch(args, target=None):
     """Start the installed build as a new, independent process.
 
     Call after the engine has released the camera. PYINSTALLER_RESET_ENVIRONMENT
-    stops the new onefile build reusing this process's extraction folder.
+    makes the new build start as a separate program instead of inheriting this
+    process's PyInstaller state.
 
     Args: args are the command-line arguments to pass on; target overrides
         install_target() (tests).

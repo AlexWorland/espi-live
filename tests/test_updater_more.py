@@ -34,13 +34,17 @@ def http_error(code):
     return urllib.error.HTTPError("https://x.invalid", code, "msg", {}, io.BytesIO())
 
 
-def frozen(exe):
+def frozen(exe, library=None):
     """Patch sys so the program looks like a frozen build at exe.
 
-    Args: exe is the fake executable path.
-    Returns: An ExitStack-free tuple context via mock.patch.multiple helpers.
+    Args: exe is the fake executable path; library is the _internal-<build>
+        folder it loaded (PyInstaller's sys._MEIPASS), if any.
+    Returns: The active mock.patch.multiple context manager.
     """
-    return mock.patch.multiple(sys, frozen=True, executable=exe, create=True)
+    values = {"frozen": True, "executable": exe}
+    if library:
+        values["_MEIPASS"] = library
+    return mock.patch.multiple(sys, create=True, **values)
 
 
 class BuildInfoTests(unittest.TestCase):
@@ -271,7 +275,7 @@ class CheckForUpdateTests(unittest.TestCase):
         self.release = {"assets": [
             {"name": updater.MANIFEST_NAME, "url": "https://api/manifest", "size": 1},
             {"name": ASSET, "url": "https://api/asset", "size": 50}]}
-        self.manifest = {"build": 8, "commit": "feedface00", "sha256": {ASSET: "AA" * 32}}
+        self.manifest = {"build": 8, "commit": "feedface00", "archives": {ASSET: "AA" * 32}}
 
     def fake_responses(self, *payloads):
         """Patch open_url to return JSON payloads in order.
@@ -640,6 +644,54 @@ class InstallEdgeTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = self.tmp.name
 
+    def write(self, path, text):
+        """Write a small text file, creating its folder.
+
+        Args: path is the file; text is its content.
+        Returns: path.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write(text)
+        return path
+
+    def read(self, path):
+        """Read a small text file.
+
+        Args: path is the file.
+        Returns: Its text.
+        """
+        with open(path) as handle:
+            return handle.read()
+
+    def install_folder(self, build=6):
+        """Create an installed program folder that is running build.
+
+        Args: build is the running build's number.
+        Returns: (executable path, library folder path).
+        """
+        target = self.write(os.path.join(self.root, "espi"), "old")
+        library = os.path.join(self.root, f"_internal-{build}")
+        self.write(os.path.join(library, "lib"), f"lib {build}")
+        return target, library
+
+    def staged_folder(self, *names):
+        """Create an unpacked program folder: files, plus folders for
+        _internal-* names.
+
+        Args: names are its top-level entries.
+        Returns: The folder path.
+        """
+        updater.remove_path(os.path.join(self.root, "stage"))
+        staged = os.path.join(self.root, "stage", "espi")
+        os.makedirs(staged)
+        for name in names:
+            if updater.is_contents_folder(name):
+                self.write(os.path.join(staged, name, "lib"), f"new {name}")
+            else:
+                self.write(os.path.join(staged, name), "new")
+        return staged
+
     def test_source_run_cannot_install(self):
         """Without an install target install refuses.
 
@@ -655,15 +707,111 @@ class InstallEdgeTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        target = os.path.join(self.root, "espi")
-        staged = os.path.join(self.root, "new")
-        for path, text in ((target, "old"), (staged, "new")):
-            with open(path, "w") as handle:
-                handle.write(text)
-        with frozen(target):
+        target, library = self.install_folder()
+        staged = self.staged_folder("espi", "_internal-7")
+        with frozen(target, library):
             self.assertEqual(updater.install_update(staged), target)
-        with open(target) as handle:
-            self.assertEqual(handle.read(), "new")
+        self.assertEqual(self.read(target), "new")
+        self.assertEqual(self.read(os.path.join(self.root, "_internal-7", "lib")),
+                         "new _internal-7")
+
+    def test_update_must_hold_the_program_and_one_library_folder(self):
+        """Anything but the executable plus one _internal-<build> is refused
+        before the installed copy is touched.
+
+        Args: None.
+        Returns: None.
+        """
+        layouts = (("_internal-7",), ("espi",), ("espi", "_internal-7", "README.txt"),
+                   ("espi", "_internal-7", "_internal-8"), ("espi", "_internal-x"))
+        for names in layouts:
+            with self.subTest(names=names):
+                target, library = self.install_folder()
+                with frozen(target, library), self.assertRaises(updater.UpdateError) as ctx:
+                    updater.install_update(self.staged_folder(*names))
+                self.assertIn("unexpected update contents", str(ctx.exception))
+                self.assertEqual(sorted(os.listdir(self.root)),
+                                 ["_internal-6", "espi", "stage"])
+
+    def test_single_file_update_is_refused(self):
+        """A one-file archive (the old layout) is not installed over a folder build.
+
+        Args: None.
+        Returns: None.
+        """
+        target, library = self.install_folder()
+        staged = self.write(os.path.join(self.root, "stage", "espi"), "one file")
+        with frozen(target, library), self.assertRaises(updater.UpdateError):
+            updater.install_update(staged)
+        self.assertEqual(self.read(target), "old")
+
+    def test_running_library_folder_is_never_replaced(self):
+        """An update whose library folder has the running build's name is refused.
+
+        Args: None.
+        Returns: None.
+        """
+        target, library = self.install_folder(build=7)
+        with frozen(target, library), self.assertRaises(updater.UpdateError) as ctx:
+            updater.install_update(self.staged_folder("espi", "_internal-7"))
+        self.assertIn("running build uses", str(ctx.exception))
+        self.assertEqual(self.read(os.path.join(library, "lib")), "lib 7")
+        self.assertEqual(self.read(target), "old")
+
+    def test_library_left_by_an_interrupted_update_is_replaced(self):
+        """A stale _internal-<new build> from an earlier attempt is overwritten.
+
+        Args: None.
+        Returns: None.
+        """
+        target, library = self.install_folder()
+        self.write(os.path.join(self.root, "_internal-7", "junk"), "partial")
+        with frozen(target, library):
+            updater.install_update(self.staged_folder("espi", "_internal-7"))
+        self.assertEqual(os.listdir(os.path.join(self.root, "_internal-7")), ["lib"])
+
+    def test_library_move_failure_leaves_program_untouched(self):
+        """If the library folder cannot be moved in, nothing is swapped.
+
+        Args: None.
+        Returns: None.
+        """
+        target, library = self.install_folder()
+        staged = self.staged_folder("espi", "_internal-7")
+        with frozen(target, library), \
+                mock.patch.object(updater, "move", side_effect=OSError("locked")), \
+                self.assertRaises(updater.UpdateError) as ctx:
+            updater.install_update(staged)
+        self.assertIn("cannot move _internal-7 into place: locked", str(ctx.exception))
+        self.assertEqual(self.read(target), "old")
+
+    def test_failed_program_swap_removes_the_new_library(self):
+        """If the executable cannot be swapped, the moved-in library goes again.
+
+        Args: None.
+        Returns: None.
+        """
+        target, library = self.install_folder()
+        staged = self.staged_folder("espi", "_internal-7")
+        with frozen(target, library), \
+                mock.patch.object(updater, "replace_entry",
+                                  side_effect=updater.UpdateError("busy")), \
+                self.assertRaises(updater.UpdateError):
+            updater.install_update(staged)
+        self.assertEqual(sorted(os.listdir(self.root)), ["_internal-6", "espi", "stage"])
+
+    def test_failed_swap_puts_the_old_entry_back(self):
+        """If the new entry cannot be moved in, the current one is restored.
+
+        Args: None.
+        Returns: None.
+        """
+        target = self.write(os.path.join(self.root, "espi"), "old")
+        with self.assertRaises(updater.UpdateError) as ctx:
+            updater.replace_entry(os.path.join(self.root, "missing"), target)
+        self.assertIn("cannot install the new build", str(ctx.exception))
+        self.assertEqual(self.read(target), "old")
+        self.assertFalse(os.path.exists(target + updater.OLD_SUFFIX))
 
     def test_bundle_directory_is_swapped_and_old_one_kept(self):
         """A .app folder is renamed to .old and the new folder moved in.
@@ -685,15 +833,11 @@ class InstallEdgeTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        target = os.path.join(self.root, "espi")
-        staged = os.path.join(self.root, "new")
-        for path, text in ((target, "cur"), (staged, "new"),
-                           (target + updater.OLD_SUFFIX, "stale")):
-            with open(path, "w") as handle:
-                handle.write(text)
-        updater.install_update(staged, target=target)
-        with open(target + updater.OLD_SUFFIX) as handle:
-            self.assertEqual(handle.read(), "cur")
+        target, library = self.install_folder()
+        self.write(target + updater.OLD_SUFFIX, "stale")
+        with frozen(target, library):
+            updater.install_update(self.staged_folder("espi", "_internal-7"))
+        self.assertEqual(self.read(target + updater.OLD_SUFFIX), "old")
 
     def test_unrenamable_target_is_reported(self):
         """If the running copy cannot be renamed the swap is refused.
@@ -701,11 +845,10 @@ class InstallEdgeTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        target = os.path.join(self.root, "espi")
-        open(target, "w").close()
+        target = self.write(os.path.join(self.root, "espi"), "old")
         with mock.patch.object(updater.os, "rename", side_effect=OSError("busy")), \
                 self.assertRaises(updater.UpdateError) as ctx:
-            updater.install_update("/staged", target=target)
+            updater.replace_entry("/staged", target)
         self.assertIn("close other running copies", str(ctx.exception))
 
     def test_cleanup_without_target_does_nothing(self):
@@ -762,6 +905,95 @@ class InstallEdgeTests(unittest.TestCase):
         open(target + updater.OLD_SUFFIX, "w").close()
         with mock.patch.object(updater, "remove_path", side_effect=OSError("in use")):
             updater.cleanup_previous_update(target)
+
+    def test_old_library_waits_until_old_program_is_deleted(self):
+        """While *.old cannot be deleted (on Windows: it still runs), the old
+        build's library folder stays; a later start removes both.
+
+        Args: None.
+        Returns: None.
+        """
+        target, old_library = self.install_folder()
+        new_library = os.path.join(self.root, "_internal-7")
+        os.makedirs(new_library)
+        self.write(target + updater.OLD_SUFFIX, "old program")
+        real_remove = updater.remove_path
+
+        def remove(path):
+            """Refuse to delete the old program, as Windows does while it runs.
+
+            Args: path is what cleanup deletes.
+            Returns: None. Raises PermissionError for the *.old program.
+            """
+            if path.endswith(updater.OLD_SUFFIX):
+                raise PermissionError("in use")
+            real_remove(path)
+
+        with frozen(target, new_library), \
+                mock.patch.object(updater, "remove_path", side_effect=remove):
+            updater.cleanup_previous_update()
+        self.assertTrue(os.path.isdir(old_library))
+        with frozen(target, new_library):
+            updater.cleanup_previous_update()
+        self.assertEqual(sorted(os.listdir(self.root)), ["_internal-7", "espi"])
+
+    def test_library_folders_stay_unless_running_from_one_here(self):
+        """Source runs and builds whose libraries are elsewhere (a .app) never
+        delete _internal-* folders.
+
+        Args: None.
+        Returns: None.
+        """
+        target, library = self.install_folder()
+        elsewhere = os.path.join(self.root, "ESPI.app", "Contents", "Frameworks")
+        for running in (None, elsewhere):
+            with self.subTest(running=running), frozen(target, running):
+                updater.cleanup_previous_update()
+                self.assertTrue(os.path.isdir(library))
+
+
+class MoveTests(unittest.TestCase):
+    """Renames retry on Windows, where freshly unpacked files are briefly locked."""
+
+    def test_windows_retries_until_the_rename_works(self):
+        """A PermissionError on Windows is retried.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(updater.os, "name", "nt"), \
+                mock.patch.object(updater, "RENAME_WAIT_S", 0), \
+                mock.patch.object(updater.os, "rename",
+                                  side_effect=[PermissionError("scanning"), None]) as rename:
+            updater.move("a", "b")
+        self.assertEqual(rename.call_count, 2)
+
+    def test_windows_gives_up_after_the_last_attempt(self):
+        """A rename that stays locked raises after RENAME_ATTEMPTS tries.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(updater.os, "name", "nt"), \
+                mock.patch.object(updater, "RENAME_WAIT_S", 0), \
+                mock.patch.object(updater.os, "rename",
+                                  side_effect=PermissionError("locked")) as rename, \
+                self.assertRaises(PermissionError):
+            updater.move("a", "b")
+        self.assertEqual(rename.call_count, updater.RENAME_ATTEMPTS)
+
+    def test_other_systems_fail_at_once(self):
+        """Elsewhere a PermissionError is raised without retrying.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(updater.os, "name", "posix"), \
+                mock.patch.object(updater.os, "rename",
+                                  side_effect=PermissionError("denied")) as rename, \
+                self.assertRaises(PermissionError):
+            updater.move("a", "b")
+        self.assertEqual(rename.call_count, 1)
 
 
 class RelaunchTests(unittest.TestCase):

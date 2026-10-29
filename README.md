@@ -45,7 +45,7 @@ The FLIR Spinnaker SDK (installers, PySpin wheels, docs and official Examples) i
 
 ## Prebuilt binaries
 
-Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed.
+Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed. The Windows and Linux archives each hold an `espi-live` folder: run `espi-live.exe` (`espi-live` on Linux) inside it, and keep the folder together, because the program loads its libraries from the `_internal-N` folder beside it (N is the build number). Nothing is unpacked at startup, unlike the single-file builds up to build 6, which extracted everything to a temporary folder on every start.
 
 Releases are approved by publishing a draft:
 
@@ -61,14 +61,15 @@ Merging into `main` does not build anything. A release can also be started by ha
 | `espi-live-linux-x64.tar.gz` | PySpin 4.4 bundled (Ubuntu 24.04 build) |
 | `espi-live-macos-arm64.zip` | `--demo` only (no macOS PySpin wheel); unsigned, run `xattr -cr "ESPI Live.app"` after unzipping |
 
-Output goes to `output/` next to the executable (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
+Output goes to `output/` next to the executable, inside the `espi-live` folder (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
 
 ### Automatic updates
 
 Prebuilt copies update themselves to the newest full release (pre-releases are skipped). At startup the Qt interface checks GitHub in the background; when a newer build exists, a blue **Update available** button appears in the status bar (and in the log). Clicking it downloads the build while measurement continues, verifies its SHA-256, then offers to restart: the app finishes any recording, releases the camera, swaps in the new build and starts it with the same options. Choosing not to restart installs it when you close the app. **Help > Check for updates…** checks on demand; **Help > About** shows the build number.
 
 - `espi-live --update` updates without opening a window; `--version` prints the build; `--no-update-check` skips the startup check.
-- The program's folder must be writable: the new build is unpacked beside it, and the old copy is kept as `*.old` until the next start.
+- The program's folder must be writable: the new build is unpacked there, its `_internal-N` folder is moved in beside the running build's, and the executable is swapped, the running one being kept as `espi-live.exe.old` (Windows cannot overwrite or delete a running program or the libraries it has loaded). The next start deletes the old executable and, once that is gone, the old `_internal-N` folder. `output/` and the token files are never touched.
+- Copies that are a single file (build 6 and earlier) cannot update themselves to the folder layout: their check reports `build N has no espi-live-windows-x64.zip` (or the Linux archive). Download a current release once by hand.
 - Builds are ordered by the workflow run number, so a copy never "updates" to an older build. Running from source never updates itself; use `git pull`.
 - The repository is public, so installed copies read releases without a token. The optional `UPDATE_TOKEN` repository secret (a fine-grained token with **Contents: read-only**) is baked in when set and only raises GitHub's API rate limit; `update-token.txt` beside the program or the `ESPI_UPDATE_TOKEN` environment variable overrides it.
 
