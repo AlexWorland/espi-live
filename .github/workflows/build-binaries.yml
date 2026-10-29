@@ -83,9 +83,12 @@ jobs:
         with:
           ref: ${{ env.BUILD_REF }}
 
+      # Cache pip's downloads (PySide6 and OpenCV are large) between runs.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install Linux system packages
         run: |
@@ -184,9 +187,14 @@ jobs:
           SDK_FILES: ${{ matrix.sdk_files }}
         run: git lfs pull --include="$SDK_FILES"
 
+      # Cache pip's downloads between runs. The key also covers the OS and
+      # Python version; Windows installs unpinned packages, so a new release
+      # of one is downloaded once and then cached too.
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install Linux system packages
         if: runner.os == 'Linux'

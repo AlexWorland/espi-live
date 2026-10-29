@@ -90,7 +90,7 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 
 - This repository is public (GPL-3.0, `LICENSE`). Never commit the FLIR SDK, other people's scripts or personal documents to it: once pushed, they stay reachable through pull-request refs even after a history rewrite. SDK files go in the private `espi-live-sdk` repository (Git LFS there).
 - `.gitignore` excludes `.venv/`, `__pycache__/`, `.DS_Store`, `.omc/`, `output/`, `build/`, `dist/`, `research/` (never push it), `third_party/`, Office lock files, and large binaries (`*.avi`, `*.zip`, `*.whl`, `*.dmg`, `*.tar.gz`, `*.pptx`). Don't force-add them.
-- CI checks out `espi-live-sdk` into `third_party/`, fetches only the LFS files each platform needs (`git lfs pull --include`) and caches them, since LFS bandwidth is metered. Keep that behavior when editing `build-binaries.yml`.
+- CI checks out `espi-live-sdk` into `third_party/`, fetches only the LFS files each platform needs (`git lfs pull --include`) and caches them, since LFS bandwidth is metered; `setup-python` caches pip downloads (`cache: pip`). Keep that behavior when editing `build-binaries.yml`.
 - Don't commit unless asked.
 - **Label every pull request for the release drafter.** `.github/release-drafter.yml` reads the labels of merged PRs to write the draft release's notes and pick its next `vX.Y.Z` tag, so set one of these when opening a PR (`gh pr create --label <name>`):
   - `enhancement`: a new or changed user-visible feature. Raises the **minor** version.

@@ -1,14 +1,16 @@
 # Changelog
 
-## 2026-10-29 — Release workflow renamed
+## 2026-10-29 — Release workflow renamed, pip cache
 
 ### Previous state
 
 - The workflow that tests, builds and attaches the binaries to a release was listed in GitHub Actions as **Build release**.
+- Every test and build run downloaded all Python dependencies from scratch.
 
 ### Current state
 
 - It is listed as **Release**. Nothing else changed: publishing the drafted release still starts it, and **Actions > Release > Run workflow** still makes a `build-N` test build. The file is still `build-binaries.yml`, so the run number that installed copies use to order builds keeps counting.
+- The test and build jobs cache pip downloads, so a run no longer downloads PySide6, OpenCV and the other dependencies again each time.
 
 ## 2026-10-29 — Releases are approved by publishing a draft
 
