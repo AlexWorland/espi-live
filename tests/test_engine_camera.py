@@ -17,7 +17,7 @@ from espi_live import camera, capture, engine, paths
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine, WindowsPreviewTimer
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
-                          interlaced_frame, usb_live2)
+                          interlaced_frame, usb_live2, webcam)
 from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
 
@@ -876,22 +876,26 @@ class SwitchLiveCameraListTests(CameraEngineCase):
         self.assertTrue(self.engine.status()["camera"].startswith("Analog capture"))
 
 
-class CaptureEngineTests(CameraEngineCase):
-    """An engine whose source is a video-capture device."""
+class CaptureEngineCase(CameraEngineCase):
+    """Base class: engines whose source is a video-capture device."""
 
-    def capture_engine(self):
-        """Create an engine for the enumerated USB-Live2.
+    def capture_engine(self, enumerated=None):
+        """Create an engine for an enumerated video device.
 
-        Args: None.
+        Args: enumerated is the fake device to open (a USB-Live2 by default).
         Returns: The Engine (opened, not started).
         """
-        enumerated = usb_live2()
+        enumerated = enumerated or usb_live2()
         info = CameraInfo("video 1", enumerated.name, kind="capture",
                           index=enumerated.index, backend=enumerated.backend,
                           vid=enumerated.vid, pid=enumerated.pid)
         self.engine = Engine(self.log, tag=info.serial, info=info)
         self.engine.open_camera()
         return self.engine
+
+
+class CaptureEngineTests(CaptureEngineCase):
+    """An engine whose source is a video-capture device."""
 
     def test_engine_streams_from_capture(self):
         """Frames flow from the capture device; the status names the capture.
@@ -978,3 +982,46 @@ class SingleFieldFlirTests(CameraEngineCase):
         self.engine.start()
         self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
         self.assertEqual(int(self.engine.latest_packet().image[1].max()), 255)
+
+
+class CameraReportEventTests(CaptureEngineCase):
+    """Unrecognised video devices produce a camera report when opened."""
+
+    def reports(self):
+        """Collect the camera_report payloads queued so far.
+
+        Args: None.
+        Returns: A list of Report.
+        """
+        return [payload for kind, payload in self.events() if kind == "camera_report"]
+
+    def test_engine_reports_only_unrecognised_capture(self):
+        """A webcam is reported; the USB-Live2 and a Blackfly are not.
+
+        Args: None.
+        Returns: None.
+        """
+        self.capture_engine(webcam())
+        reports = self.reports()
+        self.assertEqual(len(reports), 1)
+        self.assertTrue(reports[0].key.startswith("Webcam C270"))
+        self.assertIn("| Device name | Webcam C270 |", reports[0].body)
+        self.capture_engine(usb_live2())
+        self.assertEqual(self.reports(), [])
+        self.engine = Engine(self.log)
+        self.engine.open_camera()
+        self.assertEqual(self.reports(), [])
+
+    def test_engine_report_survives_detail_failure(self):
+        """If the details cannot be read the report is still sent, without them.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(capture.CaptureSession, "read_details",
+                               side_effect=RuntimeError("driver")):
+            self.capture_engine(webcam())
+        reports = self.reports()
+        self.assertEqual(len(reports), 1)
+        self.assertNotIn("| Device name |", reports[0].body)
+        self.assertTrue(self.log.has("Could not read the device details: driver"))

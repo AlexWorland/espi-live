@@ -29,6 +29,7 @@ import cv2
 import numpy as np
 
 from espi_live import sources
+from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
                                   gamma_lut, single_field, smooth_speckle,
@@ -221,9 +222,10 @@ class Engine:
     def _attach_camera(self, session):
         """Make an opened camera session the frame source.
 
-        Args: session is an opened CameraSession.
-        Returns: None; publishes the model as a "camera_identity" event and
-            the device limits as a "camera_limits" event.
+        Args: session is an opened CameraSession or CaptureSession.
+        Returns: None; publishes the model as a "camera_identity" event, the
+            device limits as a "camera_limits" event and, for a video device
+            the viewer does not recognise, a "camera_report" event.
         """
         self.camera = session
         self.camera_info = session.info
@@ -235,6 +237,22 @@ class Engine:
         self.events.put(("camera_identity", identity))
         self._set_status(demo=False, camera=session.describe(session.read_values()))
         self.events.put(("camera_limits", session.limits()))
+        if session.info.kind == "capture" and not identity.supported:
+            self._report_camera(session)
+
+    def _report_camera(self, session):
+        """Queue a camera report for an unrecognised video device.
+
+        Args: session is the opened CaptureSession.
+        Returns: None; a failure to read details sends the report without them.
+        """
+        try:
+            details = session.read_details()
+        except Exception as exc:
+            self.log.write(f"Could not read the device details: {exc}")
+            details = ()
+        self.events.put(("camera_report",
+                         capture_report(session.info, session.identity, details)))
 
     # ----- thread control ----------------------------------------------
 
