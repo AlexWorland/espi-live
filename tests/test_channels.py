@@ -154,6 +154,21 @@ class ChannelTests(ChannelTestCase):
         self.assertTrue(demo.wait(10))
         self.assertEqual(demo.retired, [])
 
+    def test_stop_drops_a_frozen_frame(self):
+        """A camera turned off forgets the frame its display was frozen on.
+
+        Args: None.
+        Returns: None.
+        """
+        demo = self.channel(CameraInfo("DEMO1"), demo=True)
+        self.assertIsNone(demo.frozen)
+        demo.start()
+        demo.frozen, demo.frozen_at = "packet", "when"
+        demo.stop()
+        self.assertIsNone(demo.frozen)
+        self.assertIsNone(demo.frozen_at)
+        self.assertTrue(demo.wait(10))
+
     def test_restarted_camera_waits_for_its_previous_engine(self):
         """A camera turned back on opens after the old engine released it.
 
