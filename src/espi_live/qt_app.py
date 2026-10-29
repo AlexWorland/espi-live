@@ -22,8 +22,8 @@ import time
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QDesktopServices, QImage, QKeySequence, QOffscreenSurface,
+from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QDesktopServices, QFontMetrics, QImage, QKeySequence, QOffscreenSurface,
                            QOpenGLContext, QPainter, QSurfaceFormat, QVector4D)
 from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
@@ -701,6 +701,70 @@ class FeatureRequestDialog(QDialog):
         super().accept()
 
 
+class FixedLabel(QLabel):
+    """A status-bar label whose width never depends on its text.
+
+    Its preferred width is that of the widest of a few sample strings; longer
+    text is shortened with an ellipsis instead of growing the label, so the
+    items beside it stay where they are. Only a window too narrow for the whole
+    bar makes it narrower, and then by the same amount whatever it shows.
+    """
+
+    def __init__(self, *samples):
+        """Reserve room for the samples.
+
+        Args: samples are the widest strings the label should show in full.
+        Returns: None.
+        """
+        super().__init__()
+        self._full = ""
+        self._reserved = max(self.fontMetrics().horizontalAdvance(text)
+                             for text in samples) + 2
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+    def sizeHint(self):
+        """Return the reserved width, whatever the text.
+
+        Args: None.
+        Returns: A QSize.
+        """
+        return QSize(self._reserved, super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        """Allow shrinking to nothing when the window is too narrow.
+
+        Args: None.
+        Returns: A QSize.
+        """
+        return QSize(0, super().minimumSizeHint().height())
+
+    def text(self):
+        """Return the full text, not the shortened display.
+
+        Args: None.
+        Returns: The string last given to setText.
+        """
+        return self._full
+
+    def setText(self, text):
+        """Show text, shortened with an ellipsis when it exceeds the width.
+
+        Args: text is the string to show.
+        Returns: None.
+        """
+        self._full = text
+        super().setText(self.fontMetrics().elidedText(text, Qt.ElideRight, self.width()))
+
+    def resizeEvent(self, event):
+        """Shorten the text again for the new width.
+
+        Args: event is the QResizeEvent.
+        Returns: None.
+        """
+        super().resizeEvent(event)
+        self.setText(self._full)
+
+
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
 
@@ -1118,26 +1182,44 @@ class MainWindow(QMainWindow):
         self.hint_label.setMinimumWidth(0)
         self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         bar.addWidget(self.hint_label, 1)
-        self.source_badge = QLabel()
-        self.record_label = QLabel()
-        self.range_status = QLabel()
-        self.camera_fps_status = QLabel()  # sensor rate, then what the app keeps up with
+        # Every readout has a fixed width, so no value can move its neighbours.
+        self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
+        self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
+        self.range_status = FixedLabel("Input: 255–255    Scaled: 255–255",
+                                       "Raw Mono8: no brightness scaling")
+        self.camera_fps_status = FixedLabel(  # sensor rate, then what the app keeps up with
+            "Camera: 999.9 fps (simulated)")
         self.camera_fps_status.setToolTip(
             "Camera: the camera's resulting acquisition rate (AcquisitionResultingFrameRate)\n"
             "Processed: frames the app received and processed\n"
             "Displayed: frames drawn on screen")
-        self.speed_status = QLabel()
-        self.pixel_status = QLabel()
+        self.speed_status = FixedLabel(
+            "Processed: 999.9 fps    Work: 99.9 ms/frame    Displayed: 999.9 fps")
+        self.pixel_status = FixedLabel("x 3088, y 2064: 255")
+        # The two update buttons are never shown together, so they share one
+        # fixed-width slot that stays put whichever is visible.
         self.update_button = QPushButton()  # shown when a newer build exists
         self.update_button.setVisible(False)
         self.update_button.setStyleSheet("background:#1d4f91;color:white;font-weight:bold;")
         self.update_button.clicked.connect(self._update_clicked)
-        bar.addPermanentWidget(self.update_button)
         self.check_button = QPushButton("Check for updates")  # until a newer build is found
         self.check_button.setFlat(True)
         self.check_button.setToolTip("Check GitHub for a newer build of ESPI live")
         self.check_button.clicked.connect(self._check_updates_now)
-        bar.addPermanentWidget(self.check_button)
+        bold = self.update_button.font()
+        bold.setBold(True)
+        metrics = QFontMetrics(bold)
+        slot_width = max(metrics.horizontalAdvance(text) for text in (
+            "Update available: build 9999 (abcdef0)", "Downloading update… 100%",
+            "Restart to update", "Check for updates", "Checking for updates…")) + 24
+        self.update_slot = QWidget()
+        slot = QGridLayout(self.update_slot)
+        slot.setContentsMargins(0, 0, 0, 0)
+        for button in (self.update_button, self.check_button):
+            button.setFixedWidth(slot_width)
+            slot.addWidget(button, 0, 0)  # same cell: they overlap
+        self.update_slot.setFixedWidth(slot_width)
+        bar.addPermanentWidget(self.update_slot)
         self.feature_button = QPushButton("Request feature")
         self.feature_button.setFlat(True)
         self.feature_button.setToolTip("Send a feature request to the developers (GitHub issue)")

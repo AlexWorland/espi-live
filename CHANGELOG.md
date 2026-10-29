@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-29 — Fixed-position status bar
+
+### Previous state
+
+- Each status-bar readout was as wide as its text, so a longer value (a high frame rate, a long range) or a button changing its label shifted every item to its left.
+
+### Current state
+
+- Every status-bar item has a fixed width sized for its widest expected text, so no value moves another item. Text that still does not fit is shortened with an ellipsis. **Check for updates** and **Update available** share one fixed slot, so swapping them moves nothing.
+
 ## 2026-10-29 — Check for updates button
 
 ### Previous state
