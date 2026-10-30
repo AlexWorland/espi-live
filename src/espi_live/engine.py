@@ -298,9 +298,11 @@ class Engine:
     def request(self, action, **payload):
         """Queue a one-shot command for the worker.
 
-        Args: action is "save" (payload title, notes), "reference",
-            "reset_previous", "reset_average" or "switch_live" (the
-            "switched_live" event then carries every detected CameraInfo).
+        Args: action is "save" (payload title, notes; optionally packet, a
+            frozen display's FramePacket to save instead of the newest one,
+            and frozen_at, its datetime), "reference", "reset_previous",
+            "reset_average" or "switch_live" (the "switched_live" event then
+            carries every detected CameraInfo).
         Returns: None.
         """
         self._actions.put((action, payload))
@@ -664,13 +666,15 @@ class Engine:
             except queue.Empty:
                 return processor, frame
             if action == "save":
-                packet = self.latest_packet()
+                packet = payload.get("packet")  # a frozen display's packet
+                if packet is None:
+                    packet = self.latest_packet()
                 if packet is None:
                     self.log.write("No current display frame is ready to save.")
                 else:
                     save_frame(packet.render(), payload.get("title", ""),
                                payload.get("notes", ""), packet.demo, self.log,
-                               self.tag)
+                               self.tag, frozen_at=payload.get("frozen_at"))
             elif action == "reset_previous":
                 processor.prev = None
                 self.log.write("Reset previous frame.")

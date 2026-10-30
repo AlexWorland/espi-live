@@ -31,7 +31,11 @@ def cli(argv=None):
     parser.add_argument("--update", action="store_true",
                         help="install the newest prebuilt binary from GitHub and exit")
     parser.add_argument("--no-update-check", action="store_true",
-                        help="don't check GitHub for a newer build at startup")
+                        help="don't contact GitHub at startup (no check for a newer "
+                             "build, no download of the source code)")
+    parser.add_argument("--send-changes", action="store_true",
+                        help="send the changes made in the downloaded source code "
+                             "(espi-live-source) to the developers for review, and exit")
     parser.add_argument("--log-level", choices=sorted(LEVELS), default=None,
                         help="log detail (default: ESPI_LOG_LEVEL, else info); "
                              "debug adds camera node writes, settings changes "
@@ -47,6 +51,9 @@ def cli(argv=None):
         sys.exit(self_check())
     if args.update:
         sys.exit(update_now())
+    if args.send_changes:
+        from espi_live import changes
+        sys.exit(changes.send_from_cli())
     try:
         from espi_live import qt_app
     except ImportError as exc:
@@ -72,7 +79,7 @@ def self_check():
         import numpy
         import PySide6
         for module in ("espi_live.engine", "espi_live.qt_app", "espi_live.updater",
-                       "espi_live.error_reports"):
+                       "espi_live.error_reports", "espi_live.changes"):
             importlib.import_module(module)
     except Exception as exc:
         print(f"Self-check failed: {type(exc).__name__}: {exc}", file=sys.stderr)

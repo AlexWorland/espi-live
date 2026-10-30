@@ -25,6 +25,7 @@ import queue
 import sys
 import time
 import traceback
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -42,7 +43,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
                                QPushButton, QSizePolicy, QSlider,
                                QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
-from espi_live import camera, error_reports, feedback, paths, updater
+from espi_live import camera, codex, error_reports, feedback, paths, source_code, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
@@ -88,6 +89,8 @@ void main() {
 """
 MAX_ZOOM = 64.0
 ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
+CODEX_LABEL = "Open in Codex"
+CODEX_BUSY_LABEL = "Getting source…"
 LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are ignored
 TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
@@ -208,6 +211,10 @@ def describe_session(channels, display):
     spinnaker = camera.spinnaker_version()
     return (f"Session: {source}; display {display}"
             + (f"; Spinnaker {spinnaker}" if spinnaker else ""))
+
+
+# Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
+FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 
 
 def request_gl_format():
@@ -897,7 +904,9 @@ class MainWindow(QMainWindow):
             (opened, not yet started); the first active one is displayed;
             log is the AppLog; use_gl selects the GPU view instead of the CPU
             fallback; check_updates looks for a newer prebuilt binary at
-            startup; reporting is the run's Reporting, or None.
+            startup; reporting is the run's Reporting, or None; and the
+            window downloads this build's source code if it is missing
+            (otherwise that waits for Open in Codex).
         Returns: None.
         """
         super().__init__()
@@ -914,15 +923,31 @@ class MainWindow(QMainWindow):
         self.pending_update = None  # unpacked build to install on exit
         self.relaunch_after_exit = False
         self.feedback = feedback.FeedbackWorker()
+        self.source = source_code.SourceWorker()  # this build's source, for Codex
+        self.source_folder = None  # set once the source copy is ready
+        self.codex_when_ready = False  # open Codex when the download finishes
         self.retired_channels = []  # demo channels replaced by real cameras
         self.drawn_sequence = 0
+        self.shown_packet = None  # the packet on screen; Freeze holds this one
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
         self.display_fps = 0.0
         self.hover = (-1, -1)
         self.view = GLImageView() if use_gl else CpuImageView()
         self.view.hovered.connect(self._set_hover)
-        self.setCentralWidget(self.view)
+        # The frozen banner floats over the top of the image (same grid cell);
+        # mouse events pass through it so zoom, pan and the readout still work.
+        self.frozen_banner = QLabel()
+        self.frozen_banner.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.frozen_banner.setStyleSheet(
+            FROZEN_STYLE + "padding:4px 12px;margin-top:8px;border-radius:4px;")
+        self.frozen_banner.setVisible(False)
+        center = QWidget()
+        stack = QGridLayout(center)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.addWidget(self.view, 0, 0)
+        stack.addWidget(self.frozen_banner, 0, 0, Qt.AlignTop | Qt.AlignHCenter)
+        self.setCentralWidget(center)
         # The controls dock takes the full window height; the log sits under
         # the image only.
         self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
@@ -950,6 +975,8 @@ class MainWindow(QMainWindow):
         self.status_timer.start(200)
         if check_updates and updater.unavailable_reason() is None:
             self.updates.check()
+        if check_updates:
+            self.source.start()  # downloads this build's source if it is missing
 
     @property
     def camera_identity(self):
@@ -1010,6 +1037,15 @@ class MainWindow(QMainWindow):
             lambda on: self.engine.update_settings(record=on))
         bar.addWidget(self.record_button)
         bar.addSeparator()
+        self.freeze_button = QPushButton("Freeze (Space)")
+        self.freeze_button.setCheckable(True)
+        self.freeze_button.setToolTip(
+            "Hold the displayed image to inspect it (zoom, pan, read pixel values) "
+            "without saving anything. The camera keeps acquiring, processing and "
+            "recording; S saves the held image.")
+        self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
+        self.freeze_button.toggled.connect(self.set_frozen)
+        bar.addWidget(self.freeze_button)
         for label, tip, handler in (
                 ("Save frame (S)", "Save the displayed frame with its title and notes",
                  self.save_frame),
@@ -1316,6 +1352,14 @@ class MainWindow(QMainWindow):
         self.hint_label.setMinimumWidth(0)
         self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         bar.addWidget(self.hint_label, 1)
+        # Leftmost permanent item: showing it only narrows the hint, so it moves
+        # nothing else.
+        self.frozen_badge = QLabel("  FROZEN  ")
+        self.frozen_badge.setStyleSheet(FROZEN_STYLE)
+        self.frozen_badge.setToolTip("The image on screen is held; the camera keeps "
+                                     "running. Press Space to return to live.")
+        self.frozen_badge.setVisible(False)
+        bar.addPermanentWidget(self.frozen_badge)
         # Every readout has a fixed width, so no value can move its neighbours.
         self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
         self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
@@ -1359,12 +1403,21 @@ class MainWindow(QMainWindow):
         self.feature_button.setToolTip("Send a feature request to the developers (GitHub issue)")
         self.feature_button.clicked.connect(lambda: self._request_feature())
         bar.addPermanentWidget(self.feature_button)
+        self.codex_button = QPushButton(CODEX_LABEL)
+        self.codex_button.setFlat(True)
+        self.codex_button.setToolTip("Ask OpenAI's Codex how ESPI live works, using this "
+                                     "build's real source code")
+        self.codex_button.setFixedWidth(max(
+            QFontMetrics(self.codex_button.font()).horizontalAdvance(text)
+            for text in (CODEX_LABEL, CODEX_BUSY_LABEL)) + 24)
+        self.codex_button.clicked.connect(self._open_codex)
+        bar.addPermanentWidget(self.codex_button)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
             bar.addPermanentWidget(widget)
 
     def _build_menus(self):
-        """Create the View menu (docks and zoom).
+        """Create the View menu (docks, zoom and freeze) and the Help menu.
 
         Args: None.
         Returns: None.
@@ -1382,10 +1435,17 @@ class MainWindow(QMainWindow):
             action.triggered.connect(handler)
             menu.addAction(action)
         menu.addSeparator()
+        self.freeze_action = QAction("Freeze display", self)
+        self.freeze_action.setCheckable(True)
+        self.freeze_action.setShortcut(QKeySequence("Space"))
+        self.freeze_action.setShortcutContext(Qt.WidgetShortcut)  # via handle_key
+        self.freeze_action.triggered.connect(self.set_frozen)
+        menu.addAction(self.freeze_action)
+        menu.addSeparator()
         hint = menu.addAction("Wheel to zoom, drag to pan, Q or Esc to quit")
         hint.setEnabled(False)  # a reminder, not a command
         self.view.setToolTip("Wheel: zoom · drag: pan · 0: fit · 1: actual size\n"
-                             "S save · F set reference · R reset last · "
+                             "Space freeze · S save · F set reference · R reset last · "
                              "A reset average · Q/Esc quit")
 
         help_menu = self.menuBar().addMenu("&Help")
@@ -1394,6 +1454,8 @@ class MainWindow(QMainWindow):
         check.triggered.connect(self._check_updates_now)
         request = help_menu.addAction("Request a feature…")
         request.triggered.connect(lambda: self._request_feature())
+        ask = help_menu.addAction("Ask Codex about the source code…")
+        ask.triggered.connect(self._open_codex)
         help_menu.addSeparator()
         self.reports_action = help_menu.addAction("Send error reports automatically")
         self.reports_action.setCheckable(True)
@@ -1480,7 +1542,11 @@ class MainWindow(QMainWindow):
             channel.start()
         self.current = channel
         self.drawn_sequence = 0
+        self.shown_packet = None
         self.view.clear()
+        if channel.frozen is not None:  # its held frame comes back at once
+            self._draw(channel.frozen)
+        self._show_frozen()
         self._load_settings(self.engine.settings(), channel.limits)
         self._set_demo(channel.demo)
         self._sync_cameras()
@@ -1546,13 +1612,16 @@ class MainWindow(QMainWindow):
         """Summarize a camera for its row in the camera list.
 
         Args: channel is one of self.channels.
-        Returns: Short text such as "displayed · 29.8 fps · REC", or "off".
+        Returns: Short text such as "displayed · 29.8 fps · REC · frozen",
+            or "off".
         """
         if not channel.active:
             return "off"
         shown = "displayed · " if channel is self.current else ""
         recording = " · REC" if channel.engine.settings().record else ""
-        return f"{shown}{channel.engine.status()['processed_fps']:.1f} fps{recording}"
+        frozen = " · frozen" if channel.frozen is not None else ""
+        return (f"{shown}{channel.engine.status()['processed_fps']:.1f} fps"
+                f"{recording}{frozen}")
 
     def _adopt_live_cameras(self, channel, cameras):
         """After a demo channel switched to a camera, list the real cameras.
@@ -1637,6 +1706,7 @@ class MainWindow(QMainWindow):
         Returns: True if the key was a shortcut.
         """
         actions = {
+            Qt.Key_Space: lambda: self.set_frozen(self.current.frozen is None),
             Qt.Key_S: self.save_frame,
             Qt.Key_F: lambda: self.engine.request("reference"),
             Qt.Key_R: lambda: self.engine.request("reset_previous"),
@@ -1652,14 +1722,58 @@ class MainWindow(QMainWindow):
         handler()
         return True
 
-    def save_frame(self):
-        """Ask the engine to save the displayed frame with the title and notes.
+    def set_frozen(self, on):
+        """Freeze the displayed camera's image on screen, or return to live.
+
+        Only the display holds still: the engine keeps acquiring, processing
+        and recording. The held frame belongs to the displayed camera.
+
+        Args: on is True to hold the frame now on screen, False to resume.
+        Returns: None.
+        """
+        channel = self.current
+        if on and channel.frozen is None:
+            if self.shown_packet is None:
+                self.log.write("No frame on screen to freeze yet.")
+            else:
+                channel.frozen, channel.frozen_at = self.shown_packet, datetime.now()
+                self.log.write(f"Display frozen at {channel.frozen_at:%H:%M:%S}; "
+                               "the camera keeps running.")
+        elif not on and channel.frozen is not None:
+            channel.frozen = channel.frozen_at = None
+            self.log.write("Display live again.")
+        self._show_frozen()
+
+    def _show_frozen(self):
+        """Show or hide every frozen-display indicator for the displayed camera.
 
         Args: None.
         Returns: None.
         """
+        frozen = self.current.frozen is not None
+        if frozen:
+            self.frozen_banner.setText(
+                f"FROZEN at {self.current.frozen_at:%H:%M:%S} — not live · "
+                "Space resumes")
+        self.frozen_banner.setVisible(frozen)
+        self.frozen_badge.setVisible(frozen)
+        for widget in (self.freeze_button, self.freeze_action):
+            widget.blockSignals(True)
+            widget.setChecked(frozen)
+            widget.blockSignals(False)
+
+    def save_frame(self):
+        """Ask the engine to save the displayed frame with the title and notes.
+
+        While the display is frozen, the held frame is saved.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = {} if self.current.frozen is None else {
+            "packet": self.current.frozen, "frozen_at": self.current.frozen_at}
         self.engine.request("save", title=self.frame_title.text(),
-                            notes=self.frame_notes.toPlainText())
+                            notes=self.frame_notes.toPlainText(), **frozen)
 
     def _show_zoom(self, zoom):
         """Sync the zoom slider and percentage with the view.
@@ -1683,19 +1797,32 @@ class MainWindow(QMainWindow):
     def _poll_frame(self):
         """Draw the newest engine frame if it has not been drawn yet.
 
+        Nothing is drawn while the displayed camera is frozen.
+
         Args: None.
         Returns: None.
         """
+        if self.current.frozen is not None:
+            return
         packet = self.engine.latest_packet()
         if packet is None or packet.sequence == self.drawn_sequence:
             return
         self.drawn_sequence = packet.sequence
+        self._draw(packet)
+        self.drawn_frames += 1
+
+    def _draw(self, packet):
+        """Put a frame on screen, rebuilding the color table only when needed.
+
+        Args: packet is the FramePacket to show.
+        Returns: None.
+        """
         key = (packet.palette, round(packet.gamma, 4))
         if key != getattr(self, "table_key", None):
             self.table = palette_rgb_table(packet.palette, packet.gamma)
             self.table_key = key
         self.view.show_packet(packet, self.table, key)
-        self.drawn_frames += 1
+        self.shown_packet = packet
 
     def _poll_status(self):
         """Refresh status text, the log, and handle engine events.
@@ -1717,9 +1844,10 @@ class MainWindow(QMainWindow):
         self.record_label.setText(status["record"])
         self.range_status.setText(status["range"])
         self.camera_fps_status.setText(status["camera_fps"])
-        self.speed_status.setText(
-            f"{status['processing']}    Displayed: {self.display_fps:.1f} fps")
-        packet = self.engine.latest_packet()
+        frozen = self.current.frozen
+        displayed = "frozen" if frozen is not None else f"{self.display_fps:.1f} fps"
+        self.speed_status.setText(f"{status['processing']}    Displayed: {displayed}")
+        packet = frozen if frozen is not None else self.engine.latest_packet()
         x, y = self.hover
         if packet is not None and 0 <= y < packet.image.shape[0] and \
                 0 <= x < packet.image.shape[1]:
@@ -1732,6 +1860,7 @@ class MainWindow(QMainWindow):
         self._handle_events()
         self._handle_update_events()
         self._handle_feedback_events()
+        self._handle_source_events()
         self._update_report_context()
         self._handle_report_events()
 
@@ -1961,6 +2090,104 @@ class MainWindow(QMainWindow):
                 elif box.clickedButton() is browser:
                     self._open_request_in_browser(request)
 
+    # ----- source code and Codex ---------------------------------------------
+
+    def _open_codex(self):
+        """Open the Codex app on this build's source code.
+
+        Downloads the source first when it is not there yet (the startup
+        download failed or is still running), then opens Codex once it is.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.source_folder is None:
+            self.codex_when_ready = True
+            self.codex_button.setEnabled(False)
+            self.codex_button.setText(CODEX_BUSY_LABEL)
+            if not self.source.start():
+                self.statusBar().showMessage("Still downloading the source code…", 3000)
+            return
+        settings = QSettings("ESPI", "espi_live")
+        if not settings.value("codex/intro_shown", False, bool):
+            if not self._codex_intro():
+                return
+            settings.setValue("codex/intro_shown", True)
+        try:
+            codex.write_guide(self.source_folder)
+        except OSError as exc:
+            QMessageBox.warning(self, "Open in Codex",
+                                "Could not prepare the source code for Codex in "
+                                f"{self.source_folder}: {exc.strerror or exc}.")
+            return
+        if QDesktopServices.openUrl(QUrl.fromEncoded(
+                codex.deep_link(self.source_folder).encode("ascii"))):
+            self.log.write(f"Opened Codex on {self.source_folder}")
+            self.statusBar().showMessage("Opening Codex with ESPI live's source code…", 5000)
+            return
+        box = QMessageBox(QMessageBox.Warning, "Codex not found",
+                          "Codex did not open. Install the Codex app (or the ChatGPT "
+                          "desktop app, which includes it), sign in, then press "
+                          "Open in Codex again.", parent=self)
+        get = box.addButton("Get Codex…", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is get:
+            QDesktopServices.openUrl(QUrl(codex.INSTALL_URL))
+
+    def _codex_intro(self):
+        """Explain Open in Codex the first time it is used.
+
+        Args: None.
+        Returns: True to go on and open Codex, False to stop.
+        """
+        box = QMessageBox(QMessageBox.Information, "Open in Codex",
+                          "Codex, OpenAI's coding assistant, opens with the source code of "
+                          "this copy of ESPI live, so you can ask it how the program works."
+                          "<br><br>If you ask it to change something, it shows you the "
+                          "change and asks whether you are happy with it. If you are, it "
+                          "sends the change to the ESPI live developers to review. Your "
+                          "installed program stays as it is.<br><br>You need the Codex "
+                          "app (or the ChatGPT desktop app) and a ChatGPT account."
+                          f"<br><br>Source code: {html.escape(self.source_folder)}",
+                          parent=self)
+        box.setTextFormat(Qt.RichText)
+        go = box.addButton("Open Codex", QMessageBox.AcceptRole)
+        get = box.addButton("Get Codex…", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        if box.clickedButton() is get:
+            QDesktopServices.openUrl(QUrl(codex.INSTALL_URL))
+        return box.clickedButton() is go
+
+    def _handle_source_events(self):
+        """Note when the source copy is ready, or why it is not.
+
+        Args: None.
+        Returns: None.
+        """
+        while True:
+            try:
+                kind, payload = self.source.events.get_nowait()
+            except Exception:
+                return
+            wanted, self.codex_when_ready = self.codex_when_ready, False
+            self.codex_button.setEnabled(True)
+            self.codex_button.setText(CODEX_LABEL)
+            if kind == "ready":
+                self.source_folder, note = payload
+                if note:
+                    self.log.write(note)
+                if wanted:
+                    self._open_codex()
+            else:
+                self.log.write(f"Source code not available: {payload}")
+                if wanted:
+                    QMessageBox.warning(self, "Open in Codex",
+                                        "The source code could not be downloaded: "
+                                        f"{html.escape(payload)}."
+                                        "<br><br>Check the internet connection and try again.")
+
     # ----- updates -----------------------------------------------------------
 
     def _check_updates_now(self):
@@ -2115,6 +2342,9 @@ class MainWindow(QMainWindow):
             self.record_button.setChecked(False)
             self.record_button.blockSignals(False)
         elif kind == "switched_live":
+            # A held demo frame must not outlive the dummy-mode indicators.
+            channel.frozen = channel.frozen_at = None
+            self._show_frozen()
             self._adopt_live_cameras(channel, payload or [])
             for button in self.mode_group.buttons():
                 button.setChecked(button.text() == "Raw")
@@ -2207,7 +2437,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
     """Start the Qt front end.
 
     Args: force_demo skips camera detection and starts synthetic video;
-        check_updates looks for a newer prebuilt binary at startup;
+        check_updates looks for a newer prebuilt binary and downloads this
+        build's source code (if missing) at startup;
         demo_cameras is how many synthetic cameras demo mode simulates;
         log_level is the --log-level name or None; send_reports is False
         for --no-error-reports.

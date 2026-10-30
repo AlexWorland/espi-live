@@ -98,6 +98,18 @@ class CliDispatchTests(unittest.TestCase):
         update.assert_called_once_with()
         self.assertEqual(code, 1)
 
+    def test_send_changes_exits_with_its_status(self):
+        """--send-changes exits with the value changes.send_from_cli returns.
+
+        Args: None.
+        Returns: None.
+        """
+        changes = types.SimpleNamespace(send_from_cli=mock.Mock(return_value=1))
+        with fake_submodule("changes", changes):
+            code, _, _ = run_cli(["--send-changes"])
+        changes.send_from_cli.assert_called_once_with()
+        self.assertEqual(code, 1)
+
     def test_default_runs_qt_with_update_check(self):
         """Without options the Qt front end runs and update checks are on.
 

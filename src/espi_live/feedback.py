@@ -80,15 +80,24 @@ def validate(request):
         raise FeedbackError("describe the feature you would like")
 
 
+def environment_lines():
+    """Describe the build and platform of this copy.
+
+    Args: None.
+    Returns: A list of Markdown bullet strings.
+    """
+    return [f"- Build: {updater.describe_build()}",
+            f"- Platform: {platform.system()} {platform.release()} "
+            f"({platform.machine()}), Python {platform.python_version()}"]
+
+
 def context_lines(request):
     """List the facts about this copy that help a developer act on a request.
 
     Args: request is the FeatureRequest.
     Returns: A list of Markdown bullet strings.
     """
-    lines = [f"- Build: {updater.describe_build()}",
-             f"- Platform: {platform.system()} {platform.release()} "
-             f"({platform.machine()}), Python {platform.python_version()}"]
+    lines = environment_lines()
     if request.source:
         lines.append(f"- Running with: {request.source}")
     if request.submitter.strip():
@@ -141,17 +150,16 @@ def explain_http_error(exc):
     return FeedbackError(f"cannot reach GitHub: {getattr(exc, 'reason', exc)}")
 
 
-def submit(request):
-    """File a feature request as a GitHub issue.
+def create_issue(payload):
+    """File an issue with the feedback token.
 
-    Args: request is a FeatureRequest.
+    Args: payload is the GitHub "create issue" body (title, body, labels).
     Returns: The new issue's web URL. Raises FeedbackError on failure.
     """
-    validate(request)
     token = feedback_token()
     if not token:
         raise FeedbackError("this copy has no feedback token")
-    data = json.dumps(issue_payload(request)).encode("utf-8")
+    data = json.dumps(payload).encode("utf-8")
     http = urllib.request.Request(
         f"{updater.API_ROOT}/repos/{repository()}/issues", data=data, method="POST",
         headers={"Accept": "application/vnd.github+json",
@@ -168,6 +176,16 @@ def submit(request):
     except ValueError as exc:
         raise FeedbackError(f"unreadable reply from GitHub: {exc}") from exc
     return issue["html_url"]
+
+
+def submit(request):
+    """File a feature request as a GitHub issue.
+
+    Args: request is a FeatureRequest.
+    Returns: The new issue's web URL. Raises FeedbackError on failure.
+    """
+    validate(request)
+    return create_issue(issue_payload(request))
 
 
 class FeedbackWorker:
