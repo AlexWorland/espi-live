@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-30 — Status-bar actions look like buttons
+
+### Previous state
+
+- **Check for updates** and **Request feature** were flat, so they read as status text like the frame-rate readouts. While a check or a request was in progress they were only grey text. **Update available** was a flat blue rectangle with no hover or pressed state.
+
+### Current state
+
+- **Check for updates**, **Request feature** and **Open in Codex** are bordered buttons with padding, a background distinct from the status bar, and hover, pressed, focus and disabled states. The pointer changes to a hand over them.
+- **Check for updates** has a refresh icon and **Request feature** a lightbulb. The blue **Update available** button (download icon) stays the primary action, more prominent than the others, including while it reads **Downloading update…**.
+- A vertical line separates the buttons from the readouts. Busy labels (**Checking for updates…**, **Sending request…**, **Downloading update…**) stay disabled buttons and do not shift the readouts.
+
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 
 ### Previous state

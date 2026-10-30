@@ -1380,7 +1380,7 @@ class PollingTests(WindowTestCase):
         window.show()
         QApplication.processEvents()
         items = (window.update_slot, window.feature_button, window.codex_button,
-                 window.source_badge,
+                 window.status_actions_rule, window.source_badge,
                  window.record_label, window.range_status, window.camera_fps_status,
                  window.speed_status, window.pixel_status)
 
@@ -1404,6 +1404,99 @@ class PollingTests(WindowTestCase):
         window.check_button.setVisible(True)
         window.update_button.setVisible(False)
         self.assertEqual(geometry(), before)
+
+    def test_status_actions_look_like_buttons(self):
+        """Idle, checking, update, sending and disabled states stay buttons.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        for button in (window.check_button, window.feature_button, window.codex_button):
+            self.assert_button_chrome(button, primary=False)
+        self.assertFalse(window.check_button.icon().isNull())
+        self.assertFalse(window.feature_button.icon().isNull())
+        self.assertTrue(window.codex_button.icon().isNull())
+        self.assertEqual(window.check_button.toolTip(),
+                         "Check GitHub for a newer build of ESPI live")
+        self.assertEqual(window.feature_button.toolTip(),
+                         "Send a feature request to the developers (GitHub issue)")
+        self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
+        self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
+        self.assertEqual(window.status_actions_rule.frameShape(), qt_app.QFrame.Shape.VLine)
+        window.check_button.setFocus(Qt.OtherFocusReason)
+        self.assertTrue(window.check_button.hasFocus())
+
+        window.updates.busy = True
+        window._sync_check_button()
+        self.assertFalse(window.check_button.isEnabled())
+        self.assertEqual(window.check_button.text(), "Checking for updates…")
+        self.assert_button_chrome(window.check_button, primary=False)
+        self.assert_has_frame(window.check_button)
+
+        window.updates.busy = False
+        window.update_info = make_info()
+        window.update_button.setText("Update available: build 99 (abcdef1)")
+        window.update_button.setVisible(True)
+        window._sync_check_button()
+        self.assertTrue(window.check_button.isHidden())
+        self.assertFalse(window.update_button.isHidden())
+        self.assert_button_chrome(window.update_button, primary=True)
+        self.assert_has_frame(window.update_button)
+        self.assertLessEqual(window.update_button.sizeHint().width(),
+                             window.update_button.width())
+
+        window.update_button.setEnabled(False)
+        window.update_button.setText("Downloading update… 25%")
+        self.assertFalse(window.update_button.isEnabled())
+        self.assert_button_chrome(window.update_button, primary=True)
+        self.assert_has_frame(window.update_button)
+        self.assertLessEqual(window.update_button.sizeHint().width(),
+                             window.update_button.width())
+
+        window.feature_button.setEnabled(False)
+        window.feature_button.setText("Sending request…")
+        self.assert_button_chrome(window.feature_button, primary=False)
+        self.assert_has_frame(window.feature_button)
+        self.assertLessEqual(window.feature_button.sizeHint().width(),
+                             window.feature_button.width())
+        self.assertEqual(window.feature_button.toolTip(),
+                         "Send a feature request to the developers (GitHub issue)")
+
+    def assert_button_chrome(self, button, primary):
+        """Check the border, pointer, focus and state rules of one button.
+
+        Args: button is a QPushButton; primary is True for the blue update button.
+        Returns: None.
+        """
+        sheet = button.styleSheet()
+        self.assertFalse(button.isFlat())
+        self.assertEqual(button.cursor().shape(), Qt.PointingHandCursor)
+        self.assertEqual(button.focusPolicy(), Qt.StrongFocus)
+        for state in (":hover", ":pressed", ":focus", ":disabled"):
+            self.assertIn(state, sheet)
+        self.assertIn("border-radius", sheet)
+        if primary:
+            self.assertIn("#1d4f91", sheet)
+            self.assertIn("font-weight: bold", sheet)
+        else:
+            self.assertNotIn("#1d4f91", sheet)
+            self.assertIn("palette(base)", sheet)
+
+    def assert_has_frame(self, button):
+        """The painted edge differs from the fill, so the control is not flat text.
+
+        Args: button is a visible QPushButton.
+        Returns: None.
+        """
+        image = button.grab().toImage()
+        mid_x = max(1, image.width() // 2)
+        center = image.pixelColor(mid_x, image.height() // 2)
+        edge = image.pixelColor(mid_x, 1)
+        self.assertNotEqual((center.red(), center.green(), center.blue()),
+                            (edge.red(), edge.green(), edge.blue()))
 
     def test_fixed_label_keeps_full_text_but_shows_an_ellipsis(self):
         """A label too narrow for its text shows "…" yet still reports the full string.
