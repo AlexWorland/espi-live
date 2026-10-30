@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-30 — Feature requests are filed by the app
+
+### Previous state
+
+- The request form had an **Enrich with GitHub Copilot** checkbox, and a blank description was refused.
+- A copy without a feedback token, and a failed send, offered **Open in browser** instead of filing the issue.
+
+### Current state
+
+- There is no enrichment checkbox. Every request is labelled `enrich`. A blank description is filed from the title, and Copilot writes the spec; a description you write is kept and expanded.
+- **Submit** files the issue from the app. When it is sent, the dialog says the request was submitted. A failed send can be edited and retried. The app does not open a browser page for it.
+
 ## 2026-10-30 — Hover tooltips on every control
 
 ### Previous state

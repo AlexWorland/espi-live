@@ -939,7 +939,7 @@ class TooltipFilter(QObject):
 
 
 class FeatureRequestDialog(QDialog):
-    """Collect a feature request: title, description, name and enrichment."""
+    """Collect a feature request: title, description and name."""
 
     def __init__(self, parent, request=None):
         """Build the form, prefilled from an earlier attempt or saved name.
@@ -950,7 +950,7 @@ class FeatureRequestDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("Request a feature")
-        self.resize(560, 460)
+        self.resize(560, 420)
         settings = QSettings("ESPI", "espi_live")
         self.title = QLineEdit(request.title if request else "")
         self.title.setMaxLength(feedback.MAX_TITLE)
@@ -958,42 +958,31 @@ class FeatureRequestDialog(QDialog):
         set_tooltip(self.title, "Short summary of the change you want. Required.")
         self.description = QPlainTextEdit(request.description if request else "")
         self.description.setPlaceholderText(
-            "What would you like ESPI live to do, and why? What are you "
-            "measuring when you need it?")
+            "What would you like ESPI live to do, and why? Leave this blank "
+            "to have it written from the title.")
         set_tooltip(self.description,
-                    "What ESPI live should do, and what you are measuring when you "
-                    "need it. Required.")
+                    "What ESPI live should do. Optional. A blank description is "
+                    "written up from the title. Text you write is kept and expanded.")
         self.submitter = QLineEdit(request.submitter if request else
                                    settings.value("feedback/name", "", str))
         self.submitter.setPlaceholderText("Optional, so we can follow up")
         set_tooltip(self.submitter,
                     "Optional name so the developers can follow up. Remembered on "
                     "this computer.")
-        self.enrich = QCheckBox("Enrich with GitHub Copilot")
-        set_tooltip(self.enrich,
-                    "After the issue is filed, GitHub Copilot adds a structured version "
-                    "(summary, proposed behavior, acceptance criteria) below your text.")
-        self.enrich.setChecked(request.enrich if request else
-                               settings.value("feedback/enrich", True, bool))
         form = QFormLayout()
         form.addRow("Title", self.title)
         form.addRow("Description", self.description)
         form.addRow("Your name", self.submitter)
-        form.addRow("", self.enrich)
         note = QLabel(f"Filed as a GitHub issue in {feedback.repository()}, with "
-                      "this build's version and platform.")
+                      "this build's version and platform. A blank description is "
+                      "written from the title; text you write is kept and expanded.")
         note.setWordWrap(True)
         note.setStyleSheet("color: gray;")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         send = buttons.button(QDialogButtonBox.Ok)
-        if feedback.feedback_token():
-            send.setText("Send")
-            set_tooltip(send, "File this request as a GitHub issue.")
-        else:
-            send.setText("Open in browser…")
-            set_tooltip(send, "Open a prefilled GitHub issue page. This copy cannot "
-                        "file issues itself.")
-        set_tooltip(buttons.button(QDialogButtonBox.Cancel), "Close without sending.")
+        send.setText("Submit")
+        set_tooltip(send, "File this request as a GitHub issue.")
+        set_tooltip(buttons.button(QDialogButtonBox.Cancel), "Close without submitting.")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
@@ -1009,11 +998,10 @@ class FeatureRequestDialog(QDialog):
         """
         return feedback.FeatureRequest(
             title=self.title.text(), description=self.description.toPlainText(),
-            enrich=self.enrich.isChecked(), submitter=self.submitter.text(),
-            source=source)
+            submitter=self.submitter.text(), source=source)
 
     def accept(self):
-        """Close only when the request is complete; remember name and choice.
+        """Close only when the request has a title; remember the name.
 
         Args: None.
         Returns: None.
@@ -1025,7 +1013,6 @@ class FeatureRequestDialog(QDialog):
             return
         settings = QSettings("ESPI", "espi_live")
         settings.setValue("feedback/name", self.submitter.text().strip())
-        settings.setValue("feedback/enrich", self.enrich.isChecked())
         super().accept()
 
 
@@ -2277,9 +2264,7 @@ class MainWindow(QMainWindow):
     # ----- feature requests --------------------------------------------------
 
     def _request_feature(self, previous=None):
-        """Ask for a feature request and send it in the background.
-
-        Without a feedback token the request opens as a prefilled GitHub page.
+        """Ask for a feature request and file it in the background.
 
         Args: previous is a FeatureRequest to restore after a failed send.
         Returns: None.
@@ -2291,23 +2276,10 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         request = dialog.request("dummy mode" if self.engine.demo else "camera")
-        if not feedback.feedback_token():
-            self._open_request_in_browser(request)
-            return
         self.feedback.submit(request)
         self.feature_button.setEnabled(False)
         self.feature_button.setText("Sending request…")
         self.log.write(f"Sending feature request: {request.title.strip()}")
-
-    def _open_request_in_browser(self, request):
-        """Open GitHub's new-issue page prefilled with the request.
-
-        Args: request is the FeatureRequest.
-        Returns: None.
-        """
-        if not QDesktopServices.openUrl(QUrl(feedback.browser_url(request))):
-            QMessageBox.warning(self, "Request a feature",
-                                "Could not open a web browser.")
 
     def _handle_feedback_events(self):
         """Report feature requests that were sent or failed.
@@ -2324,26 +2296,18 @@ class MainWindow(QMainWindow):
             self.feature_button.setText("Request feature")
             if kind == "sent":
                 self.log.write(f"Feature request filed: {payload}")
-                extra = ("<br><br>GitHub Copilot will add a structured version to "
-                         "the issue in a minute or two." if request.enrich else "")
-                box = QMessageBox(QMessageBox.Information, "Request sent",
-                                  f"Thank you. Your request is filed as "
-                                  f'<a href="{payload}">{payload}</a>.{extra}', parent=self)
-                box.setTextFormat(Qt.RichText)
-                box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                box = QMessageBox(QMessageBox.Information, "Request submitted",
+                                  "Your request was submitted.", parent=self)
                 box.exec()
             else:
                 self.log.write(f"Feature request failed: {payload}")
                 box = QMessageBox(QMessageBox.Warning, "Request not sent",
                                   f"The request could not be sent: {payload}.", parent=self)
                 retry = box.addButton("Edit and retry", QMessageBox.AcceptRole)
-                browser = box.addButton("Open in browser", QMessageBox.ActionRole)
                 box.addButton(QMessageBox.Cancel)
                 box.exec()
                 if box.clickedButton() is retry:
                     self._request_feature(request)
-                elif box.clickedButton() is browser:
-                    self._open_request_in_browser(request)
 
     # ----- source code and Codex ---------------------------------------------
 
