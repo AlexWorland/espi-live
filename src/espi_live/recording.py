@@ -149,12 +149,14 @@ def recording_path(mode, demo, tag=""):
                         f"{prefix}espi_{mode.lower()}_{camera}{timestamp()}.avi")
 
 
-def save_frame(display, title, notes, demo, log, tag=""):
+def save_frame(display, title, notes, demo, log, tag="", frozen_at=None):
     """Save a displayed frame as PNG plus an optional title/notes sidecar.
 
     Args: display is the grayscale or BGR image exactly as shown; title and
         notes are optional user text; demo marks synthetic video; log has a
-        write(message) method; tag names the camera when several are used.
+        write(message) method; tag names the camera when several are used;
+        frozen_at is the datetime the display was frozen on this frame, or
+        None for a live frame (the file name carries the save time).
     Returns: The PNG path when saved, otherwise None (the reason is logged).
     """
     title = title.strip()
@@ -175,12 +177,14 @@ def save_frame(display, title, notes, demo, log, tag=""):
     log.write(f"Saved: {path}")
     if title or notes:
         info_path = os.path.splitext(path)[0] + ".txt"
+        frozen = f"Frozen at: {frozen_at:%Y-%m-%d %H:%M:%S}\n" if frozen_at else ""
         try:
             with open(info_path, "w", encoding="utf-8") as info:
                 info.write(
                     f"Frame: {os.path.basename(path)}\n"
                     f"Source: {'Demo' if demo else 'Camera'}"
                     f"{f' {tag}' if tag else ''}\n"
+                    f"{frozen}"
                     f"Title: {title}\n\nNotes:\n{notes}\n")
             log.write(f"Saved frame info: {info_path}")
         except OSError as exc:

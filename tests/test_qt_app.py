@@ -1477,6 +1477,227 @@ class PollingTests(WindowTestCase):
         self.assertEqual(self.window.pixel_status.text(), "")
 
 
+class FreezeTests(WindowTestCase):
+    """Freezing the displayed image without saving it (issue #14)."""
+
+    def show(self, packet):
+        """Publish a packet from the engine and let the window draw it.
+
+        Args: packet is the FramePacket to publish.
+        Returns: None.
+        """
+        self.engine._packet = packet
+        self.window._poll_frame()
+
+    def freeze_action(self):
+        """Find View > Freeze display.
+
+        Args: None.
+        Returns: The QAction.
+        """
+        view_menu = self.window.menuBar().actions()[0].menu()
+        return next(a for a in view_menu.actions() if a.text() == "Freeze display")
+
+    def freeze_on_first_frame(self):
+        """Draw frame 1, freeze it, then publish a newer frame 2.
+
+        Args: None.
+        Returns: The frozen FramePacket.
+        """
+        frozen = make_packet(sequence=1)
+        self.show(frozen)
+        self.window.freeze_button.click()
+        self.show(make_packet(sequence=2, palette="Jet"))
+        return frozen
+
+    def test_freeze_holds_the_shown_frame_while_the_engine_continues(self):
+        """Newer engine frames are not drawn while the display is frozen.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.assertIs(self.window.view.packet, frozen)
+        self.assertIs(self.window.current.frozen, frozen)
+        self.assertEqual(self.window.drawn_frames, 1)
+        self.assertTrue(self.log.lines[-1].startswith("Display frozen"))
+
+    def test_unfreeze_returns_to_the_newest_frame(self):
+        """Resuming draws the engine's current frame on the next poll.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.window.freeze_button.click()
+        self.assertIsNone(self.window.current.frozen)
+        self.window._poll_frame()
+        self.assertEqual(self.window.view.packet.sequence, 2)
+        self.assertEqual(self.log.lines[-1], "Display live again.")
+
+    def test_freeze_without_a_frame_logs_and_stays_live(self):
+        """Freezing before anything was drawn does nothing but explain why.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.freeze_button.click()
+        self.assertIsNone(self.window.current.frozen)
+        self.assertFalse(self.window.freeze_button.isChecked())
+        self.assertTrue(self.window.frozen_banner.isHidden())
+        self.assertEqual(self.log.lines[-1], "No frame on screen to freeze yet.")
+
+    def test_repeated_freeze_or_resume_changes_nothing(self):
+        """Freezing a frozen view, or resuming a live one, is a no-op.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        lines = len(self.log.lines)
+        self.window.set_frozen(True)
+        self.assertIs(self.window.current.frozen, frozen)
+        self.window.set_frozen(False)
+        self.window.set_frozen(False)
+        self.assertEqual(len(self.log.lines), lines + 1)
+
+    def test_frozen_indicators_show_and_hide(self):
+        """Banner, badge, button and menu item all mark a frozen view.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        action = self.freeze_action()
+        for widget in (window.frozen_banner, window.frozen_badge):
+            self.assertTrue(widget.isHidden())
+        self.freeze_on_first_frame()
+        when = window.current.frozen_at.strftime("%H:%M:%S")
+        self.assertFalse(window.frozen_banner.isHidden())
+        self.assertIn(f"FROZEN at {when}", window.frozen_banner.text())
+        self.assertIn("Space", window.frozen_banner.text())
+        self.assertFalse(window.frozen_badge.isHidden())
+        self.assertTrue(window.freeze_button.isChecked())
+        self.assertTrue(action.isChecked())
+        window.set_frozen(False)
+        for widget in (window.frozen_banner, window.frozen_badge):
+            self.assertTrue(widget.isHidden())
+        self.assertFalse(window.freeze_button.isChecked())
+        self.assertFalse(action.isChecked())
+
+    def test_frozen_badge_moves_no_other_status_item(self):
+        """Showing or hiding the FROZEN badge leaves every other item in place.
+
+        The badge takes its room from the hint text, so the window is made wide
+        enough for the hint to have some.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.resize(2400, 900)
+        window.show()
+        items = (window.update_slot, window.feature_button, window.source_badge,
+                 window.record_label, window.range_status, window.camera_fps_status,
+                 window.speed_status, window.pixel_status)
+
+        def geometry():
+            QApplication.processEvents()
+            return [(w.x(), w.width()) for w in items]
+
+        before = geometry()
+        self.freeze_on_first_frame()
+        self.assertFalse(window.frozen_badge.isHidden())
+        self.assertEqual(geometry(), before)
+        window.set_frozen(False)
+        self.assertEqual(geometry(), before)
+
+    def test_banner_lets_mouse_reach_the_image(self):
+        """The banner over the image does not block zoom, pan or the readout.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(self.window.frozen_banner.testAttribute(
+            Qt.WA_TransparentForMouseEvents))
+
+    def test_space_key_toggles_freeze(self):
+        """Space freezes and resumes the display.
+
+        Args: None.
+        Returns: None.
+        """
+        self.show(make_packet(sequence=1))
+        self.assertTrue(self.window.handle_key(Qt.Key_Space))
+        self.assertIsNotNone(self.window.current.frozen)
+        self.assertTrue(self.window.handle_key(Qt.Key_Space))
+        self.assertIsNone(self.window.current.frozen)
+
+    def test_view_menu_item_toggles_freeze(self):
+        """View > Freeze display freezes and resumes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.show(make_packet(sequence=1))
+        action = self.freeze_action()
+        self.assertEqual(action.shortcut().toString(), "Space")
+        action.trigger()
+        self.assertIsNotNone(self.window.current.frozen)
+        action.trigger()
+        self.assertIsNone(self.window.current.frozen)
+
+    def test_save_while_frozen_sends_the_frozen_frame(self):
+        """Save writes the held frame and its freeze time, not the live one.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.window.frame_title.setText("Held")
+        self.window.save_frame()
+        self.assertEqual(self.queued(), [("save", {
+            "title": "Held", "notes": "", "packet": frozen,
+            "frozen_at": self.window.current.frozen_at})])
+
+    def test_pixel_readout_reads_the_frozen_frame(self):
+        """The hover readout reports the frozen image, not the live one.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), "Gray",
+                                          1.0, "Raw", True)
+        self.window.hover = (10, 5)
+        self.window._poll_status()
+        self.assertEqual(self.window.pixel_status.text(),
+                         f"x 10, y 5: {int(frozen.image[5, 10])}")
+
+    def test_displayed_rate_reads_frozen(self):
+        """The displayed-frame rate says frozen instead of a number.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.window._poll_status()
+        self.assertIn("Displayed: frozen", self.window.speed_status.text())
+
+    def test_switch_to_live_drops_a_frozen_demo_frame(self):
+        """A held demo frame never outlives the dummy-mode indicators.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.engine.events.put(("switched_live", None))
+        self.window._handle_events()
+        self.assertIsNone(self.window.current.frozen)
+        self.assertTrue(self.window.frozen_banner.isHidden())
+        self.assertFalse(self.window.freeze_button.isChecked())
+
+
 class EngineEventTests(WindowTestCase):
     """Reaction to engine events."""
 
@@ -1747,6 +1968,50 @@ class MultiCameraTests(unittest.TestCase):
         self.assertTrue(states[0].startswith("displayed · "))
         self.assertTrue(states[1].endswith(" · REC"))
         self.assertEqual(states[2], "off")
+
+    def test_freeze_belongs_to_the_displayed_camera(self):
+        """Each camera keeps its own frozen frame across display switches.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first = self.window, self.channels[0]
+        frozen = make_packet(sequence=1)
+        first.engine._packet = frozen
+        window._poll_frame()
+        window.set_frozen(True)
+        window._poll_status()
+        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
+        window.camera_combo.setCurrentIndex(1)  # the second camera is live
+        self.assertIsNone(window.current.frozen)
+        self.assertIsNone(window.view.packet)
+        self.assertTrue(window.frozen_banner.isHidden())
+        self.assertFalse(window.freeze_button.isChecked())
+        window._poll_status()
+        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
+        self.assertFalse(window.camera_states[1].text().endswith(" · frozen"))
+        window.camera_combo.setCurrentIndex(0)  # back: the held frame is shown at once
+        self.assertIs(window.view.packet, frozen)
+        self.assertFalse(window.frozen_banner.isHidden())
+        self.assertTrue(window.freeze_button.isChecked())
+        first.engine._packet = make_packet(sequence=2)
+        window._poll_frame()
+        self.assertIs(window.view.packet, frozen)
+
+    def test_turning_off_a_frozen_background_camera_drops_its_frame(self):
+        """A camera whose processing is turned off loses its frozen frame.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first = self.window, self.channels[0]
+        first.engine._packet = make_packet(sequence=1)
+        window._poll_frame()
+        window.set_frozen(True)
+        window.camera_combo.setCurrentIndex(1)
+        window.camera_checks[0].setChecked(False)
+        self.assertFalse(first.active)
+        self.assertIsNone(first.frozen)
 
     def test_background_events_do_not_change_the_shown_controls(self):
         """Limits are stored and record_off ignored for a camera not shown.

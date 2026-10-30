@@ -20,6 +20,7 @@ import html
 import math
 import sys
 import time
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -89,6 +90,8 @@ TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
 DEFAULT_LIMITS = {"ExposureTime": (0, 50000), "Gain": (0, 30),
                   "AcquisitionFrameRate": (0, 60)}
+# Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
+FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 
 
 def request_gl_format():
@@ -798,13 +801,26 @@ class MainWindow(QMainWindow):
         self.codex_when_ready = False  # open Codex when the download finishes
         self.retired_channels = []  # demo channels replaced by real cameras
         self.drawn_sequence = 0
+        self.shown_packet = None  # the packet on screen; Freeze holds this one
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
         self.display_fps = 0.0
         self.hover = (-1, -1)
         self.view = GLImageView() if use_gl else CpuImageView()
         self.view.hovered.connect(self._set_hover)
-        self.setCentralWidget(self.view)
+        # The frozen banner floats over the top of the image (same grid cell);
+        # mouse events pass through it so zoom, pan and the readout still work.
+        self.frozen_banner = QLabel()
+        self.frozen_banner.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.frozen_banner.setStyleSheet(
+            FROZEN_STYLE + "padding:4px 12px;margin-top:8px;border-radius:4px;")
+        self.frozen_banner.setVisible(False)
+        center = QWidget()
+        stack = QGridLayout(center)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.addWidget(self.view, 0, 0)
+        stack.addWidget(self.frozen_banner, 0, 0, Qt.AlignTop | Qt.AlignHCenter)
+        self.setCentralWidget(center)
         # The controls dock takes the full window height; the log sits under
         # the image only.
         self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
@@ -894,6 +910,15 @@ class MainWindow(QMainWindow):
             lambda on: self.engine.update_settings(record=on))
         bar.addWidget(self.record_button)
         bar.addSeparator()
+        self.freeze_button = QPushButton("Freeze (Space)")
+        self.freeze_button.setCheckable(True)
+        self.freeze_button.setToolTip(
+            "Hold the displayed image to inspect it (zoom, pan, read pixel values) "
+            "without saving anything. The camera keeps acquiring, processing and "
+            "recording; S saves the held image.")
+        self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
+        self.freeze_button.toggled.connect(self.set_frozen)
+        bar.addWidget(self.freeze_button)
         for label, tip, handler in (
                 ("Save frame (S)", "Save the displayed frame with its title and notes",
                  self.save_frame),
@@ -1191,6 +1216,14 @@ class MainWindow(QMainWindow):
         self.hint_label.setMinimumWidth(0)
         self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         bar.addWidget(self.hint_label, 1)
+        # Leftmost permanent item: showing it only narrows the hint, so it moves
+        # nothing else.
+        self.frozen_badge = QLabel("  FROZEN  ")
+        self.frozen_badge.setStyleSheet(FROZEN_STYLE)
+        self.frozen_badge.setToolTip("The image on screen is held; the camera keeps "
+                                     "running. Press Space to return to live.")
+        self.frozen_badge.setVisible(False)
+        bar.addPermanentWidget(self.frozen_badge)
         # Every readout has a fixed width, so no value can move its neighbours.
         self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
         self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
@@ -1248,7 +1281,7 @@ class MainWindow(QMainWindow):
             bar.addPermanentWidget(widget)
 
     def _build_menus(self):
-        """Create the View menu (docks and zoom).
+        """Create the View menu (docks, zoom and freeze) and the Help menu.
 
         Args: None.
         Returns: None.
@@ -1266,10 +1299,17 @@ class MainWindow(QMainWindow):
             action.triggered.connect(handler)
             menu.addAction(action)
         menu.addSeparator()
+        self.freeze_action = QAction("Freeze display", self)
+        self.freeze_action.setCheckable(True)
+        self.freeze_action.setShortcut(QKeySequence("Space"))
+        self.freeze_action.setShortcutContext(Qt.WidgetShortcut)  # via handle_key
+        self.freeze_action.triggered.connect(self.set_frozen)
+        menu.addAction(self.freeze_action)
+        menu.addSeparator()
         hint = menu.addAction("Wheel to zoom, drag to pan, Q or Esc to quit")
         hint.setEnabled(False)  # a reminder, not a command
         self.view.setToolTip("Wheel: zoom · drag: pan · 0: fit · 1: actual size\n"
-                             "S save · F set reference · R reset last · "
+                             "Space freeze · S save · F set reference · R reset last · "
                              "A reset average · Q/Esc quit")
 
         help_menu = self.menuBar().addMenu("&Help")
@@ -1357,7 +1397,11 @@ class MainWindow(QMainWindow):
             channel.start()
         self.current = channel
         self.drawn_sequence = 0
+        self.shown_packet = None
         self.view.clear()
+        if channel.frozen is not None:  # its held frame comes back at once
+            self._draw(channel.frozen)
+        self._show_frozen()
         self._load_settings(self.engine.settings(), channel.limits)
         self._set_demo(channel.demo)
         self._sync_cameras()
@@ -1423,13 +1467,16 @@ class MainWindow(QMainWindow):
         """Summarize a camera for its row in the camera list.
 
         Args: channel is one of self.channels.
-        Returns: Short text such as "displayed · 29.8 fps · REC", or "off".
+        Returns: Short text such as "displayed · 29.8 fps · REC · frozen",
+            or "off".
         """
         if not channel.active:
             return "off"
         shown = "displayed · " if channel is self.current else ""
         recording = " · REC" if channel.engine.settings().record else ""
-        return f"{shown}{channel.engine.status()['processed_fps']:.1f} fps{recording}"
+        frozen = " · frozen" if channel.frozen is not None else ""
+        return (f"{shown}{channel.engine.status()['processed_fps']:.1f} fps"
+                f"{recording}{frozen}")
 
     def _adopt_live_cameras(self, channel, cameras):
         """After a demo channel switched to a camera, list the real cameras.
@@ -1514,6 +1561,7 @@ class MainWindow(QMainWindow):
         Returns: True if the key was a shortcut.
         """
         actions = {
+            Qt.Key_Space: lambda: self.set_frozen(self.current.frozen is None),
             Qt.Key_S: self.save_frame,
             Qt.Key_F: lambda: self.engine.request("reference"),
             Qt.Key_R: lambda: self.engine.request("reset_previous"),
@@ -1529,14 +1577,58 @@ class MainWindow(QMainWindow):
         handler()
         return True
 
-    def save_frame(self):
-        """Ask the engine to save the displayed frame with the title and notes.
+    def set_frozen(self, on):
+        """Freeze the displayed camera's image on screen, or return to live.
+
+        Only the display holds still: the engine keeps acquiring, processing
+        and recording. The held frame belongs to the displayed camera.
+
+        Args: on is True to hold the frame now on screen, False to resume.
+        Returns: None.
+        """
+        channel = self.current
+        if on and channel.frozen is None:
+            if self.shown_packet is None:
+                self.log.write("No frame on screen to freeze yet.")
+            else:
+                channel.frozen, channel.frozen_at = self.shown_packet, datetime.now()
+                self.log.write(f"Display frozen at {channel.frozen_at:%H:%M:%S}; "
+                               "the camera keeps running.")
+        elif not on and channel.frozen is not None:
+            channel.frozen = channel.frozen_at = None
+            self.log.write("Display live again.")
+        self._show_frozen()
+
+    def _show_frozen(self):
+        """Show or hide every frozen-display indicator for the displayed camera.
 
         Args: None.
         Returns: None.
         """
+        frozen = self.current.frozen is not None
+        if frozen:
+            self.frozen_banner.setText(
+                f"FROZEN at {self.current.frozen_at:%H:%M:%S} — not live · "
+                "Space resumes")
+        self.frozen_banner.setVisible(frozen)
+        self.frozen_badge.setVisible(frozen)
+        for widget in (self.freeze_button, self.freeze_action):
+            widget.blockSignals(True)
+            widget.setChecked(frozen)
+            widget.blockSignals(False)
+
+    def save_frame(self):
+        """Ask the engine to save the displayed frame with the title and notes.
+
+        While the display is frozen, the held frame is saved.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = {} if self.current.frozen is None else {
+            "packet": self.current.frozen, "frozen_at": self.current.frozen_at}
         self.engine.request("save", title=self.frame_title.text(),
-                            notes=self.frame_notes.toPlainText())
+                            notes=self.frame_notes.toPlainText(), **frozen)
 
     def _show_zoom(self, zoom):
         """Sync the zoom slider and percentage with the view.
@@ -1560,19 +1652,32 @@ class MainWindow(QMainWindow):
     def _poll_frame(self):
         """Draw the newest engine frame if it has not been drawn yet.
 
+        Nothing is drawn while the displayed camera is frozen.
+
         Args: None.
         Returns: None.
         """
+        if self.current.frozen is not None:
+            return
         packet = self.engine.latest_packet()
         if packet is None or packet.sequence == self.drawn_sequence:
             return
         self.drawn_sequence = packet.sequence
+        self._draw(packet)
+        self.drawn_frames += 1
+
+    def _draw(self, packet):
+        """Put a frame on screen, rebuilding the color table only when needed.
+
+        Args: packet is the FramePacket to show.
+        Returns: None.
+        """
         key = (packet.palette, round(packet.gamma, 4))
         if key != getattr(self, "table_key", None):
             self.table = palette_rgb_table(packet.palette, packet.gamma)
             self.table_key = key
         self.view.show_packet(packet, self.table, key)
-        self.drawn_frames += 1
+        self.shown_packet = packet
 
     def _poll_status(self):
         """Refresh status text, the log, and handle engine events.
@@ -1594,9 +1699,10 @@ class MainWindow(QMainWindow):
         self.record_label.setText(status["record"])
         self.range_status.setText(status["range"])
         self.camera_fps_status.setText(status["camera_fps"])
-        self.speed_status.setText(
-            f"{status['processing']}    Displayed: {self.display_fps:.1f} fps")
-        packet = self.engine.latest_packet()
+        frozen = self.current.frozen
+        displayed = "frozen" if frozen is not None else f"{self.display_fps:.1f} fps"
+        self.speed_status.setText(f"{status['processing']}    Displayed: {displayed}")
+        packet = frozen if frozen is not None else self.engine.latest_packet()
         x, y = self.hover
         if packet is not None and 0 <= y < packet.image.shape[0] and \
                 0 <= x < packet.image.shape[1]:
@@ -1933,6 +2039,9 @@ class MainWindow(QMainWindow):
             self.record_button.setChecked(False)
             self.record_button.blockSignals(False)
         elif kind == "switched_live":
+            # A held demo frame must not outlive the dummy-mode indicators.
+            channel.frozen = channel.frozen_at = None
+            self._show_frozen()
             self._adopt_live_cameras(channel, payload or [])
             for button in self.mode_group.buttons():
                 button.setChecked(button.text() == "Raw")

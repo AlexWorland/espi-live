@@ -670,6 +670,37 @@ class DirectWorkerTests(CameraEngineCase):
         self.engine._handle_actions("processor", None)
         self.assertTrue(self.log.has("No current display frame"))
 
+    def test_handle_actions_save_writes_a_given_frozen_packet(self):
+        """A save carrying a frozen packet writes that packet, not the newest one.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = engine.FramePacket(1, np.full((8, 8), 7, np.uint8), "Gray", 1.0,
+                                    "Raw", True)
+        self.engine._packet = self.packet()  # newer live frame, not demo
+        when = object()
+        self.engine.request("save", title="x", notes="", packet=frozen, frozen_at=when)
+        with mock.patch.object(engine, "save_frame") as save:
+            self.engine._handle_actions("processor", None)
+        image, title, notes, demo, _, tag = save.call_args.args
+        self.assertEqual(int(image[0, 0]), 7)
+        self.assertEqual((title, notes, demo, tag), ("x", "", True, self.engine.tag))
+        self.assertIs(save.call_args.kwargs["frozen_at"], when)
+
+    def test_handle_actions_save_without_frozen_packet_saves_newest(self):
+        """A plain save writes the newest packet with no freeze time.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine._packet = self.packet()
+        self.engine.request("save", title="", notes="")
+        with mock.patch.object(engine, "save_frame") as save:
+            self.engine._handle_actions("processor", None)
+        self.assertFalse(save.call_args.args[3])
+        self.assertIsNone(save.call_args.kwargs["frozen_at"])
+
     def test_handle_actions_reference_without_frame_logs(self):
         """A reference request before any frame is reported.
 

@@ -12,6 +12,18 @@
 - An **Open in Codex** button in the status bar (and **Help > Ask Codex about the source code…**) opens OpenAI's Codex app on that folder, with instructions that make Codex answer from the real code in plain words. A first-use dialog explains it and links to the Codex download.
 - When the user asks Codex for a change and approves it, Codex runs the new `--send-changes` option, which files the change as a `codex-change` GitHub issue; the new `codex-change.yml` workflow applies it to a `codex/issue-<n>` branch and opens a pull request for the developers to review. The program still holds only an Issues token.
 
+## 2026-10-29 — Freeze the displayed image without saving it
+
+### Previous state
+
+- The only way to hold an image for inspection was **Save frame** (`S`), which wrote a PNG (and, with a title or notes, a `.txt` file) to `output/frames/`.
+
+### Current state
+
+- **Freeze** (`Space`, a toolbar button, or **View > Freeze display**) holds the image on screen so it can be zoomed, panned and read with the pixel readout, without writing anything. Only the display stops: the camera keeps acquiring, and averaging, reference refresh and recording carry on. Press `Space` again to return to the live image.
+- A frozen image is marked by an amber **FROZEN at** *time* bar over the image, a **FROZEN** status-bar badge and the highlighted toolbar button; the displayed rate reads "frozen". **Save frame** saves the held image, and its notes file records when it was frozen. **Set reference** still uses the live camera frame.
+- With several cameras, each camera keeps its own frozen frame (the camera list shows `frozen`); turning a camera's processing off, or **Switch to live capture** from dummy mode, drops it. Defaults (exposure 8000 µs, gain 0 dB, 30 fps) and recording are unchanged.
+
 ## 2026-10-29 — Fixed-position status bar
 
 ### Previous state
