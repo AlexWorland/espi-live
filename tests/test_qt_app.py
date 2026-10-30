@@ -26,7 +26,7 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
-from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, updater
+from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, tips, updater
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
 from espi_live.channels import Channel, demo_channels
@@ -949,6 +949,7 @@ class WindowTestCase(unittest.TestCase):
         """
         self.window.frame_timer.stop()
         self.window.status_timer.stop()
+        self.window.tip_timer.stop()
         self.window.close()
         self.engine.stop()
         self.engine.wait(5.0)
@@ -999,12 +1000,13 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertEqual(self.window.exposure.toolTip(), "")
 
     def test_first_run_uses_default_window_size(self):
-        """Without saved geometry the window opens at 1400x900.
+        """Without saved geometry the window opens at the default size.
 
         Args: None.
         Returns: None.
         """
-        self.assertEqual((self.window.width(), self.window.height()), (1400, 900))
+        self.assertEqual((self.window.width(), self.window.height()),
+                         (qt_app.DEFAULT_WIDTH, qt_app.DEFAULT_HEIGHT))
 
     def test_cpu_view_is_used_when_gl_not_requested(self):
         """use_gl=False builds the CPU fallback view.
@@ -1025,6 +1027,7 @@ class MainWindowBuildTests(WindowTestCase):
         self.addCleanup(window.deleteLater)
         window.frame_timer.stop()
         window.status_timer.stop()
+        window.tip_timer.stop()
         self.assertEqual(window.updates.checks, 1)
         window.close()
 
@@ -1403,6 +1406,12 @@ class PollingTests(WindowTestCase):
         window.check_button.setText("Checking for updates…")
         window.check_button.setVisible(True)
         window.update_button.setVisible(False)
+        self.assertEqual(geometry(), before)
+        window._rotate_tip()  # a longer or shorter tip must not shove the badges
+        self.assertEqual(geometry(), before)
+        window._rotate_tip()  # a longer or shorter tip must not shove the badges
+        self.assertEqual(geometry(), before)
+        window._rotate_tip()  # a longer or shorter tip must not shove the badges
         self.assertEqual(geometry(), before)
 
     def test_fixed_label_keeps_full_text_but_shows_an_ellipsis(self):
@@ -1849,6 +1858,7 @@ class MultiCameraTests(unittest.TestCase):
         self.window = qt_app.MainWindow(self.channels, self.log, False, False)
         self.window.frame_timer.stop()
         self.window.status_timer.stop()
+        self.window.tip_timer.stop()
         self.addCleanup(self.cleanup_window)
 
     def cleanup_window(self):
@@ -2462,8 +2472,9 @@ class CloseTests(WindowTestCase):
         self.addCleanup(window.deleteLater)
         self.addCleanup(window.status_timer.stop)
         self.addCleanup(window.frame_timer.stop)
+        self.addCleanup(window.tip_timer.stop)
         self.addCleanup(window.close)
-        self.assertEqual(window.height(), 700)  # not the 1400x900 default
+        self.assertEqual(window.height(), 700)  # not the default height
 
     def test_running_demo_engine_feeds_the_view(self):
         """A started demo engine publishes frames that the window draws.
@@ -3001,6 +3012,7 @@ class CaptureWindowTests(unittest.TestCase):
         self.window = qt_app.MainWindow(self.channels, self.log, False, False)
         self.window.frame_timer.stop()
         self.window.status_timer.stop()
+        self.window.tip_timer.stop()
         self.addCleanup(self.cleanup_window)
         self.window._handle_events()  # identity and limits queued by the open
 
@@ -3212,6 +3224,7 @@ class CodexTests(WindowTestCase):
                 window = demo_window(engine, self.log, check_updates=check_updates)
                 window.frame_timer.stop()
                 window.status_timer.stop()
+                window.tip_timer.stop()
                 window.deleteLater()
         worker.start.assert_called_once_with()
 
@@ -3348,6 +3361,130 @@ class CodexTests(WindowTestCase):
             self.assertEqual(open_url.call_count, opened)
             self.assertEqual(self.dialogs.call_args.args[1], "Codex not found")
         self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
+
+
+class HelpTipTests(WindowTestCase):
+    """Rotating status-bar tips (issue #21)."""
+
+    def test_a_tip_is_showing_and_the_timer_is_slow(self):
+        """The window opens on one tip, and the timer is not per-frame.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertIn(window.tip_label.text(), tips.TIPS)
+        self.assertFalse(window.tip_label.isHidden())
+        self.assertTrue(window.tips_action.isChecked())
+        self.assertEqual(window.tip_timer.interval(), tips.ROTATE_MS)
+        self.assertEqual(window.tip_timer.timerType(), Qt.CoarseTimer)
+        self.assertTrue(window.tip_timer.isActive())
+        self.assertIn(window.tip_label.text(), window.tip_label.toolTip())
+        self.assertIn("Right-click to hide.", window.tip_label.toolTip())
+
+    def test_click_and_timer_advance_and_the_last_tip_wraps(self):
+        """A click and a timeout both move to the next tip, and the end wraps.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window._poll_status()
+        hint = window.hint_label.text()
+        self.assertEqual(hint, self.engine.status()["hint"])
+        index = window.tips.index
+        event = mock.MagicMock()
+        event.button.return_value = Qt.LeftButton
+        window.tip_label.mousePressEvent(event)
+        self.assertEqual(window.tips.index, (index + 1) % len(tips.TIPS))
+        self.assertEqual(window.tip_label.text(), tips.TIPS[window.tips.index])
+        self.assertIn("Click for the next tip.", window.tip_label.toolTip())
+        self.assertEqual(window.hint_label.text(), hint)
+        window.tips.index = len(tips.TIPS) - 1
+        window.tip_timer.timeout.emit()
+        self.assertEqual(window.tips.index, 0)
+        self.assertEqual(window.tip_label.text(), tips.TIPS[0])
+        self.assertEqual(window.hint_label.text(), hint)
+
+    def test_narrow_tip_elides_but_keeps_the_full_text(self):
+        """A tip squeezed to a few pixels shows an ellipsis and reports the whole string.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.TipLabel(*tips.TIPS)
+        self.addCleanup(label.close)
+        label.setText(tips.TIPS[0])
+        label.resize(30, 20)
+        label.setText(tips.TIPS[0])
+        self.assertEqual(label.text(), tips.TIPS[0])
+        self.assertTrue(QLabel.text(label).endswith("…"))
+        label.resize(label.sizeHint().width(), 20)
+        label.setText(tips.TIPS[0])
+        self.assertEqual(QLabel.text(label), tips.TIPS[0])
+
+    def test_hiding_persists_and_a_late_timeout_stays_hidden(self):
+        """Hide remembers the choice; the next window stays quiet until View > Help tips.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        index = window.tips.index
+        event = mock.MagicMock()
+        event.button.return_value = Qt.RightButton
+        window.tip_label.mousePressEvent(event)
+        self.assertTrue(window.tip_label.isHidden())
+        self.assertFalse(window.tips_action.isChecked())
+        self.assertFalse(window.tip_timer.isActive())
+        self.assertEqual(window.tip_label.toolTip(), "")
+        self.assertTrue(FakeSettings.store["tips/hidden"])
+        window.tip_timer.timeout.emit()
+        self.assertEqual(window.tips.index, index)
+        window.close()
+
+        engine = Engine(self.log)
+        engine.use_demo()
+        again = demo_window(engine, self.log)
+        self.addCleanup(again.deleteLater)
+        self.addCleanup(again.status_timer.stop)
+        self.addCleanup(again.frame_timer.stop)
+        self.addCleanup(again.tip_timer.stop)
+        self.addCleanup(again.close)
+        self.assertTrue(again.tip_label.isHidden())
+        self.assertFalse(again.tips_action.isChecked())
+        self.assertFalse(again.tip_timer.isActive())
+        self.assertTrue(again.tips.hidden)
+        again.tips_action.trigger()
+        self.assertFalse(again.tip_label.isHidden())
+        self.assertIn(again.tip_label.text(), tips.TIPS)
+        self.assertFalse(FakeSettings.store["tips/hidden"])
+        self.assertTrue(again.tip_timer.isActive())
+
+    def test_view_menu_hides_tips_without_moving_the_dummy_badge(self):
+        """Unchecking Help tips hides them, and the dummy-mode badge stays whole.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
+        for tip in tips.TIPS:
+            window.tip_label.setText(tip)
+            self.assertEqual(QLabel.text(window.tip_label), tip)
+        before = window.source_badge.geometry().getRect()
+        window.resize(1400, 900)  # a saved narrow layout keeps the badge
+        QApplication.processEvents()
+        self.assertIn("DUMMY", QLabel.text(window.source_badge))
+        window.resize(qt_app.DEFAULT_WIDTH, qt_app.DEFAULT_HEIGHT)
+        QApplication.processEvents()
+        window.tips_action.trigger()
+        QApplication.processEvents()
+        self.assertTrue(window.tip_label.isHidden())
+        self.assertTrue(FakeSettings.store["tips/hidden"])
+        self.assertEqual(window.source_badge.geometry().getRect(), before)
 
 
 if __name__ == "__main__":

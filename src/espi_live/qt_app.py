@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
                                QPushButton, QSizePolicy, QSlider,
                                QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
-from espi_live import camera_reports, codex, feedback, source_code, updater
+from espi_live import camera_reports, codex, feedback, source_code, tips, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.logs import AppLog
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
@@ -87,6 +87,10 @@ ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1.
 CODEX_LABEL = "Open in Codex"
 CODEX_BUSY_LABEL = "Getting source…"
 LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are ignored
+# Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
+# layout is left alone; a narrower window keeps the badge and elides the tip.
+DEFAULT_WIDTH = 2100
+DEFAULT_HEIGHT = 900
 TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
 DEFAULT_LIMITS = {"ExposureTime": (0, 50000), "Gain": (0, 30),
@@ -772,6 +776,33 @@ class FixedLabel(QLabel):
         self.setText(self._full)
 
 
+class TipLabel(FixedLabel):
+    """The help tip. A left click shows the next one; a right click hides it."""
+
+    clicked = Signal()
+    dismissed = Signal()
+
+    def __init__(self, *samples):
+        """Reserve room for the samples and show that the tip is clickable.
+
+        Args: samples are the widest strings the label should show in full.
+        Returns: None.
+        """
+        super().__init__(*samples)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        """A left click asks for the next tip; a right click hides them.
+
+        Args: event is the Qt mouse event.
+        Returns: None.
+        """
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        elif event.button() == Qt.RightButton:
+            self.dismissed.emit()
+
+
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
 
@@ -839,7 +870,7 @@ class MainWindow(QMainWindow):
 
         settings = QSettings("ESPI", "espi_live")
         if not self.restoreGeometry(settings.value("geometry", b"")):
-            self.resize(1400, 900)
+            self.resize(DEFAULT_WIDTH, DEFAULT_HEIGHT)
         self.restoreState(settings.value("windowState", b""), LAYOUT_VERSION)
 
         self.frame_timer = QTimer(self)
@@ -849,6 +880,14 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._poll_status)
         self.status_timer.start(200)
+        # Coarse, and only while tips are showing: nothing per frame, and the
+        # slot only changes a label. It never talks to an engine.
+        self.tip_timer = QTimer(self)
+        self.tip_timer.setTimerType(Qt.CoarseTimer)
+        self.tip_timer.setInterval(tips.ROTATE_MS)
+        self.tip_timer.timeout.connect(self._rotate_tip)
+        if not self.tips.hidden:
+            self.tip_timer.start()
         if check_updates and updater.unavailable_reason() is None:
             self.updates.check()
         if check_updates:
@@ -1239,10 +1278,25 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         bar = self.statusBar()
-        self.hint_label = QLabel()  # left side; elides first when space runs out
+        settings = QSettings("ESPI", "espi_live")
+        self.tips = tips.TipRotator(
+            hidden=bool(settings.value("tips/hidden", False, bool)))
+        # Ignored, with no minimum, so the badges keep the width they had
+        # before the tip existed. Stretch 20 against the view hint's 1 fills
+        # the sentence first; the cap is the longest tip, and the hint gets
+        # whatever is left. Right-click and View > Help tips dismiss it.
+        self.tip_label = TipLabel(*tips.TIPS)
+        self.tip_label.clicked.connect(self._rotate_tip)
+        self.tip_label.dismissed.connect(lambda: self._set_tips_visible(False))
+        self.tip_label.setMinimumWidth(0)
+        self.tip_label.setMaximumWidth(self.tip_label.sizeHint().width())
+        self.tip_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        bar.addWidget(self.tip_label, 20)
+        self.hint_label = QLabel()  # takes the space the tip does not use
         self.hint_label.setMinimumWidth(0)
         self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         bar.addWidget(self.hint_label, 1)
+        self._show_tip()
         # Leftmost permanent item: showing it only narrows the hint, so it moves
         # nothing else.
         self.frozen_badge = QLabel("  FROZEN  ")
@@ -1317,6 +1371,12 @@ class MainWindow(QMainWindow):
         menu.addAction(self.controls_dock.toggleViewAction())
         menu.addAction(self.log_dock.toggleViewAction())
         menu.addAction(self.actions_bar.toggleViewAction())
+        self.tips_action = QAction("Help tips", self)
+        self.tips_action.setCheckable(True)
+        self.tips_action.setChecked(not self.tips.hidden)
+        self.tips_action.setToolTip("Show rotating help tips in the status bar")
+        self.tips_action.triggered.connect(self._set_tips_visible)
+        menu.addAction(self.tips_action)
         menu.addSeparator()
         for text, key, handler in (("Fit to window", "0", self.view.fit),
                                    ("Actual size", "1", self.view.actual_size)):
@@ -1772,6 +1832,52 @@ class MainWindow(QMainWindow):
         self.view.show_packet(packet, self.table, key)
         self.shown_packet = packet
 
+    def _show_tip(self):
+        """Put the current tip in the status bar, or hide it.
+
+        Args: None.
+        Returns: None.
+        """
+        text = self.tips.current()
+        shown = not self.tips.hidden
+        self.tip_label.setText(text)
+        self.tip_label.setToolTip(
+            f"{text}\nClick for the next tip. Right-click to hide." if text else "")
+        self.tip_label.setVisible(shown)
+        action = getattr(self, "tips_action", None)
+        if action is not None:
+            action.setChecked(shown)
+
+    def _rotate_tip(self):
+        """Show the next tip and wait the full interval again.
+
+        Shared by the timer and a click. A timeout that arrives after the
+        tips were hidden must not bring them back.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.tips.hidden:
+            return
+        self.tips.advance()
+        self._show_tip()
+        self.tip_timer.start()
+
+    def _set_tips_visible(self, visible):
+        """Show or hide the tips and remember the choice.
+
+        Args: visible is True to show tips.
+        Returns: None.
+        """
+        if visible:
+            self.tips.restore()
+            self.tip_timer.start()
+        else:
+            self.tips.dismiss()
+            self.tip_timer.stop()
+        self._show_tip()
+        QSettings("ESPI", "espi_live").setValue("tips/hidden", self.tips.hidden)
+
     def _poll_status(self):
         """Refresh status text, the log, and handle engine events.
 
@@ -2190,6 +2296,7 @@ class MainWindow(QMainWindow):
         """
         if not self.closing:
             self.closing = True
+            self.tip_timer.stop()
             self.statusBar().showMessage("Finishing recordings and releasing the camera…")
             for engine in self._all_engines():
                 engine.stop()
