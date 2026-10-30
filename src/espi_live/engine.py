@@ -193,8 +193,13 @@ class Engine:
             unavailable; the engine is then unchanged and use_demo() may be
             called.
         """
-        attempt = (sources.make_session(self.log, self.info) if self.info is not None
-                   else CameraSession(self.log, self.serial))
+        settings = self.settings()
+        attempt = (sources.make_session(
+                       self.log, self.info, settings.exposure_us,
+                       settings.gain_db, settings.fps)
+                   if self.info is not None else
+                   CameraSession(self.log, self.serial, settings.exposure_us,
+                                 settings.gain_db, settings.fps))
         attempt.open()
         self._attach_camera(attempt)
 
@@ -430,7 +435,7 @@ class Engine:
         """
         processor = ESPIProcessor()
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        applied = self.settings()  # camera starts at these defaults
+        applied = self.settings()  # the camera was opened at these values
         last_setting_time = 0.0
         last_mode = applied.mode
         record_signature = None
@@ -720,7 +725,9 @@ class Engine:
         """
         self.log.write("Searching for a camera to switch to live capture...")
         try:
-            attempt = sources.open_first_live(self.log)
+            settings = self.settings()
+            attempt = sources.open_first_live(
+                self.log, settings.exposure_us, settings.gain_db, settings.fps)
         except Exception as exc:
             self.log.write(f"Still in dummy mode: {exc}")
             self.events.put(("switch_failed", str(exc)))

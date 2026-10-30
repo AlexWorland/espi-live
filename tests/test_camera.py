@@ -258,6 +258,18 @@ class ConfigureCameraTests(FakeSpinTestCase):
             "StreamBufferHandlingMode"].value, 1)
         self.assertEqual(self.log.lines, [])
 
+    def test_writes_given_exposure_gain_and_frame_rate(self):
+        """A caller can start the camera away from the hard-coded defaults.
+
+        Args: None.
+        Returns: None.
+        """
+        nodemap = camera.configure_camera(
+            self.cam, self.log, exposure_us=5000.0, gain_db=2.5, fps=12.0)
+        self.assertEqual(nodemap.nodes["ExposureTime"].value, 5000.0)
+        self.assertEqual(nodemap.nodes["Gain"].value, 2.5)
+        self.assertEqual(nodemap.nodes["AcquisitionFrameRate"].value, 12.0)
+
     def test_logs_each_unsupported_setting(self):
         """A camera without the nodes still configures without raising.
 

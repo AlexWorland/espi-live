@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-30 — A restarted camera keeps its exposure, gain and frame rate
+
+### Previous state
+
+- Turning a camera off and on again started it at 8000 µs, 0 dB and 30 fps, while the sliders still showed the values saved for that camera. It stayed there until one of those three settings was moved.
+
+### Current state
+
+- A camera that is turned back on starts at the exposure, gain and frame rate its sliders show. A new camera still starts at 8000 µs, 0 dB and 30 fps.
+
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 
 ### Previous state
