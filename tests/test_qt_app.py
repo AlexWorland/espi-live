@@ -3016,6 +3016,21 @@ class QtMessageHandlerTests(unittest.TestCase):
         faulthandler.disable.assert_called_once()
 
 
+    def test_fatal_keeps_native_diagnostics_without_a_saved_report(self):
+        """Disabled or failed reporting preserves faulthandler for the abort.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter.capture_message.return_value = None
+        with mock.patch.object(qt_app, "faulthandler") as handler, \
+                self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+            with mock.patch.object(qt_app.error_reports, "_reporter", None):
+                qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+        handler.disable.assert_not_called()
+
+
 class SettingOnTests(unittest.TestCase):
     """Reading QSettings flags stored as text."""
 
@@ -3051,6 +3066,11 @@ class ReportingClassTests(unittest.TestCase):
         patcher = mock.patch.object(qt_app, "QSettings", FakeSettings)
         patcher.start()
         self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        outputs = mock.patch.object(paths, "OUTPUT_DIR", tmp.name)
+        outputs.start()
+        self.addCleanup(outputs.stop)
         self.log = FakeLog()
 
     def reporting(self):
@@ -3059,7 +3079,9 @@ class ReportingClassTests(unittest.TestCase):
         Args: None.
         Returns: The Reporting.
         """
-        return qt_app.Reporting(self.log)
+        reporting = qt_app.Reporting(self.log)
+        self.addCleanup(reporting.stop)
+        return reporting
 
     def test_init_reads_the_saved_choice(self):
         """The stored choice decides the reporter's initial state.
@@ -3131,7 +3153,8 @@ class ReportingClassTests(unittest.TestCase):
         """
         reporting = self.reporting()
         before = (sys.excepthook, threading.excepthook, sys.unraisablehook)
-        reporting.start(self.log)
+        with mock.patch.object(reporting.worker, "start"):
+            reporting.start(self.log)
         self.assertNotEqual(sys.excepthook, before[0])
         reporting.stop()
         self.assertEqual((sys.excepthook, threading.excepthook, sys.unraisablehook), before)
@@ -3315,6 +3338,24 @@ class ErrorReportUITests(WindowTestCase):
         self.assertEqual(
             call.kwargs["source"], "camera BFS-U3-63S4M")
         self.assertEqual(call.kwargs["serials"], ["SN-1", "SN-1"])
+
+    def test_report_context_accepts_analog_capture_identity(self):
+        """An analog identity has no hardware serial and must not break polling.
+
+        Args: None.
+        Returns: None.
+        """
+        from espi_live.capture_models import CaptureIdentity
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        channel = SimpleNamespace(demo=False, identity=CaptureIdentity(name="USB-Live2"),
+                                  info=CameraInfo("video 0", "USB-Live2", kind="capture"))
+        with mock.patch.object(self.window, "current", channel), \
+                mock.patch.object(self.window, "channels", [channel]):
+            self.window._update_report_context()
+        context = reporting.reporter.update_context.call_args.kwargs
+        self.assertEqual(context["serials"], ["video 0"])
+        self.assertEqual(context["source"], "camera USB-Live2")
 
     def test_report_outcomes_reach_the_status_bar(self):
         """A delivered report shows its outcome with the issue link.

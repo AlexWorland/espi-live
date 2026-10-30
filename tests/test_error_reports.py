@@ -336,7 +336,7 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(base, frozen)
         self.assertEqual(base, temporary)
         self.assertEqual(base, shifted)
-        self.assertTrue(base.startswith("ESPI-ERR-v1-"))
+        self.assertEqual(base, "ESPI-ERR-v1-5760d2b75c50")
 
     def test_every_difference_changes_the_fingerprint(self):
         """Another function, type, cause or code files under a new ID.
@@ -1147,7 +1147,7 @@ class ReporterTests(ReporterBase):
         with open(crash, "w", encoding="utf-8") as handle:
             handle.write(dump)
         with open(log, "w", encoding="utf-8") as handle:
-            handle.write("start\n")
+            handle.write("Old camera (PRIVATE-SERIAL-1234) on old-private-host\n")
         empty = os.path.join(self.folder, "espi_2.crash")
         open(empty, "w", encoding="utf-8").close()
         orphan = os.path.join(self.folder, "espi_3.crash")
@@ -1158,6 +1158,9 @@ class ReporterTests(ReporterBase):
         with self.assertLogs("espi_live.error_reports", "WARNING"):
             reports = self.reporter.collect_native_crashes()
         self.assertEqual(len(reports), 2)
+        for report in reports:
+            self.assertNotIn("PRIVATE-SERIAL", report.body)
+            self.assertNotIn("old-private-host", report.body)
         self.assertFalse(os.path.exists(crash))
         with open(log, encoding="utf-8") as handle:
             self.assertIn("Native crash (faulthandler)", handle.read())
@@ -1353,7 +1356,7 @@ class DeliveryTests(ReporterBase):
         self.reporter.save_pending(second)
         github = FakeGitHub(issues=[report_line(4, f"[{second.fingerprint}] earlier")])
         posted = []
-        with mock.patch.object(error_reports, "GitHub", lambda repo, token: github), \
+        with mock.patch.object(error_reports, "GitHub", lambda repo, token, **kwargs: github), \
                 mock.patch.object(error_reports.feedback, "feedback_token",
                                   return_value="secret"), \
                 mock.patch.object(error_reports.feedback, "repository",
@@ -1377,7 +1380,7 @@ class DeliveryTests(ReporterBase):
                 fingerprint=f"ESPI-ERR-v1-{index:012d}"))
         posted = []
         with mock.patch.object(error_reports, "MAX_DELIVERIES_PER_RUN", 2), \
-                mock.patch.object(error_reports, "GitHub", lambda repo, token: FakeGitHub()), \
+                mock.patch.object(error_reports, "GitHub", lambda repo, token, **kwargs: FakeGitHub()), \
                 mock.patch.object(error_reports.feedback, "feedback_token",
                                   return_value="secret"), \
                 mock.patch.object(error_reports.feedback, "repository",
@@ -1405,7 +1408,7 @@ class DeliveryTests(ReporterBase):
         github = FakeGitHub()
         github.matching = mock.MagicMock(side_effect=error_reports.ReportError("offline"))
         posted = []
-        with mock.patch.object(error_reports, "GitHub", lambda repo, token: github), \
+        with mock.patch.object(error_reports, "GitHub", lambda repo, token, **kwargs: github), \
                 mock.patch.object(error_reports.feedback, "feedback_token",
                                   return_value="secret"), \
                 mock.patch.object(error_reports.feedback, "repository",
@@ -1423,7 +1426,7 @@ class DeliveryTests(ReporterBase):
         """
         self.reporter.save_pending(make_report())
         posted = []
-        with mock.patch.object(error_reports, "GitHub", lambda repo, token: FakeGitHub()), \
+        with mock.patch.object(error_reports, "GitHub", lambda repo, token, **kwargs: FakeGitHub()), \
                 mock.patch.object(error_reports.feedback, "feedback_token",
                                   return_value="secret"), \
                 mock.patch.object(error_reports.feedback, "repository",
@@ -1611,9 +1614,12 @@ class HookTests(ReporterBase):
         """
         with mock.patch.object(sys, "excepthook") as default:
             hooks = self.install()
-            hooks.excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
-            default.assert_called_once()
-            hooks.excepthook(ValueError, ValueError("bare"), None)
+            try:
+                hooks.excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
+                default.assert_called_once()
+                hooks.excepthook(ValueError, ValueError("bare"), None)
+            finally:
+                hooks.uninstall()
         self.assertEqual(len(self.reporter.load_pending()), 1)
 
     def test_thread_hook_reports_worker_threads_but_not_its_own(self):
@@ -1700,3 +1706,152 @@ class HookTests(ReporterBase):
         self.assertEqual(loud.records[0][2], original)
         self.assertEqual(error_reports.current_reporter(), self.reporter)
         self.assertEqual(hooks.reporter, self.reporter)
+
+
+class ReviewRegressionTests(ReporterBase):
+    """Privacy and delivery regressions found during PR review."""
+
+    def test_all_public_fields_are_scrubbed(self):
+        """Context, thread names, titles and comments use the scrubber.
+
+        Args: None.
+        Returns: None.
+        """
+        secret = 'private@example.com'
+        self.reporter.update_context(source='camera ' + secret, display=secret,
+                                     serials=['SN-123456'])
+        with mock.patch.object(threading.current_thread(), '_name', secret):
+            report = self.reporter.build(
+                'v1|ValueError||private@example.com.py:inner', 'ValueError: boom',
+                [], 'engine', False, ['Saved: /tmp/Frames/patient_case.png'])
+        for text in (report.title, report.body, report.seen):
+            self.assertNotIn(secret, text)
+            self.assertNotIn('patient_case', text)
+        github = FakeGitHub()
+        report.title = report.body = report.seen = secret
+        self.reporter.deliver(report, github, {'reports': {}})
+        self.assertEqual(github.created[0].body, '<email>')
+        github.created.clear()
+        github.issues[0]['title'] = f'[{report.fingerprint}] existing'
+        self.reporter.deliver(report, github, {'reports': {}})
+        self.assertEqual(github.comments[0][1], '<email>')
+
+    def test_serials_are_retained_after_context_changes(self):
+        """Disconnected cameras remain scrubbed from the recent log tail.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter.update_context(serials=['SN-123456'])
+        self.reporter.update_context(serials=['SN-987654'])
+        self.assertEqual(self.reporter.scrubber()('[SN-123456] SN-987654'),
+                         '[<serial>] <serial>')
+
+    def test_send_pending_stops_after_opt_out(self):
+        """An opt-out during a request leaves the rest of the batch pending.
+
+        Args: None.
+        Returns: None.
+        """
+        first = make_report()
+        second = make_report(fingerprint='ESPI-ERR-v1-bbbbbbbbbbbb')
+        self.reporter.save_pending(first)
+        self.reporter.save_pending(second)
+        github = FakeGitHub()
+        posted = []
+
+        def opt_out(event):
+            """Disable reporting after the first outcome.
+
+            Args: event is the completed outcome.
+            Returns: None.
+            """
+            posted.append(event)
+            self.reporter.enabled = False
+
+        with mock.patch.object(error_reports, 'GitHub', return_value=github), \
+                mock.patch.object(error_reports.feedback, 'feedback_token', return_value='fake'):
+            self.reporter.send_pending(opt_out)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual([report.fingerprint for _, report in self.reporter.load_pending()],
+                         [second.fingerprint])
+
+    def test_consent_is_rechecked_after_lookup_before_mutation(self):
+        """Disabling during lookup prevents the following issue POST.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter.save_pending(make_report())
+        methods = []
+
+        def respond(request, **kwargs):
+            """Return an empty lookup and revoke consent while it is in flight.
+
+            Args: request is the HTTP request; kwargs are transport options.
+            Returns: An empty issue-list response.
+            """
+            methods.append(request.method)
+            self.reporter.enabled = False
+            return FakeResponse(b'[]')
+
+        with mock.patch.object(error_reports.urllib.request, 'urlopen', side_effect=respond), \
+                mock.patch.object(error_reports.feedback, 'feedback_token', return_value='fake'), \
+                self.assertLogs('espi_live.error_reports', 'WARNING'):
+            self.reporter.send_pending(lambda event: None)
+        self.assertEqual(methods, ['GET'])
+        self.assertEqual(len(self.reporter.load_pending()), 1)
+
+    def test_old_pending_reports_are_pruned_before_startup_delivery(self):
+        """Expiry applies even when startup has captured no new errors.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter.save_pending(make_report())
+        path, _ = self.reporter.load_pending()[0]
+        old = time.time() - error_reports.PENDING_MAX_AGE_S - 100
+        os.utime(path, (old, old))
+        with mock.patch.object(error_reports, 'GitHub') as client:
+            self.reporter.send_pending(lambda event: None)
+        client.assert_not_called()
+        self.assertEqual(self.reporter.load_pending(), [])
+
+    def test_live_native_crash_file_is_not_consumed(self):
+        """A surviving native exception in another active run stays local.
+
+        Args: None.
+        Returns: None.
+        """
+        from espi_live.logs import RunLock
+        path = os.path.join(self.folder, 'espi_active.crash')
+        with open(path, 'w') as handle:
+            handle.write('Fatal Python error: Segmentation fault\n')
+        lock = RunLock(path[:-6] + '.log')
+        self.assertTrue(lock.acquire())
+        self.addCleanup(lock.close)
+        self.assertEqual(self.reporter.collect_native_crashes(), [])
+        self.assertTrue(os.path.exists(path))
+
+    def test_v1_golden_cause_code_and_comprehensions(self):
+        """Literal digests pin the v1 serialization and comprehension filtering.
+
+        Args: None.
+        Returns: None.
+        """
+        cases = [
+            ('ValueError', 'KeyError',
+             [('src/espi_live/engine.py', 'outer'), ('src/espi_live/engine.py', 'inner')],
+             '', 'v1|ValueError|KeyError|espi_live.engine:outer>espi_live.engine:inner',
+             'ESPI-ERR-v1-e55ae320525a'),
+            ('PySpin.PySpinError', '', [('src/espi_live/camera.py', 'grab')], '-1011',
+             'v1|PySpin.PySpinError||espi_live.camera:grab|-1011', 'ESPI-ERR-v1-85d9976f0f50'),
+            ('ValueError', '', [('src/espi_live/engine.py', 'f'),
+                               ('src/espi_live/engine.py', '<listcomp>'),
+                               ('src/espi_live/engine.py', 'g')], '',
+             'v1|ValueError||espi_live.engine:f>espi_live.engine:g', 'ESPI-ERR-v1-a63b22e0e311')]
+        for kind, cause, frames, code, expected, digest in cases:
+            actual = error_reports.canonical_string(
+                kind, cause, error_reports.frame_signature(frames), code)
+            self.assertEqual(actual, expected)
+            self.assertEqual(error_reports.fingerprint_of(actual), digest)

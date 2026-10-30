@@ -120,12 +120,13 @@ def handle_qt_message(kind, context, message):
         return
     fatal = kind == QtMsgType.QtFatalMsg
     reporter = error_reports.current_reporter()
+    report = None
     if reporter is not None:
         stack = traceback.extract_stack()[:-1]
-        reporter.capture_message("fatal" if fatal else "critical", message,
+        report = reporter.capture_message("fatal" if fatal else "critical", message,
                                  [(frame.filename, frame.name) for frame in stack],
                                  "".join(traceback.format_list(stack)))
-    if fatal:
+    if fatal and report is not None:
         faulthandler.disable()  # Qt aborts next; this report already covers it
 
 
@@ -2019,8 +2020,8 @@ class MainWindow(QMainWindow):
             source = "camera " + (identity.short_name() if identity
                                   else self.current.info.model or "(model unknown)")
         serials = [channel.info.serial for channel in self.channels]
-        serials += [channel.identity.serial for channel in self.channels
-                    if channel.identity is not None and channel.identity.serial]
+        serials += [getattr(channel.identity, "serial", "") for channel in self.channels
+                    if getattr(channel.identity, "serial", "")]
         self.reporting.reporter.update_context(
             source=source, cameras=len(self.channels), serials=serials,
             spinnaker=camera.spinnaker_version())

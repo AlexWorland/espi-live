@@ -42,6 +42,66 @@ TAIL_LINES = 40  # recent lines kept in memory for error reports
 WATCHDOG_S = 10.0  # dump every thread's stack when the UI has not ticked for this long
 
 
+class RunLock:
+    """An OS-held lock that marks a run active until it closes or dies."""
+
+    def __init__(self, log_path):
+        """Prepare a lock beside a run log.
+
+        Args: log_path is the run's .log file path.
+        Returns: None.
+        """
+        self.path = log_path + ".lock"
+        self.handle = None
+
+    def acquire(self):
+        """Try to own the lock without waiting for another process.
+
+        Args: None.
+        Returns: True on success; False if busy or inaccessible.
+        """
+        try:
+            self.handle = open(self.path, "a+b")
+            if os.name == "nt":
+                import msvcrt
+                self.handle.write(b"\0")
+                self.handle.flush()
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.close()
+            return False
+        return True
+
+    def close(self):
+        """Release the lock, leaving its marker available for later probes.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
+
+
+def run_is_active(log_path):
+    """Check a run's lock, conservatively protecting inaccessible markers.
+
+    Args: log_path is the run's .log file path.
+    Returns: True if another process holds the lock or it cannot be checked.
+    """
+    if not os.path.exists(log_path + ".lock"):
+        return False  # older versions did not create markers
+    lock = RunLock(log_path)
+    try:
+        return not lock.acquire()
+    finally:
+        lock.close()
+
+
 def resolve_level(name=None):
     """Choose the log level from an option, ESPI_LOG_LEVEL or the default.
 
@@ -113,7 +173,9 @@ def prune_logs(folder, keep=KEEP_LOGS):
     removed = 0
     for name in names[:max(0, len(names) - keep)]:
         stem = os.path.join(folder, name[:-len(LOG_SUFFIX)])
-        for path in (stem + LOG_SUFFIX, stem + CRASH_SUFFIX):
+        if run_is_active(stem + LOG_SUFFIX):
+            continue
+        for path in (stem + LOG_SUFFIX, stem + CRASH_SUFFIX, stem + LOG_SUFFIX + ".lock"):
             try:
                 os.remove(path)
             except FileNotFoundError:
@@ -297,6 +359,7 @@ class AppLog:
         self.crash_path = None
         self.faulthandler_was_enabled = False
         self.started = time.monotonic()
+        self.run_lock = None
 
     @property
     def path(self):
@@ -318,7 +381,11 @@ class AppLog:
         stamp = timestamp()
         try:
             folder = output_folder("logs")
-            self.log_file = open(os.path.join(folder, f"{LOG_PREFIX}{stamp}{LOG_SUFFIX}"),
+            log_path = os.path.join(folder, f"{LOG_PREFIX}{stamp}{LOG_SUFFIX}")
+            self.run_lock = RunLock(log_path)
+            if not self.run_lock.acquire():
+                raise OSError("could not lock this run's log")
+            self.log_file = open(log_path,
                                  "w", encoding="utf-8", buffering=1)
             prune_logs(folder, KEEP_LOGS)
             if crash_file:
@@ -476,6 +543,9 @@ class AppLog:
             self.sink.log_file = None
             self.log_file.close()
             self.log_file = None
+        if self.run_lock is not None:
+            self.run_lock.close()
+            self.run_lock = None
 
     def _fold_crash_file(self):
         """Move what faulthandler wrote during a run that survived into the log.

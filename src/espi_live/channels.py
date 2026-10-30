@@ -105,6 +105,9 @@ class Channel:
         Returns: None.
         """
         self.info = info
+        reporter = error_reports.current_reporter()
+        if reporter is not None:
+            reporter.update_context(serials=[info.serial])
         self.demo_source = demo
         self.log = PrefixedLog(log, "")  # the window names cameras when several
         self.engine = engine

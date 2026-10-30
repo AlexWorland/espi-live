@@ -54,7 +54,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from espi_live import feedback, paths, updater
-from espi_live.logs import CRASH_SUFFIX, LOG_SUFFIX, library_versions
+from espi_live.logs import CRASH_SUFFIX, LOG_SUFFIX, library_versions, run_is_active
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +317,7 @@ TOKEN_PATTERN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0
 BEARER_PATTERN = re.compile(r"(?i)\b(bearer|token)(\s+|=)[A-Za-z0-9_.\-]{16,}")
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 BUNDLE_PATTERN = re.compile(r"(?:~|[A-Za-z]:)?(?:[\\/][^\\/\s\"'<>|]+)*[\\/]_MEI\w+")
-SAVED_FILE_PATTERN = re.compile(r"((?:frames|recordings)[\\/])[^\s\"'<>|]+")
+SAVED_FILE_PATTERN = re.compile(r"((?:frames|recordings)[\\/])[^\s\"'<>|]+", re.IGNORECASE)
 SERIAL_PATTERN = re.compile(r"(?i)((?:serial(?: number)?|S/N)\s*[:=#]?\s*)([A-Za-z0-9-]{4,})")
 
 
@@ -567,14 +567,16 @@ def write_json(path, data):
 class GitHub:
     """The few issue endpoints the reporter needs."""
 
-    def __init__(self, repo, token):
+    def __init__(self, repo, token, allowed=None):
         """Create a client.
 
-        Args: repo is "owner/name"; token is "" for anonymous reads.
+        Args: repo is "owner/name"; token is "" for anonymous reads;
+            allowed checks consent immediately before a write request.
         Returns: None.
         """
         self.repo = repo
         self.token = token
+        self.allowed = allowed
 
     def call(self, method, path, payload=None, query=None):
         """Make one API request.
@@ -596,6 +598,8 @@ class GitHub:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
+        if method != "GET" and self.allowed is not None and not self.allowed():
+            raise ReportError("automatic error reporting was turned off")
         try:
             with urllib.request.urlopen(request, timeout=updater.TIMEOUT_S,
                                         context=updater.ssl_context()) as response:
@@ -693,6 +697,10 @@ class ErrorReporter:
         Returns: None.
         """
         with self.lock:
+            if "serials" in fields:
+                fields["serials"] = sorted({serial for serial in self.context.get("serials", ())
+                                           if serial} | {serial for serial in fields["serials"]
+                                                         if serial})
             self.context.update(fields)
 
     def capture(self, exc, where, fatal=False):
@@ -844,15 +852,15 @@ class ErrorReporter:
             f"- Uptime: {int(self.uptime())} s"]
         traceback_parts = [clean(relative_traceback(part)) for part in lines]
         log_lines = [clean(line) for line in log_lines]
-        body = self.body(key, canonical, error, facts, traceback_parts, log_lines)
+        body = clean(self.body(key, canonical, error, facts, traceback_parts, log_lines))
         seen = (f"Seen again in build {build} ({commit[:7] or 'source'}) on "
                 f"{platform.system()} {platform.release()} ({platform.machine()}), "
                 f"{context.get('front_end', '?')} {context.get('display', '')}".rstrip()
                 + f", {source or 'unknown source'}:\n\n```text\n{fence(error)}\n```")
         return ErrorReport(
             fingerprint=key, canonical=canonical,
-            title=f"[{key}] {kind} in {place}", error=error, where=where, fatal=fatal,
-            area=area, body=body, seen=seen, build=build, commit=commit,
+            title=clean(f"[{key}] {kind} in {place}"), error=error, where=where, fatal=fatal,
+            area=area, body=body, seen=clean(seen), build=build, commit=commit,
             committed_at=committed_at, created=time.time())
 
     @staticmethod
@@ -1025,7 +1033,9 @@ class ErrorReporter:
 
         A non-empty .crash file means a run died in native code. Its dump is
         appended to that run's log (so the log is complete) and the file is
-        deleted; when reporting is on it also becomes a pending report.
+        deleted; when reporting is on its stack becomes a pending report.
+        The previous run's log stays local: this run may not know its personal
+        identifiers and cannot reliably scrub it.
 
         Args: own_crash_path is this run's crash file, which is skipped.
         Returns: The ErrorReports created.
@@ -1041,6 +1051,9 @@ class ErrorReporter:
             if not name.endswith(CRASH_SUFFIX) or (
                     own_crash_path and os.path.abspath(path) == os.path.abspath(own_crash_path)):
                 continue
+            log_path = path[:-len(CRASH_SUFFIX)] + LOG_SUFFIX
+            if run_is_active(log_path):
+                continue
             try:
                 with open(path, encoding="utf-8", errors="replace") as handle:
                     text = handle.read()
@@ -1048,19 +1061,18 @@ class ErrorReporter:
                 continue
             if not text.strip():
                 continue  # no crash, or a copy that is still running
-            log_path = path[:-len(CRASH_SUFFIX)] + LOG_SUFFIX
-            log_lines = None
             try:
-                with open(log_path, encoding="utf-8", errors="replace") as handle:
-                    log_lines = handle.read().splitlines()[-40:]
-                with open(log_path, "a", encoding="utf-8") as handle:
+                with open(log_path, "r+", encoding="utf-8") as handle:
+                    handle.seek(0, os.SEEK_END)
                     handle.write("\n--- Native crash (faulthandler) ---\n" + text)
                 os.remove(path)
             except OSError as exc:
                 logger.warning(f"Could not file the crash dump {name}: {exc}")
             logger.warning(f"The run logged in {os.path.basename(log_path)} crashed "
                            "in native code")
-            report = self.capture_crash(text, log_lines or [])
+            # An earlier run may have used other cameras, users or install
+            # paths. Its log cannot be safely scrubbed with this run's context.
+            report = self.capture_crash(text, [])
             if report is not None:
                 reports.append(report)
         return reports
@@ -1075,13 +1087,16 @@ class ErrorReporter:
         """
         if not self.enabled:
             return
+        self.prune_pending()
         pending = self.load_pending()
         if not pending:
             return
         token = feedback.feedback_token()
-        github = GitHub(feedback.repository(), token)
+        github = GitHub(feedback.repository(), token, allowed=lambda: self.enabled)
         ledger = self.load_ledger()
         for path, report in pending:
+            if not self.enabled:
+                break
             if report.fingerprint in self.delivered:
                 continue
             if len(self.delivered) >= MAX_DELIVERIES_PER_RUN:
@@ -1133,6 +1148,10 @@ class ErrorReporter:
             is the install's record, updated in place.
         Returns: An Outcome. Raises ReportError when GitHub cannot be used.
         """
+        # Recheck persisted payloads at the publication boundary as well.
+        clean = self.scrubber()
+        report = dataclasses.replace(report, title=clean(report.title),
+                                     body=clean(report.body), seen=clean(report.seen))
         entry = ledger["reports"].setdefault(report.fingerprint, {"builds": []})
         matches = github.matching(report.fingerprint)
         if not matches:

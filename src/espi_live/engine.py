@@ -236,6 +236,10 @@ class Engine:
         self.camera_info = session.info
         self.demo_source = None
         identity = session.identity
+        reporter = error_reports.current_reporter()
+        if reporter is not None:
+            reporter.update_context(serials=[session.info.serial,
+                                            getattr(identity, "serial", "")])
         self.log.write("Camera: " + " | ".join(identity.description()))
         for warning in identity.warnings():
             self.log.warning(f"Camera note: {warning}")

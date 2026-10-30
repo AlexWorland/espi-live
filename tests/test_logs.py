@@ -618,5 +618,72 @@ class AppLogTests(unittest.TestCase):
         self.assertTrue(all(line.split("] ", 1)[1].count("-") == 1 for line in lines))
 
 
+
+
+class ActiveRunTests(unittest.TestCase):
+    """OS locks protect logs and crash dumps belonging to active runs."""
+
+    def test_retention_preserves_active_files_then_prunes_after_close(self):
+        """Holding a run lock prevents removal even on POSIX.
+
+        Args: None.
+        Returns: None.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'espi_1.log')
+            crash = os.path.join(folder, 'espi_1.crash')
+            for name in (path, crash, os.path.join(folder, 'espi_2.log')):
+                with open(name, 'w') as handle:
+                    handle.write('diagnostics')
+            lock = logs.RunLock(path)
+            self.assertTrue(lock.acquire())
+            try:
+                self.assertTrue(logs.run_is_active(path))
+                self.assertEqual(logs.prune_logs(folder, keep=1), 0)
+                self.assertTrue(os.path.exists(crash))
+            finally:
+                lock.close()
+            self.assertFalse(logs.run_is_active(path))
+            self.assertEqual(logs.prune_logs(folder, keep=1), 1)
+            self.assertFalse(os.path.exists(path))
+            self.assertFalse(os.path.exists(crash))
+            self.assertFalse(os.path.exists(path + '.lock'))
+
+    def test_lock_failures_and_windows_locking(self):
+        """Failed opens are conservative; Windows uses a nonblocking byte lock.
+
+        Args: None.
+        Returns: None.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'espi_1.log')
+            lock = logs.RunLock(path)
+            with mock.patch('builtins.open', side_effect=PermissionError):
+                self.assertFalse(lock.acquire())
+            windows = mock.Mock(LK_NBLCK=2)
+            with mock.patch.object(logs.os, 'name', 'nt'), \
+                    mock.patch.dict(sys.modules, {'msvcrt': windows}):
+                self.assertTrue(lock.acquire())
+                windows.locking.assert_called_once_with(lock.handle.fileno(), 2, 1)
+                lock.close()
+            with mock.patch.object(logs.RunLock, 'acquire', return_value=False):
+                self.assertTrue(logs.run_is_active(path))
+
+    def test_start_without_lock_falls_back_to_console(self):
+        """An unavailable run lock cannot leave an unprotected log open.
+
+        Args: None.
+        Returns: None.
+        """
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(paths, 'OUTPUT_DIR', folder), \
+                mock.patch.object(logs.RunLock, 'acquire', return_value=False):
+            log = logs.AppLog()
+            try:
+                self.assertIsNone(log.start())
+            finally:
+                log.close()
+
+
 if __name__ == "__main__":
     unittest.main()
