@@ -1145,6 +1145,31 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertEqual((s.average, s.ref_refresh_s, s.smoothing), (5, 2.5, 3))
         self.assertEqual((s.clip_percent, s.gamma), (1.5, 1.7))
 
+    def test_gamma_stays_its_own_control_and_explains_stretch(self):
+        """Gamma is a visible Display slider, with a tip that contrasts stretch.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        gamma = self.window.gamma
+        self.assertTrue(gamma.isVisible())
+        self.assertFalse(gamma.isHidden())
+        tip = gamma.toolTip()
+        self.assertIn("Stretch", qt_app.GAMMA_TIP)
+        self.assertIn("Stretch", tip)
+        self.assertIn("1.0", tip)
+        self.assertIn("Now: 1.0", tip)
+        self.assertEqual(gamma.slider.toolTip(), tip)
+        self.assertEqual(gamma.spin.toolTip(), tip)
+        labels = [label for label in self.window.controls_dock.findChildren(QLabel)
+                  if label.text() == "Gamma"]
+        self.assertEqual([label.toolTip() for label in labels], [tip])
+        stretch = self.window.scale_range.toolTip()
+        self.assertIn("Raw", stretch)
+        self.assertIn("gamma", stretch.lower())
+        self.assertNotIn("advanced", tip.lower())
+
     def test_checkboxes_and_combos_update_engine_settings(self):
         """Check boxes and combo boxes write their engine settings.
 
