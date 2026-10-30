@@ -10,6 +10,56 @@
 
 - A camera that is turned back on starts at the exposure, gain and frame rate its sliders show. A new camera still starts at 8000 µs, 0 dB and 30 fps.
 
+## 2026-10-30 — Noise reduction works across the slider, and says so
+
+### Previous state
+
+- **Noise reduction** read its 0–95 slider as the share of the previous frame to keep. Twenty was about one frame of memory, so most of the travel did almost nothing, and the speckle grain (which the control keeps on purpose) made a still image look unchanged. It was easy to take it for the Speckle filter or Average N, and **Stretch to 0–255** repaints a quieter difference at full brightness, which hides the change again.
+
+### Current state
+
+- The same slider, still 0 = off and 95 = strongest, now means how far the control is turned up. Each step adds the same amount of memory, so 10 is about three frames and 95 is still the old cap of about twenty. The default stays 0. The speckle grain is still kept.
+- The hover tip, which also shows the current value, and a note under the slider say what to look for (less flicker, a trail when something moves) and what will not change (a still speckle image; stretch hides a quieter difference), and that this is not the Speckle filter or Average N.
+
+## 2026-10-30 — Feature requests are filed by the app
+
+### Previous state
+
+- The request form had an **Enrich with GitHub Copilot** checkbox, and a blank description was refused.
+- A copy without a feedback token, and a failed send, offered **Open in browser** instead of filing the issue.
+
+### Current state
+
+- There is no enrichment checkbox. Every request is labelled `enrich`. A blank description is filed from the title, and Copilot writes the spec; a description you write is kept and expanded.
+- **Submit** files the issue from the app. When it is sent, the dialog says the request was submitted. A failed send can be edited and retried. The app does not open a browser page for it.
+- A published build always contains the feedback token. The release build stops if that secret is missing, and `--check` says whether this copy has one. It never prints the token.
+
+## 2026-10-30 — Hover tooltips on every control
+
+### Previous state
+
+- Some controls explained themselves (noise reduction, averaging, the speckle filter, stretch clip, invert) and others did not: gamma, stretch to 0–255, palette, CLAHE, exposure, gain, frame rate, the view-mode buttons and several camera controls.
+- Slider tips did not show the value under the pointer, and a shortcut was not always named on the control that uses it.
+- The shortcut list was a tooltip on the live image, so it covered the measurement.
+
+### Current state
+
+- Hovering any slider, spin box, checkbox, combo box, button, text field, menu item or status readout shows what it does, and, where it helps, when to use it and a typical value. Sliders include the current value and unit (`Now: 8000 µs`). A control with a shortcut names it (`Shortcut: S`).
+- Tips wait 600 ms, including when the pointer moves from one control to the next, so they do not flash. They open beside the control and never over the live image; the image itself has no tooltip. The shortcut list is in the View menu.
+- Disabled controls still show their tip, so an analog camera's exposure, gain and frame rate still say they are set on the camera, and dummy mode still says those three are simulated.
+- The old Tk window is not part of the application any more (`--ui tk` is gone), so this is the Qt window only.
+
+## 2026-10-30 — Updates are noticed while the app stays open
+
+### Previous state
+
+- A prebuilt copy looked for a newer build once, at startup. A camera PC left running for days never noticed a build released after it opened.
+- The status-bar button read **Update available:** followed by the version.
+
+### Current state
+
+- While the app is open it checks again about every three hours, a little earlier or later each time. It skips a check that would overlap one already running, a download, a recording or a frame save. `--no-update-check` turns the later checks off too. Running from source still does not update itself.
+- When a newer build is found the button reads **Install update** (the versions are in the tooltip, such as "Build 42 → 45") and the status bar mentions it once. Finding that same build again leaves the button as it is. A check that fails only goes to the log, and an update already found stays on the button. Downloading and restarting work as before: the new build is installed only after the camera is released.
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 
 ### Previous state
