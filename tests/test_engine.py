@@ -16,26 +16,7 @@ from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
                                   apply_palette, normalize_min_max,
                                   palette_rgb_table, smooth_speckle,
                                   stretch_contrast)
-
-
-class ListLog:
-    """Collect log messages in memory."""
-
-    def __init__(self):
-        """Create an empty log.
-
-        Args: None.
-        Returns: None.
-        """
-        self.lines = []
-
-    def write(self, message):
-        """Record one message.
-
-        Args: message is the text to keep.
-        Returns: None.
-        """
-        self.lines.append(message)
+from list_log import ListLog
 
 
 def wait_until(predicate, timeout=5.0):

@@ -228,6 +228,27 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.run_worker(side_effect=feedback.FeedbackError("nope")),
                          ("failed", (REQUEST, "nope")))
 
+    def test_unexpected_failure_posts_and_reraises(self):
+        """A bug in submit posts the failure and reaches threading.excepthook.
+
+        Args: None.
+        Returns: None.
+        """
+        worker = feedback.FeedbackWorker()
+        with mock.patch.object(feedback, "submit", side_effect=RuntimeError("boom")), \
+                mock.patch.object(feedback.threading, "excepthook") as hook:
+            self.assertTrue(worker.submit(REQUEST))
+            kind, payload = worker.events.get(timeout=5)
+        self.assertEqual(kind, "failed")
+        self.assertEqual(payload[1], "RuntimeError: boom")
+        for _ in range(500):
+            if not worker.busy:
+                break
+            time.sleep(0.01)
+        self.assertFalse(worker.busy)
+        hook.assert_called_once()
+        self.assertIs(hook.call_args.args[0].exc_type, RuntimeError)
+
     def test_second_submit_while_busy_is_refused(self):
         """Only one request is sent at a time.
 

@@ -13,26 +13,7 @@ import cv2
 import numpy as np
 
 from espi_live import paths, recording
-
-
-class ListLog:
-    """Collect log messages in memory."""
-
-    def __init__(self):
-        """Create an empty log.
-
-        Args: None.
-        Returns: None.
-        """
-        self.lines = []
-
-    def write(self, message):
-        """Record one message.
-
-        Args: message is the text to keep.
-        Returns: None.
-        """
-        self.lines.append(message)
+from list_log import ListLog
 
 
 class FakeWriter:

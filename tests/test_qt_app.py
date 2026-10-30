@@ -12,9 +12,11 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import logging
 import queue
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -31,12 +33,19 @@ from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
 from espi_live.channels import Channel, demo_channels
 from espi_live.engine import Engine, FramePacket
+from list_log import ListLog
 
 APP = QApplication.instance() or QApplication(sys.argv)
 
+FINGERPRINT_UI = "ESPI-ERR-v1-" + "b" * 12
 
-class FakeLog:
+
+class FakeLog(ListLog):
     """In-memory stand-in for AppLog."""
+
+    level = logging.INFO
+    path = None
+    crash_path = None
 
     def __init__(self):
         """Create an empty log.
@@ -44,16 +53,17 @@ class FakeLog:
         Args: None.
         Returns: None.
         """
-        self.lines = []
+        super().__init__()
         self.pending = []
+        self.ticks = 0
 
-    def write(self, message):
+    def _add(self, level, message, exc_info=None):
         """Record one message for assertions and for drain().
 
-        Args: message is the text to keep.
+        Args: level, message and exc_info as ListLog takes them.
         Returns: None.
         """
-        self.lines.append(message)
+        super()._add(level, message, exc_info)
         self.pending.append(message + "\n")
 
     def drain(self):
@@ -64,6 +74,30 @@ class FakeLog:
         """
         text, self.pending = "".join(self.pending), []
         return text
+
+    def recent_lines(self):
+        """Return the newest lines, as AppLog does for error reports.
+
+        Args: None.
+        Returns: The last 40 lines.
+        """
+        return self.lines[-40:]
+
+    def uptime(self):
+        """Pretend the run started a minute ago.
+
+        Args: None.
+        Returns: 60.0.
+        """
+        return 60.0
+
+    def watchdog_tick(self):
+        """Count UI ticks instead of arming faulthandler.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ticks += 1
 
     def start(self):
         """Pretend to open a log file.
@@ -1577,10 +1611,11 @@ class EngineEventTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        self.engine.events.put(("fatal", "kaboom"))
+        self.engine.events.put(("fatal", ("kaboom", None)))
         with mock.patch.object(self.window, "close") as close:
             self.window._handle_events()
-        self.dialogs.critical.assert_called_once()
+        self.assertEqual(self.dialogs.call_args.args[1:], ("ESPI stopped", "kaboom"))
+        self.dialogs.return_value.exec.assert_called_once()
         close.assert_called_once()
 
     def test_stopped_closes_unless_already_closing(self):
@@ -1810,12 +1845,11 @@ class MultiCameraTests(unittest.TestCase):
         """
         window, second = self.window, self.channels[1]
         window.camera_checks[1].setChecked(True)
-        second.engine.events.put(("fatal", "kaboom"))
+        second.engine.events.put(("fatal", ("kaboom", None)))
         with mock.patch.object(window, "close") as close:
             window._handle_events()
         close.assert_not_called()
-        self.assertIn("Synthetic camera (DEMO2): kaboom",
-                      self.dialogs.critical.call_args.args[2])
+        self.assertIn("Synthetic camera (DEMO2): kaboom", self.dialogs.call_args.args[2])
         self.assertFalse(second.active)
         self.assertFalse(window.camera_checks[1].isChecked())
         self.assertIs(window.current, self.channels[0])
@@ -2328,7 +2362,10 @@ class RunTests(unittest.TestCase):
         self.main_window = mock.MagicMock(return_value=self.window)
         self.cleanup = mock.MagicMock()
         self.startup_cleanup = mock.MagicMock(return_value=self.cleanup)
+        self.reporting = mock.MagicMock()
+        self.reporting_class = mock.MagicMock(return_value=self.reporting)
         for patcher in (
+                mock.patch.object(qt_app, "Reporting", self.reporting_class),
                 mock.patch.object(qt_app.updater, "StartupCleanup", self.startup_cleanup),
                 mock.patch.object(qt_app, "request_gl_format"),
                 mock.patch.object(qt_app, "AppLog", return_value=self.log),
@@ -2353,7 +2390,7 @@ class RunTests(unittest.TestCase):
         self.cameras.assert_not_called()
         self.demos.assert_called_once_with(self.log, 2)
         self.assertEqual(self.main_window.call_args.args[0], [self.channel])
-        self.assertEqual(self.main_window.call_args.args[2:], (True, False))
+        self.assertEqual(self.main_window.call_args.args[2:], (True, False, self.reporting))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
         self.finish.assert_called_once_with(self.window, self.log)
@@ -2669,6 +2706,484 @@ class FeatureRequestTests(WindowTestCase):
         retry, browser = self.failed_choice("cancel")
         retry.assert_not_called()
         browser.assert_not_called()
+
+
+class QtMessageHandlerTests(unittest.TestCase):
+    """handle_qt_message: Qt's own messages logged and reported."""
+
+    def setUp(self):
+        """Install a mock reporter for capture_message.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter = mock.MagicMock()
+        patcher = mock.patch.object(qt_app.error_reports, "_reporter", self.reporter)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_info_and_warning_messages_are_only_logged(self):
+        """Warnings land in the log with their category; nothing is reported.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertLogs("espi_live.qt", "WARNING") as captured:
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtWarningMsg,
+                                     SimpleNamespace(category="qt.opengl"), "slow shader")
+        self.assertIn("Qt (qt.opengl): slow shader", captured.output[0])
+        with self.assertLogs("espi_live.qt", "INFO") as captured:
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtInfoMsg, None, "hello")
+        self.assertIn("Qt: hello", captured.output[0])
+        self.reporter.capture_message.assert_not_called()
+
+    def test_critical_and_fatal_messages_are_reported(self):
+        """Criticals report the message with the active Python stack.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtCriticalMsg,
+                                     SimpleNamespace(category="default"), "context lost")
+        call = self.reporter.capture_message.call_args
+        self.assertEqual(call.args[0], "critical")
+        self.assertEqual(call.args[1], "context lost")
+        self.assertIn("handle_qt_message", call.args[3])
+
+    def test_fatal_messages_also_drop_the_crash_handler(self):
+        """A fatal Qt message covers the coming abort, so faulthandler steps aside.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app, "faulthandler") as faulthandler, \
+                self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+        self.assertEqual(self.reporter.capture_message.call_args.args[0], "fatal")
+        faulthandler.disable.assert_called_once()
+
+
+class SettingOnTests(unittest.TestCase):
+    """Reading QSettings flags stored as text."""
+
+    def test_false_spellings(self):
+        """False, 0 and their text forms are off.
+
+        Args: None.
+        Returns: None.
+        """
+        for value in (False, 0, "false", "0", " FALSE "):
+            self.assertFalse(qt_app.setting_on(value), value)
+
+    def test_everything_else_is_on(self):
+        """True, numbers and unknown text are on.
+
+        Args: None.
+        Returns: None.
+        """
+        for value in (True, 1, "yes", None):
+            self.assertTrue(qt_app.setting_on(value), value)
+
+
+class ReportingClassTests(unittest.TestCase):
+    """The run's Reporting: switches, hooks, Qt handler and worker."""
+
+    def setUp(self):
+        """Patch QSettings with the fake store and clear the level environment.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        patcher = mock.patch.object(qt_app, "QSettings", FakeSettings)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+
+    def reporting(self):
+        """Build a Reporting for these tests.
+
+        Args: None.
+        Returns: The Reporting.
+        """
+        return qt_app.Reporting(self.log)
+
+    def test_init_reads_the_saved_choice(self):
+        """The stored choice decides the reporter's initial state.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}):
+            off = self.reporting()
+            self.assertFalse(off.reporter.enabled)
+            self.assertIn("source checkouts", off.forced)
+        FakeSettings.store[qt_app.error_reports.SETTING_KEY] = "false"
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            self.assertFalse(self.reporting().reporter.enabled)
+            FakeSettings.store.clear()
+            self.assertTrue(self.reporting().reporter.enabled)
+        self.assertEqual(off.reporter.context.get("front_end"), "Qt")
+        self.assertIn(off.worker.kick, off.reporter.listeners)
+
+    def test_start_installs_hooks_and_drains_old_crashes(self):
+        """Starting hooks Python and Qt, logs the state and sends old crashes.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        handler = mock.MagicMock(return_value="PREVIOUS")
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}), \
+                mock.patch.object(qt_app, "qInstallMessageHandler", handler), \
+                mock.patch.object(reporting.reporter, "collect_native_crashes") as collect, \
+                mock.patch.object(reporting.worker, "start") as start:
+            try:
+                reporting.start(self.log)
+                self.assertIn("Error reports: off", self.log.lines[-1])
+                collect.assert_called_once_with(None)
+                start.assert_called_once()
+                handler.assert_called_once_with(qt_app.handle_qt_message)
+                self.assertEqual(reporting.previous_handler, "PREVIOUS")
+                self.assertIsNotNone(reporting.hooks)
+            finally:
+                reporting.stop()
+        handler.assert_called_with("PREVIOUS")
+        self.assertIsNone(reporting.hooks)
+        self.assertIsNone(qt_app.error_reports.current_reporter())
+
+    def test_choose_records_the_choice_and_kicks(self):
+        """The Help-menu choice is saved, applied and kicks the worker.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            reporting = self.reporting()
+            with mock.patch.object(reporting.worker, "kick") as kick:
+                reporting.choose(False, self.log)
+                self.assertFalse(FakeSettings.store[qt_app.error_reports.SETTING_KEY])
+                self.assertFalse(reporting.reporter.enabled)
+                self.assertIn("Error reports: off", self.log.lines[-1])
+                kick.assert_not_called()
+                reporting.choose(True, self.log)
+                self.assertTrue(reporting.reporter.enabled)
+                kick.assert_called_once()
+
+    def test_stop_restores_the_previous_handler(self):
+        """Stopping uninstalls the hooks and the Qt message handler.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        before = (sys.excepthook, threading.excepthook, sys.unraisablehook)
+        reporting.start(self.log)
+        self.assertNotEqual(sys.excepthook, before[0])
+        reporting.stop()
+        self.assertEqual((sys.excepthook, threading.excepthook, sys.unraisablehook), before)
+        self.assertIsNone(qt_app.error_reports.current_reporter())
+        with mock.patch.object(reporting.worker, "stop") as stop:
+            reporting.stop()
+        stop.assert_called_once()
+
+
+class SessionDescriptionTests(unittest.TestCase):
+    """describe_session's Spinnaker note."""
+
+    def test_the_sdk_version_is_appended_when_known(self):
+        """A loaded Spinnaker shows up in the session line.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.camera, "spinnaker_version",
+                               return_value="4.2.0.88"):
+            line = qt_app.describe_session(
+                [mock.MagicMock(demo=True, label="Synthetic camera (DEMO1)", active=True)],
+                "GPU")
+        self.assertIn("dummy mode, 1 synthetic camera(s)", line)
+        self.assertIn("display GPU; Spinnaker 4.2.0.88", line)
+
+    def test_mixed_channels_are_listed(self):
+        """A camera channel is named, with its processing state.
+
+        Args: None.
+        Returns: None.
+        """
+        camera = mock.MagicMock(demo=False, label="[12345678] BFS-U3-63S4M", active=True)
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value=None):
+            line = qt_app.describe_session([camera], "CPU")
+        self.assertEqual(line, "Session: 1 camera(s): [12345678] BFS-U3-63S4M (processing)"
+                               "; display CPU")
+
+
+class ErrorReportUITests(WindowTestCase):
+    """The window's error-report menu, status and dialogs."""
+
+    def reporting(self, enabled=True, forced=None):
+        """Build a reporting stand-in with a working event queue.
+
+        Args: enabled and forced describe the reporter state.
+        Returns: A MagicMock reporting.
+        """
+        reporting = mock.MagicMock(reporter=mock.MagicMock(enabled=enabled), forced=forced)
+        reporting.worker = mock.MagicMock(events=queue.Queue())
+        return reporting
+
+    def test_the_action_mirrors_the_reporter(self):
+        """The checkable action shows the state and explains itself.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.reporting = self.reporting()
+        self.window._sync_reports_action()
+        self.assertTrue(self.window.reports_action.isChecked())
+        self.assertTrue(self.window.reports_action.isEnabled())
+        self.assertIn("public GitHub issues", self.window.reports_action.toolTip())
+
+    def test_a_forced_off_shows_the_reason(self):
+        """When a switch forces reporting off, the action is locked.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.reporting = self.reporting(enabled=False,
+                                               forced="turned off with --no-error-reports")
+        self.window._sync_reports_action()
+        self.assertFalse(self.window.reports_action.isChecked())
+        self.assertFalse(self.window.reports_action.isEnabled())
+        self.assertEqual(self.window.reports_action.toolTip(),
+                         "Off: turned off with --no-error-reports")
+
+    def test_the_menu_choice_reaches_reporting(self):
+        """Toggling the action calls Reporting.choose and refreshes the menu.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        self.window._choose_error_reports(True)
+        reporting.choose.assert_called_once_with(True, self.window.log)
+        self.assertTrue(self.window.reports_action.isChecked())
+
+    def test_open_log_folder_opens_the_log_directory(self):
+        """The log's folder opens in the desktop file manager.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = "/x/runs/espi_1.log"
+        with mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = True
+            self.window._open_log_folder()
+        self.assertEqual(desktop.openUrl.call_args.args[0].path(), "/x/runs")
+
+    def test_open_log_folder_without_a_log_file(self):
+        """Without a log file the default logs folder is opened.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = None
+        with mock.patch.object(qt_app.paths, "output_folder", return_value="/fake/logs"), \
+                mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = True
+            self.window._open_log_folder()
+        self.assertEqual(desktop.openUrl.call_args.args[0].path(), "/fake/logs")
+
+    def test_open_log_folder_falls_back_to_a_message(self):
+        """If the desktop refuses, the path is shown in a dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = "/x/runs/espi_1.log"
+        with mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = False
+            self.window._open_log_folder()
+        self.assertIn("/x/runs", self.dialogs.information.call_args.args[2])
+
+    def test_open_log_folder_survives_an_unavailable_folder(self):
+        """A failing folder lookup becomes a warning dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = None
+        with mock.patch.object(qt_app.paths, "output_folder",
+                               side_effect=OSError("gone")):
+            self.window._open_log_folder()
+        self.assertIn("unavailable", self.dialogs.warning.call_args.args[2])
+
+    def test_report_context_describes_demo_mode(self):
+        """Demo runs say so and list the demo serials.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value=None):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(call.kwargs["source"], "dummy mode")
+        self.assertEqual(call.kwargs["cameras"], 1)
+        self.assertEqual(call.kwargs["serials"], ["DEMO1"])
+
+    def test_report_context_describes_the_camera(self):
+        """A camera run names the model and scrubs its serials.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        camera = mock.MagicMock(demo=False, identity=None)
+        camera.info = SimpleNamespace(serial="SN-1", model="")
+        original, original_channels = self.window.current, self.window.channels
+        self.addCleanup(setattr, self.window, "current", original)
+        self.addCleanup(setattr, self.window, "channels", original_channels)
+        self.window.current = camera
+        self.window.channels = [camera]
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value="4.2"):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(call.kwargs["source"], "camera (model unknown)")
+        self.assertEqual(call.kwargs["serials"], ["SN-1"])
+        self.assertEqual(call.kwargs["spinnaker"], "4.2")
+
+        camera.identity = SimpleNamespace(short_name=lambda: "BFS-U3-63S4M", serial="SN-1")
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value="4.2"):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(
+            call.kwargs["source"], "camera BFS-U3-63S4M")
+        self.assertEqual(call.kwargs["serials"], ["SN-1", "SN-1"])
+
+    def test_report_outcomes_reach_the_status_bar(self):
+        """A delivered report shows its outcome with the issue link.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/owner/repo/issues/5")
+        reporting.worker.events.put(("outcome", outcome))
+        with mock.patch.object(self.window.report_timer, "start") as timer:
+            self.window._handle_report_events()
+        self.assertEqual(self.window.report_outcomes[FINGERPRINT_UI], outcome)
+        self.assertIn("Reported as <a href=", self.window.report_label.text())
+        timer.assert_called_once()
+        self.assertIn(FINGERPRINT_UI, self.window.report_label.toolTip())
+
+    def test_report_outcomes_fill_an_open_fatal_dialog(self):
+        """While the "ESPI stopped" dialog is open its line is updated in place.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        box = mock.MagicMock()
+        self.window.fatal_boxes[FINGERPRINT_UI] = (box, "kaboom")
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/owner/repo/issues/5")
+        reporting.worker.events.put(("outcome", outcome))
+        self.window._handle_report_events()
+        box.setText.assert_called_once()
+        text = box.setText.call_args.args[0]
+        self.assertIn("kaboom", text)
+        self.assertIn("Reported as", text)
+        self.assertIn(FINGERPRINT_UI, text)
+        self.assertFalse(self.window.report_label.isVisibleTo(self.window))
+
+    def test_outcome_html_links_the_issue(self):
+        """The outcome line becomes a link when there is an issue.
+
+        Args: None.
+        Returns: None.
+        """
+        html = qt_app.MainWindow._outcome_html
+        self.assertEqual(html(None), "Reporting this error…")
+        plain = qt_app.error_reports.Outcome(FINGERPRINT_UI, "saved")
+        self.assertEqual(html(plain), "Report saved; it will be sent next time")
+        linked = qt_app.error_reports.Outcome(FINGERPRINT_UI, "fixed", url="https://x/y")
+        self.assertEqual(html(linked), "Fixed in a newer build; update to get the fix")
+        browser = qt_app.error_reports.Outcome(FINGERPRINT_UI, "browser",
+                                               url="https://x/y?a=b&c=d")
+        self.assertEqual(html(browser),
+                         'Not sent automatically: <a href="https://x/y?a=b&amp;c=d">'
+                         'Report in browser…</a>')
+        created = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/o/r/issues/5")
+        self.assertEqual(html(created),
+                         'Reported as <a href="https://github.com/o/r/issues/5">#5</a>')
+
+    def test_fatal_text_gains_the_report_line(self):
+        """The stopped-dialog text carries the report state and the error ID.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.window._fatal_text("kaboom", None), "kaboom")
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "saved")
+        self.window.report_outcomes[FINGERPRINT_UI] = outcome
+        text = self.window._fatal_text("kaboom", FINGERPRINT_UI)
+        self.assertTrue(text.startswith("kaboom<br><br>Report saved"))
+        self.assertIn(f"Error ID {FINGERPRINT_UI}", text)
+
+    def test_show_fatal_registers_its_dialog(self):
+        """While a fatal dialog is open its fingerprint is tracked, then freed.
+
+        Args: None.
+        Returns: None.
+        """
+        seen = {}
+
+        def fake_exec():
+            """Record what the window tracked while the dialog was open.
+
+            Args: None.
+            Returns: None.
+            """
+            seen.update(self.window.fatal_boxes)
+
+        self.dialogs.return_value.exec.side_effect = fake_exec
+        self.window._show_fatal("kaboom", FINGERPRINT_UI)
+        self.assertEqual(seen[FINGERPRINT_UI][1], "kaboom")
+        self.assertEqual(self.window.fatal_boxes, {})
+        self.assertEqual(self.dialogs.call_args.args[1:],
+                         ("ESPI stopped", self.window._fatal_text("kaboom", FINGERPRINT_UI)))
+
+    def test_report_status_variants(self):
+        """Each outcome kind shows the right status-bar text.
+
+        Args: None.
+        Returns: None.
+        """
+        cases = {
+            "declined": None,
+            "fixed": "Check for updates",
+            "saved": "will be reported next time",
+            "created": "Unexpected error: Reported as"}
+        for kind, needle in cases.items():
+            outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, kind, 5,
+                                                   "https://github.com/o/r/issues/5")
+            self.window.report_label.setVisible(False)
+            with mock.patch.object(self.window.report_timer, "start") as timer:
+                self.window._show_report_status(outcome)
+            if needle is None:
+                self.assertFalse(self.window.report_label.isVisibleTo(self.window))
+                timer.assert_not_called()
+                continue
+            self.assertIn(needle, self.window.report_label.text())
+            timer.assert_called_once()
 
 
 if __name__ == "__main__":

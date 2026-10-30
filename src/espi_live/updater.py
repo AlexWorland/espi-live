@@ -750,7 +750,10 @@ class UpdateWorker:
 
     The front end polls ``events`` for ("checked", UpdateInfo or None),
     ("check_failed", message), ("downloaded", staged_path) and
-    ("download_failed", message), and reads ``progress`` for a bar.
+    ("download_failed", message), and reads ``progress`` for a bar. An
+    UpdateError (network, disk or GitHub) only fails the job; any other
+    exception is a bug, so after posting the failure it is re-raised for
+    threading.excepthook to log and report.
     """
 
     def __init__(self):
@@ -782,8 +785,11 @@ class UpdateWorker:
             """
             try:
                 self.events.put((ok_kind, job()))
-            except Exception as exc:
+            except UpdateError as exc:
                 self.events.put((fail_kind, str(exc)))
+            except Exception as exc:
+                self.events.put((fail_kind, f"{type(exc).__name__}: {exc}"))
+                raise
             finally:
                 self.busy = False
 

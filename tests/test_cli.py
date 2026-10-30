@@ -108,7 +108,7 @@ class CliDispatchTests(unittest.TestCase):
         with fake_submodule("qt_app", qt):
             code, _, _ = run_cli([])
         qt.run.assert_called_once_with(force_demo=False, check_updates=True,
-                                       demo_cameras=1)
+                                       demo_cameras=1, log_level=None, send_reports=True)
         self.assertEqual(code, 5)
 
     def test_demo_and_no_update_check_reach_qt(self):
@@ -121,7 +121,7 @@ class CliDispatchTests(unittest.TestCase):
         with fake_submodule("qt_app", qt):
             code, _, _ = run_cli(["--demo", "--demo-cameras", "3", "--no-update-check"])
         qt.run.assert_called_once_with(force_demo=True, check_updates=False,
-                                       demo_cameras=3)
+                                       demo_cameras=3, log_level=None, send_reports=True)
         self.assertEqual(code, 0)
 
     def test_missing_pyside_exits_with_message(self):

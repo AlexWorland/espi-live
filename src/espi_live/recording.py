@@ -7,6 +7,7 @@ import time
 
 import cv2
 
+from espi_live import error_reports
 from espi_live.paths import output_folder, timestamp
 
 
@@ -153,8 +154,8 @@ def save_frame(display, title, notes, demo, log, tag=""):
     """Save a displayed frame as PNG plus an optional title/notes sidecar.
 
     Args: display is the grayscale or BGR image exactly as shown; title and
-        notes are optional user text; demo marks synthetic video; log has a
-        write(message) method; tag names the camera when several are used.
+        notes are optional user text; demo marks synthetic video; log is an
+        AppLog or PrefixedLog; tag names the camera when several are used.
     Returns: The PNG path when saved, otherwise None (the reason is logged).
     """
     title = title.strip()
@@ -167,10 +168,10 @@ def save_frame(display, title, notes, demo, log, tag=""):
         folder = output_folder("frames")
         path = os.path.join(folder, f"{prefix}frame_{camera}{timestamp()}{suffix}.png")
         if not cv2.imwrite(path, display):
-            log.write(f"Could not save: {path}")
+            log.warning(f"Could not save: {path}")
             return None
     except (OSError, cv2.error) as exc:
-        log.write(f"Could not save frame: {exc}")
+        error_reports.caught(log, exc, "save", "Could not save frame")
         return None
     log.write(f"Saved: {path}")
     if title or notes:
@@ -184,5 +185,5 @@ def save_frame(display, title, notes, demo, log, tag=""):
                     f"Title: {title}\n\nNotes:\n{notes}\n")
             log.write(f"Saved frame info: {info_path}")
         except OSError as exc:
-            log.write(f"Frame saved, but could not save info: {exc}")
+            log.warning(f"Frame saved, but could not save info: {exc}")
     return path

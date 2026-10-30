@@ -17,34 +17,7 @@ from espi_live import camera, engine, paths
 from espi_live.engine import Engine, WindowsPreviewTimer
 from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
-
-
-class ListLog:
-    """Collect log messages in memory."""
-
-    def __init__(self):
-        """Create an empty log.
-
-        Args: None.
-        Returns: None.
-        """
-        self.lines = []
-
-    def write(self, message):
-        """Record one message.
-
-        Args: message is the text to keep.
-        Returns: None.
-        """
-        self.lines.append(message)
-
-    def has(self, text):
-        """Check whether any logged line contains text.
-
-        Args: text is the substring to look for.
-        Returns: True if some line contains it.
-        """
-        return any(text in line for line in self.lines)
+from list_log import ListLog
 
 
 def wait_until(predicate, timeout=5.0):
@@ -250,12 +223,11 @@ class SetupTests(CameraEngineCase):
         """
         self.cam.tl_device_nodemap.nodes["DeviceModelName"].value = (
             "Blackfly S BFS-U3-70S7C")
-        with mock.patch.object(self.engine.log, "write") as write:
-            self.engine.open_camera()
-        text = "\n".join(call.args[0] for call in write.call_args_list)
-        self.assertIn("Camera: Blackfly S BFS-U3-70S7C (FLIR)", text)
-        self.assertIn("Camera note: Colour camera", text)
-        self.assertIn("BFS-U3-70S7C has not been tested", text)
+        self.engine.open_camera()
+        self.assertTrue(self.log.has("Camera: Blackfly S BFS-U3-70S7C (FLIR)"))
+        notes = "\n".join(self.log.at("WARNING"))
+        self.assertIn("Camera note: Colour camera", notes)
+        self.assertIn("BFS-U3-70S7C has not been tested", notes)
 
     def test_open_camera_failure_leaves_engine_unchanged(self):
         """No camera raises and the engine may still choose demo.
@@ -387,12 +359,16 @@ class CameraStreamingTests(CameraEngineCase):
         Returns: None.
         """
         self.cam.frame_source = lambda: FakeImage(np.zeros((4, 4), np.uint16))
-        with mock.patch.object(engine.traceback, "print_exc"):
-            self.start_camera()
-            payload = self.wait_event("fatal")
-            self.wait_event("stopped")
-        self.assertIn("Expected a Mono8 image", payload)
+        self.start_camera()
+        message, fingerprint = self.wait_event("fatal")
+        self.wait_event("stopped")
+        self.assertIn("Expected a Mono8 image", message)
+        self.assertIsNone(fingerprint)  # no reporter installed
         self.assertTrue(self.log.has("Stopped: RuntimeError"))
+        level, _, exc_info = self.log.records[[line.startswith("Stopped")
+                                               for line in self.log.lines].index(True)]
+        self.assertEqual(level, "ERROR")
+        self.assertIsInstance(exc_info, RuntimeError)  # logged with its traceback
         self.assertTrue(self.system.released)
         self.assertIsNone(self.engine.camera)
 

@@ -78,6 +78,24 @@ class PrefixedLogTests(unittest.TestCase):
         prefixed.write("b")
         self.assertEqual(log.lines, ["[1] a", "b"])
 
+    def test_level_methods_prefix_and_keep_the_level(self):
+        """debug, info, warning, error and exception all gain the prefix.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        prefixed = channels.PrefixedLog(log, "[1] ")
+        prefixed.debug("d")
+        prefixed.info("i")
+        prefixed.warning("w")
+        prefixed.error("e", exc_info=True)
+        prefixed.exception("x")
+        self.assertEqual([level for level, _, _ in log.records],
+                         ["DEBUG", "INFO", "WARNING", "ERROR", "ERROR"])
+        self.assertEqual(log.lines, ["[1] d", "[1] i", "[1] w", "[1] e", "[1] x"])
+        self.assertEqual(log.records[3][2], True)
+
 
 class ChannelTests(ChannelTestCase):
     """Channel state, start/stop and settings."""
