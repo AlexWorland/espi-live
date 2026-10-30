@@ -16,6 +16,7 @@ acquiring, processing and recording in the background. Every control acts on
 the displayed camera's own engine and settings.
 """
 
+import html
 import math
 import sys
 import time
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
                                QPushButton, QSizePolicy, QSlider,
                                QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
-from espi_live import feedback, updater
+from espi_live import codex, feedback, source_code, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.logs import AppLog
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
@@ -82,6 +83,8 @@ void main() {
 """
 MAX_ZOOM = 64.0
 ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
+CODEX_LABEL = "Open in Codex"
+CODEX_BUSY_LABEL = "Getting source…"
 LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are ignored
 TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
@@ -778,7 +781,8 @@ class MainWindow(QMainWindow):
             (opened, not yet started); the first active one is displayed;
             log is the AppLog; use_gl selects the GPU view instead of the CPU
             fallback; check_updates looks for a newer prebuilt binary at
-            startup.
+            startup and downloads this build's source code if it is missing
+            (otherwise that waits for Open in Codex).
         Returns: None.
         """
         super().__init__()
@@ -792,6 +796,9 @@ class MainWindow(QMainWindow):
         self.pending_update = None  # unpacked build to install on exit
         self.relaunch_after_exit = False
         self.feedback = feedback.FeedbackWorker()
+        self.source = source_code.SourceWorker()  # this build's source, for Codex
+        self.source_folder = None  # set once the source copy is ready
+        self.codex_when_ready = False  # open Codex when the download finishes
         self.retired_channels = []  # demo channels replaced by real cameras
         self.drawn_sequence = 0
         self.shown_packet = None  # the packet on screen; Freeze holds this one
@@ -841,6 +848,8 @@ class MainWindow(QMainWindow):
         self.status_timer.start(200)
         if check_updates and updater.unavailable_reason() is None:
             self.updates.check()
+        if check_updates:
+            self.source.start()  # downloads this build's source if it is missing
 
     @property
     def camera_identity(self):
@@ -1258,6 +1267,15 @@ class MainWindow(QMainWindow):
         self.feature_button.setToolTip("Send a feature request to the developers (GitHub issue)")
         self.feature_button.clicked.connect(lambda: self._request_feature())
         bar.addPermanentWidget(self.feature_button)
+        self.codex_button = QPushButton(CODEX_LABEL)
+        self.codex_button.setFlat(True)
+        self.codex_button.setToolTip("Ask OpenAI's Codex how ESPI live works, using this "
+                                     "build's real source code")
+        self.codex_button.setFixedWidth(max(
+            QFontMetrics(self.codex_button.font()).horizontalAdvance(text)
+            for text in (CODEX_LABEL, CODEX_BUSY_LABEL)) + 24)
+        self.codex_button.clicked.connect(self._open_codex)
+        bar.addPermanentWidget(self.codex_button)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
             bar.addPermanentWidget(widget)
@@ -1299,6 +1317,8 @@ class MainWindow(QMainWindow):
         check.triggered.connect(self._check_updates_now)
         request = help_menu.addAction("Request a feature…")
         request.triggered.connect(lambda: self._request_feature())
+        ask = help_menu.addAction("Ask Codex about the source code…")
+        ask.triggered.connect(self._open_codex)
         about = help_menu.addAction("About ESPI live")
         about.triggered.connect(lambda: QMessageBox.about(
             self, "About ESPI live", updater.describe_build()))
@@ -1694,6 +1714,7 @@ class MainWindow(QMainWindow):
         self._handle_events()
         self._handle_update_events()
         self._handle_feedback_events()
+        self._handle_source_events()
 
     # ----- feature requests --------------------------------------------------
 
@@ -1765,6 +1786,104 @@ class MainWindow(QMainWindow):
                     self._request_feature(request)
                 elif box.clickedButton() is browser:
                     self._open_request_in_browser(request)
+
+    # ----- source code and Codex ---------------------------------------------
+
+    def _open_codex(self):
+        """Open the Codex app on this build's source code.
+
+        Downloads the source first when it is not there yet (the startup
+        download failed or is still running), then opens Codex once it is.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.source_folder is None:
+            self.codex_when_ready = True
+            self.codex_button.setEnabled(False)
+            self.codex_button.setText(CODEX_BUSY_LABEL)
+            if not self.source.start():
+                self.statusBar().showMessage("Still downloading the source code…", 3000)
+            return
+        settings = QSettings("ESPI", "espi_live")
+        if not settings.value("codex/intro_shown", False, bool):
+            if not self._codex_intro():
+                return
+            settings.setValue("codex/intro_shown", True)
+        try:
+            codex.write_guide(self.source_folder)
+        except OSError as exc:
+            QMessageBox.warning(self, "Open in Codex",
+                                "Could not prepare the source code for Codex in "
+                                f"{self.source_folder}: {exc.strerror or exc}.")
+            return
+        if QDesktopServices.openUrl(QUrl.fromEncoded(
+                codex.deep_link(self.source_folder).encode("ascii"))):
+            self.log.write(f"Opened Codex on {self.source_folder}")
+            self.statusBar().showMessage("Opening Codex with ESPI live's source code…", 5000)
+            return
+        box = QMessageBox(QMessageBox.Warning, "Codex not found",
+                          "Codex did not open. Install the Codex app (or the ChatGPT "
+                          "desktop app, which includes it), sign in, then press "
+                          "Open in Codex again.", parent=self)
+        get = box.addButton("Get Codex…", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is get:
+            QDesktopServices.openUrl(QUrl(codex.INSTALL_URL))
+
+    def _codex_intro(self):
+        """Explain Open in Codex the first time it is used.
+
+        Args: None.
+        Returns: True to go on and open Codex, False to stop.
+        """
+        box = QMessageBox(QMessageBox.Information, "Open in Codex",
+                          "Codex, OpenAI's coding assistant, opens with the source code of "
+                          "this copy of ESPI live, so you can ask it how the program works."
+                          "<br><br>If you ask it to change something, it shows you the "
+                          "change and asks whether you are happy with it. If you are, it "
+                          "sends the change to the ESPI live developers to review. Your "
+                          "installed program stays as it is.<br><br>You need the Codex "
+                          "app (or the ChatGPT desktop app) and a ChatGPT account."
+                          f"<br><br>Source code: {html.escape(self.source_folder)}",
+                          parent=self)
+        box.setTextFormat(Qt.RichText)
+        go = box.addButton("Open Codex", QMessageBox.AcceptRole)
+        get = box.addButton("Get Codex…", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        if box.clickedButton() is get:
+            QDesktopServices.openUrl(QUrl(codex.INSTALL_URL))
+        return box.clickedButton() is go
+
+    def _handle_source_events(self):
+        """Note when the source copy is ready, or why it is not.
+
+        Args: None.
+        Returns: None.
+        """
+        while True:
+            try:
+                kind, payload = self.source.events.get_nowait()
+            except Exception:
+                return
+            wanted, self.codex_when_ready = self.codex_when_ready, False
+            self.codex_button.setEnabled(True)
+            self.codex_button.setText(CODEX_LABEL)
+            if kind == "ready":
+                self.source_folder, note = payload
+                if note:
+                    self.log.write(note)
+                if wanted:
+                    self._open_codex()
+            else:
+                self.log.write(f"Source code not available: {payload}")
+                if wanted:
+                    QMessageBox.warning(self, "Open in Codex",
+                                        "The source code could not be downloaded: "
+                                        f"{html.escape(payload)}."
+                                        "<br><br>Check the internet connection and try again.")
 
     # ----- updates -----------------------------------------------------------
 
@@ -2013,7 +2132,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
     """Start the Qt front end.
 
     Args: force_demo skips camera detection and starts synthetic video;
-        check_updates looks for a newer prebuilt binary at startup;
+        check_updates looks for a newer prebuilt binary and downloads this
+        build's source code (if missing) at startup;
         demo_cameras is how many synthetic cameras demo mode simulates.
     Returns: The process exit code.
     """
