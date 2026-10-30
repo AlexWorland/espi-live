@@ -1,0 +1,1731 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESPI live — User Guide</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #ffffff;
+    --fg: #1b1f24;
+    --muted: #5c6773;
+    --panel: #f6f8fa;
+    --border: #d9e0e8;
+    --accent: #0b63ce;
+    --accent-soft: #e9f2fe;
+    --warn: #a4231f;
+    --warn-soft: #fdf0ef;
+    --note-soft: #eef6ff;
+    --code-bg: #f0f3f6;
+    --shadow: 0 8px 30px rgba(20, 35, 55, 0.08);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #101418;
+    --fg: #e6edf3;
+    --muted: #9aa7b4;
+    --panel: #161c23;
+    --border: #2b3440;
+    --accent: #6cb6ff;
+    --accent-soft: #16324f;
+    --warn: #ff8a80;
+    --warn-soft: #3a1c1b;
+    --note-soft: #142638;
+    --code-bg: #1b232c;
+    --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #101418;
+      --fg: #e6edf3;
+      --muted: #9aa7b4;
+      --panel: #161c23;
+      --border: #2b3440;
+      --accent: #6cb6ff;
+      --accent-soft: #16324f;
+      --warn: #ff8a80;
+      --warn-soft: #3a1c1b;
+      --note-soft: #142638;
+      --code-bg: #1b232c;
+      --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .to-top { transition: none; }
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 280px minmax(0, 1fr);
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+  /* ---------- sidebar ---------- */
+  .sidebar {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    max-height: 100dvh;
+    overflow-y: auto;
+    padding: 26px 20px 40px;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .brand { margin: 0 0 18px; }
+  .brand strong { display: block; font-size: 1.15rem; letter-spacing: -0.01em; }
+  .brand span { color: var(--muted); font-size: 0.85rem; }
+  .sidebar-tools { display: grid; gap: 8px; margin-bottom: 18px; }
+  .sidebar-tools input,
+  .sidebar-tools button {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.85rem;
+  }
+  .sidebar-tools input { border-color: var(--muted); }
+  .sidebar-tools button { cursor: pointer; text-align: left; }
+  .sidebar-tools button:hover { border-color: var(--accent); color: var(--accent); }
+  .skip {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    padding: 8px 12px;
+    border: 2px solid var(--accent);
+    background: var(--bg);
+    color: var(--fg);
+    z-index: 20;
+  }
+  .skip:focus { left: 8px; top: 8px; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .toc-empty { margin: 8px; color: var(--muted); font-size: 0.85rem; }
+  .sidebar-tools input:focus-visible,
+  .sidebar-tools button:focus-visible,
+  a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  #toc ol { list-style: none; margin: 0; padding: 0; }
+  #toc ol ol { margin: 2px 0 8px 14px; padding-left: 10px; border-left: 1px solid var(--border); }
+  #toc li { margin: 1px 0; }
+  #toc li[hidden] { display: none; }
+  #toc a {
+    display: block;
+    padding: 4px 8px;
+    border-radius: 6px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 0.875rem;
+  }
+  #toc > ol > li > a { color: var(--fg); font-weight: 600; font-size: 0.9rem; }
+  #toc a:hover { background: var(--accent-soft); color: var(--accent); }
+  #toc a[aria-current="location"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  /* ---------- main ---------- */
+  main { padding: 42px 56px 100px; max-width: 940px; }
+  header.hero { padding-bottom: 26px; border-bottom: 1px solid var(--border); }
+  h1 { margin: 0 0 10px; font-size: 2.35rem; line-height: 1.15; letter-spacing: -0.025em; }
+  .lede { margin: 0; max-width: 72ch; color: var(--muted); font-size: 1.05rem; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .pill {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+  section { scroll-margin-top: 18px; }
+  main section { margin-top: 44px; }
+  main section section { margin-top: 30px; }
+  h2 {
+    margin: 0 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 1.55rem;
+    line-height: 1.25;
+    letter-spacing: -0.015em;
+  }
+  h3 { margin: 28px 0 10px; font-size: 1.16rem; }
+  h4 { margin: 22px 0 8px; font-size: 1rem; }
+  p { max-width: 76ch; }
+  ul, ol { padding-left: 1.35rem; }
+  li { margin: 5px 0; max-width: 74ch; }
+  .anchor {
+    margin-left: 0.35em;
+    color: var(--muted);
+    text-decoration: none;
+    opacity: 0;
+    font-weight: 400;
+  }
+  h2:hover .anchor, h3:hover .anchor, .anchor:focus { opacity: 0.7; }
+  a { color: var(--accent); }
+  a:hover { text-decoration-thickness: 2px; }
+  strong { font-weight: 650; }
+  kbd {
+    display: inline-block;
+    min-width: 1.7em;
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--panel);
+    font: 0.85em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-align: center;
+  }
+  code {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--code-bg);
+    font: 0.88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre {
+    overflow-x: auto;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--code-bg);
+    font: 0.86rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { padding: 0; background: none; }
+  .table-wrap { overflow-x: auto; margin: 14px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+  th, td {
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--panel); font-weight: 650; }
+  tbody tr:nth-child(even) td { background: var(--panel); }
+  .note, .warn {
+    margin: 18px 0;
+    padding: 12px 16px;
+    border-left: 4px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    background: var(--note-soft);
+  }
+  .warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .note p, .warn p { margin: 4px 0; max-width: 72ch; }
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 14px;
+    margin: 16px 0;
+  }
+  .card {
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+  }
+  .card h4 { margin: 0 0 6px; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+  details.faq {
+    margin: 10px 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+  }
+  details.faq summary {
+    padding: 11px 15px;
+    cursor: pointer;
+    font-weight: 600;
+    list-style-position: inside;
+  }
+  details.faq summary:hover { color: var(--accent); }
+  details.faq > :not(summary) { padding: 0 15px; }
+  details.faq > :last-child { padding-bottom: 12px; }
+  .to-top {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    padding: 9px 14px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--bg);
+    text-decoration: none;
+    font-size: 0.86rem;
+    font-weight: 600;
+    box-shadow: var(--shadow);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 150ms ease, visibility 150ms ease;
+  }
+  .to-top.visible { opacity: 1; visibility: visible; }
+  footer {
+    margin-top: 60px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
+  /* ---------- responsive ---------- */
+  @media (max-width: 900px) {
+    .layout { display: block; }
+    .sidebar {
+      position: static;
+      max-height: none;
+      padding: 18px 20px 10px;
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    #toc { max-height: 42vh; overflow-y: auto; }
+    main { padding: 28px 22px 80px; }
+    h1 { font-size: 1.9rem; }
+    .to-top { right: 14px; bottom: 14px; }
+  }
+  /* ---------- print ---------- */
+  @media print {
+    :root,
+    :root[data-theme="dark"],
+    :root:not([data-theme="light"]) {
+      color-scheme: light;
+      --bg: #fff;
+      --fg: #000;
+      --panel: #fff;
+      --border: #bbb;
+      --muted: #444;
+      --accent: #000;
+      --accent-soft: #fff;
+      --warn: #000;
+      --warn-soft: #fff;
+      --note-soft: #fff;
+      --code-bg: #f4f4f4;
+      --shadow: none;
+    }
+    .layout { display: block; max-width: none; }
+    .sidebar, .to-top, .anchor { display: none !important; }
+    main { max-width: none; padding: 0; }
+    a { color: #000; text-decoration: none; }
+    a[href^="#"] { text-decoration: underline; }
+    details.faq { break-inside: avoid; }
+    h2, h3 { break-after: avoid; }
+    .note, .warn, .card, table, pre { break-inside: avoid; }
+  }
+</style>
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem("espi-guide-theme");
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+    } catch (error) { /* file:// or private mode may block storage */ }
+  })();
+</script>
+<noscript><style>.sidebar-tools { display: none; }</style></noscript>
+</head>
+<body id="top">
+<a class="skip" href="#main">Skip to contents</a>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <strong>ESPI live</strong>
+      <span>User Guide</span>
+    </div>
+    <div class="sidebar-tools">
+      <input id="toc-filter" type="search" placeholder="Filter sections…"
+             autocomplete="off" aria-label="Filter the contents list">
+      <button id="theme-toggle" type="button">Theme: Auto</button>
+      <button id="print-button" type="button">Print / Save as PDF</button>
+    </div>
+    <nav id="toc" aria-label="Contents">
+      <ol>
+        <li><a href="#quick-start">Quick start</a></li>
+        <li><a href="#starting">Starting the application</a>
+          <ol>
+            <li><a href="#start-camera">With a camera</a></li>
+            <li><a href="#start-demo">Demo mode</a></li>
+            <li><a href="#start-interface">Command line</a></li>
+            <li><a href="#start-packaged">Packaged builds</a></li>
+          </ol>
+        </li>
+        <li><a href="#window">The window at a glance</a></li>
+        <li><a href="#controls">Controls reference</a>
+          <ol>
+            <li><a href="#dummy-mode">Demo banner and live switch</a></li>
+            <li><a href="#toolbar">Toolbar</a></li>
+            <li><a href="#view">View</a></li>
+            <li><a href="#camera">Camera</a></li>
+            <li><a href="#measurement">ESPI measurement</a></li>
+            <li><a href="#fringe">Fringe enhancement</a></li>
+            <li><a href="#display">Display</a></li>
+            <li><a href="#capture">Capture and saved frames</a></li>
+            <li><a href="#status-bar">Status bar</a></li>
+            <li><a href="#log">Log panel</a></li>
+            <li><a href="#view-menu">View menu</a></li>
+            <li><a href="#help-menu">Help menu</a></li>
+          </ol>
+        </li>
+        <li><a href="#several-cameras">Several cameras</a></li>
+        <li><a href="#analog">Analog camera</a></li>
+        <li><a href="#defaults">Defaults and limits</a></li>
+        <li><a href="#operations">Common operations</a>
+          <ol>
+            <li><a href="#op-position">Position and focus</a></li>
+            <li><a href="#op-freeze">Freeze and inspect</a></li>
+            <li><a href="#op-reference">Capture a reference</a></li>
+            <li><a href="#op-previous">Measure frame-to-frame change</a></li>
+            <li><a href="#op-average">Average and rolling average</a></li>
+            <li><a href="#op-noise">Reduce sensor noise</a></li>
+            <li><a href="#op-contrast">Improve fringes and contrast</a></li>
+            <li><a href="#op-save">Save a still frame</a></li>
+            <li><a href="#op-record">Record a sequence</a></li>
+            <li><a href="#op-camera">Adjust exposure, gain and FPS</a></li>
+            <li><a href="#op-layout">Arrange the workspace</a></li>
+            <li><a href="#op-switch-live">Switch demo → live</a></li>
+            <li><a href="#op-cameras">Use several cameras</a></li>
+          </ol>
+        </li>
+        <li><a href="#shortcuts">Keyboard and mouse</a></li>
+        <li><a href="#files">Files and output folders</a></li>
+        <li><a href="#troubleshooting">Troubleshooting</a>
+          <ol>
+            <li><a href="#ts-no-camera">No camera detected</a></li>
+            <li><a href="#ts-switch">Live switch fails</a></li>
+            <li><a href="#ts-black">Black image</a></li>
+            <li><a href="#ts-camera-drop">Camera dropped out</a></li>
+            <li><a href="#ts-fps">Low displayed rate</a></li>
+            <li><a href="#ts-cpu">CPU fallback</a></li>
+            <li><a href="#ts-record-skip">Skipped frames</a></li>
+            <li><a href="#ts-record-stop">Recording stops</a></li>
+            <li><a href="#ts-clamp">Control clamps</a></li>
+            <li><a href="#ts-colors">Color mismatch</a></li>
+            <li><a href="#ts-fatal">Fatal error</a></li>
+          </ol>
+        </li>
+        <li><a href="#updates">Updates, features and Codex</a></li>
+      </ol>
+      <p class="toc-empty" id="toc-empty" hidden>No sections match.</p>
+    </nav>
+  </aside>
+
+  <main id="main" tabindex="-1">
+    <header class="hero">
+      <h1>ESPI live — User Guide</h1>
+      <p class="lede">ESPI live shows a live image from a FLIR Blackfly
+        BFS-U3-63S4M-C Mono8 camera (or an analog camera through a capture
+        adapter) and turns it into ESPI (electronic speckle pattern
+        interferometry) measurements by subtracting frames. This guide
+        explains every control and walks through the operations you will use
+        most.</p>
+      <div class="meta">
+        <span class="pill">Offline guide</span>
+        <span class="pill">Open from Help → User Guide (F1)</span>
+        <span class="pill">Links work in this page</span>
+      </div>
+    </header>
+
+    <section id="quick-start">
+      <h2>Quick start <a class="anchor" href="#quick-start" aria-label="Link to Quick start">#</a></h2>
+      <ol>
+        <li>Start the app with a camera connected (or choose
+          <a href="#start-demo">demo mode</a> when asked).</li>
+        <li>Stay in <a href="#view">Raw</a> view and position and focus the
+          specimen.</li>
+        <li>Adjust <a href="#camera">Exposure</a> so the image is bright but not
+          washed out. Use <strong>Gain</strong> only when exposure is not
+          enough.</li>
+        <li>Switch to <strong>Reference</strong> and press <kbd>F</kbd> (or
+          <strong>Set reference</strong>) with the specimen in its resting
+          state. <a href="#op-reference">Detailed steps</a>.</li>
+        <li>Load or deform the specimen. The difference image shows the ESPI
+          fringe pattern.</li>
+        <li>If the pattern is noisy, raise <a href="#measurement">Average N</a>.
+          If it is faint, leave <strong>Stretch to 0–255</strong> on and try a
+          color <a href="#display">Palette</a>.</li>
+        <li>Press <kbd>S</kbd> (<strong>Save frame</strong>) to keep a still, or
+          <a href="#capture">Record AVI</a> to capture a sequence. Add a title
+          and notes before saving to identify the measurement.</li>
+      </ol>
+    </section>
+
+    <section id="starting">
+      <h2>Starting the application <a class="anchor" href="#starting" aria-label="Link to Starting the application">#</a></h2>
+
+      <section id="start-camera">
+        <h3>With a camera <a class="anchor" href="#start-camera" aria-label="Link to With a camera">#</a></h3>
+        <p>On the Windows camera PC, double-click
+          <code>scripts/windows/SETUP AND START ESPI.bat</code>. It checks
+          Python, OpenCV, NumPy, PySide6, PySpin and the Spinnaker SDK, asks
+          before installing anything, and launches the app
+          when validation passes. After an install, close any installers and run
+          the same file again.</p>
+        <p>On macOS or Linux, from a terminal in the project folder:</p>
+        <pre tabindex="0"><code>./run.sh</code></pre>
+        <p>On Windows, from the project folder in a command prompt:</p>
+        <pre tabindex="0"><code>set PYTHONPATH=src
+python -m espi_live</code></pre>
+        <p>The app opens the first FLIR camera it finds. If no camera is
+          detected, it offers to start demo mode; choose <strong>No</strong> to
+          quit instead.</p>
+      </section>
+
+      <section id="start-demo">
+        <h3>Without a camera (demo mode) <a class="anchor" href="#start-demo" aria-label="Link to Demo mode">#</a></h3>
+        <pre tabindex="0"><code>./run.sh --demo</code></pre>
+        <p>Demo mode produces a moving synthetic grayscale pattern, so you can
+          learn the controls, check processing, and test saving and recording
+          without a camera. Exposure, gain and frame rate are simulated.</p>
+        <div class="warn">
+          <p><strong>Demo data is clearly marked.</strong> A red
+            <strong>DUMMY MODE</strong> banner (in the Controls panel) and a
+            status badge are visible, and every saved frame and recording
+            carries a <strong>DUMMY MODE ACTIVE</strong> watermark and a
+            <code>dummy_</code> filename prefix. Demo data is never presented
+            as camera data.</p>
+          <p>Demo frames are <strong>960×640</strong>. The watermark covers the
+            top ~10% (at least 42 px), so that band is hidden in demo previews,
+            saved frames and recordings.</p>
+        </div>
+      </section>
+
+      <section id="start-interface">
+        <h3>Command line <a class="anchor" href="#start-interface" aria-label="Link to Command line">#</a></h3>
+        <p>There is one Qt front end. Useful options:</p>
+        <ul>
+          <li><code>--demo</code> — synthetic video without touching a camera;
+            <code>--demo-cameras N</code> creates several synthetic cameras.</li>
+          <li><code>--check</code> — load every module without opening a window
+            and exit. <code>--version</code> prints the build number.</li>
+          <li><code>--update</code> — install the newest full release without
+            opening a window. <code>--no-update-check</code> skips the startup
+            update check and the source download.</li>
+          <li><code>--send-changes</code> — send changes made in the downloaded
+            source folder (see <a href="#updates">Updates, features and
+            Codex</a>).</li>
+        </ul>
+      </section>
+
+      <section id="start-packaged">
+        <h3>Packaged builds <a class="anchor" href="#start-packaged" aria-label="Link to Packaged builds">#</a></h3>
+        <p>Release downloads are self-contained; you do not need Python,
+          PySide6 or the repository.</p>
+        <div class="table-wrap">
+          <table>
+            <caption class="sr-only">Packaged builds per platform</caption>
+            <thead>
+              <tr><th scope="col">Download</th><th scope="col">What it is</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>espi-live-windows-x64.zip</code></td>
+                <td>An <code>espi-live</code> folder with
+                  <code>espi-live.exe</code> and PySpin 4.2; opens a real
+                  camera.</td></tr>
+              <tr><td><code>espi-live-linux-x64.tar.gz</code></td>
+                <td>An <code>espi-live</code> folder with the program and PySpin
+                  4.4; opens a real camera.</td></tr>
+              <tr><td><code>espi-live-macos-arm64.zip</code></td>
+                <td><code>ESPI Live.app</code>; <strong>demo only</strong>
+                  because there is no macOS PySpin wheel. After unzipping, run
+                  <code>xattr -cr "ESPI Live.app"</code> or right-click →
+                  Open.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Output is written to <code>output/</code> next to the executable
+          (next to the <code>.app</code> on macOS). Packaged copies update
+          themselves from GitHub; see <a href="#updates">Updates, features and
+          Codex</a>. The repository README is not included in the bundle; this
+          guide is the manual for a packaged install.</p>
+      </section>
+    </section>
+
+    <section id="window">
+      <h2>The window at a glance <a class="anchor" href="#window" aria-label="Link to The window at a glance">#</a></h2>
+      <div class="table-wrap">
+        <table>
+          <caption class="sr-only">Window areas and what they show</caption>
+          <thead>
+            <tr><th scope="col">Area</th><th scope="col">What it shows</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Toolbar</strong></td><td>View modes, Record, Freeze,
+              Save frame, Set reference, Reset last, Reset average, and the
+              Zoom slider with Fit and 1:1.</td></tr>
+            <tr><td>Image area</td><td>The live, frozen or processed
+              measurement. This is where the mouse shortcuts, zoom and pan
+              apply; a frozen image carries an amber <strong>FROZEN</strong>
+              bar.</td></tr>
+            <tr><td><strong>Controls</strong> panel</td><td>Cameras (when
+              several), Camera, ESPI measurement, Fringe enhancement, Display
+              and Saved frame details. Dockable, floatable or hidden.</td></tr>
+            <tr><td><strong>Log</strong> panel</td><td>Timestamped messages:
+              camera status, saved files, recordings and errors.</td></tr>
+            <tr><td>Status bar</td><td>View hint, <strong>FROZEN</strong>
+              badge, source badge, recording state, measurement range,
+              processing and display rates, pixel value, and the update /
+              feature / Codex buttons.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Both panels can be dragged to another edge, floated as separate
+        windows, or hidden from the <a href="#view-menu">View menu</a>. The
+        window size and layout are remembered between runs.</p>
+    </section>
+
+    <section id="controls">
+      <h2>Controls reference <a class="anchor" href="#controls" aria-label="Link to Controls reference">#</a></h2>
+
+      <section id="dummy-mode">
+        <h3>Demo banner and Switch to live capture <a class="anchor" href="#dummy-mode" aria-label="Link to Demo banner and live switch">#</a></h3>
+        <p>These appear only in demo mode.</p>
+        <ul>
+          <li><strong>DUMMY MODE</strong> banner and badge: a reminder that the
+            image is synthetic.</li>
+          <li><strong>Switch to live capture</strong>: retries camera detection
+            without restarting the app. If a camera is found, the app resets to
+            <a href="#view">Raw</a> view, clears measurement baselines, stops
+            any demo recording, and continues with live frames. If no camera is
+            found, a warning explains why and demo mode keeps running.</li>
+        </ul>
+      </section>
+
+      <section id="toolbar">
+        <h3>Toolbar <a class="anchor" href="#toolbar" aria-label="Link to Toolbar">#</a></h3>
+        <ul>
+          <li><strong>View modes</strong> — <strong>Raw</strong>,
+            <strong>Previous</strong> and <strong>Reference</strong>; see
+            <a href="#view">View</a>.</li>
+          <li><strong>Record AVI</strong> — start or stop recording the
+            displayed image. The recording label shows the output rate.</li>
+          <li><strong>Freeze (Space)</strong> — hold the displayed image without
+            saving it. The camera keeps acquiring, averaging, reference
+            refresh and recording continue. An amber <strong>FROZEN</strong>
+            bar over the image and a status badge mark the held frame; press
+            <kbd>Space</kbd> again to return to live. Save frame saves the held
+            image, and Set reference still uses the live camera frame.</li>
+          <li><strong>Save frame (S)</strong>, <strong>Set reference (F)</strong>,
+            <strong>Reset last (R)</strong>, <strong>Reset average (A)</strong>
+            — the same actions as the measurement and capture sections.</li>
+          <li><strong>Zoom</strong> — drag, click or scroll the slider to zoom
+            from fit (100%) up to 64×; <strong>Fit</strong> (<kbd>0</kbd>) and
+            <strong>1:1</strong> (<kbd>1</kbd>) jump to those levels. The mouse
+            wheel zooms around the cursor and dragging pans.</li>
+        </ul>
+        <p>Every control, menu item and status readout has a hover tooltip that
+          explains it. Tip text waits briefly so it does not flicker as the
+          pointer moves.</p>
+      </section>
+
+      <section id="view">
+        <h3>View <a class="anchor" href="#view" aria-label="Link to View">#</a></h3>
+        <p>Choose how each frame is built. All three modes use the same camera
+          frames; with <strong>Average N = 1</strong> they update at the same
+          rate. With <strong>N &gt; 1</strong>, Previous and Reference publish
+          a new image only after N frames.</p>
+        <div class="card-grid">
+          <div class="card">
+            <h4>Raw</h4>
+            <p>The direct Mono8 camera image with no subtraction, scaling,
+              gamma or palette. Use it for positioning, focusing and checking
+              exposure.</p>
+          </div>
+          <div class="card">
+            <h4>Previous</h4>
+            <p>The absolute difference between this frame and the previous one.
+              Stationary areas are black; anything that changed since the last
+              frame is bright. The first frame after switching becomes the
+              baseline and displays black.</p>
+          </div>
+          <div class="card">
+            <h4>Reference</h4>
+            <p>The absolute difference between this frame and a stored
+              reference frame. Capture the resting state once, then watch how
+              the specimen changes against it. Until a reference exists, the
+              view is black and a hint tells you to press <kbd>F</kbd>.</p>
+          </div>
+        </div>
+        <p>Changing the view mode clears any partial average. Switching
+          <em>to</em> <a href="#op-previous">Previous</a> starts a fresh
+          baseline on the next frame. The reference frame is kept until you
+          capture a new one, switch to live capture successfully, or close the
+          app.</p>
+        <p>Below the view buttons, a hint line describes the current mode and
+          reminds you when a reference is still needed.</p>
+      </section>
+
+      <section id="camera">
+        <h3>Camera <a class="anchor" href="#camera" aria-label="Link to Camera">#</a></h3>
+        <ul>
+          <li><strong>Exposure</strong> (microseconds) — how long each frame
+            collects light. It changes brightness and motion blur. The default
+            is 8000 µs. Longer exposure means a brighter image but limits the
+            maximum frame rate.</li>
+          <li><strong>Gain</strong> (dB) — electronic amplification. It
+            brightens the image but also amplifies noise, so prefer more
+            exposure when the specimen allows it. The default is 0 dB.</li>
+          <li><strong>Requested FPS</strong> — the frame rate you ask the camera
+            for. The default is 30 fps. The camera may deliver less if exposure,
+            USB bandwidth or the camera's own limits prevent it.</li>
+          <li><strong>Noise reduction</strong> — blends each camera frame with
+            the previous ones, 0–95% of the history kept (0 = off), to remove
+            random sensor noise in every view, Raw included, while keeping the
+            speckle ESPI fringes depend on. Higher values smooth more but leave
+            a trail behind motion and weaken <strong>Previous</strong>-view
+            fringes; a Reference captured with it on is less noisy too.</li>
+          <li><strong>Single field (interlaced camera)</strong> — shown for an
+            interlaced analog source; on by default. It keeps one field,
+            doubled to full height, removing the 1/60 s offset between fields
+            at the cost of half the vertical detail.</li>
+        </ul>
+        <p>Each control has a slider for quick changes and a number box for
+          exact entry: drag the slider, type a value and press Enter, or use the
+          arrow keys.</p>
+        <p>When a camera is connected the sliders adapt to its readable limits,
+          but this build clips them to <strong>0–50,000 µs exposure, 0–30 dB
+          gain and 0–60 fps</strong>. The camera itself can reach 30 s and
+          47.99 dB, but those values are not exposed in the UI. Out-of-range
+          values are clamped. The 100 ms frame-grab timeout also means very long
+          exposures can stop the stream from keeping up.</p>
+        <p>Each time the app opens the camera it writes Mono8, continuous
+          acquisition, auto-exposure and auto-gain off, 8000 µs, 0 dB and
+          30 fps, and selects NewestOnly buffering. Settings made in SpinView
+          are replaced; set exposure, gain and frame rate in the app.</p>
+        <h4>Rate limiting and the readout</h4>
+        <p>Changes are sent to the camera at most about ten times per second, so
+          dragging a slider stays smooth. The readout underneath the controls
+          is refreshed once per second and shows:</p>
+        <pre tabindex="0"><code>Applied: 8000 µs, 0.0 dB; FPS set 30.0, resulting 29.8</code></pre>
+        <ul>
+          <li><strong>Applied</strong> is what the camera actually accepted,
+            which can differ from what you requested if the camera clamped a
+            value.</li>
+          <li><strong>FPS set</strong> is your request; <strong>resulting</strong>
+            is the measured acquisition rate. A lower resulting rate is normal
+            at long exposures or high resolution.</li>
+        </ul>
+        <p>In demo mode this readout says that exposure, gain and FPS are
+          simulated.</p>
+        <p>See <a href="#op-camera">Adjust exposure, gain and frame rate</a> for
+          practical steps.</p>
+      </section>
+
+      <section id="measurement">
+        <h3>ESPI measurement <a class="anchor" href="#measurement" aria-label="Link to ESPI measurement">#</a></h3>
+        <p>These controls apply to <strong>Previous</strong> and
+          <strong>Reference</strong> views. <strong>Raw</strong> ignores them.</p>
+        <ul>
+          <li><strong>Average N</strong> — each displayed image becomes the
+            mean of N consecutive difference frames. Averaging reduces random
+            noise at the cost of a slower displayed update: at 30 fps and
+            N = 5, a new averaged image appears about six times per second.
+            While the first N frames are collected the image stays unchanged,
+            and changing N or the view mode restarts the count. Recording
+            follows the averaged rate.</li>
+          <li><strong>Rolling average (updates every frame)</strong> — a
+            running average that still updates at the camera rate. Use it when
+            you want to watch fringes move instead of waiting for each block of
+            N frames.</li>
+          <li><strong>Ref. refresh</strong> — Reference view recaptures the
+            reference every N seconds so slow drift (air currents, heat)
+            cancels; 0 keeps one reference until you press <kbd>F</kbd>.</li>
+        </ul>
+      </section>
+
+      <section id="fringe">
+        <h3>Fringe enhancement <a class="anchor" href="#fringe" aria-label="Link to Fringe enhancement">#</a></h3>
+        <ul>
+          <li><strong>Speckle filter</strong> — <strong>Gaussian</strong>, or
+            edge-keeping <strong>Median</strong> (capped at 5 px to keep the
+            frame rate). Use Median when a wide Gaussian blurs fringe
+            edges.</li>
+          <li><strong>Filter width</strong> — blur in pixels that removes
+            pixel-scale speckle; keep it well below the fringe spacing. 0 = off.
+            A typical start is 0, then a few pixels.</li>
+          <li><strong>Stretch to 0–255</strong> — maps each difference frame's
+            darkest and brightest pixels (after <strong>Stretch clip</strong>)
+            to 0 and 255, so fringes fill the display. The status bar shows the
+            input and scaled ranges, before gamma and palette. A constant
+            difference image maps to black.</li>
+          <li><strong>Stretch clip</strong> — lets this percentage of the
+            darkest and brightest pixels saturate so a few stray speckles do
+            not flatten the contrast; 0 = exact min/max, about 0.5% when a few
+            speckles dominate.</li>
+          <li><strong>Invert</strong> — swaps bright and dark fringes.</li>
+        </ul>
+        <p>Stretch, clip and invert apply to difference views; Raw is never
+          stretched or inverted.</p>
+      </section>
+
+      <section id="display">
+        <h3>Display <a class="anchor" href="#display" aria-label="Link to Display">#</a></h3>
+        <p>These controls apply to <strong>Previous</strong> and
+          <strong>Reference</strong> views. <strong>Raw</strong> always shows
+          untouched grayscale.</p>
+        <ul>
+          <li><strong>Palette</strong> — Gray, Turbo, Jet, Hot, Viridis, Plasma
+            or Inferno. Color palettes make small intensity differences easier
+            to see. The palette applies to the whole processed frame, and saved
+            files and recordings use exactly the same colors as the screen.</li>
+          <li><strong>Gamma</strong> — a display curve from 0.1 to 3.0. Values
+            below 1 <strong>darken</strong> midtones and values above 1
+            <strong>brighten</strong> them. Gamma does not change the
+            measurement data, only how it is displayed and saved. 1.0 leaves
+            the image unchanged.</li>
+          <li><strong>CLAHE (color palettes only)</strong> — contrast-limited
+            adaptive histogram equalization. It boosts local contrast in small
+            tiles, which can reveal faint fringes in unevenly lit areas. It is
+            computed on the CPU, so it costs more processing time, and it is
+            ignored when the palette is Gray. Gamma is applied before
+            CLAHE.</li>
+        </ul>
+        <p>See <a href="#op-contrast">Get the best contrast</a>.</p>
+      </section>
+
+      <section id="capture">
+        <h3>Capture and saved frames <a class="anchor" href="#capture" aria-label="Link to Capture and saved frames">#</a></h3>
+        <ul>
+          <li><strong>Record AVI</strong> — when checked, writes the displayed
+            image to an AVI file at a steady output rate. In
+            <strong>Previous</strong>/<strong>Reference</strong> the output rate
+            is the source rate divided by <strong>Average N</strong>, capped at
+            30 fps and floored at 1 fps. In <strong>Raw</strong> view Average N
+            is ignored. Recording includes the palette, gamma, CLAHE, scaling
+            and, in demo mode, the watermark, so the file matches the screen.
+            The label beside the button shows the output rate, and recording
+            continues while you move, resize or interact with the window.
+            <ul>
+              <li>If encoding cannot keep up, intermediate preview frames are
+                skipped and the AVI timeline still advances; when acquisition is
+                slower than the output rate, the last frame is repeated. The log
+                reports skipped frames and late encoder intervals when the file
+                is closed.</li>
+              <li>Changing the view mode, or <strong>Average N</strong> or
+                <strong>Rolling average</strong> in Previous/Reference, closes
+                the current AVI and starts a new one.
+                <strong>Other changes do not split the file:</strong> palette,
+                gamma, CLAHE, Stretch to 0–255, Stretch clip, Speckle filter,
+                Invert, exposure, gain, FPS, noise reduction, Single field,
+                <strong>Set reference</strong>, <strong>Reset last</strong> and
+                <strong>Reset average</strong> all continue writing to the same
+                file. Stop and restart the recording after any of them, or the
+                file will mix processing configurations or measurement
+                baselines.</li>
+              <li>Unchecking <strong>Record AVI</strong> finishes the file
+                cleanly. Closing the app also finishes it, waiting up to about
+                5 seconds for the writer; the log prints the final path and
+                frame count.</li>
+            </ul>
+          </li>
+          <li><strong>Title (optional)</strong> — a short label added to the
+            saved PNG filename. Characters that are unsafe in filenames,
+            including spaces, become underscores; leading/trailing underscores
+            are removed and the result is limited to 80 characters.</li>
+          <li><strong>Notes (optional)</strong> — free text stored in a
+            sidecar <code>.txt</code> file next to the PNG. When the display is
+            frozen, the sidecar also records when it was frozen.</li>
+          <li><strong>Save frame (S)</strong> — saves exactly what is on screen
+            as a PNG. If no display frame is ready yet, the log says
+            <code>No current display frame is ready to save.</code> If a title
+            or notes are present, a <code>.txt</code> file with the same base
+            name records the title, notes and whether the source was the camera
+            or demo mode.</li>
+          <li><strong>Set reference (F)</strong> — stores the current live
+            camera frame as the reference and resets averaging. This is the
+            same reference used by <strong>Reference</strong> view; when the
+            display is frozen, Set reference still captures the live camera
+            frame, not the frozen image.</li>
+          <li><strong>Reset last (R)</strong> — forgets the stored previous
+            frame. <strong>Previous</strong> view then starts a fresh baseline
+            on the next frame (with Average N = 1 that is one black frame before
+            differences resume; with N &gt; 1 the first displayed image is an
+            average that includes it). It does not affect the reference.</li>
+          <li><strong>Reset average (A)</strong> — discards a partial average.
+            The next displayed image restarts the N-frame count. Useful after a
+            disturbance so one disturbance does not smear into the next
+            measurement.</li>
+        </ul>
+        <div class="note">
+          <p><strong>Before you record:</strong> in Reference view, confirm a
+            reference exists and the image is not black; in Previous view, wait
+            for the first baseline frame. A recording started before either
+            exists contains black frames. Stop the recording before changing
+            exposure, gain, FPS, palette, gamma, CLAHE or scaling, or before
+            <strong>Set reference</strong>, <strong>Reset last</strong> or
+            <strong>Reset average</strong>. Check free disk space first: the AVI
+            is full-resolution MJPG, there is no size limit or free-space check,
+            and a full disk stops the recording.</p>
+        </div>
+        <p>See <a href="#op-save">Save a still frame with notes</a> and
+          <a href="#op-record">Record a measurement sequence</a>.</p>
+      </section>
+
+      <section id="status-bar">
+        <h3>Status bar <a class="anchor" href="#status-bar" aria-label="Link to Status bar">#</a></h3>
+        <p>From left to right:</p>
+        <ul>
+          <li><strong>View hint</strong> — a short reminder for the current
+            mode, such as pressing <kbd>F</kbd> for a reference.</li>
+          <li><strong>FROZEN</strong> badge and the amber
+            <strong>FROZEN at</strong> time over the image — the display is
+            held; the camera and recording continue.</li>
+          <li><strong>Source badge</strong> — green <strong>Camera</strong> for
+            live acquisition, red <strong>DUMMY MODE</strong> for synthetic
+            video.</li>
+          <li><strong>Recording state</strong> — off, or the AVI output rate
+            while recording.</li>
+          <li><strong>Measurement range</strong> — for difference views, the
+            input minimum and maximum and the scaled range, for example
+            <code>Input: 3–41    Scaled: 0–255</code>. In Raw view it reads
+            <code>Raw Mono8: no brightness scaling</code>. The range is
+            measured after Stretch clip and before gamma, CLAHE and the
+            palette.</li>
+          <li><strong>Processing and display rate</strong> —
+            <code>Processed: 29.9 fps  Work: 4.2 ms/frame</code> followed by
+            <code>Displayed: 29.8 fps</code>. <strong>Processed</strong> is
+            the rate at which the worker acquired and processed frames;
+            <strong>Work</strong> is the average processing time per frame.
+            <strong>Displayed</strong> is the rate at which the window actually
+            repainted. With <strong>Average N = 1</strong>, a lower displayed
+            rate than processed rate means the display or window compositor is
+            the bottleneck. With <strong>N &gt; 1</strong> (and Rolling average
+            off), Displayed is expected to be about Processed/N because a new
+            image is published only after N frames.</li>
+          <li><strong>Pixel readout</strong> — while the pointer is over the
+            image: <code>x 412, y 208: 137</code>, the image coordinates and the
+            0–255 sample used for display: after Stretch clip and scaling, and
+            after gamma/CLAHE when CLAHE is on. With scaling off it is the raw
+            absolute difference. It is not calibrated in physical units.</li>
+          <li><strong>Update / feature buttons</strong> — <strong>Check for
+            updates</strong> (or the blue <strong>Update available</strong>
+            button), <strong>Request feature</strong> and
+            <strong>Open in Codex</strong>. See
+            <a href="#updates">Updates, features and Codex</a>.</li>
+        </ul>
+      </section>
+
+      <section id="log">
+        <h3>Log panel <a class="anchor" href="#log" aria-label="Link to Log panel">#</a></h3>
+        <p>The log is the application's record of what happened. It is
+          timestamped and scrolls automatically. It reports startup and
+          streaming, camera timeouts and failures, view changes, every saved
+          file and its path, recording start and finish with frame counts,
+          averaging and reference actions, demo/live switches, and errors.
+          Applied camera settings are shown in the camera readout beneath the
+          controls, not in the log.</p>
+        <p>Each run writes
+          <code>output/logs/espi_&lt;YYYYMMDD_HHMMSS_microseconds&gt;.log</code>.
+          When reporting a problem, include the relevant lines from this panel
+          or that file.</p>
+        <p>The log keeps the most recent 2000 lines in the window; the file
+          keeps the full run. Lines from several cameras start with the
+          camera's serial number.</p>
+        <p>If <code>output/</code> is not writable (for example the app is in a
+          protected folder), no log, frame or recording file can be written.
+          The log panel and console remain, but move the app to a writable
+          folder to capture files.</p>
+      </section>
+
+      <section id="view-menu">
+        <h3>View menu <a class="anchor" href="#view-menu" aria-label="Link to View menu">#</a></h3>
+        <ul>
+          <li><strong>Controls</strong>, <strong>Log</strong> and the
+            <strong>toolbar</strong> — show or hide each.</li>
+          <li><strong>Fit to window</strong> (<kbd>0</kbd>) — show the whole
+            image, aspect-correct. <strong>Actual size</strong> (<kbd>1</kbd>)
+            uses one camera pixel per screen pixel.</li>
+          <li><strong>Freeze display</strong> (<kbd>Space</kbd>) — hold the
+            displayed image without saving it; the camera keeps running.</li>
+        </ul>
+        <p>Docks can also be dragged by their title bars. Dropping one outside
+          the main window floats it; closing a dock hides it. The layout is
+          saved on exit. The menu also lists the shortcut keys.</p>
+      </section>
+
+      <section id="help-menu">
+        <h3>Help menu <a class="anchor" href="#help-menu" aria-label="Link to Help menu">#</a></h3>
+        <ul>
+          <li><strong>User Guide</strong> (<kbd>F1</kbd>) — opens this page in
+            your default browser. Every section link and cross-reference works
+            offline; the filter, theme and print controls are in the
+            sidebar.</li>
+          <li><strong>Check for updates…</strong> — check GitHub for a newer
+            build and report the result in a dialog.</li>
+          <li><strong>Request a feature…</strong> — file a GitHub issue with a
+            title and optional description; see
+            <a href="#updates">Updates, features and Codex</a>.</li>
+          <li><strong>Ask Codex about the source code…</strong> — open the
+            build's source in OpenAI Codex.</li>
+          <li><strong>About ESPI live</strong> — the build number and version
+            of this copy.</li>
+        </ul>
+      </section>
+    </section>
+
+    <section id="several-cameras">
+      <h2>Several cameras <a class="anchor" href="#several-cameras" aria-label="Link to Several cameras">#</a></h2>
+      <p>When more than one FLIR camera is connected, a <strong>Cameras</strong>
+        section appears at the top of the Controls panel.</p>
+      <ul>
+        <li><strong>Display</strong> picks the camera shown in the window.</li>
+        <li>Each camera has a <strong>Process</strong> checkbox. A checked
+          camera keeps acquiring, processing and recording while another
+          camera is displayed. The displayed camera always processes, so its
+          checkbox is locked on; choosing an unchecked camera in Display turns
+          it on.</li>
+        <li>Each row shows that camera's processed rate and
+          <strong>REC</strong> while it records.</li>
+        <li>Every camera has its own settings, reference, average, display
+          options, freeze frame and Record state. Controls, the toolbar and
+          shortcuts always act on the displayed camera.</li>
+        <li>Unchecking <strong>Process</strong> stops that camera (finishing
+          its recording and releasing it) but keeps its settings for next time;
+          its reference and running average start fresh. At startup only the
+          first camera that opens is processed.</li>
+        <li>Log lines from each camera start with its serial number. An error
+          in one camera turns only that camera off.</li>
+      </ul>
+      <p>Several 6.3 MP cameras streaming at once can exceed one USB 3
+        controller's bandwidth. Watch each row's frame rate; lower the frame
+        rate or use separate controllers if it drops. <code>--demo
+        --demo-cameras 3</code> simulates three cameras for trying this without
+        hardware.</p>
+      <p>See <a href="#op-cameras">Use several cameras</a>.</p>
+    </section>
+
+    <section id="analog">
+      <h2>Analog camera <a class="anchor" href="#analog" aria-label="Link to Analog camera">#</a></h2>
+      <p>The Sony XC-ST50's composite video goes through a Hauppauge USB-Live2
+        into the PC, and the stick appears in the camera list as
+        <strong>Hauppauge USB-Live2 (video N)</strong>. Close WinTV and
+        Hauppauge Capture first: the stick serves one program at a time.</p>
+      <ul>
+        <li>Exposure, gain and frame rate are set by the camera's own switches,
+          so those controls are disabled; the status line shows the measured
+          capture rate.</li>
+        <li><strong>Single field (interlaced camera)</strong>, on by default,
+          shows one of the two interlaced fields, doubled to full height. This
+          removes the 1/60 s offset between fields at the cost of half the
+          vertical detail.</li>
+        <li>Images look about 12% wide because NTSC pixels are not square;
+          they are not resampled. Expect coarser fringes than with the
+          Blackfly.</li>
+      </ul>
+      <p>Other video devices (webcams, other capture sticks) are listed as
+        <strong>not yet supported</strong> and are never opened unless you
+        choose one. When you switch one on, it runs as delivered, and the
+        viewer files a GitHub issue labelled <code>camera-support</code> with
+        what the device reports, once per device type. A copy without a feedback
+        token saves the report to
+        <code>output/logs/camera-report-*.md</code> and shows a
+        <strong>Report this camera</strong> button instead.</p>
+    </section>
+
+    <section id="defaults">
+      <h2>Defaults and limits <a class="anchor" href="#defaults" aria-label="Link to Defaults and limits">#</a></h2>
+      <p>These are the values the app starts with and the ranges its controls
+        expose. The camera may clamp a value further; check the
+        <strong>Applied</strong> readout.</p>
+      <div class="table-wrap">
+        <table>
+          <caption class="sr-only">Default values and control ranges</caption>
+          <thead>
+            <tr><th scope="col">Control</th><th scope="col">Default</th>
+              <th scope="col">Range / step</th><th scope="col">Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Exposure</td><td>8000 µs</td><td>0–50,000 µs, step 1</td>
+              <td>Camera can reach 30 s; not exposed in this UI.</td></tr>
+            <tr><td>Gain</td><td>0 dB</td><td>0–30 dB, step 0.1</td>
+              <td>Camera can reach 47.99 dB; not exposed in this UI.</td></tr>
+            <tr><td>Requested FPS</td><td>30 fps</td><td>0–60 fps, step 0.1</td>
+              <td>Full-frame Mono8 camera rating is 59 fps.</td></tr>
+            <tr><td>Noise reduction</td><td>0% (off)</td><td>0–95%, step 1%</td>
+              <td>Applies in every view, Raw included.</td></tr>
+            <tr><td>Single field</td><td>On (interlaced only)</td>
+              <td>On / off</td><td>Even rows only, doubled to full height.</td></tr>
+            <tr><td>Average N</td><td>1 (off)</td><td>1–60, step 1</td>
+              <td>Ignored in Raw view.</td></tr>
+            <tr><td>Rolling average</td><td>Off</td><td>On / off</td>
+              <td>Updates every frame instead of one per N.</td></tr>
+            <tr><td>Ref. refresh</td><td>0 s (never)</td>
+              <td>0–10 s, step 0.1</td>
+              <td>Recaptures the Reference periodically.</td></tr>
+            <tr><td>Speckle filter</td><td>Gaussian</td>
+              <td>Gaussian / Median</td><td>Median is capped at 5 px.</td></tr>
+            <tr><td>Filter width</td><td>0 px (off)</td>
+              <td>0–31 px, step 1</td><td>Keep below the fringe spacing.</td></tr>
+            <tr><td>Stretch to 0–255</td><td>On</td><td>On / off</td>
+              <td>Maps each difference frame to 0–255.</td></tr>
+            <tr><td>Stretch clip</td><td>0%</td><td>0–10%, step 0.1%</td>
+              <td>0 = exact min/max.</td></tr>
+            <tr><td>Invert</td><td>Off</td><td>On / off</td>
+              <td>Swaps bright and dark fringes.</td></tr>
+            <tr><td>Palette</td><td>Gray</td><td>Gray, Turbo, Jet, Hot,
+              Viridis, Plasma, Inferno</td><td>Raw is always grayscale.</td></tr>
+            <tr><td>Gamma</td><td>1.0</td><td>0.1–3.0, step 0.1</td>
+              <td>&lt; 1 darkens midtones; &gt; 1 brightens.</td></tr>
+            <tr><td>CLAHE</td><td>On</td><td>On / off</td>
+              <td>Only with a color palette.</td></tr>
+            <tr><td>Record AVI</td><td>Off</td><td>On / off</td>
+              <td>Output capped at 30 fps, floor 1 fps.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Opening the camera writes 8000 µs, 0 dB and 30 fps every time;
+        settings made in SpinView are replaced.</p>
+    </section>
+
+    <section id="operations">
+      <h2>Common operations <a class="anchor" href="#operations" aria-label="Link to Common operations">#</a></h2>
+
+      <section id="op-position">
+        <h3>Position, focus and inspect the image <a class="anchor" href="#op-position" aria-label="Link to Position, focus and inspect">#</a></h3>
+        <ol>
+          <li>Select <a href="#view">Raw</a> view.</li>
+          <li>Use <a href="#camera">Exposure and Gain</a> to get a well-exposed
+            image.</li>
+          <li>Use the toolbar <strong>Zoom</strong> slider, or the mouse wheel
+            or trackpad on the image, to zoom up to 64×. At high zoom individual
+            pixels are shown sharply.</li>
+          <li>Drag with the left mouse button to pan while zoomed.</li>
+          <li>Double-click the image to toggle between fit and 4× zoom. Press
+            <kbd>0</kbd> for fit and <kbd>1</kbd> for 1:1.</li>
+          <li>Watch the <a href="#status-bar">pixel readout</a> in the status
+            bar to check individual values.</li>
+        </ol>
+      </section>
+
+      <section id="op-freeze">
+        <h3>Freeze and inspect an image <a class="anchor" href="#op-freeze" aria-label="Link to Freeze and inspect an image">#</a></h3>
+        <ol>
+          <li>Press <kbd>Space</kbd> or click <strong>Freeze</strong>. The image
+            holds and an amber <strong>FROZEN at</strong> bar appears; the
+            camera, averaging, reference refresh and recording keep running.</li>
+          <li>Zoom, pan and read pixel values on the held image.</li>
+          <li>Press <kbd>S</kbd> to save the held image; the sidecar records
+            when it was frozen. <strong>Set reference</strong> still captures
+            the live camera frame.</li>
+          <li>Press <kbd>Space</kbd> again to return to live. With several
+            cameras, each keeps its own frozen frame; switching a camera off or
+            to live drops it.</li>
+        </ol>
+      </section>
+
+      <section id="op-reference">
+        <h3>Capture a reference and see a difference measurement <a class="anchor" href="#op-reference" aria-label="Link to Capture a reference">#</a></h3>
+        <ol>
+          <li>Put the specimen in its resting state.</li>
+          <li>Select <strong>Reference</strong> view.</li>
+          <li>Press <kbd>F</kbd> or click <strong>Set reference</strong>. The
+            log confirms the capture, and the hint changes from asking for a
+            reference to showing the difference view.</li>
+          <li>Load, heat or otherwise deform the specimen. The image now shows
+            absolute differences from the resting state.</li>
+          <li>If the pattern is too faint, turn on
+            <strong>Stretch to 0–255</strong> and try a
+            <a href="#display">color palette</a>.</li>
+          <li>To start a new measurement from the current state, press
+            <kbd>F</kbd> again.</li>
+          <li>If the camera settings or illumination change, capture a new
+            reference; otherwise the brightness change appears as a large false
+            difference.</li>
+        </ol>
+      </section>
+
+      <section id="op-previous">
+        <h3>Measure frame-to-frame change instead <a class="anchor" href="#op-previous" aria-label="Link to Measure frame-to-frame change">#</a></h3>
+        <ol>
+          <li>Select <strong>Previous</strong> view.</li>
+          <li>The first frame becomes the baseline, then each displayed image
+            is the difference from the frame before it. This is useful for
+            spotting motion or vibration that is present right now.</li>
+          <li>Press <kbd>R</kbd> (<strong>Reset last</strong>) after a
+            disturbance to start a clean baseline.</li>
+        </ol>
+      </section>
+
+      <section id="op-average">
+        <h3>Average and rolling average <a class="anchor" href="#op-average" aria-label="Link to Average and rolling average">#</a></h3>
+        <ol>
+          <li>Select <strong>Previous</strong> or <strong>Reference</strong>.</li>
+          <li>Raise <a href="#measurement">Average N</a>. Start around 3–5 and
+            increase until the fringes are stable; higher values mean a slower
+            displayed update.</li>
+          <li>Turn on <strong>Rolling average</strong> when you want a running
+            average that still updates every frame, for watching fringes move.</li>
+          <li>If a disturbance has just occurred and the image looks smeared,
+            press <kbd>A</kbd> (<strong>Reset average</strong>) to restart the
+            accumulation.</li>
+          <li>For slow drift from air or heat, set <strong>Ref. refresh</strong>
+            to a few seconds; 0 keeps one reference until you press
+            <kbd>F</kbd>.</li>
+          <li>Recording runs at the averaged rate unless Rolling average is on,
+            so a large N produces a lower-frame-rate AVI with the same
+            duration.</li>
+        </ol>
+      </section>
+
+      <section id="op-noise">
+        <h3>Reduce sensor noise <a class="anchor" href="#op-noise" aria-label="Link to Reduce sensor noise">#</a></h3>
+        <ol>
+          <li>Raise <strong>Noise reduction</strong> in the Camera section to
+            blend each frame with the previous ones (0–95%).</li>
+          <li>Use the lowest value that cleans the background; high values
+            leave a trail behind motion and weaken Previous-view fringes.</li>
+          <li>Use <a href="#op-average">Average N</a> for difference-frame
+            noise; these two controls solve different problems.</li>
+        </ol>
+      </section>
+
+      <section id="op-contrast">
+        <h3>Get the best contrast <a class="anchor" href="#op-contrast" aria-label="Link to Get the best contrast">#</a></h3>
+        <ol>
+          <li>Keep <strong>Stretch to 0–255</strong> on for a first look; the
+            status bar shows the true input range.</li>
+          <li>Choose a color <a href="#display">Palette</a> for small
+            differences.</li>
+          <li>Use <strong>Speckle filter</strong> and <strong>Filter width</strong>
+            to blur away pixel-scale speckle; keep the width well below the
+            fringe spacing.</li>
+          <li>Set <strong>Stretch clip</strong> to about 0.5% when a few stray
+            speckles flatten the contrast; 0 is exact min/max.</li>
+          <li>Adjust <strong>Gamma</strong> to brighten or darken the
+            midtones, and <strong>Invert</strong> to swap bright and dark
+            fringes.</li>
+          <li>Enable <strong>CLAHE</strong> if one area is much dimmer than
+            another; it boosts local contrast but costs processing time and only
+            works with a color palette.</li>
+          <li>Turn <strong>Stretch to 0–255</strong> off when you need to judge
+            absolute difference values between frames; the status bar and pixel
+            readout then show the unscaled values.</li>
+        </ol>
+      </section>
+
+      <section id="op-save">
+        <h3>Save a still frame with notes <a class="anchor" href="#op-save" aria-label="Link to Save a still frame">#</a></h3>
+        <ol>
+          <li>Type a <strong>Title</strong>, for example
+            <code>aluminium_plate_40C</code>.</li>
+          <li>Type any <strong>Notes</strong>: load level, temperature,
+            specimen, lens, or anything needed to interpret the image later.</li>
+          <li>Click <strong>Save frame</strong> or press <kbd>S</kbd>. If the
+            display is frozen, the held image is saved and the sidecar records
+            when it was frozen.</li>
+          <li>The log shows the PNG path. If a title or notes were present, a
+            matching <code>.txt</code> file holds them with the source (Camera
+            or Demo).</li>
+        </ol>
+        <p>The PNG contains exactly the current display, including palette,
+          gamma, CLAHE, stretch, invert and the demo watermark.</p>
+      </section>
+
+      <section id="op-record">
+        <h3>Record a measurement sequence <a class="anchor" href="#op-record" aria-label="Link to Record a measurement sequence">#</a></h3>
+        <ol>
+          <li>Set the view, averaging, palette and contrast you want. These
+            choices are baked into the recording.</li>
+          <li>Click <strong>Record AVI</strong>. The status label beside the
+            button shows the output frame rate.</li>
+          <li>Perform the experiment. You can keep using the window while it
+            records.</li>
+          <li>Click <strong>Record AVI</strong> again to stop. The log prints
+            the file path and a summary of frames written and skipped.</li>
+          <li>Find the file under <code>output/recordings/</code> (see
+            <a href="#files">Files and output folders</a>).</li>
+        </ol>
+        <div class="note">
+          <p>Only the view mode, and <strong>Average N</strong> or
+            <strong>Rolling average</strong> in Previous/Reference, start a new
+            file. Changing palette, gamma, CLAHE, Stretch to 0–255, Stretch
+            clip, Speckle filter, Invert, exposure, gain, FPS, noise reduction,
+            Single field, <strong>Set reference</strong>,
+            <strong>Reset last</strong> or <strong>Reset average</strong>
+            continues the same file. Stop and restart the recording after any
+            of those changes, or record them as separate files and note the
+            change in your lab book.</p>
+        </div>
+      </section>
+
+      <section id="op-camera">
+        <h3>Adjust exposure, gain and frame rate <a class="anchor" href="#op-camera" aria-label="Link to Adjust exposure, gain and frame rate">#</a></h3>
+        <ol>
+          <li>Watch the <strong>Applied</strong> line under the camera
+            controls.</li>
+          <li>Increase <strong>Exposure</strong> for a brighter image and better
+            signal-to-noise ratio, at the cost of motion blur and a lower
+            maximum frame rate.</li>
+          <li>Increase <strong>Gain</strong> only when exposure is already as
+            long as the experiment allows.</li>
+          <li>Set <strong>Requested FPS</strong> to the rate you need. If the
+            <strong>resulting</strong> rate is lower, the camera, exposure or
+            USB bandwidth is the limit.</li>
+          <li>Raise <strong>Noise reduction</strong> only as needed; it cleans
+            sensor noise in every view but trails motion and weakens
+            Previous-view fringes at high values.</li>
+          <li>For an interlaced analog camera, leave
+            <strong>Single field</strong> on unless you need the full vertical
+            detail and can accept the 1/60 s field offset.</li>
+          <li>After changing camera settings, capture a new reference if you are
+            measuring differences.</li>
+        </ol>
+      </section>
+
+      <section id="op-layout">
+        <h3>Arrange the workspace <a class="anchor" href="#op-layout" aria-label="Link to Arrange the workspace">#</a></h3>
+        <ul>
+          <li>Drag the <strong>Controls</strong> or <strong>Log</strong> dock by
+            its title bar to another edge or out of the window to float it.</li>
+          <li>Use <strong>View → Controls</strong> or
+            <strong>View → Log</strong> to hide or show a panel.</li>
+          <li>Resize the window; the layout and size are restored the next time
+            the app starts.</li>
+          <li>On a small screen, hide the log while measuring and show it when
+            you need to check a saved path or an error.</li>
+        </ul>
+      </section>
+
+      <section id="op-switch-live">
+        <h3>Switch from demo to live capture <a class="anchor" href="#op-switch-live" aria-label="Link to Switch from demo to live capture">#</a></h3>
+        <ol>
+          <li>Connect and power the camera.</li>
+          <li>Make sure no other application (SpinView, another viewer, a
+            script) is using it.</li>
+          <li>Click <strong>Switch to live capture</strong>.</li>
+          <li>If it succeeds, the red indicators disappear, the view resets to
+            <strong>Raw</strong>, and any demo recording is stopped so synthetic
+            and live frames never share a file. The switch also configures the
+            camera at <strong>8000 µs, 0 dB and 30 fps</strong>. The sliders
+            keep the demo values, so check the <strong>Applied</strong> readout
+            and re-enter your exposure, gain and FPS before measuring. Capture a
+            new reference before continuing.</li>
+          <li>If it fails, a warning gives the reason and demo mode continues.
+            Fix the connection and try again; no restart is needed.</li>
+        </ol>
+      </section>
+
+      <section id="op-cameras">
+        <h3>Use several cameras <a class="anchor" href="#op-cameras" aria-label="Link to Use several cameras">#</a></h3>
+        <ol>
+          <li>Connect the cameras. The <strong>Cameras</strong> section appears
+            at the top of Controls when more than one source is available.</li>
+          <li>Pick the camera to show with <strong>Display</strong>. The
+            controls, toolbar and shortcuts act on that camera.</li>
+          <li>Leave <strong>Process</strong> checked on cameras that should
+            keep acquiring, processing and recording in the background.</li>
+          <li>Watch each row's rate and <strong>REC</strong> marker. If rates
+            drop, lower the frame rate or move cameras to separate USB 3
+            controllers.</li>
+          <li>Uncheck <strong>Process</strong> to stop a camera and release it;
+            its settings are kept, but its reference and average start fresh
+            when it runs again.</li>
+        </ol>
+      </section>
+    </section>
+
+    <section id="shortcuts">
+      <h2>Keyboard and mouse <a class="anchor" href="#shortcuts" aria-label="Link to Keyboard and mouse">#</a></h2>
+      <p>Shortcuts are ignored while you are typing in a text field, so
+        <kbd>S</kbd> in the notes box types the letter instead of saving. The
+        same applies after clicking the number boxes for exposure, gain, FPS,
+        Average N or gamma, or the Palette list: click the image or press
+        <kbd>Esc</kbd> before using <kbd>S</kbd>, <kbd>F</kbd>, <kbd>R</kbd> or
+        <kbd>A</kbd>.</p>
+      <p>The same shortcut list is in the <strong>View</strong> menu, and
+        controls that have a shortcut name it in their tooltip.</p>
+      <div class="table-wrap">
+        <table>
+          <caption class="sr-only">Keyboard and mouse shortcuts</caption>
+          <thead>
+            <tr><th scope="col">Input</th><th scope="col">Action</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><kbd>Space</kbd></td><td>Freeze or resume the display; the
+              camera keeps running</td></tr>
+            <tr><td><kbd>S</kbd></td><td>Save the displayed frame (the held
+              frame when frozen)</td></tr>
+            <tr><td><kbd>F</kbd></td><td>Set the reference frame from the live
+              camera</td></tr>
+            <tr><td><kbd>R</kbd></td><td>Reset the stored previous frame</td></tr>
+            <tr><td><kbd>A</kbd></td><td>Reset partial averaging</td></tr>
+            <tr><td><kbd>Q</kbd> or <kbd>Esc</kbd></td><td>Quit (Esc in a text
+              field only leaves the field)</td></tr>
+            <tr><td><kbd>0</kbd></td><td>Fit the whole image to the window</td></tr>
+            <tr><td><kbd>1</kbd></td><td>Show one camera pixel per screen
+              pixel</td></tr>
+            <tr><td>Mouse wheel / trackpad</td><td>Zoom around the cursor, up to
+              64×</td></tr>
+            <tr><td>Drag</td><td>Pan while zoomed</td></tr>
+            <tr><td>Double-click</td><td>Toggle between fit and 4× zoom</td></tr>
+            <tr><td><kbd>F1</kbd></td><td>Open this guide in your browser</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="files">
+      <h2>Files and output folders <a class="anchor" href="#files" aria-label="Link to Files and output folders">#</a></h2>
+      <p>Everything is written under the project's <code>output/</code> folder.
+        In a packaged build, that folder sits next to the executable (next to
+        the <code>.app</code> on macOS).</p>
+      <pre tabindex="0"><code>output/
+  logs/        one log file per run
+  frames/      saved PNG stills and their .txt sidecars
+  recordings/  AVI recordings</code></pre>
+      <p>File names use the camera's serial number (when several are used) and
+        a local timestamp:</p>
+      <ul>
+        <li>Frames:
+          <code>frame_&lt;serial&gt;_YYYYMMDD_HHMMSS_microseconds[_title].png</code></li>
+        <li>Recordings:
+          <code>espi_&lt;view&gt;_&lt;serial&gt;_YYYYMMDD_HHMMSS_microseconds.avi</code></li>
+        <li>Demo files add a <code>dummy_</code> prefix.</li>
+        <li>Logs:
+          <code>output/logs/espi_&lt;YYYYMMDD_HHMMSS_microseconds&gt;.log</code>.</li>
+      </ul>
+      <p>Recordings are MJPG-compressed AVI files. They are capped at 30 fps and
+        use the same colors as the screen. A frame title or notes produce a
+        sidecar text file with the frame name, source, title, notes and, for a
+        frozen image, the time it was frozen.</p>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>Troubleshooting <a class="anchor" href="#troubleshooting" aria-label="Link to Troubleshooting">#</a></h2>
+      <p>Click a symptom to expand it. The same information is in the log panel
+        and the run's log file under <code>output/logs/</code>.</p>
+
+      <details class="faq" id="ts-no-camera">
+        <summary>No camera was detected</summary>
+        <p>The app offers demo mode. Check that the camera is powered,
+          connected by a USB 3 port and cable, and not open in SpinView or
+          another application. Then click <strong>Switch to live capture</strong>
+          or restart the app. If PySpin is not installed, the log says so; on
+          the camera PC run the setup script again.</p>
+      </details>
+
+      <details class="faq" id="ts-switch">
+        <summary>Live capture switch fails</summary>
+        <p>Read the warning dialog and the log. Common causes are another
+          program holding the camera, a USB 2 port or hub, a loose cable, or a
+          camera that has not finished booting. Demo mode keeps running so you
+          can retry without losing the session.</p>
+      </details>
+
+      <details class="faq" id="ts-black">
+        <summary>The image is black in Previous or Reference view</summary>
+        <ul>
+          <li>Confirm a reference has been captured; the hint line says if one
+            is missing.</li>
+          <li>With <strong>Stretch to 0–255</strong> on, a constant difference
+            image is all black by design. Disturb the specimen or turn
+            stretching off to inspect raw values.</li>
+          <li>Check that the view is not <strong>Raw</strong> after a
+            live-capture switch.</li>
+        </ul>
+        <p>A recording started before a reference exists, or before the first
+          <strong>Previous</strong> baseline frame, contains black frames. Stop
+          it, wait for a real difference image, then start the recording.</p>
+      </details>
+
+      <details class="faq" id="ts-camera-drop">
+        <summary>The image freezes and the status bar says “Waiting for camera frame”</summary>
+        <p>The app has stopped receiving valid frames. Check the USB 3 cable
+          and port, close SpinView or any other application using the camera,
+          and restart the camera or the app. The log repeats
+          <code>Camera timeout or acquisition error</code> every few seconds.
+          The app does not reconnect automatically.</p>
+      </details>
+
+      <details class="faq" id="ts-fps">
+        <summary>The displayed rate is lower than the camera rate</summary>
+        <p>Read <strong>Processed</strong> and <strong>Displayed</strong> in the
+          status bar. If <strong>Processed</strong> is low, the limit is
+          acquisition: exposure, USB bandwidth, or the camera.
+          <strong>Average N</strong> does not lower <strong>Processed</strong>;
+          it lowers <strong>Displayed</strong> (see below).</p>
+        <p>If <strong>Processed</strong> is high but
+          <strong>Displayed</strong> is low and <strong>Average N</strong> is 1,
+          the window or graphics system is the bottleneck; hide the log or
+          reduce the window size. The CPU fallback is selected automatically
+          when OpenGL 3.3 is unavailable; it is not a performance option.</p>
+        <p>At full resolution the camera is rated 59 fps for Mono8 and the app
+          caps the requested rate at 60 fps. At 8000 µs the exposure is not the
+          limit; longer exposures can reduce the attainable rate. Use the
+          <strong>resulting</strong> FPS readout as the authoritative value.</p>
+      </details>
+
+      <details class="faq" id="ts-cpu">
+        <summary>The log says “Display: CPU fallback”</summary>
+        <p>The machine could not create an OpenGL 3.3 core context, common in
+          some remote-desktop sessions. Everything still works, but the CPU
+          draws and scales the image, so the display rate may be lower and large
+          windows cost more CPU.</p>
+      </details>
+
+      <details class="faq" id="ts-record-skip">
+        <summary>Recording skips frames or repeats frames</summary>
+        <p>The AVI is written on a constant-rate timeline because encoders and
+          players expect one. If the encoder cannot keep up, preview frames are
+          skipped; if acquisition is slower than the output rate, the last frame
+          is repeated. Lower <strong>Requested FPS</strong> or raise
+          <strong>Average N</strong> to reduce the output rate. The log reports
+          skipped frames and late intervals when the file is closed.</p>
+      </details>
+
+      <details class="faq" id="ts-record-stop">
+        <summary>Recording stops by itself</summary>
+        <p>Changing the view mode or <strong>Average N</strong> closes the
+          current file and begins a new one. An encoder error also stops
+          recording and turns the button off; the log contains the reason and
+          any path that was saved.</p>
+      </details>
+
+      <details class="faq" id="ts-clamp">
+        <summary>A control snaps back or will not reach the value I typed</summary>
+        <p>The camera is clamping the value, or the value is outside this
+          build's fixed UI limits: exposure 0–50,000 µs, gain 0–30 dB and
+          Requested FPS 0–60. The camera itself can reach 30 s and 47.99 dB, but
+          those values are not exposed here. Check the
+          <strong>Applied</strong> readout and the log.</p>
+      </details>
+
+      <details class="faq" id="ts-colors">
+        <summary>Saved colors do not match the screen</summary>
+        <p>They should: saved frames and recordings are produced by the same
+          palette and gamma path as the display. Confirm you are looking at the
+          file from the same run and that it is a demo file (watermarked) or a
+          camera file as expected.</p>
+      </details>
+
+      <details class="faq" id="ts-fatal">
+        <summary>The application closes with an error</summary>
+        <p>A fatal camera or processing error ends the run rather than leaving
+          a broken measurement. A dialog shows the exception, and the full
+          traceback is in the run's log file under <code>output/logs/</code>.
+          Restart the app and, if it recurs, include that log when asking for
+          help.</p>
+      </details>
+    </section>
+
+    <section id="updates">
+      <h2>Updates, features and Codex <a class="anchor" href="#updates" aria-label="Link to Updates, features and Codex">#</a></h2>
+      <p>There is one Qt front end; the old Tk interface is no longer part of
+        the application.</p>
+
+      <h3>Automatic updates</h3>
+      <p>Packaged copies check GitHub at startup and offer a newer full release
+        (pre-releases are skipped). A blue <strong>Update available</strong>
+        button appears in the status bar and the log. Click it to download
+        while measurement continues; the app verifies the SHA-256, then offers
+        to restart. It finishes any recording, releases the camera, swaps in
+        the new build and starts it with the same options. Choosing not to
+        restart installs the update when you close the app.</p>
+      <ul>
+        <li><strong>Check for updates</strong> in the status bar or
+          <strong>Help → Check for updates…</strong> checks on demand; it is
+          greyed out while a check runs.</li>
+        <li><code>espi-live --update</code> updates without opening a window;
+          <code>--no-update-check</code> skips the startup check and source
+          download.</li>
+        <li>The program's folder must be writable. Output, token files and
+          recordings are never touched. A single-file build from build 6 or
+          earlier cannot update itself to the folder layout; download a current
+          release by hand once.</li>
+        <li>The build number is ordered by workflow run, so a copy never
+          updates to an older build. Running from source does not self-update;
+          use <code>git pull</code>.</li>
+      </ul>
+
+      <h3>Request a feature</h3>
+      <p><strong>Request feature</strong> in the status bar or
+        <strong>Help → Request a feature…</strong> asks for a title, optional
+        description and optional name, then files a GitHub issue labelled
+        <code>feature-request</code> and <code>enrich</code>. The issue includes
+        the build, platform and video source. <strong>Submit</strong> files it
+        from the app; a blank description is written from the title, and text
+        you write is kept and expanded. A copy without a feedback token says it
+        cannot file the request.</p>
+
+      <h3>Open in Codex</h3>
+      <p>Packaged copies keep the source they were built from in
+        <code>espi-live-source/</code> next to the program. <strong>Open in
+        Codex</strong> in the status bar or
+        <strong>Help → Ask Codex about the source code…</strong> opens OpenAI
+        Codex on that folder, so you can ask how the program works. It reads
+        <strong>Getting source…</strong> while the source downloads first. A
+        change approved in Codex is sent as a GitHub issue with
+        <code>--send-changes</code>; it is not pushed with git from the app.
+        Running from source opens the checkout itself.</p>
+      <p><strong>About ESPI live</strong> shows the build number and version of
+        this copy. Include it when reporting a problem.</p>
+    </section>
+
+    <footer>
+      <p>ESPI live is a live viewer for a FLIR Blackfly BFS-U3-63S4M-C Mono8
+        camera. For installation, build and development details, see the
+        project README in the source repository. Open this guide from
+        <strong>Help → User Guide</strong> (<kbd>F1</kbd>) at any time.</p>
+    </footer>
+  </main>
+</div>
+
+<a class="to-top" id="to-top" href="#top" aria-label="Back to top">↑ Top</a>
+
+<script>
+  (function () {
+    "use strict";
+    var root = document.documentElement;
+
+    /* Theme: cycles Auto → Light → Dark and remembers the choice. */
+    var themes = ["auto", "light", "dark"];
+    var themeButton = document.getElementById("theme-toggle");
+    function readTheme() {
+      try { return localStorage.getItem("espi-guide-theme") || "auto"; }
+      catch (error) { return "auto"; }
+    }
+    var currentTheme = "auto";
+    function applyTheme(theme) {
+      currentTheme = theme;
+      if (theme === "auto") { root.removeAttribute("data-theme"); }
+      else { root.setAttribute("data-theme", theme); }
+      themeButton.textContent = "Theme: " + theme.charAt(0).toUpperCase() + theme.slice(1);
+      try { localStorage.setItem("espi-guide-theme", theme); } catch (error) { /* file:// may refuse */ }
+    }
+    applyTheme(readTheme());
+    themeButton.addEventListener("click", function () {
+      applyTheme(themes[(themes.indexOf(currentTheme) + 1) % themes.length]);
+    });
+
+    /* Print / Save as PDF. */
+    document.getElementById("print-button").addEventListener("click", function () {
+      window.print();
+    });
+
+    /* Filter the contents list as you type. */
+    var filter = document.getElementById("toc-filter");
+    var emptyMessage = document.getElementById("toc-empty");
+    function applyFilter() {
+      var query = filter.value.trim().toLowerCase();
+      var links = Array.prototype.slice.call(document.querySelectorAll("#toc a"));
+      var items = Array.prototype.slice.call(document.querySelectorAll("#toc li"));
+      items.forEach(function (item) { item.hidden = false; });
+      if (!query) {
+        emptyMessage.hidden = true;
+        return;
+      }
+      var matches = links.filter(function (link) {
+        return link.textContent.toLowerCase().indexOf(query) !== -1;
+      });
+      var visible = 0;
+      items.forEach(function (item) {
+        var any = Array.prototype.some.call(item.querySelectorAll("a"), function (link) {
+          return matches.indexOf(link) !== -1;
+        });
+        item.hidden = !any;
+        if (any) { visible += 1; }
+      });
+      emptyMessage.hidden = visible > 0;
+    }
+    filter.addEventListener("input", applyFilter);
+    window.addEventListener("pageshow", applyFilter);
+
+    /* Open a collapsible FAQ when a contents link points inside it. */
+    function revealTarget() {
+      var id;
+      try {
+        id = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+      } catch (error) {
+        return;
+      }
+      if (!id) { return; }
+      var target = document.getElementById(id);
+      if (!target) { return; }
+      var panel = target.closest("details");
+      if (panel) {
+        panel.open = true;
+        target.scrollIntoView();
+      }
+    }
+    window.addEventListener("hashchange", revealTarget);
+    window.addEventListener("load", revealTarget);
+
+    /* Highlight the section currently being read and show Back to top. */
+    var tocLinks = Array.prototype.slice.call(document.querySelectorAll("#toc a[href^='#']"));
+    var linksById = {};
+    tocLinks.forEach(function (link) {
+      linksById[link.getAttribute("href").slice(1)] = link;
+    });
+    var sections = Array.prototype.slice.call(document.querySelectorAll("main section[id]"));
+    var toTop = document.getElementById("to-top");
+    var pending = false;
+
+    function updateReadingPosition() {
+      pending = false;
+      var marker = window.scrollY + 130;
+      var current = null;
+      sections.forEach(function (section) {
+        if (section.getBoundingClientRect().top + window.scrollY <= marker) {
+          current = section;
+        }
+      });
+      tocLinks.forEach(function (link) { link.removeAttribute("aria-current"); });
+      if (current && linksById[current.id]) {
+        var active = linksById[current.id];
+        active.setAttribute("aria-current", "location");
+        var sidebar = active.closest(".sidebar");
+        if (sidebar) {
+          var box = sidebar.getBoundingClientRect();
+          var item = active.getBoundingClientRect();
+          if (item.top < box.top + 8) {
+            sidebar.scrollTop += item.top - box.top - 8;
+          } else if (item.bottom > box.bottom - 8) {
+            sidebar.scrollTop += item.bottom - box.bottom + 8;
+          }
+        }
+      }
+      toTop.classList.toggle("visible", window.scrollY > 500);
+    }
+    window.addEventListener("scroll", function () {
+      if (!pending) {
+        pending = true;
+        window.requestAnimationFrame(updateReadingPosition);
+      }
+    }, { passive: true });
+    window.addEventListener("resize", updateReadingPosition);
+    updateReadingPosition();
+
+    /* Print every collapsible answer, then restore the collapsed state. */
+    var closedBeforePrint = [];
+    window.addEventListener("beforeprint", function () {
+      closedBeforePrint = Array.prototype.slice.call(document.querySelectorAll("details:not([open])"));
+      closedBeforePrint.forEach(function (panel) { panel.open = true; });
+    });
+    window.addEventListener("afterprint", function () {
+      closedBeforePrint.forEach(function (panel) { panel.open = false; });
+      closedBeforePrint = [];
+    });
+  })();
+</script>
+</body>
+</html>

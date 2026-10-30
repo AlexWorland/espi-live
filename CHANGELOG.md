@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-30 — Built-in user guide under Help
+
+### Previous state
+
+- The UI had no in-application user guide. Control meanings, measurement steps, shortcuts, camera handling and troubleshooting were spread across the README and tooltips.
+
+### Current state
+
+- New `src/espi_live/user_guide.html`, a self-contained offline page bundled with the package. It covers the toolbar, view modes, camera settings, noise reduction, averaging and rolling average, reference refresh, fringe enhancement, display, capture and saved frames, status bar, log, several cameras, the analog camera, defaults and limits, common operations, shortcuts, output files, troubleshooting, updates, feature requests and Codex.
+- **Help → User Guide** (**F1**) opens the page in the default browser; `--check` fails when the guide is missing from a binary. The page has linked contents, a section filter, collapsible troubleshooting answers, light/dark themes, print/PDF support and in-page cross-references, with no network access or external assets.
+- `guide.py` resolves the guide from source or a PyInstaller build (including a macOS `.app`'s `Contents/Resources`) and builds an error page if it cannot be read. The release workflow ships `user_guide.html` with `--add-data`, and camera-free tests check the content, anchors, print rules, frozen paths and error page.
+
 ## 2026-10-30 — Feature requests are filed by the app
 
 ### Previous state

@@ -228,6 +228,21 @@ class SelfCheckTests(unittest.TestCase):
             self.assertIn(expected, out.getvalue())
             listing.assert_not_called()
 
+    def test_fails_when_user_guide_is_missing(self):
+        """A missing bundled user guide fails the self-check.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(cli.importlib, "import_module"), \
+                mock.patch.object(cli, "guide_path",
+                                  return_value="/no/such/user_guide.html"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                status = cli.self_check()
+        self.assertEqual(status, 1)
+        self.assertIn("user guide missing", err.getvalue())
+
     def test_fails_when_a_module_cannot_import(self):
         """A broken bundled module returns 1 and prints the error.
 
