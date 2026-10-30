@@ -272,10 +272,13 @@ def read_identity(cam):
         height=read_int(device, "SensorHeight") or read_int(device, "HeightMax"))
 
 
-def configure_camera(cam, log):
-    """Configure the camera for the existing Mono8 continuous-preview defaults.
+def configure_camera(cam, log, exposure_us=8000.0, gain_db=0.0, fps=30.0):
+    """Configure Mono8 continuous preview at a starting exposure, gain and rate.
 
-    Args: cam is an initialized PySpin camera; log reports unsupported writes.
+    Args: cam is an initialized PySpin camera; log reports unsupported writes;
+        exposure_us, gain_db and fps are written to ExposureTime, Gain and
+        AcquisitionFrameRate. Omitted, they are the viewer defaults
+        (8000 µs, 0 dB, 30 fps).
     Returns: The camera's GenICam node map.
     """
     nodemap = cam.GetNodeMap()
@@ -283,10 +286,10 @@ def configure_camera(cam, log):
                         ("AcquisitionMode", "Continuous"),
                         ("ExposureAuto", "Off"), ("GainAuto", "Off")):
         try_setting(log, nodemap, set_enum, name, value)
-    try_setting(log, nodemap, set_float, "ExposureTime", 8000.0)
-    try_setting(log, nodemap, set_float, "Gain", 0.0)
+    try_setting(log, nodemap, set_float, "ExposureTime", exposure_us)
+    try_setting(log, nodemap, set_float, "Gain", gain_db)
     try_setting(log, nodemap, set_bool, "AcquisitionFrameRateEnable", True)
-    try_setting(log, nodemap, set_float, "AcquisitionFrameRate", 30.0)
+    try_setting(log, nodemap, set_float, "AcquisitionFrameRate", fps)
     try_setting(log, cam.GetTLStreamNodeMap(), set_enum,
                 "StreamBufferHandlingMode", "NewestOnly")
     return nodemap
@@ -297,15 +300,20 @@ class CameraSession:
 
     interlaced = False  # FLIR cameras deliver progressive frames
 
-    def __init__(self, log, serial=None):
+    def __init__(self, log, serial=None, exposure_us=8000.0, gain_db=0.0, fps=30.0):
         """Initialize empty camera handles for a connection attempt.
 
         Args: log has a write(message) method for diagnostics; serial picks
-            a camera by DeviceSerialNumber, or None for the first camera.
+            a camera by DeviceSerialNumber, or None for the first camera;
+            exposure_us, gain_db and fps are applied when the camera opens
+            (8000 µs, 0 dB and 30 fps when omitted).
         Returns: None.
         """
         self.log = log
         self.serial = serial
+        self.exposure_us = exposure_us
+        self.gain_db = gain_db
+        self.fps = fps
         self.info = None
         self.system = None
         self.cam_list = None
@@ -340,7 +348,8 @@ class CameraSession:
             self.cam.Init()
             self.initialized = True
             self.identity = read_identity(self.cam)
-            self.nodemap = configure_camera(self.cam, self.log)
+            self.nodemap = configure_camera(
+                self.cam, self.log, self.exposure_us, self.gain_db, self.fps)
             self.cam.BeginAcquisition()
             self.acquiring = True
         except Exception:

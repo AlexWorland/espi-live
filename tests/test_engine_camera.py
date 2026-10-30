@@ -250,6 +250,19 @@ class SetupTests(CameraEngineCase):
         self.assertEqual(kind2, "camera_limits")
         self.assertIn("Gain", limits)
 
+    def test_open_camera_writes_saved_exposure_gain_and_frame_rate(self):
+        """Opening applies the engine's settings, not the hard-coded defaults.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(exposure_us=5000.0, gain_db=1.5, fps=15.0)
+        self.engine.open_camera()
+        nodes = self.cam.nodemap.nodes
+        self.assertEqual(nodes["ExposureTime"].value, 5000.0)
+        self.assertEqual(nodes["Gain"].value, 1.5)
+        self.assertEqual(nodes["AcquisitionFrameRate"].value, 15.0)
+
     def test_open_camera_logs_model_notes(self):
         """An untested colour model is named in the log with its notes.
 
@@ -745,6 +758,21 @@ class DirectWorkerTests(CameraEngineCase):
         self.assertEqual(self.engine._retired, [recorder])
         self.assertIsNone(frame)
         self.assertIsNone(self.engine.latest_packet())
+        self.assertFalse(self.engine.demo)
+
+    def test_switch_live_opens_at_the_engine_settings(self):
+        """Leaving demo mode starts the camera at the current slider values.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.use_demo()
+        self.engine.update_settings(exposure_us=5000.0, gain_db=1.5, fps=15.0)
+        self.engine._switch_live(None, None)
+        nodes = self.cam.nodemap.nodes
+        self.assertEqual(nodes["ExposureTime"].value, 5000.0)
+        self.assertEqual(nodes["Gain"].value, 1.5)
+        self.assertEqual(nodes["AcquisitionFrameRate"].value, 15.0)
         self.assertFalse(self.engine.demo)
 
     def test_run_waits_for_recorders_and_reports_unfinished(self):
