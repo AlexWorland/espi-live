@@ -181,6 +181,19 @@ def github_request(method, path, token, payload=None):
         raise FeedbackError(f"unreadable reply from GitHub: {exc}") from exc
 
 
+def create_issue(payload):
+    """File an issue with the feedback token.
+
+    Args: payload is the GitHub "create issue" body (title, body, labels).
+    Returns: The new issue's web URL. Raises FeedbackError on failure.
+    """
+    token = feedback_token()
+    if not token:
+        raise FeedbackError("this copy has no feedback token")
+    issue = github_request("POST", f"/repos/{repository()}/issues", token, payload)
+    return issue["html_url"]
+
+
 def submit(request):
     """File a feature request as a GitHub issue.
 
@@ -188,12 +201,7 @@ def submit(request):
     Returns: The new issue's web URL. Raises FeedbackError on failure.
     """
     validate(request)
-    token = feedback_token()
-    if not token:
-        raise FeedbackError("this copy has no feedback token")
-    issue = github_request("POST", f"/repos/{repository()}/issues", token,
-                           issue_payload(request))
-    return issue["html_url"]
+    return create_issue(issue_payload(request))
 
 
 class FeedbackWorker:

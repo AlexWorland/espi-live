@@ -1,0 +1,120 @@
+name: Codex change to pull request
+
+# The app's "Open in Codex" button lets a user ask Codex about the program's
+# source code, and to change it. When the user approves a change, the program
+# files it as an issue labelled "codex-change" (src/espi_live/changes.py): a
+# description, the commit the change was made against and the patch. This
+# workflow applies the patch to a new codex/issue-<n> branch from that commit
+# and opens a pull request for review, so the program itself only ever holds
+# an Issues token. GITHUB_TOKEN cannot push workflow files, and the patch may
+# not touch .github/ at all.
+#
+# Needs Settings > Actions > General > "Allow GitHub Actions to create and
+# approve pull requests".
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: codex-change-${{ github.event.issue.number }}
+
+jobs:
+  pull-request:
+    # The program files these issues with the owner's token; issues from
+    # anyone else are left alone even if someone labels them.
+    if: >-
+      github.event.label.name == 'codex-change' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE: ${{ github.event.issue.number }}
+      BRANCH: codex/issue-${{ github.event.issue.number }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      # The default branch's code reads the issue, never the patch's own code.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The issue text goes in through the environment, never through ${{ }}
+      # in a script, so it cannot inject shell commands.
+      - name: Read the change from the issue
+        id: change
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          if ! base=$(PYTHONPATH=src python -m espi_live.changes extract \
+              --patch "$RUNNER_TEMP/change.patch" \
+              --description "$RUNNER_TEMP/description.md" 2>"$RUNNER_TEMP/error.txt"); then
+            {
+              echo "This change could not be turned into a pull request:"
+              echo
+              cat "$RUNNER_TEMP/error.txt"
+            } > "$RUNNER_TEMP/comment.md"
+            gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/comment.md"
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Apply the change to a new branch
+        env:
+          BASE: ${{ steps.change.outputs.base }}
+          TITLE: ${{ github.event.issue.title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags origin "$BASE"
+          git switch --create "$BRANCH" "$BASE"
+          if ! git apply --index --whitespace=nowarn "$RUNNER_TEMP/change.patch" \
+              2>"$RUNNER_TEMP/error.txt"; then
+            {
+              echo "The change does not apply to commit \`$BASE\`:"
+              echo
+              echo '```'
+              cat "$RUNNER_TEMP/error.txt"
+              echo '```'
+            } > "$RUNNER_TEMP/comment.md"
+            gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/comment.md"
+            exit 1
+          fi
+          git commit --quiet -m "$TITLE" -m "Requested through ESPI live's Open in Codex button in #$ISSUE."
+          git push origin "$BRANCH"
+
+      - name: Open the pull request
+        id: pr
+        env:
+          TITLE: ${{ github.event.issue.title }}
+        run: |
+          {
+            cat "$RUNNER_TEMP/description.md"
+            echo
+            echo "---"
+            echo
+            echo "Sent by a user of ESPI live through the **Open in Codex** button (#$ISSUE) after they approved the change in Codex. Nobody has run the tests yet (prebuilt copies cannot): review it like any outside contribution, run the full suite, and label it for the release drafter before merging."
+          } > "$RUNNER_TEMP/pr.md"
+          gh label create codex-change --color 10a37f \
+            --description "Change sent from the app's Open in Codex button" 2>/dev/null || true
+          url=$(gh pr create --base "$DEFAULT_BRANCH" --head "$BRANCH" --title "$TITLE" \
+            --body-file "$RUNNER_TEMP/pr.md" --label codex-change)
+          gh issue comment "$ISSUE" --body "Opened $url for review."
+          gh issue close "$ISSUE" --reason completed
+
+      - name: Report a failure to open the pull request
+        if: failure() && steps.pr.outcome == 'failure'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "$ISSUE" --body "The change is on branch \`$BRANCH\`, but the pull request could not be opened (is \"Allow GitHub Actions to create and approve pull requests\" on?): $RUN_URL"

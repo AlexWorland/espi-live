@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from unittest import mock
 
 import cv2
@@ -324,6 +325,27 @@ class SaveFrameTests(unittest.TestCase):
         self.assertTrue(os.path.basename(path).startswith("frame_12345678_"))
         with open(os.path.splitext(path)[0] + ".txt", encoding="utf-8") as handle:
             self.assertIn("Source: Camera 12345678", handle.read())
+
+    def test_frozen_frame_records_when_it_was_frozen(self):
+        """A frame saved from a frozen view notes the freeze time in the sidecar.
+
+        Args: None.
+        Returns: None.
+        """
+        path = recording.save_frame(self.image, "t", "", False, self.log,
+                                    frozen_at=datetime(2026, 10, 29, 15, 42, 7))
+        with open(os.path.splitext(path)[0] + ".txt", encoding="utf-8") as handle:
+            self.assertIn("Frozen at: 2026-10-29 15:42:07\n", handle.read())
+
+    def test_live_frame_sidecar_has_no_freeze_line(self):
+        """A frame saved from the live view does not mention freezing.
+
+        Args: None.
+        Returns: None.
+        """
+        path = recording.save_frame(self.image, "t", "", False, self.log)
+        with open(os.path.splitext(path)[0] + ".txt", encoding="utf-8") as handle:
+            self.assertNotIn("Frozen", handle.read())
 
     def test_imwrite_returning_false_logs_and_returns_none(self):
         """A refused PNG write is logged and returns None.

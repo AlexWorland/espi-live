@@ -1379,7 +1379,8 @@ class PollingTests(WindowTestCase):
         window = self.window
         window.show()
         QApplication.processEvents()
-        items = (window.update_slot, window.feature_button, window.source_badge,
+        items = (window.update_slot, window.feature_button, window.codex_button,
+                 window.source_badge,
                  window.record_label, window.range_status, window.camera_fps_status,
                  window.speed_status, window.pixel_status)
 
@@ -1476,6 +1477,227 @@ class PollingTests(WindowTestCase):
         self.window.pixel_status.setText("stale")
         self.window._poll_status()
         self.assertEqual(self.window.pixel_status.text(), "")
+
+
+class FreezeTests(WindowTestCase):
+    """Freezing the displayed image without saving it (issue #14)."""
+
+    def show(self, packet):
+        """Publish a packet from the engine and let the window draw it.
+
+        Args: packet is the FramePacket to publish.
+        Returns: None.
+        """
+        self.engine._packet = packet
+        self.window._poll_frame()
+
+    def freeze_action(self):
+        """Find View > Freeze display.
+
+        Args: None.
+        Returns: The QAction.
+        """
+        view_menu = self.window.menuBar().actions()[0].menu()
+        return next(a for a in view_menu.actions() if a.text() == "Freeze display")
+
+    def freeze_on_first_frame(self):
+        """Draw frame 1, freeze it, then publish a newer frame 2.
+
+        Args: None.
+        Returns: The frozen FramePacket.
+        """
+        frozen = make_packet(sequence=1)
+        self.show(frozen)
+        self.window.freeze_button.click()
+        self.show(make_packet(sequence=2, palette="Jet"))
+        return frozen
+
+    def test_freeze_holds_the_shown_frame_while_the_engine_continues(self):
+        """Newer engine frames are not drawn while the display is frozen.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.assertIs(self.window.view.packet, frozen)
+        self.assertIs(self.window.current.frozen, frozen)
+        self.assertEqual(self.window.drawn_frames, 1)
+        self.assertTrue(self.log.lines[-1].startswith("Display frozen"))
+
+    def test_unfreeze_returns_to_the_newest_frame(self):
+        """Resuming draws the engine's current frame on the next poll.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.window.freeze_button.click()
+        self.assertIsNone(self.window.current.frozen)
+        self.window._poll_frame()
+        self.assertEqual(self.window.view.packet.sequence, 2)
+        self.assertEqual(self.log.lines[-1], "Display live again.")
+
+    def test_freeze_without_a_frame_logs_and_stays_live(self):
+        """Freezing before anything was drawn does nothing but explain why.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.freeze_button.click()
+        self.assertIsNone(self.window.current.frozen)
+        self.assertFalse(self.window.freeze_button.isChecked())
+        self.assertTrue(self.window.frozen_banner.isHidden())
+        self.assertEqual(self.log.lines[-1], "No frame on screen to freeze yet.")
+
+    def test_repeated_freeze_or_resume_changes_nothing(self):
+        """Freezing a frozen view, or resuming a live one, is a no-op.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        lines = len(self.log.lines)
+        self.window.set_frozen(True)
+        self.assertIs(self.window.current.frozen, frozen)
+        self.window.set_frozen(False)
+        self.window.set_frozen(False)
+        self.assertEqual(len(self.log.lines), lines + 1)
+
+    def test_frozen_indicators_show_and_hide(self):
+        """Banner, badge, button and menu item all mark a frozen view.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        action = self.freeze_action()
+        for widget in (window.frozen_banner, window.frozen_badge):
+            self.assertTrue(widget.isHidden())
+        self.freeze_on_first_frame()
+        when = window.current.frozen_at.strftime("%H:%M:%S")
+        self.assertFalse(window.frozen_banner.isHidden())
+        self.assertIn(f"FROZEN at {when}", window.frozen_banner.text())
+        self.assertIn("Space", window.frozen_banner.text())
+        self.assertFalse(window.frozen_badge.isHidden())
+        self.assertTrue(window.freeze_button.isChecked())
+        self.assertTrue(action.isChecked())
+        window.set_frozen(False)
+        for widget in (window.frozen_banner, window.frozen_badge):
+            self.assertTrue(widget.isHidden())
+        self.assertFalse(window.freeze_button.isChecked())
+        self.assertFalse(action.isChecked())
+
+    def test_frozen_badge_moves_no_other_status_item(self):
+        """Showing or hiding the FROZEN badge leaves every other item in place.
+
+        The badge takes its room from the hint text, so the window is made wide
+        enough for the hint to have some.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.resize(2400, 900)
+        window.show()
+        items = (window.update_slot, window.feature_button, window.source_badge,
+                 window.record_label, window.range_status, window.camera_fps_status,
+                 window.speed_status, window.pixel_status)
+
+        def geometry():
+            QApplication.processEvents()
+            return [(w.x(), w.width()) for w in items]
+
+        before = geometry()
+        self.freeze_on_first_frame()
+        self.assertFalse(window.frozen_badge.isHidden())
+        self.assertEqual(geometry(), before)
+        window.set_frozen(False)
+        self.assertEqual(geometry(), before)
+
+    def test_banner_lets_mouse_reach_the_image(self):
+        """The banner over the image does not block zoom, pan or the readout.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(self.window.frozen_banner.testAttribute(
+            Qt.WA_TransparentForMouseEvents))
+
+    def test_space_key_toggles_freeze(self):
+        """Space freezes and resumes the display.
+
+        Args: None.
+        Returns: None.
+        """
+        self.show(make_packet(sequence=1))
+        self.assertTrue(self.window.handle_key(Qt.Key_Space))
+        self.assertIsNotNone(self.window.current.frozen)
+        self.assertTrue(self.window.handle_key(Qt.Key_Space))
+        self.assertIsNone(self.window.current.frozen)
+
+    def test_view_menu_item_toggles_freeze(self):
+        """View > Freeze display freezes and resumes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.show(make_packet(sequence=1))
+        action = self.freeze_action()
+        self.assertEqual(action.shortcut().toString(), "Space")
+        action.trigger()
+        self.assertIsNotNone(self.window.current.frozen)
+        action.trigger()
+        self.assertIsNone(self.window.current.frozen)
+
+    def test_save_while_frozen_sends_the_frozen_frame(self):
+        """Save writes the held frame and its freeze time, not the live one.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.window.frame_title.setText("Held")
+        self.window.save_frame()
+        self.assertEqual(self.queued(), [("save", {
+            "title": "Held", "notes": "", "packet": frozen,
+            "frozen_at": self.window.current.frozen_at})])
+
+    def test_pixel_readout_reads_the_frozen_frame(self):
+        """The hover readout reports the frozen image, not the live one.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), "Gray",
+                                          1.0, "Raw", True)
+        self.window.hover = (10, 5)
+        self.window._poll_status()
+        self.assertEqual(self.window.pixel_status.text(),
+                         f"x 10, y 5: {int(frozen.image[5, 10])}")
+
+    def test_displayed_rate_reads_frozen(self):
+        """The displayed-frame rate says frozen instead of a number.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.window._poll_status()
+        self.assertIn("Displayed: frozen", self.window.speed_status.text())
+
+    def test_switch_to_live_drops_a_frozen_demo_frame(self):
+        """A held demo frame never outlives the dummy-mode indicators.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.engine.events.put(("switched_live", None))
+        self.window._handle_events()
+        self.assertIsNone(self.window.current.frozen)
+        self.assertTrue(self.window.frozen_banner.isHidden())
+        self.assertFalse(self.window.freeze_button.isChecked())
 
 
 class EngineEventTests(WindowTestCase):
@@ -1748,6 +1970,50 @@ class MultiCameraTests(unittest.TestCase):
         self.assertTrue(states[0].startswith("displayed · "))
         self.assertTrue(states[1].endswith(" · REC"))
         self.assertEqual(states[2], "off")
+
+    def test_freeze_belongs_to_the_displayed_camera(self):
+        """Each camera keeps its own frozen frame across display switches.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first = self.window, self.channels[0]
+        frozen = make_packet(sequence=1)
+        first.engine._packet = frozen
+        window._poll_frame()
+        window.set_frozen(True)
+        window._poll_status()
+        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
+        window.camera_combo.setCurrentIndex(1)  # the second camera is live
+        self.assertIsNone(window.current.frozen)
+        self.assertIsNone(window.view.packet)
+        self.assertTrue(window.frozen_banner.isHidden())
+        self.assertFalse(window.freeze_button.isChecked())
+        window._poll_status()
+        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
+        self.assertFalse(window.camera_states[1].text().endswith(" · frozen"))
+        window.camera_combo.setCurrentIndex(0)  # back: the held frame is shown at once
+        self.assertIs(window.view.packet, frozen)
+        self.assertFalse(window.frozen_banner.isHidden())
+        self.assertTrue(window.freeze_button.isChecked())
+        first.engine._packet = make_packet(sequence=2)
+        window._poll_frame()
+        self.assertIs(window.view.packet, frozen)
+
+    def test_turning_off_a_frozen_background_camera_drops_its_frame(self):
+        """A camera whose processing is turned off loses its frozen frame.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first = self.window, self.channels[0]
+        first.engine._packet = make_packet(sequence=1)
+        window._poll_frame()
+        window.set_frozen(True)
+        window.camera_combo.setCurrentIndex(1)
+        window.camera_checks[0].setChecked(False)
+        self.assertFalse(first.active)
+        self.assertIsNone(first.frozen)
 
     def test_background_events_do_not_change_the_shown_controls(self):
         """Limits are stored and record_off ignored for a camera not shown.
@@ -2876,6 +3142,212 @@ class DemoCaptureControlsTests(WindowTestCase):
         self.assertTrue(window.exposure.isEnabled())
         self.assertEqual(window.exposure.toolTip(), "Simulated in dummy mode")
 
+
+class CodexTests(WindowTestCase):
+    """Open in Codex: getting the source, the first-use dialog and opening the
+    app, with the source worker, settings and dialogs faked."""
+
+    FOLDER = os.path.join(tempfile.gettempdir(), "espi-live-source")
+
+    def setUp(self):
+        """Build the window with a source worker that never starts a thread.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        self.window.source = mock.MagicMock(busy=False, events=queue.Queue())
+        self.window.source.start.return_value = True
+        patcher = mock.patch.object(qt_app.codex, "write_guide", return_value=None)
+        self.write_guide = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def ready(self, note=""):
+        """Deliver a "source ready" event.
+
+        Args: note is the event's log line.
+        Returns: None.
+        """
+        self.window.source.events.put(("ready", (self.FOLDER, note)))
+        self.window._handle_source_events()
+
+    def buttons(self, choice, count):
+        """Make the next message box report one of its added buttons as clicked.
+
+        Args: choice is the index of the clicked button; count is how many
+            buttons the box adds.
+        Returns: None.
+        """
+        box = self.dialogs.return_value
+        made = [object() for _ in range(count)]
+        box.addButton.side_effect = made
+        box.clickedButton.return_value = made[choice]
+
+    def test_entry_points_exist(self):
+        """The status bar button and the Help menu entry both open Codex.
+
+        Args: None.
+        Returns: None.
+        """
+        help_menu = self.window.menuBar().actions()[-1].menu()
+        entry = next(a for a in help_menu.actions()
+                     if a.text() == "Ask Codex about the source code…")
+        with mock.patch.object(self.window, "_open_codex") as open_codex:
+            entry.trigger()
+            self.window.codex_button.click()
+        self.assertEqual(open_codex.call_count, 2)
+        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+
+    def test_startup_gets_the_source_only_with_update_checks(self):
+        """The startup check runs unless GitHub is off limits at startup.
+
+        Args: None.
+        Returns: None.
+        """
+        worker = mock.MagicMock()
+        with mock.patch.object(qt_app.source_code, "SourceWorker", return_value=worker):
+            for check_updates in (False, True):
+                engine = Engine(self.log)
+                engine.use_demo()
+                window = demo_window(engine, self.log, check_updates=check_updates)
+                window.frame_timer.stop()
+                window.status_timer.stop()
+                window.deleteLater()
+        worker.start.assert_called_once_with()
+
+    def test_click_before_the_source_is_ready_downloads_then_opens(self):
+        """Without the source the button waits for it, then opens Codex.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._open_codex()
+        self.assertFalse(self.window.codex_button.isEnabled())
+        self.assertEqual(self.window.codex_button.text(), "Getting source…")
+        self.window.source.start.assert_called_once_with()
+        FakeSettings.store["codex/intro_shown"] = True
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                               return_value=True) as open_url:
+            self.ready("Downloaded the source code")
+        self.assertTrue(self.window.codex_button.isEnabled())
+        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+        self.assertIn("Downloaded the source code", self.log.lines)
+        self.write_guide.assert_called_once_with(self.FOLDER)
+        url = open_url.call_args.args[0]
+        self.assertEqual(url.toEncoded().data().decode(), qt_app.codex.deep_link(self.FOLDER))
+        self.assertIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
+        self.assertIn("Opening Codex", self.window.statusBar().currentMessage())
+
+    def test_ready_source_at_startup_opens_nothing(self):
+        """The startup event only records the folder.
+
+        Args: None.
+        Returns: None.
+        """
+        before = list(self.log.lines)
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
+            self.ready()
+        self.assertEqual(self.window.source_folder, self.FOLDER)
+        open_url.assert_not_called()
+        self.assertEqual(self.log.lines, before)
+
+    def test_click_while_downloading_waits(self):
+        """A click during the startup download opens Codex when it finishes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.source.start.return_value = False
+        self.window._open_codex()
+        self.assertTrue(self.window.codex_when_ready)
+        self.assertIn("Still downloading", self.window.statusBar().currentMessage())
+
+    def test_failed_download(self):
+        """A failure is logged, and reported in a dialog only after a click.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.source.events.put(("failed", "offline"))
+        self.window._handle_source_events()
+        self.assertIn("Source code not available: offline", self.log.lines)
+        self.dialogs.warning.assert_not_called()
+        self.window._open_codex()
+        self.window.source.events.put(("failed", "R&D <offline>"))
+        self.window._handle_source_events()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("could not be downloaded: R&amp;D &lt;offline&gt;",
+                      self.dialogs.warning.call_args.args[2])
+        self.assertTrue(self.window.codex_button.isEnabled())
+        self.assertIsNone(self.window.source_folder)
+
+    def test_first_use_explains_and_remembers(self):
+        """The first open asks first; cancelling opens nothing and asks again.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                               return_value=True) as open_url:
+            with mock.patch.object(self.window, "_codex_intro", return_value=False):
+                self.window._open_codex()
+            open_url.assert_not_called()
+            self.assertNotIn("codex/intro_shown", FakeSettings.store)
+            with mock.patch.object(self.window, "_codex_intro", return_value=True) as intro:
+                self.window._open_codex()
+                self.window._open_codex()
+        intro.assert_called_once_with()
+        self.assertTrue(FakeSettings.store["codex/intro_shown"])
+        self.assertEqual(open_url.call_count, 2)
+
+    def test_intro_buttons(self):
+        """Open Codex goes on; Get Codex opens the download page; Cancel stops.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        self.buttons(0, 3)
+        self.assertTrue(self.window._codex_intro())
+        self.assertIn(self.FOLDER, self.dialogs.call_args.args[2])
+        self.buttons(2, 3)
+        self.assertFalse(self.window._codex_intro())
+        self.buttons(1, 3)
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
+            self.assertFalse(self.window._codex_intro())
+        self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
+
+    def test_guide_that_cannot_be_written_warns(self):
+        """A read-only source folder is reported and Codex is not opened.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        FakeSettings.store["codex/intro_shown"] = True
+        self.write_guide.side_effect = PermissionError("read-only")
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
+            self.window._open_codex()
+        open_url.assert_not_called()
+        self.assertIn("read-only", self.dialogs.warning.call_args.args[2])
+
+    def test_missing_codex_offers_the_download(self):
+        """When no app takes the link, a dialog offers the download page.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        FakeSettings.store["codex/intro_shown"] = True
+        for choice, opened in ((1, 1), (0, 2)):
+            self.buttons(choice, 2)
+            with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                                   return_value=False) as open_url:
+                self.window._open_codex()
+            self.assertEqual(open_url.call_count, opened)
+            self.assertEqual(self.dialogs.call_args.args[1], "Codex not found")
+        self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
 
 
 if __name__ == "__main__":

@@ -70,6 +70,8 @@ class Channel:
         self.limits = {}  # last "camera_limits" payload: {node name: (low, high)}
         self.identity = None  # last "camera_identity" payload (CameraIdentity)
         self.report = None  # last "camera_report" payload (camera_reports.Report)
+        self.frozen = None  # FramePacket held on screen while the display is frozen
+        self.frozen_at = None  # datetime the display was frozen
         self.retired = []  # stopped engines that may still be finishing
 
     @property
@@ -161,13 +163,14 @@ class Channel:
         """Turn processing off, keeping the settings for the next start.
 
         The engine finishes its recording and releases the camera in the
-        background; wait() waits for that.
+        background; wait() waits for that. A frozen frame is dropped.
 
         Args: None.
         Returns: None.
         """
         if self.engine is None:
             return
+        self.frozen = self.frozen_at = None
         self.settings = replace(self.engine.settings(), record=False)
         self.engine.stop()
         self.retired.append(self.engine)
