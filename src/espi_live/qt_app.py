@@ -47,6 +47,20 @@ from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHO
                                   VIEW_MODES, palette_rgb_table)
 
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
+# Gamma stays its own Display control: it is a curve, not a second stretch.
+GAMMA_TIP = (
+    "Shifts mid-tones after Stretch to 0–255, in Raw, Previous and Reference. "
+    "Stretch is a straight remap of this frame's dark-to-bright range "
+    "(contrast); gamma is a curve on top of that. Below 1.0 brightens dark "
+    "fringes, above 1.0 darkens bright ones. With a good stretch, start at 1.0."
+)
+STRETCH_TIP = (
+    "Map each difference frame's darkest and brightest pixels, after Stretch "
+    "clip, to 0 and 255 so fringes fill the display. This is a straight "
+    "remap (contrast), not gamma. Off keeps the difference values as they "
+    "are. The status bar shows both ranges. On by default. Previous and "
+    "Reference only; Raw is not stretched."
+)
 GL_TEXTURE_2D = 0x0DE1
 GL_R8 = 0x8229
 GL_RED = 0x1903
@@ -110,7 +124,7 @@ ZOOM_SLIDER_TIP = ("Drag, click or scroll to zoom. The mouse wheel and "
                    "drag-to-pan on the image still work.")
 MODE_TIPS = {
     "Raw": ("Raw: the camera's Mono8 image, for aiming and focusing. "
-            "No difference, stretch, gamma or palette."),
+            "Gamma applies; no difference, stretch or palette."),
     "Previous": ("Previous: the difference from the last frame, so fringes show "
                  "what just changed. Shortcut: R restarts that difference."),
     "Reference": ("Reference: the difference from a stored frame. Shortcut: F "
@@ -1401,7 +1415,9 @@ class MainWindow(QMainWindow):
             if label is None:
                 grid.addWidget(widget, row, 0, 1, 2)
             else:
-                grid.addWidget(QLabel(label), row, 0)
+                name = QLabel(label)
+                name.setToolTip(widget.toolTip())
+                grid.addWidget(name, row, 0)
                 grid.addWidget(widget, row, 1)
             row += 1
 
@@ -1543,11 +1559,9 @@ class MainWindow(QMainWindow):
         add(self.smoothing_combo, "Speckle filter")
         add(self.smoothing, "Filter width")
         self.scale_range = QCheckBox("Stretch to 0–255")
-        set_tooltip(self.scale_range,
-                    "Map each difference frame's darkest and brightest pixels, after "
-                    "Stretch clip, to 0 and 255 so fringes fill the display. Off "
-                    "keeps the difference values as they are. The status bar shows "
-                    "both ranges. On by default. Raw view is not stretched.")
+        set_tooltip(self.scale_range, STRETCH_TIP,
+                    "Gamma is a separate curve applied afterwards and does not "
+                    "replace this stretch.")
         self.scale_range.setChecked(s.scale_range)
         self.scale_range.toggled.connect(
             lambda on: self.engine.update_settings(scale_range=on))
@@ -1582,10 +1596,7 @@ class MainWindow(QMainWindow):
         self.palette_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(palette=name))
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
-        self.gamma.set_description(
-            "Display brightness curve for difference images. 1.0 leaves values "
-            "unchanged; lower than 1 darkens midtones and higher than 1 brightens "
-            "them. Raw view ignores it. A typical value is 1.0.")
+        self.gamma.set_description(GAMMA_TIP)
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
         self.clahe = QCheckBox("CLAHE (color palettes only)")
         set_tooltip(self.clahe,
