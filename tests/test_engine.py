@@ -171,6 +171,39 @@ class EngineDemoTests(unittest.TestCase):
         self.assertEqual(int(packet.image[:20, :].min()), 0)  # banner background
         self.assertEqual(int(packet.image[:42, :].max()), 255)  # banner text
 
+    def test_gamma_reaches_every_view_and_changes_midtones(self):
+        """Raw, Previous and Reference publish the display gamma.
+
+        Raw stays gray even when a color palette is selected. A gamma other
+        than 1.0 changes rendered pixels that are not already black or white.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        for mode in ("Raw", "Previous", "Reference"):
+            self.engine.update_settings(mode=mode, gamma=0.5, clahe=False,
+                                        palette="Turbo", scale_range=True)
+            if mode == "Reference":
+                self.engine.request("reference")
+
+            def ready(mode=mode):
+                """True once this view carries gamma and a mid-tone pixel.
+
+                Args: mode is the view this iteration is waiting for.
+                Returns: True when the newest packet matches.
+                """
+                packet = self.engine.latest_packet()
+                return (packet is not None and packet.mode == mode and
+                        packet.gamma == 0.5 and
+                        np.any((packet.image > 0) & (packet.image < 255)))
+
+            self.assertTrue(wait_until(ready))
+            packet = self.engine.latest_packet()
+            self.assertEqual(packet.palette, "Gray" if mode == "Raw" else "Turbo")
+            plain = apply_palette(packet.image, packet.palette, 1.0)
+            self.assertFalse(np.array_equal(packet.render(), plain))
+
     def test_noise_reduction_filters_the_raw_feed(self):
         """Noise reduction runs on camera frames, so Raw view uses it too.
 

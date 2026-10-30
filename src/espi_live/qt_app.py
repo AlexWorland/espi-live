@@ -44,6 +44,18 @@ from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
                                   palette_rgb_table)
 
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
+# Gamma stays its own Display control: it is a curve, not a second stretch.
+GAMMA_TIP = (
+    "Shifts mid-tones after Stretch to 0–255, in Raw, Previous and Reference. "
+    "Stretch is a straight remap of this frame's dark-to-bright range "
+    "(contrast); gamma is a curve on top of that. Below 1.0 brightens dark "
+    "fringes, above 1.0 darkens bright ones. With a good stretch, start at 1.0."
+)
+STRETCH_TIP = (
+    "Straight remap of this frame's darkest and brightest difference pixels "
+    "(after Stretch clip) onto 0 and 255. Gamma is a separate curve applied "
+    "afterwards and does not replace this. Previous and Reference only."
+)
 GL_TEXTURE_2D = 0x0DE1
 GL_R8 = 0x8229
 GL_RED = 0x1903
@@ -557,6 +569,16 @@ class SliderSpin(QWidget):
             lambda ticks: self.spin.setValue(ticks * self.step))
         self.spin.valueChanged.connect(self._spin_changed)
 
+    def setToolTip(self, tip):
+        """Show the same hover text on the slider and the spin box.
+
+        Args: tip is the text shown when the pointer rests on either one.
+        Returns: None.
+        """
+        super().setToolTip(tip)
+        self.slider.setToolTip(tip)
+        self.spin.setToolTip(tip)
+
     def set_range(self, low, high):
         """Change the allowed range, clamping the current value.
 
@@ -1055,7 +1077,9 @@ class MainWindow(QMainWindow):
             if label is None:
                 grid.addWidget(widget, row, 0, 1, 2)
             else:
-                grid.addWidget(QLabel(label), row, 0)
+                name = QLabel(label)
+                name.setToolTip(widget.toolTip())
+                grid.addWidget(name, row, 0)
                 grid.addWidget(widget, row, 1)
             row += 1
 
@@ -1157,6 +1181,7 @@ class MainWindow(QMainWindow):
         add(self.smoothing_combo, "Speckle filter")
         add(self.smoothing, "Filter width")
         self.scale_range = QCheckBox("Stretch to 0–255")
+        self.scale_range.setToolTip(STRETCH_TIP)
         self.scale_range.setChecked(s.scale_range)
         self.scale_range.toggled.connect(
             lambda on: self.engine.update_settings(scale_range=on))
@@ -1186,6 +1211,7 @@ class MainWindow(QMainWindow):
         self.palette_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(palette=name))
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
+        self.gamma.setToolTip(GAMMA_TIP)
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
         self.clahe = QCheckBox("CLAHE (color palettes only)")
         self.clahe.setChecked(s.clahe)

@@ -913,6 +913,17 @@ class SliderSpinTests(unittest.TestCase):
         self.assertEqual(self.control.value(), 1.0)
         self.assertEqual(self.control.slider.maximum(), 2)
 
+    def test_tooltip_is_shared_by_the_slider_and_spin_box(self):
+        """Hover text set on the pair shows on both parts.
+
+        Args: None.
+        Returns: None.
+        """
+        self.control.setToolTip("mid-tones")
+        self.assertEqual(self.control.toolTip(), "mid-tones")
+        self.assertEqual(self.control.slider.toolTip(), "mid-tones")
+        self.assertEqual(self.control.spin.toolTip(), "mid-tones")
+
 
 class WindowTestCase(unittest.TestCase):
     """Base class: a MainWindow on a demo engine with every side effect faked."""
@@ -1093,6 +1104,28 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertEqual(s.noise_reduction, 60)
         self.assertEqual((s.average, s.ref_refresh_s, s.smoothing), (5, 2.5, 3))
         self.assertEqual((s.clip_percent, s.gamma), (1.5, 1.7))
+
+    def test_gamma_stays_its_own_control_and_explains_stretch(self):
+        """Gamma is a visible Display slider, with a tip that contrasts stretch.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        gamma = self.window.gamma
+        self.assertTrue(gamma.isVisible())
+        self.assertFalse(gamma.isHidden())
+        tip = qt_app.GAMMA_TIP
+        self.assertIn("Stretch", tip)
+        self.assertIn("1.0", tip)
+        self.assertEqual(gamma.toolTip(), tip)
+        self.assertEqual(gamma.slider.toolTip(), tip)
+        self.assertEqual(gamma.spin.toolTip(), tip)
+        labels = [label for label in self.window.controls_dock.findChildren(QLabel)
+                  if label.text() == "Gamma"]
+        self.assertEqual([label.toolTip() for label in labels], [tip])
+        self.assertEqual(self.window.scale_range.toolTip(), qt_app.STRETCH_TIP)
+        self.assertNotIn("advanced", tip.lower())
 
     def test_checkboxes_and_combos_update_engine_settings(self):
         """Check boxes and combo boxes write their engine settings.
