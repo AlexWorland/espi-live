@@ -1,0 +1,49 @@
+# Error reports labelled auto-error land on the roadmap project. The app can
+# only file issues with its Issues-only FEEDBACK_TOKEN, which cannot reach
+# projects, so this workflow does it with PROJECT_PAT: a classic token (or
+# fine-grained token) whose only extra permission is "projects: write" on this
+# repository. Bake nothing into the builds: secrets stay in Actions.
+
+name: Add error reports to the roadmap
+
+on:
+  issues:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  add-to-project:
+    # Only the automatic error-report label, not feature requests or hand-applied
+    # labels.
+    if: github.event.label.name == 'auto-error'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add the issue to the ESPI Live roadmap
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          PROJECT_ID: PVT_kwHOA4Xuf84BpXll  # "ESPI Live roadmap", AlexWorland
+          ISSUE_ID: ${{ github.event.issue.node_id }}
+        run: |
+          # The roadmap is small; 100 items cover it. Re-adding the label after a
+          # removal must not duplicate the card.
+          ids="$(gh api graphql -F project_id="$PROJECT_ID" -f query='
+              query($project_id: ID!) {
+                node(id: $project_id) {
+                  ... on ProjectV2 {
+                    items(first: 100) { nodes { content { ... on Issue { id } } } }
+                  }
+                }
+              }' --jq '.data.node.items.nodes[]?.content.id // empty')"
+          if printf '%s\n' "$ids" | grep -qxF "$ISSUE_ID"; then
+            echo "The issue is already in the project."
+          else
+            gh api graphql -F project_id="$PROJECT_ID" -F content_id="$ISSUE_ID" \
+              -f query='
+                mutation($project_id: ID!, $content_id: ID!) {
+                  addProjectV2ItemById(input: {projectId: $project_id,
+                                               contentId: $content_id}) {
+                    item { id }
+                  }
+                }' --jq '.data.addProjectV2ItemById.item.id'
+          fi
