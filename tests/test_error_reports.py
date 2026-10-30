@@ -164,6 +164,14 @@ def fingerprint_from_code(template, filename, entry="outer"):
     try:
         namespace[entry]()
     except Exception as exc:
+        # Drop the frames above the compiled code so the ID depends only on
+        # it: wherever the checkout path itself contains the package name,
+        # the helper's frame would otherwise count as in-app and the pinned
+        # ID would change with the location of the tests.
+        frame = exc.__traceback__
+        while frame is not None and frame.tb_frame.f_code.co_filename != filename:
+            frame = frame.tb_next
+        exc.__traceback__ = frame
         return error_reports.fingerprint(exc)
     raise AssertionError("the code did not raise")
 

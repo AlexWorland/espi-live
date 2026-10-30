@@ -12,6 +12,28 @@
 
 - The log is built on the standard `logging` module: `HH:MM:SS LEVEL [thread] message` lines in the per-run file, the GUI log panel and the console, with a startup header (build and commit time, platform, library versions, front end, level). `--log-level {debug,info,warning}` or `ESPI_LOG_LEVEL` raises the detail (`debug` adds camera node writes, settings changes and frame timing), the newest 50 run logs are kept, `Help > Open log folder` opens the folder, warnings from Python and Qt are logged, `faulthandler` writes `espi_<timestamp>.crash` for native crashes (reported by the next start), and a UI stall longer than ~10 s dumps every thread's stack into the log.
 - Unexpected errors — uncaught exceptions on any thread (including Qt slots), engine and recorder failures, Qt critical messages and the previous run's crash file — are reported automatically as GitHub issues labelled `auto-error`. Each error carries a deterministic ID (`ESPI-ERR-v1-…`) from its exception type and code path, so the same bug is reported once across machines, install paths and runs: the existing issue gets one "seen again" comment per build, a regression in a newer build reopens it, wontfix issues stay quiet. Every report is scrubbed of home folders, user and host names, camera serials, saved-file names, e-mail addresses and token-like strings. Release builds report by default; `--no-error-reports`, `ESPI_ERROR_REPORTS=0` or **Help > Send error reports automatically** turns it off, and copies without the token get a **Report in browser…** link instead. The "ESPI stopped" dialog names the issue, and non-fatal errors show a status-bar message with the link. Issues are added to the **ESPI Live roadmap** project by a workflow using the new `PROJECT_PAT` secret.
+## 2026-10-30 — Gamma in every view, and how it differs from stretch
+
+### Previous state
+
+- **Gamma** sat in the Display section with no explanation. In **Raw** (the view the program opens in) the slider did nothing: those frames were always drawn at gamma 1.0. **Previous** and **Reference** did apply it.
+- **Stretch to 0–255** is a straight remap of a measurement frame's range. With a good stretch, gamma's mid-tone shift is easy to mistake for the same control, or to miss entirely.
+
+### Current state
+
+- Gamma stays its own control in Display (not an advanced setting). Its tooltip, and the Stretch checkbox's, say what each one does: stretch sets contrast, gamma is the curve after that. Below 1.0 brightens dark fringes; above 1.0 darkens bright ones; 1.0 leaves mid-tones alone.
+- Raw, Previous and Reference all use the gamma slider. Raw still skips stretch and the color palette, so positioning pixels stay gray. The default is still 1.0, so an unchanged setup looks the same. Saved frames and recordings follow the screen.
+
+## 2026-10-30 — Noise reduction works across the slider, and says so
+
+### Previous state
+
+- **Noise reduction** read its 0–95 slider as the share of the previous frame to keep. Twenty was about one frame of memory, so most of the travel did almost nothing, and the speckle grain (which the control keeps on purpose) made a still image look unchanged. It was easy to take it for the Speckle filter or Average N, and **Stretch to 0–255** repaints a quieter difference at full brightness, which hides the change again.
+
+### Current state
+
+- The same slider, still 0 = off and 95 = strongest, now means how far the control is turned up. Each step adds the same amount of memory, so 10 is about three frames and 95 is still the old cap of about twenty. The default stays 0. The speckle grain is still kept.
+- The hover tip, which also shows the current value, and a note under the slider say what to look for (less flicker, a trail when something moves) and what will not change (a still speckle image; stretch hides a quieter difference), and that this is not the Speckle filter or Average N.
 
 ## 2026-10-30 — Feature requests are filed by the app
 
@@ -40,6 +62,18 @@
 - Tips wait 600 ms, including when the pointer moves from one control to the next, so they do not flash. They open beside the control and never over the live image; the image itself has no tooltip. The shortcut list is in the View menu.
 - Disabled controls still show their tip, so an analog camera's exposure, gain and frame rate still say they are set on the camera, and dummy mode still says those three are simulated.
 - The old Tk window is not part of the application any more (`--ui tk` is gone), so this is the Qt window only.
+
+## 2026-10-30 — Updates are noticed while the app stays open
+
+### Previous state
+
+- A prebuilt copy looked for a newer build once, at startup. A camera PC left running for days never noticed a build released after it opened.
+- The status-bar button read **Update available:** followed by the version.
+
+### Current state
+
+- While the app is open it checks again about every three hours, a little earlier or later each time. It skips a check that would overlap one already running, a download, a recording or a frame save. `--no-update-check` turns the later checks off too. Running from source still does not update itself.
+- When a newer build is found the button reads **Install update** (the versions are in the tooltip, such as "Build 42 → 45") and the status bar mentions it once. Finding that same build again leaves the button as it is. A check that fails only goes to the log, and an update already found stays on the button. Downloading and restarting work as before: the new build is installed only after the camera is released.
 
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 

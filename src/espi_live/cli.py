@@ -31,8 +31,9 @@ def cli(argv=None):
     parser.add_argument("--update", action="store_true",
                         help="install the newest prebuilt binary from GitHub and exit")
     parser.add_argument("--no-update-check", action="store_true",
-                        help="don't contact GitHub at startup (no check for a newer "
-                             "build, no download of the source code)")
+                        help="don't contact GitHub to look for a newer build "
+                             "(neither at startup nor later) and don't download "
+                             "the source code")
     parser.add_argument("--send-changes", action="store_true",
                         help="send the changes made in the downloaded source code "
                              "(espi-live-source) to the developers for review, and exit")
