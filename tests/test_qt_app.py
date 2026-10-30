@@ -24,9 +24,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
-from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QKeyEvent, QSurfaceFormat
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QHelpEvent, QKeyEvent, QSurfaceFormat
+from PySide6.QtWidgets import (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QApplication,
+                               QComboBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QStyle,
+                               QTextEdit, QWidget)
 
 from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, updater
 from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
@@ -947,6 +949,34 @@ class SliderSpinTests(unittest.TestCase):
         self.assertEqual(self.control.value(), 1.0)
         self.assertEqual(self.control.slider.maximum(), 2)
 
+    def test_tooltip_tracks_the_value_and_an_optional_note(self):
+        """The tip names the control, the live value and a situation line.
+
+        Args: None.
+        Returns: None.
+        """
+        self.control.set_description("Scale factor. A typical value is 2.")
+        self.assertIn("Now: 2.0 x", self.control.toolTip())
+        self.assertEqual(self.control.slider.toolTip(), self.control.toolTip())
+        self.assertEqual(self.control.spin.toolTip(), self.control.toolTip())
+        self.control.set_note("Simulated in dummy mode")
+        self.assertIn("Simulated in dummy mode", self.control.toolTip())
+        self.control.slider.setValue(8)
+        self.assertIn("Now: 4.0 x", self.control.toolTip())
+        self.control.set_note("")
+        self.assertNotIn("Simulated", self.control.toolTip())
+
+    def test_integer_value_is_shown_without_decimals(self):
+        """A whole-number control does not show a fractional part.
+
+        Args: None.
+        Returns: None.
+        """
+        control = qt_app.SliderSpin(0, 10, 1, 0, 3, " px")
+        self.addCleanup(control.deleteLater)
+        control.set_description("Width.")
+        self.assertIn("Now: 3 px", control.toolTip())
+
 
 class WindowTestCase(unittest.TestCase):
     """Base class: a MainWindow on a demo engine with every side effect faked."""
@@ -1016,7 +1046,8 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertFalse(self.window.switch_live_button.isHidden())
         self.assertTrue(self.window.camera_label.isHidden())
         self.assertIn("DUMMY", self.window.source_badge.text())
-        self.assertEqual(self.window.exposure.toolTip(), "Simulated in dummy mode")
+        self.assertIn("Simulated in dummy mode", self.window.exposure.toolTip())
+        self.assertIn("Now: 8000 µs", self.window.exposure.toolTip())
 
     def test_set_demo_false_switches_to_camera_indicators(self):
         """Leaving demo mode hides every dummy indicator.
@@ -1030,7 +1061,10 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertTrue(self.window.switch_live_button.isHidden())
         self.assertFalse(self.window.camera_label.isHidden())
         self.assertIn("Camera", self.window.source_badge.text())
-        self.assertEqual(self.window.exposure.toolTip(), "")
+        tip = self.window.exposure.toolTip()
+        self.assertNotIn("Simulated", tip)
+        self.assertIn("collects light", tip)
+        self.assertIn("Now: 8000 µs", tip)
 
     def test_first_run_uses_default_window_size(self):
         """Without saved geometry the window opens at 1400x900.
@@ -1215,6 +1249,341 @@ class MainWindowBuildTests(WindowTestCase):
         """
         self.window.view.hovered.emit(3, 4)
         self.assertEqual(self.window.hover, (3, 4))
+
+
+def _dock_controls_missing_tooltips(dock):
+    """List interactive controls in a dock that have no tooltip.
+
+    The spin box's internal editor is part of the spin box, so it is not
+    listed on its own. A new slider, button, combo or text field with no
+    tooltip fails the suite.
+
+    Args: dock is the controls QDockWidget.
+    Returns: Widgets that still need a tooltip.
+    """
+    kinds = (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
+             QLineEdit, QPlainTextEdit, QTextEdit)
+    containers = (QAbstractSpinBox, QComboBox, QPlainTextEdit, QTextEdit)
+    missing = []
+    for widget in dock.findChildren(QWidget):
+        if not isinstance(widget, kinds):
+            continue
+        parent = widget.parentWidget()
+        inside = False
+        while parent is not None:
+            if isinstance(parent, containers):
+                inside = True
+                break
+            parent = parent.parentWidget()
+        if inside:
+            continue
+        if not widget.toolTip().strip():
+            missing.append(widget)
+    return missing
+
+
+class TooltipCoverageTests(WindowTestCase):
+    """Every control explains itself, and tips stay off the live image."""
+
+    def test_controls_dock_rejects_a_control_without_a_tooltip(self):
+        """A controls-dock slider, button, combo or text field must have a tip.
+
+        Args: None.
+        Returns: None.
+        """
+        missing = _dock_controls_missing_tooltips(self.window.controls_dock)
+        self.assertEqual([type(widget).__name__ for widget in missing], [])
+
+    def test_sliders_include_the_live_value_and_shortcuts(self):
+        """Slider tips name the current value; shortcut controls name the key.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIn("Now: 1.0", self.window.gamma.toolTip())
+        self.assertIn("1.0", self.window.gamma.toolTip())
+        self.window.gamma.set_value(2.5)
+        self.assertIn("Now: 2.5", self.window.gamma.toolTip())
+        self.assertIn("Now: 8000 µs", self.window.exposure.toolTip())
+        self.assertIn("Now: 100%", self.window.zoom_slider.toolTip())
+        self.window._show_zoom(8)
+        self.assertIn("Now: 800%", self.window.zoom_slider.toolTip())
+        self.assertIn("Shortcut: S", self.window.frame_title.toolTip())
+        self.assertIn("Shortcut: Space", self.window.freeze_button.toolTip())
+        for button in self.window.mode_group.buttons():
+            self.assertIn(button.text(), button.toolTip())
+        self.assertIn("AVI", self.window.record_button.toolTip())
+        self.assertEqual(self.window.view.toolTip(), "")
+
+    def test_menus_and_status_badges_have_tooltips(self):
+        """Menu actions and status readouts say what they show.
+
+        Args: None.
+        Returns: None.
+        """
+        for name in ("hint_label", "frozen_badge", "source_badge", "record_label",
+                     "range_status", "camera_fps_status", "speed_status", "pixel_status",
+                     "update_button", "check_button", "feature_button", "codex_button"):
+            self.assertTrue(getattr(self.window, name).toolTip().strip(), name)
+        for top in self.window.menuBar().actions():
+            for action in top.menu().actions():
+                if not action.isSeparator():
+                    self.assertTrue(action.toolTip().strip(), action.text())
+        self.assertIn("Space", self.window.freeze_action.toolTip())
+        self.assertTrue(self.window.record_button.testAttribute(Qt.WA_AlwaysShowToolTips))
+        self.assertTrue(self.window.testAttribute(Qt.WA_AlwaysShowToolTips))
+
+    def test_tooltip_delay_is_installed_once(self):
+        """Tips wait briefly, and a second install does not replace the style.
+
+        Args: None.
+        Returns: None.
+        """
+        style = QApplication.style()
+        self.assertIsInstance(style, qt_app.TooltipDelayStyle)
+        self.assertEqual(style.styleHint(QStyle.SH_ToolTip_WakeUpDelay), qt_app.TOOLTIP_DELAY_MS)
+        self.assertEqual(style.styleHint(QStyle.SH_ToolTip_FallAsleepDelay),
+                         qt_app.TOOLTIP_FALL_ASLEEP_MS)
+        self.assertIsInstance(style.styleHint(QStyle.SH_EtchDisabledText), int)
+        qt_app.install_tooltip_delay()
+        self.assertIs(QApplication.style(), style)
+
+    def _tip_event(self, widget):
+        """Build the hover event Qt sends after the tooltip delay.
+
+        Args: widget is the control under the pointer.
+        Returns: A QHelpEvent.
+        """
+        local = QPoint(1, 1)
+        return QHelpEvent(QEvent.ToolTip, local, widget.mapToGlobal(local))
+
+    def test_a_control_tooltip_is_placed_off_the_image(self):
+        """The filter shows the tip, and the rectangle misses the image.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        QApplication.processEvents()
+        slider = self.window.gamma.slider
+        with mock.patch.object(qt_app.QToolTip, "showText") as show:
+            self.assertTrue(self.window.tooltip_filter.eventFilter(
+                slider, self._tip_event(slider)))
+        pos, text, widget = show.call_args.args
+        self.assertIs(widget, slider)
+        self.assertIn("Now:", text)
+        view = self.window.view
+        view_rect = QRect(view.mapToGlobal(QPoint(0, 0)), view.size())
+        self.assertGreater(view_rect.width(), 0)
+        self.assertFalse(view_rect.intersects(QRect(pos, qt_app.tooltip_size(text))))
+
+    def test_the_image_never_shows_a_tooltip(self):
+        """A tip on the image view is swallowed so the picture stays visible.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.view.setToolTip("would cover the fringes")
+        with mock.patch.object(qt_app.QToolTip, "showText") as show, \
+                mock.patch.object(qt_app.QToolTip, "hideText") as hide:
+            self.assertTrue(self.window.tooltip_filter.eventFilter(
+                self.window.view, self._tip_event(self.window.view)))
+        show.assert_not_called()
+        hide.assert_called_once()
+
+    def test_filter_ignores_other_events_windows_and_empty_tips(self):
+        """Only a tip on one of this window's controls is handled.
+
+        Args: None.
+        Returns: None.
+        """
+        filt = self.window.tooltip_filter
+        self.assertFalse(filt.eventFilter(self.window.gamma, QEvent(QEvent.Leave)))
+        self.assertFalse(filt.eventFilter(QObject(), self._tip_event(self.window.gamma)))
+        outsider = QPushButton("no")
+        outsider.setToolTip("elsewhere")
+        self.addCleanup(outsider.deleteLater)
+        self.assertFalse(filt.eventFilter(outsider, self._tip_event(outsider)))
+        self.assertFalse(filt.eventFilter(
+            self.window.demo_banner, self._tip_event(self.window.demo_banner)))
+
+
+class TooltipPlacementTests(unittest.TestCase):
+    """Tooltip geometry stays on screen and off the image."""
+
+    def setUp(self):
+        """A host, an image and a control, in one coordinate system.
+
+        Args: None.
+        Returns: None.
+        """
+        self.screen = QRect(-10000, -10000, 40000, 40000)
+        self.host = QWidget()
+        self.host.setGeometry(0, 0, 2000, 1400)
+        self.image = QWidget(self.host)
+        self.image.setGeometry(200, 80, 900, 700)
+        self.control = QPushButton("Gamma", self.host)
+        self.control.setGeometry(1200, 200, 140, 28)
+        self.control.setToolTip("Brighten midtones")
+        self.host.show()
+
+    def tearDown(self):
+        """Delete the host.
+
+        Args: None.
+        Returns: None.
+        """
+        self.host.deleteLater()
+
+    def _image_rect(self):
+        """Return the image in global coordinates.
+
+        Args: None.
+        Returns: A QRect.
+        """
+        return QRect(self.image.mapToGlobal(QPoint(0, 0)), self.image.size())
+
+    def test_a_tip_beside_the_image_opens_under_the_control(self):
+        """A control clear of the image keeps the nearest position.
+
+        Args: None.
+        Returns: None.
+        """
+        pos = qt_app.tooltip_position(self.control, "Hi", self.image, self.screen)
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos, QPoint(origin.x(), origin.y() + self.control.height()
+                                     + qt_app.TOOLTIP_MARGIN))
+        self.assertFalse(self._image_rect().intersects(
+            QRect(pos, qt_app.tooltip_size("Hi"))))
+
+    def test_a_tip_on_the_image_moves_outside_it(self):
+        """Every side of a control sitting on the image is rejected.
+
+        Args: None.
+        Returns: None.
+        """
+        self.control.setGeometry(500, 400, 40, 24)
+        text = "Brightness"
+        pos = qt_app.tooltip_position(self.control, text, self.image, self.screen)
+        self.assertFalse(self._image_rect().intersects(
+            QRect(pos, qt_app.tooltip_size(text))))
+
+    def test_a_hidden_image_does_not_move_the_tip(self):
+        """No visible image means the tip opens just below the control.
+
+        Args: None.
+        Returns: None.
+        """
+        self.control.setGeometry(500, 400, 40, 24)
+        self.image.hide()
+        pos = qt_app.tooltip_position(self.control, "Hi", self.image, self.screen)
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos.y(), origin.y() + self.control.height() + qt_app.TOOLTIP_MARGIN)
+
+    def test_missing_image_uses_the_first_candidate(self):
+        """None for the image is the same as a hidden one.
+
+        Args: None.
+        Returns: None.
+        """
+        pos = qt_app.tooltip_position(self.control, "Hi", None, self.screen)
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos, QPoint(origin.x(), origin.y() + self.control.height()
+                                     + qt_app.TOOLTIP_MARGIN))
+
+    def test_a_wide_tip_slides_onto_the_screen_beside_the_image(self):
+        """A tip that hangs off the screen moves sideways, still clear of the image.
+
+        Args: None.
+        Returns: None.
+        """
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        text = "word " * 30
+        size = qt_app.tooltip_size(text)
+        # The unnudged tip hangs off the right; sliding it left still clears the image.
+        screen = QRect(origin.x() - 200, origin.y() - 20, size.width() + 160, 400)
+        pos = qt_app.tooltip_position(self.control, text, self.image, screen)
+        rect = QRect(pos, size)
+        self.assertTrue(screen.contains(rect))
+        self.assertFalse(self._image_rect().intersects(rect))
+        self.assertLess(pos.x(), origin.x())
+
+    def test_a_tip_may_leave_the_screen_to_spare_the_image(self):
+        """An off-screen tip is kept when the on-screen one would cover the image.
+
+        Args: None.
+        Returns: None.
+        """
+        image = self._image_rect()
+        screen = QRect(image.x() + 10, image.y() + 10, max(1, image.width() - 20),
+                       max(1, image.height() - 20))
+        text = "Brighten the midtones of a difference image"
+        pos = qt_app.tooltip_position(self.control, text, self.image, screen)
+        self.assertFalse(self._image_rect().intersects(
+            QRect(pos, qt_app.tooltip_size(text))))
+        self.assertFalse(screen.contains(QRect(pos, qt_app.tooltip_size(text))))
+
+    def test_a_tiny_screen_clamps_the_tip(self):
+        """When nothing fits, the tip is pushed to the screen's top-left.
+
+        Args: None.
+        Returns: None.
+        """
+        screen = QRect(0, 0, 20, 20)
+        text = "one\ntwo\nthree\nfour"
+        pos = qt_app.tooltip_position(self.control, text, None, screen)
+        self.assertEqual(pos, QPoint(screen.left(), screen.top()))
+
+    def test_no_widget_screen_uses_a_fallback_desktop(self):
+        """A widget with no screen still gets a tip below it.
+
+        Args: None.
+        Returns: None.
+        """
+
+        class NoScreen(QPushButton):
+            """A button whose screen() is missing."""
+
+            def screen(self):
+                """Report that no screen is attached.
+
+                Args: None.
+                Returns: None.
+                """
+                return None
+
+        button = NoScreen("n", self.host)
+        button.setGeometry(10, 10, 40, 20)
+        button.show()
+        pos = qt_app.tooltip_position(button, "Hi")
+        origin = button.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos, QPoint(origin.x(), origin.y() + button.height()
+                                     + qt_app.TOOLTIP_MARGIN))
+
+    def test_the_widget_screen_is_used_when_none_is_passed(self):
+        """Omitting the screen reads it from the widget.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIsNotNone(self.control.screen())
+        pos = qt_app.tooltip_position(self.control, "Hi")
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos.y(), origin.y() + self.control.height() + qt_app.TOOLTIP_MARGIN)
+
+    def test_format_tooltip_wraps_and_drops_blank_parts(self):
+        """Long text wraps; a blank part adds no line.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.format_tooltip(), "")
+        self.assertEqual(qt_app.format_tooltip("  ", ""), "")
+        wrapped = qt_app.format_tooltip("word " * 40)
+        self.assertGreater(wrapped.count("\n"), 0)
+        self.assertLessEqual(max(len(line) for line in wrapped.split("\n")), qt_app.TOOLTIP_WRAP)
+        self.assertGreater(qt_app.tooltip_size(wrapped).height(),
+                           qt_app.tooltip_size("word").height())
 
 
 class MainWindowGlTests(WindowTestCase):
@@ -2547,7 +2916,7 @@ class FeatureRequestTests(WindowTestCase):
     """The Request feature dialog, sending and result reporting, with no network."""
 
     REQUEST = feedback.FeatureRequest(title="Export reference", description="As PNG",
-                                      enrich=True, submitter="Sam", source="camera")
+                                      submitter="Sam", source="camera")
 
     def setUp(self):
         """Build the window with a fake token and a worker that never starts a thread.
@@ -2575,32 +2944,51 @@ class FeatureRequestTests(WindowTestCase):
         self.assertEqual(request.call_count, 2)
 
     def test_dialog_restores_a_request_and_reads_it_back(self):
-        """A previous request refills the form; Send is offered with a token.
+        """A previous request refills the form, and Submit files it.
 
         Args: None.
         Returns: None.
         """
         dialog = qt_app.FeatureRequestDialog(self.window, self.REQUEST)
         self.assertEqual(dialog.request("camera"), self.REQUEST)
-        self.assertEqual(dialog.findChild(qt_app.QDialogButtonBox)
-                         .button(qt_app.QDialogButtonBox.Ok).text(), "Send")
+        self.assertFalse(dialog.findChildren(qt_app.QCheckBox))
+        send = dialog.findChild(qt_app.QDialogButtonBox).button(qt_app.QDialogButtonBox.Ok)
+        self.assertEqual(send.text(), "Submit")
+        self.assertIn("GitHub issue", send.toolTip())
+        self.assertIn("Required", dialog.title.toolTip())
+        self.assertIn("blank", dialog.description.toolTip())
+        self.assertIn("follow up", dialog.submitter.toolTip())
 
     def test_dialog_defaults_come_from_settings_without_a_token(self):
-        """A fresh form uses the saved name and choice and offers the browser.
+        """A fresh form uses the saved name and still offers Submit.
 
         Args: None.
         Returns: None.
         """
-        FakeSettings.store.update({"feedback/name": "Kim", "feedback/enrich": False})
+        FakeSettings.store.update({"feedback/name": "Kim"})
         with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""):
             dialog = qt_app.FeatureRequestDialog(self.window)
         self.assertEqual(dialog.submitter.text(), "Kim")
-        self.assertFalse(dialog.enrich.isChecked())
-        self.assertEqual(dialog.findChild(qt_app.QDialogButtonBox)
-                         .button(qt_app.QDialogButtonBox.Ok).text(), "Open in browser…")
+        send = dialog.findChild(qt_app.QDialogButtonBox).button(qt_app.QDialogButtonBox.Ok)
+        self.assertEqual(send.text(), "Submit")
+        cancel = dialog.findChild(qt_app.QDialogButtonBox).button(qt_app.QDialogButtonBox.Cancel)
+        self.assertIn("without submitting", cancel.toolTip())
 
-    def test_accept_refuses_an_incomplete_request(self):
-        """A blank description warns and keeps the dialog open.
+    def test_accept_refuses_a_blank_title(self):
+        """A blank title warns and keeps the dialog open.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window)
+        dialog.description.setPlainText("A description")
+        dialog.accept()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("title", self.dialogs.warning.call_args.args[2])
+        self.assertEqual(dialog.result(), 0)
+
+    def test_accept_allows_a_blank_description(self):
+        """A title alone is enough; enrichment writes the description.
 
         Args: None.
         Returns: None.
@@ -2608,12 +2996,12 @@ class FeatureRequestTests(WindowTestCase):
         dialog = qt_app.FeatureRequestDialog(self.window)
         dialog.title.setText("Only a title")
         dialog.accept()
-        self.dialogs.warning.assert_called_once()
-        self.assertIn("describe", self.dialogs.warning.call_args.args[2])
-        self.assertEqual(dialog.result(), 0)
+        self.dialogs.warning.assert_not_called()
+        self.assertEqual(dialog.result(), qt_app.QDialog.Accepted)
+        self.assertEqual(dialog.request("camera").description, "")
 
-    def test_accept_remembers_name_and_choice(self):
-        """A complete request closes the dialog and saves name and enrichment.
+    def test_accept_remembers_the_name(self):
+        """A complete request closes the dialog and saves the name.
 
         Args: None.
         Returns: None.
@@ -2622,7 +3010,7 @@ class FeatureRequestTests(WindowTestCase):
         dialog.accept()
         self.assertEqual(dialog.result(), qt_app.QDialog.Accepted)
         self.assertEqual(FakeSettings.store["feedback/name"], "Sam")
-        self.assertTrue(FakeSettings.store["feedback/enrich"])
+        self.assertNotIn("feedback/enrich", FakeSettings.store)
 
     def run_request(self, result):
         """Open the request flow with the dialog's exec() returning result.
@@ -2666,32 +3054,20 @@ class FeatureRequestTests(WindowTestCase):
         self.window._request_feature()
         self.assertIn("still being sent", self.window.statusBar().currentMessage())
 
-    def test_without_token_the_browser_opens(self):
-        """Copies without a token open the prefilled GitHub page instead.
+    def test_without_token_the_app_still_files_the_request(self):
+        """A copy without a token still submits; it does not open a browser.
 
         Args: None.
         Returns: None.
         """
         with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""), \
-                mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                                  return_value=True) as open_url:
+                mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
             self.run_request(qt_app.QDialog.Accepted)
-        self.window.feedback.submit.assert_not_called()
-        self.assertIn("/issues/new?", open_url.call_args.args[0].toString())
-        self.dialogs.warning.assert_not_called()
+        self.window.feedback.submit.assert_called_once_with(self.REQUEST)
+        open_url.assert_not_called()
 
-    def test_browser_failure_warns(self):
-        """A missing browser is reported.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl", return_value=False):
-            self.window._open_request_in_browser(self.REQUEST)
-        self.dialogs.warning.assert_called_once()
-
-    def test_sent_request_links_the_issue(self):
-        """A filed request restores the button, logs and links the issue.
+    def test_sent_request_confirms_submission(self):
+        """A filed request restores the button and says it was submitted.
 
         Args: None.
         Returns: None.
@@ -2703,27 +3079,24 @@ class FeatureRequestTests(WindowTestCase):
         self.assertTrue(self.window.feature_button.isEnabled())
         self.assertEqual(self.window.feature_button.text(), "Request feature")
         self.assertIn(f"Feature request filed: {url}", self.log.lines)
-        text = self.dialogs.call_args.args[2]
-        self.assertIn(url, text)
-        self.assertIn("Copilot", text)
+        self.assertEqual(self.dialogs.call_args.args[2], "Your request was submitted.")
         self.dialogs.return_value.exec.assert_called_once()
 
     def failed_choice(self, choice):
         """Report a failed send and click one of the offered buttons.
 
-        Args: choice is "retry", "browser" or "cancel".
-        Returns: (request_feature mock, open_request_in_browser mock).
+        Args: choice is "retry" or "cancel".
+        Returns: The _request_feature mock.
         """
         box = self.dialogs.return_value
-        buttons = {"retry": object(), "browser": object(), "cancel": object()}
-        box.addButton.side_effect = [buttons["retry"], buttons["browser"], buttons["cancel"]]
+        buttons = {"retry": object(), "cancel": object()}
+        box.addButton.side_effect = [buttons["retry"], buttons["cancel"]]
         box.clickedButton.return_value = buttons[choice]
         self.window.feedback.events.put(("failed", (self.REQUEST, "offline")))
-        with mock.patch.object(self.window, "_request_feature") as retry, \
-                mock.patch.object(self.window, "_open_request_in_browser") as browser:
+        with mock.patch.object(self.window, "_request_feature") as retry:
             self.window._handle_feedback_events()
         self.assertIn("Feature request failed: offline", self.log.lines)
-        return retry, browser
+        return retry
 
     def test_failed_request_can_be_retried(self):
         """Edit and retry reopens the dialog with the same request.
@@ -2731,19 +3104,8 @@ class FeatureRequestTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        retry, browser = self.failed_choice("retry")
+        retry = self.failed_choice("retry")
         retry.assert_called_once_with(self.REQUEST)
-        browser.assert_not_called()
-
-    def test_failed_request_can_open_in_browser(self):
-        """Open in browser keeps the text without retyping.
-
-        Args: None.
-        Returns: None.
-        """
-        retry, browser = self.failed_choice("browser")
-        browser.assert_called_once_with(self.REQUEST)
-        retry.assert_not_called()
 
     def test_failed_request_can_be_dismissed(self):
         """Cancel does nothing more.
@@ -2751,9 +3113,8 @@ class FeatureRequestTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        retry, browser = self.failed_choice("cancel")
+        retry = self.failed_choice("cancel")
         retry.assert_not_called()
-        browser.assert_not_called()
 
 
 class FakeReportWorker:
@@ -2861,14 +3222,17 @@ class CaptureWindowTests(unittest.TestCase):
         self.assertIs(window.current, self.usb)
         for widget in (window.exposure, window.gain, window.fps):
             self.assertFalse(widget.isEnabled())
-            self.assertEqual(widget.toolTip(), ANALOG_TIP)
+            self.assertIn(ANALOG_TIP, " ".join(widget.toolTip().split()))
+            self.assertIn("Now:", widget.toolTip())
         self.assertFalse(window.single_field.isHidden())
         self.assertTrue(window.single_field.isChecked())
         self.assertTrue(window.report_label.isHidden())
         window.show_channel(self.flir)
         for widget in (window.exposure, window.gain, window.fps):
             self.assertTrue(widget.isEnabled())
-            self.assertEqual(widget.toolTip(), "")
+            self.assertNotIn("analog video", widget.toolTip())
+            self.assertNotIn("Simulated", widget.toolTip())
+            self.assertIn("Now:", widget.toolTip())
         self.assertTrue(window.single_field.isHidden())
 
     def test_single_field_checkbox_updates_engine(self):
@@ -2957,7 +3321,8 @@ class DemoCaptureControlsTests(WindowTestCase):
         self.assertTrue(window.report_label.isHidden())
         self.assertTrue(window.report_button.isHidden())
         self.assertTrue(window.exposure.isEnabled())
-        self.assertEqual(window.exposure.toolTip(), "Simulated in dummy mode")
+        self.assertIn("Simulated in dummy mode", window.exposure.toolTip())
+        self.assertIn("Now: 8000 µs", window.exposure.toolTip())
 
 
 class QtMessageHandlerTests(unittest.TestCase):

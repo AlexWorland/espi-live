@@ -10,14 +10,13 @@ import tempfile
 import time
 import unittest
 import urllib.error
-import urllib.parse
 from unittest import mock
 
 from espi_live import feedback
 
 REQUEST = feedback.FeatureRequest(title="  Export the reference frame ",
                                   description="Save the baseline as PNG.\n",
-                                  enrich=True, submitter="Sam", source="camera")
+                                  submitter="Sam", source="camera")
 
 
 class FakeResponse(io.BytesIO):
@@ -44,7 +43,7 @@ class PayloadTests(unittest.TestCase):
     """Issue contents and validation."""
 
     def test_payload_has_labels_text_and_context(self):
-        """An enriched request carries both labels, the text and the context.
+        """A request carries both labels, the user's text and the context.
 
         Args: None.
         Returns: None.
@@ -57,39 +56,28 @@ class PayloadTests(unittest.TestCase):
         self.assertIn("- Running with: camera", payload["body"])
         self.assertIn("- Build: ", payload["body"])
 
-    def test_plain_request_has_no_enrich_label(self):
-        """Without enrichment only the feature-request label is set.
+    def test_blank_description_is_enriched_from_the_title(self):
+        """An empty description is filed and marked so enrichment writes it.
 
         Args: None.
         Returns: None.
         """
-        plain = feedback.FeatureRequest(title="t", description="d")
-        self.assertEqual(feedback.issue_payload(plain)["labels"], ["feature-request"])
-        self.assertNotIn("Requested by", feedback.issue_payload(plain)["body"])
+        plain = feedback.FeatureRequest(title="t", description="  \n")
+        payload = feedback.issue_payload(plain)
+        self.assertEqual(payload["labels"], ["feature-request", "enrich"])
+        self.assertTrue(payload["body"].startswith("_No description was given._"))
+        self.assertNotIn("Requested by", payload["body"])
+        feedback.validate(plain)
 
-    def test_validate_rejects_blank_fields(self):
-        """Blank titles and descriptions are refused.
-
-        Args: None.
-        Returns: None.
-        """
-        for title, text in (("  ", "d"), ("t", "\n ")):
-            with self.assertRaises(feedback.FeedbackError):
-                feedback.validate(feedback.FeatureRequest(title=title, description=text))
-
-    def test_browser_url_is_prefilled(self):
-        """The fallback page carries title, body and labels.
+    def test_validate_rejects_a_blank_title(self):
+        """A blank title is refused; a blank description is not.
 
         Args: None.
         Returns: None.
         """
-        with mock.patch.dict(os.environ, {feedback.REPO_ENV: "owner/repo"}):
-            url = feedback.browser_url(REQUEST)
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        self.assertEqual(parsed.path, "/owner/repo/issues/new")
-        self.assertEqual(query["title"], ["Export the reference frame"])
-        self.assertEqual(query["labels"], ["feature-request,enrich"])
+        with self.assertRaises(feedback.FeedbackError):
+            feedback.validate(feedback.FeatureRequest(title="  ", description="d"))
+        feedback.validate(feedback.FeatureRequest(title="t", description="\n "))
 
 
 class SubmitTests(unittest.TestCase):

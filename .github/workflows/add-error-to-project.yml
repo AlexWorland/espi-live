@@ -27,6 +27,8 @@ jobs:
         run: |
           # The roadmap is small; 100 items cover it. Re-adding the label after a
           # removal must not duplicate the card.
+          # GraphQL variable names must reach the server literally.
+          # shellcheck disable=SC2016
           ids="$(gh api graphql -F project_id="$PROJECT_ID" -f query='
               query($project_id: ID!) {
                 node(id: $project_id) {
@@ -38,6 +40,7 @@ jobs:
           if printf '%s\n' "$ids" | grep -qxF "$ISSUE_ID"; then
             echo "The issue is already in the project."
           else
+            # shellcheck disable=SC2016
             gh api graphql -F project_id="$PROJECT_ID" -F content_id="$ISSUE_ID" \
               -f query='
                 mutation($project_id: ID!, $content_id: ID!) {

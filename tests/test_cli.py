@@ -16,7 +16,7 @@ import warnings
 from unittest import mock
 
 import espi_live
-from espi_live import camera, capture, cli, updater
+from espi_live import camera, capture, cli, feedback, updater
 
 
 @contextlib.contextmanager
@@ -157,7 +157,8 @@ class SelfCheckTests(unittest.TestCase):
         Returns: None.
         """
         fake = types.SimpleNamespace(__file__="/sdk/PySpin.py")
-        with mock.patch.object(cli.importlib, "import_module"), \
+        with mock.patch.object(feedback, "feedback_token", return_value=""), \
+                mock.patch.object(cli.importlib, "import_module"), \
                 mock.patch.object(camera, "load_pyspin", return_value=fake), \
                 mock.patch.object(updater, "describe_build",
                                   return_value="build 7"):
@@ -168,6 +169,26 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIn("Self-check OK", out.getvalue())
         self.assertIn("PySpin /sdk/PySpin.py", out.getvalue())
         self.assertIn("build 7", out.getvalue())
+        self.assertIn("feedback token: absent", out.getvalue())
+
+    def test_reports_feedback_token_present_without_printing_it(self):
+        """A baked-in feedback token is reported as present, never as text.
+
+        Args: None.
+        Returns: None.
+        """
+        secret = "github_pat_test_value_not_printed"
+        with mock.patch.object(feedback, "feedback_token", return_value=secret), \
+                mock.patch.object(cli.importlib, "import_module"), \
+                mock.patch.object(camera, "load_pyspin",
+                                  side_effect=ImportError("no PySpin")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                status = cli.self_check()
+        text = out.getvalue()
+        self.assertEqual(status, 0)
+        self.assertIn("feedback token: present", text)
+        self.assertNotIn(secret, text)
 
     def test_reports_demo_only_when_pyspin_missing(self):
         """A missing PySpin is not a failure; the check says demo only.

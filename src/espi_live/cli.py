@@ -69,7 +69,8 @@ def self_check():
     """Import every bundled module a run needs, without opening a window.
 
     Used by CI to catch a frozen binary that is missing Qt, OpenCV or NumPy
-    pieces, which --help alone would not load.
+    pieces, which --help alone would not load. The report says whether a
+    feedback token is present and does not print the token.
 
     Args: None.
     Returns: 0 when everything imports, 1 otherwise (the error is printed).
@@ -90,11 +91,14 @@ def self_check():
     except ImportError:
         pyspin = "PySpin not bundled (demo only)"
     from espi_live.capture import load_enumerator  # imports only; lists nothing
+    from espi_live.feedback import feedback_token
     video = ("Video devices: cv2_enumerate_cameras "
              + ("available" if load_enumerator() else "not installed"))
+    # Present or absent only: the token itself stays out of the log.
+    token = "present" if feedback_token() else "absent"
     print(f"Self-check OK: Python {sys.version.split()[0]}, NumPy {numpy.__version__}, "
           f"OpenCV {cv2.__version__}, PySide6 {PySide6.__version__}; {pyspin}; "
-          f"{video}; {updater.describe_build()}")
+          f"{video}; {updater.describe_build()}; feedback token: {token}")
     return 0
 
 
