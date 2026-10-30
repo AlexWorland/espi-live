@@ -1,10 +1,10 @@
 name: Enrich feature request
 
-# The app's "Request feature" button files an issue labelled "enrich" when the
-# user ticks "Enrich with GitHub Copilot" (a maintainer can also add the label
-# to any issue by hand). GitHub Copilot rewrites the request into a structured
-# spec, which is appended below the original text; the label is then swapped
-# for "enriched" so it runs once.
+# Every issue filed by the app's "Request feature" button is labelled "enrich"
+# (a maintainer can also add the label to any issue by hand). GitHub Copilot
+# writes a structured spec from the title when the description is empty, and
+# expands the user's text when it is not. The spec is appended below the
+# original text; the label is then swapped for "enriched" so it runs once.
 #
 # Needs the COPILOT_PAT secret: a fine-grained personal access token from an
 # account with a Copilot plan, with the "Copilot Requests" permission. Without
@@ -58,7 +58,7 @@ jobs:
           BODY: ${{ github.event.issue.body }}
         run: |
           {
-            echo "Rewrite this feature request."
+            echo "Enrich this feature request."
             echo
             echo "<<<REQUEST"
             echo "Title: $TITLE"
