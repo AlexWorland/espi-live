@@ -11,6 +11,7 @@
 
 - There is no enrichment checkbox. Every request is labelled `enrich`. A blank description is filed from the title, and Copilot writes the spec; a description you write is kept and expanded.
 - **Submit** files the issue from the app. When it is sent, the dialog says the request was submitted. A failed send can be edited and retried. The app does not open a browser page for it.
+- A published build always contains the feedback token. The release build stops if that secret is missing, and `--check` says whether this copy has one. It never prints the token.
 
 ## 2026-10-30 — Hover tooltips on every control
 
