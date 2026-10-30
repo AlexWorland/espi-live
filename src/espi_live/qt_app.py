@@ -16,18 +16,23 @@ acquiring, processing and recording in the background. Every control acts on
 the displayed camera's own engine and settings.
 """
 
+import faulthandler
 import html
+import logging
 import math
+import os
+import queue
 import random
 import sys
 import textwrap
 import time
+import traceback
 from datetime import datetime
 
 import cv2
 import numpy as np
-from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QSettings, QSize, Qt, QTimer,
-                            QUrl, Signal)
+from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QSettings, QSize,
+                            Qt, QtMsgType, QTimer, QUrl, Signal, qInstallMessageHandler)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFontMetrics, QIcon, QImage,
                            QKeySequence, QOffscreenSurface, QOpenGLContext, QPainter,
                            QPainterPath, QPalette, QPen, QPixmap, QSurfaceFormat, QVector4D)
@@ -41,9 +46,9 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QPlainTextEdit, QProxyStyle, QPushButton, QSizePolicy, QSlider,
                                QStyle, QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
 
-from espi_live import camera_reports, codex, feedback, source_code, updater
+from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
-from espi_live.logs import AppLog
+from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
                                   VIEW_MODES, palette_rgb_table)
 
@@ -112,6 +117,124 @@ TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
 DEFAULT_LIMITS = {"ExposureTime": (0, 50000), "Gain": (0, 30),
                   "AcquisitionFrameRate": (0, 60)}
+REPORT_STATUS_MS = 60000  # how long an error-report message stays in the status bar
+QT_LEVELS = {QtMsgType.QtDebugMsg: logging.DEBUG, QtMsgType.QtInfoMsg: logging.INFO,
+             QtMsgType.QtWarningMsg: logging.WARNING, QtMsgType.QtCriticalMsg: logging.ERROR,
+             QtMsgType.QtFatalMsg: logging.ERROR}
+qt_logger = logging.getLogger("espi_live.qt")
+
+
+def handle_qt_message(kind, context, message):
+    """Log a Qt message; report critical and fatal ones (qInstallMessageHandler).
+
+    Qt calls this from any thread, so it only logs and captures.
+
+    Args: kind is the QtMsgType; context is the QMessageLogContext; message
+        is the text.
+    Returns: None.
+    """
+    category = getattr(context, "category", "") or ""
+    where = f"Qt ({category})" if category not in ("", "default") else "Qt"
+    qt_logger.log(QT_LEVELS.get(kind, logging.WARNING), f"{where}: {message}")
+    if kind not in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+        return
+    fatal = kind == QtMsgType.QtFatalMsg
+    reporter = error_reports.current_reporter()
+    report = None
+    if reporter is not None:
+        stack = traceback.extract_stack()[:-1]
+        report = reporter.capture_message("fatal" if fatal else "critical", message,
+                                 [(frame.filename, frame.name) for frame in stack],
+                                 "".join(traceback.format_list(stack)))
+    if fatal and report is not None:
+        faulthandler.disable()  # Qt aborts next; this report already covers it
+
+
+def setting_on(value):
+    """Read a QSettings flag, which some backends store as text.
+
+    Args: value is what QSettings returned.
+    Returns: False for False, 0, "false" or "0"; otherwise True.
+    """
+    return str(value).strip().lower() not in ("false", "0")
+
+
+class Reporting:
+    """This run's error reporter, Python hooks, Qt message handler and worker."""
+
+    def __init__(self, log, send_reports=True):
+        """Create the reporter from the switches; nothing is hooked until start().
+
+        Args: log is the AppLog; send_reports is False for --no-error-reports.
+        Returns: None.
+        """
+        self.cli_off = not send_reports
+        settings = QSettings("ESPI", "espi_live")
+        self.chosen = setting_on(settings.value(error_reports.SETTING_KEY, True))
+        enabled, self.forced = error_reports.resolve_enabled(self.cli_off, self.chosen)
+        self.reporter = error_reports.ErrorReporter(enabled, log_tail=log.recent_lines,
+                                                    uptime=log.uptime)
+        self.reporter.update_context(front_end="Qt")
+        self.worker = error_reports.ErrorReportWorker(self.reporter)
+        self.reporter.listeners.append(self.worker.kick)
+        self.hooks = None
+        self.previous_handler = None
+
+    def start(self, log):
+        """Install the hooks, report earlier native crashes and start sending.
+
+        Args: log is the AppLog.
+        Returns: None.
+        """
+        self.hooks = error_reports.install_hooks(self.reporter)
+        self.previous_handler = qInstallMessageHandler(handle_qt_message)
+        log.info("Error reports: " + ("on" if self.reporter.enabled else
+                                      f"off ({self.forced or 'turned off in the Help menu'})"))
+        self.reporter.collect_native_crashes(log.crash_path)
+        self.worker.start()
+
+    def choose(self, on, log):
+        """Apply the Help menu choice.
+
+        Args: on is the new choice; log is the AppLog.
+        Returns: None.
+        """
+        self.chosen = on
+        QSettings("ESPI", "espi_live").setValue(error_reports.SETTING_KEY, on)
+        self.reporter.enabled, self.forced = error_reports.resolve_enabled(self.cli_off, on)
+        log.info(f"Error reports: {'on' if self.reporter.enabled else 'off'}")
+        if self.reporter.enabled:
+            self.worker.kick()
+
+    def stop(self):
+        """Restore the hooks and the Qt message handler and stop the worker.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.hooks is not None:
+            qInstallMessageHandler(self.previous_handler)
+            self.hooks.uninstall()
+            self.hooks = None
+        self.worker.stop()
+
+
+def describe_session(channels, display):
+    """Summarize what this run uses, for the log.
+
+    Args: channels is the list of Channel; display describes the image view.
+    Returns: One line.
+    """
+    if all(channel.demo for channel in channels):
+        source = f"dummy mode, {len(channels)} synthetic camera(s)"
+    else:
+        source = f"{len(channels)} camera(s): " + ", ".join(
+            channel.label + (" (processing)" if channel.active else "") for channel in channels)
+    spinnaker = camera.spinnaker_version()
+    return (f"Session: {source}; display {display}"
+            + (f"; Spinnaker {spinnaker}" if spinnaker else ""))
+
+
 # Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
 FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 # Status-bar actions. palette() follows the light or dark theme at startup.
@@ -1251,16 +1374,17 @@ class FixedLabel(QLabel):
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
 
-    def __init__(self, channels, log, use_gl, check_updates=True):
+    def __init__(self, channels, log, use_gl, check_updates=True, reporting=None):
         """Build the window and start polling the engines.
 
         Args: channels is a list of Channel, at least one of them active
             (opened, not yet started); the first active one is displayed;
             log is the AppLog; use_gl selects the GPU view instead of the CPU
             fallback; check_updates looks for a newer prebuilt binary at
-            startup and again every few hours, and downloads this build's
-            source code if it is missing (otherwise that waits for Open in
-            Codex). False skips every update check, including the later ones.
+            startup and again every few hours; reporting is the run's
+            Reporting, or None; and the window downloads this build's source
+            code if it is missing (otherwise that waits for Open in Codex).
+            False skips every update check, including the later ones.
         Returns: None.
         """
         super().__init__()
@@ -1269,6 +1393,9 @@ class MainWindow(QMainWindow):
         self.channels = list(channels)
         self.current = next(channel for channel in self.channels if channel.active)
         self.log = log
+        self.reporting = reporting
+        self.report_outcomes = {}  # fingerprint -> latest error_reports.Outcome
+        self.fatal_boxes = {}  # fingerprint -> (open "ESPI stopped" box, its message)
         self.closing = False
         self.updates = updater.UpdateWorker()
         self.update_info = None
@@ -1832,6 +1959,15 @@ class MainWindow(QMainWindow):
         """
         bar = self.statusBar()
         bar.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+        self.error_report_label = QLabel()  # error-report results, with the issue link
+        self.error_report_label.setTextFormat(Qt.RichText)
+        self.error_report_label.setOpenExternalLinks(True)
+        self.error_report_label.setVisible(False)
+        self.error_report_label.setStyleSheet("color:#b00020;")
+        bar.addWidget(self.error_report_label)
+        self.error_report_timer = QTimer(self)
+        self.error_report_timer.setSingleShot(True)
+        self.error_report_timer.timeout.connect(self.error_report_label.hide)
         self.hint_label = QLabel()  # left side; elides first when space runs out
         self.hint_label.setMinimumWidth(0)
         self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -1979,6 +2115,7 @@ class MainWindow(QMainWindow):
                     "Q or Esc: quit.")
 
         help_menu = self.menuBar().addMenu("&Help")
+        help_menu.setToolTipsVisible(True)
         check = help_menu.addAction("Check for updates…")
         set_tooltip(check, "Check GitHub for a newer build of ESPI live.")
         check.triggered.connect(self._check_updates_now)
@@ -1989,6 +2126,14 @@ class MainWindow(QMainWindow):
         set_tooltip(ask, "Ask OpenAI's Codex how ESPI live works, using this build's "
                     "real source code.")
         ask.triggered.connect(self._open_codex)
+        help_menu.addSeparator()
+        self.reports_action = help_menu.addAction("Send error reports automatically")
+        self.reports_action.setCheckable(True)
+        self._sync_reports_action()
+        self.reports_action.toggled.connect(self._choose_error_reports)
+        logs = help_menu.addAction("Open log folder")
+        logs.triggered.connect(self._open_log_folder)
+        help_menu.addSeparator()
         about = help_menu.addAction("About ESPI live")
         set_tooltip(about, "Show the version and build of this copy.")
         about.triggered.connect(lambda: QMessageBox.about(
@@ -2458,11 +2603,169 @@ class MainWindow(QMainWindow):
             self.pixel_status.setText("")
         for channel, state in zip(self.channels, self.camera_states):
             state.setText(self._camera_state(channel))
+        self.log.watchdog_tick()
         self._handle_events()
         self._handle_update_events()
         self._handle_feedback_events()
         self._handle_report_events()
         self._handle_source_events()
+        self._update_report_context()
+        self._handle_error_report_events()
+
+    # ----- error reports -------------------------------------------------------
+
+    def _sync_reports_action(self):
+        """Show the error-report choice and whether a switch forces it off.
+
+        Args: None.
+        Returns: None.
+        """
+        action = self.reports_action
+        action.blockSignals(True)
+        if self.reporting is None:
+            action.setChecked(False)
+            action.setEnabled(False)
+        else:
+            action.setChecked(self.reporting.reporter.enabled)
+            action.setEnabled(self.reporting.forced is None)
+            action.setToolTip(
+                f"Off: {self.reporting.forced}" if self.reporting.forced else
+                "Unexpected errors are filed as public GitHub issues, without your "
+                "user name, folders or camera serial numbers")
+        action.blockSignals(False)
+
+    def _choose_error_reports(self, on):
+        """Turn automatic error reports on or off from the Help menu.
+
+        Args: on is the new state.
+        Returns: None.
+        """
+        self.reporting.choose(on, self.log)
+        self._sync_reports_action()
+
+    def _open_log_folder(self):
+        """Open the folder that holds the run logs.
+
+        Args: None.
+        Returns: None.
+        """
+        try:
+            folder = (os.path.dirname(self.log.path) if self.log.path
+                      else paths.output_folder("logs"))
+        except OSError as exc:
+            QMessageBox.warning(self, "Log folder", f"The log folder is unavailable: {exc}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(folder)):
+            QMessageBox.information(self, "Log folder", f"The logs are in {folder}")
+
+    def _update_report_context(self):
+        """Tell the reporter what this session shows, for later reports.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.reporting is None:
+            return
+        identity = self.current.identity
+        if self.current.demo:
+            source = "dummy mode"
+        else:
+            source = "camera " + (identity.short_name() if identity
+                                  else self.current.info.model or "(model unknown)")
+        serials = [channel.info.serial for channel in self.channels]
+        serials += [getattr(channel.identity, "serial", "") for channel in self.channels
+                    if getattr(channel.identity, "serial", "")]
+        self.reporting.reporter.update_context(
+            source=source, cameras=len(self.channels), serials=serials,
+            spinnaker=camera.spinnaker_version())
+
+    def _handle_error_report_events(self):
+        """Show what happened to error reports: in an open "ESPI stopped"
+        dialog for that error, otherwise in the status bar.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.reporting is None:
+            return
+        while True:
+            try:
+                _, outcome = self.reporting.worker.events.get_nowait()
+            except queue.Empty:
+                return
+            self.report_outcomes[outcome.fingerprint] = outcome
+            if outcome.fingerprint in self.fatal_boxes:
+                box, message = self.fatal_boxes[outcome.fingerprint]
+                box.setText(self._fatal_text(message, outcome.fingerprint))
+            else:
+                self._show_report_status(outcome)
+
+    @staticmethod
+    def _outcome_html(outcome):
+        """Describe an outcome as rich text with the issue link.
+
+        Args: outcome is an error_reports.Outcome, or None while sending.
+        Returns: HTML text.
+        """
+        text = html.escape(error_reports.outcome_text(outcome))
+        if outcome is None or not outcome.url:
+            return text
+        url = html.escape(outcome.url, quote=True)
+        if outcome.kind == "browser":
+            return f'Not sent automatically: <a href="{url}">Report in browser…</a>'
+        if outcome.number:
+            number = f"#{outcome.number}"
+            return text.replace(number, f'<a href="{url}">{number}</a>', 1)
+        return text
+
+    def _fatal_text(self, message, fingerprint):
+        """Build the "ESPI stopped" text, with the report's state when there is one.
+
+        Args: message is the error; fingerprint is its error ID or None.
+        Returns: HTML text.
+        """
+        text = html.escape(message)
+        if fingerprint is None:
+            return text
+        outcome = self.report_outcomes.get(fingerprint)
+        return (f"{text}<br><br>{self._outcome_html(outcome)}"
+                f"<br><small>Error ID {html.escape(fingerprint)}</small>")
+
+    def _show_fatal(self, message, fingerprint):
+        """Show the "ESPI stopped" dialog; its report line updates while it is open.
+
+        Args: message is the error; fingerprint is its error ID or None.
+        Returns: None.
+        """
+        box = QMessageBox(QMessageBox.Critical, "ESPI stopped",
+                          self._fatal_text(message, fingerprint), parent=self)
+        box.setTextFormat(Qt.RichText)
+        box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        if fingerprint is not None:
+            self.fatal_boxes[fingerprint] = (box, message)
+        try:
+            box.exec()
+        finally:
+            self.fatal_boxes.pop(fingerprint, None)
+
+    def _show_report_status(self, outcome):
+        """Put a report outcome in the status bar for a while (no dialog).
+
+        Args: outcome is an error_reports.Outcome.
+        Returns: None.
+        """
+        if outcome.kind == "declined":
+            return  # the developers chose not to fix it; the log has the details
+        if outcome.kind == "fixed":
+            text = "An error occurred that a newer build fixes: use Check for updates"
+        elif outcome.kind == "saved":
+            text = "An unexpected error was saved; it will be reported next time"
+        else:
+            text = f"Unexpected error: {self._outcome_html(outcome)}"
+        self.error_report_label.setText(text)
+        self.error_report_label.setToolTip(f"Error ID {outcome.fingerprint}")
+        self.error_report_label.setVisible(True)
+        self.error_report_timer.start(REPORT_STATUS_MS)
 
     # ----- feature requests --------------------------------------------------
 
@@ -2493,7 +2796,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 kind, (request, payload) = self.feedback.events.get_nowait()
-            except Exception:
+            except queue.Empty:
                 return
             self.feature_button.setEnabled(True)
             self.feature_button.setText("Request feature")
@@ -2503,7 +2806,7 @@ class MainWindow(QMainWindow):
                                   "Your request was submitted.", parent=self)
                 box.exec()
             else:
-                self.log.write(f"Feature request failed: {payload}")
+                self.log.warning(f"Feature request failed: {payload}")
                 box = QMessageBox(QMessageBox.Warning, "Request not sent",
                                   f"The request could not be sent: {payload}.", parent=self)
                 retry = box.addButton("Edit and retry", QMessageBox.AcceptRole)
@@ -2746,7 +3049,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 kind, payload = self.updates.events.get_nowait()
-            except Exception:
+            except queue.Empty:
                 break
             manual, self.update_manual = self.update_manual, False
             if kind == "checked" and payload is None:
@@ -2759,7 +3062,7 @@ class MainWindow(QMainWindow):
                 if manual:
                     self._update_clicked()
             elif kind == "check_failed":
-                self.log.write(f"Update check failed: {payload}")
+                self.log.warning(f"Update check failed: {payload}")
                 if manual:
                     QMessageBox.warning(self, "Updates", f"Update check failed: {payload}")
             elif kind == "downloaded":
@@ -2772,7 +3075,7 @@ class MainWindow(QMainWindow):
                 self.update_button.setEnabled(True)
                 self._offer_restart()
             elif kind == "download_failed":
-                self.log.write(f"Update download failed: {payload}")
+                self.log.warning(f"Update download failed: {payload}")
                 self._show_available_update(self.update_info)
                 QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
         self._sync_check_button()
@@ -2802,7 +3105,7 @@ class MainWindow(QMainWindow):
             while engine is not None and channel.engine is engine:
                 try:
                     kind, payload = engine.events.get_nowait()
-                except Exception:
+                except queue.Empty:
                     break
                 self._handle_event(channel, kind, payload)
 
@@ -2852,7 +3155,8 @@ class MainWindow(QMainWindow):
                                 f"Could not start {channel.label}: {payload}")
             self._channel_ended(channel)
         elif kind == "fatal":
-            QMessageBox.critical(self, "ESPI stopped", f"{name}{payload}")
+            message, fingerprint = payload
+            self._show_fatal(f"{name}{message}", fingerprint)
             self._channel_ended(channel)
         elif kind == "stopped" and not self.closing:
             self._channel_ended(channel)
@@ -2922,37 +3226,44 @@ def finish_update(window, log):
             updater.relaunch(sys.argv[1:])
             log.write("Restarting into the new build")
     except (updater.UpdateError, OSError) as exc:
-        log.write(f"Update could not be installed: {exc}")
+        log.warning(f"Update could not be installed: {exc}")
 
 
-def run(force_demo=False, check_updates=True, demo_cameras=1):
+def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
+        send_reports=True):
     """Start the Qt front end.
 
     Args: force_demo skips camera detection and starts synthetic video;
         check_updates looks for a newer prebuilt binary (at startup and
         every few hours) and downloads this build's source code (if missing)
         at startup;
-        demo_cameras is how many synthetic cameras demo mode simulates.
+        demo_cameras is how many synthetic cameras demo mode simulates;
+        log_level is the --log-level name or None; send_reports is False
+        for --no-error-reports.
     Returns: The process exit code.
     """
     request_gl_format()
     QApplication.setApplicationName("ESPI live")
     QApplication.setOrganizationName("ESPI")
     app = QApplication.instance() or QApplication(sys.argv)
-    log = AppLog()
+    log = AppLog(log_level)
     path = log.start()
+    for line in header_lines("Qt", log.level):
+        log.info(line)
+    reporting = Reporting(log, send_reports)
     cleanup = updater.StartupCleanup(log.write)
     window = None
     channels = []
     try:
         if path:
             log.write(f"Log file: {path}")
+        reporting.start(log)
         cleanup.start()
         if not force_demo:
             try:
                 channels = open_camera_channels(log)
             except Exception as exc:
-                log.write(f"Camera startup unavailable: {exc}")
+                error_reports.caught(log, exc, "camera_startup", "Camera startup unavailable")
                 answer = QMessageBox.question(
                     None, "No camera detected",
                     "No FLIR camera or recognised capture adapter is available. "
@@ -2963,14 +3274,19 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
         if not channels:
             channels = demo_channels(log, demo_cameras)
         use_gl, description = opengl_available()
-        log.write(f"Display: GPU ({description})" if use_gl else
-                  f"Display: CPU fallback ({description})")
-        window = MainWindow(channels, log, use_gl, check_updates)
+        display = f"GPU ({description})" if use_gl else f"CPU fallback ({description})"
+        log.write(f"Display: {display}")
+        log.info(describe_session(channels, display))
+        reporting.reporter.update_context(display=display)
+        window = MainWindow(channels, log, use_gl, check_updates, reporting)
         window.show()
         for channel in channels:
             if channel.active:
                 channel.engine.start()
         return app.exec()
+    except Exception as exc:  # the hooks are restored below, before Python's own hook runs
+        error_reports.caught(log, exc, "main_thread", "ESPI live stopped", fatal=True)
+        raise
     finally:
         if window is None:
             for channel in channels:
@@ -2979,4 +3295,5 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
                     channel.engine.wait(8.0)
         cleanup.stop()
         finish_update(window, log)
+        reporting.stop()
         log.close()

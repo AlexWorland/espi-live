@@ -84,6 +84,24 @@ class PrefixedLogTests(unittest.TestCase):
         prefixed.write("b")
         self.assertEqual(log.lines, ["[1] a", "b"])
 
+    def test_level_methods_prefix_and_keep_the_level(self):
+        """debug, info, warning, error and exception all gain the prefix.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        prefixed = channels.PrefixedLog(log, "[1] ")
+        prefixed.debug("d")
+        prefixed.info("i")
+        prefixed.warning("w")
+        prefixed.error("e", exc_info=True)
+        prefixed.exception("x")
+        self.assertEqual([level for level, _, _ in log.records],
+                         ["DEBUG", "INFO", "WARNING", "ERROR", "ERROR"])
+        self.assertEqual(log.lines, ["[1] d", "[1] i", "[1] w", "[1] e", "[1] x"])
+        self.assertEqual(log.records[3][2], True)
+
 
 class ChannelTests(ChannelTestCase):
     """Channel state, start/stop and settings."""
@@ -307,3 +325,41 @@ class StartupHelperTests(ChannelTestCase):
         self.channels.extend(found)
         self.assertEqual([c.active for c in found], [True, False, False])
         self.assertTrue(found[0].engine.demo)
+
+
+class ReportingStartupTests(ChannelTestCase):
+    """Camera identifiers reach reporting before startup can fail."""
+
+    def test_startup_failure_scrubs_discovered_serials(self):
+        """An exception while opening cameras cannot publish enumeration serials.
+
+        Args: None.
+        Returns: None.
+        """
+        from espi_live import error_reports
+        infos = [CameraInfo('PRIVATE-SERIAL-111', 'Blackfly'),
+                 CameraInfo('PRIVATE-SERIAL-222', 'Blackfly')]
+        reporter = error_reports.ErrorReporter(
+            enabled=True, folder=paths.output_folder('logs'), log_tail=lambda: self.log.lines)
+        with mock.patch.object(error_reports, '_reporter', reporter), \
+                mock.patch.object(channels.sources, 'detect_cameras', return_value=infos), \
+                mock.patch.object(channels.Channel, 'open', side_effect=ValueError('startup bug')):
+            with self.assertRaises(ValueError):
+                channels.open_camera_channels(self.log)
+        self.assertEqual(len(reporter.reports), 1)
+        body = next(iter(reporter.reports.values())).body
+        self.assertIn('<serial>', body)
+        for info in infos:
+            self.assertNotIn(info.serial, body)
+
+    def test_opened_identity_is_registered_before_logging(self):
+        """Successful fake-camera startup registers the attached identity too.
+
+        Args: None.
+        Returns: None.
+        """
+        from espi_live import error_reports
+        reporter = error_reports.ErrorReporter()
+        with mock.patch.object(error_reports, '_reporter', reporter):
+            self.channels = channels.open_camera_channels(self.log)
+        self.assertEqual(set(reporter.context['serials']), {'1', '2'})

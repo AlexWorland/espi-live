@@ -13,7 +13,7 @@ and shows one of them.
 
 from dataclasses import asdict, replace
 
-from espi_live import sources
+from espi_live import error_reports, sources
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine, Settings
 
@@ -24,21 +24,63 @@ class PrefixedLog:
     def __init__(self, log, prefix):
         """Wrap a log.
 
-        Args: log has a write(message) method; prefix is prepended to each
-            message (for example "[12345678] "); the window changes it when
-            cameras are added or removed.
+        Args: log is an AppLog (write, debug, info, warning, error,
+            exception); prefix is prepended to each message (for example
+            "[12345678] "); the window changes it when cameras are added or
+            removed.
         Returns: None.
         """
         self.log = log
         self.prefix = prefix
 
     def write(self, message):
-        """Write one prefixed message.
+        """Write one prefixed INFO message.
 
         Args: message is the text to log.
         Returns: None.
         """
         self.log.write(f"{self.prefix}{message}")
+
+    def debug(self, message):
+        """Write one prefixed DEBUG message.
+
+        Args: message is the text to log.
+        Returns: None.
+        """
+        self.log.debug(f"{self.prefix}{message}")
+
+    def info(self, message):
+        """Write one prefixed INFO message.
+
+        Args: message is the text to log.
+        Returns: None.
+        """
+        self.log.info(f"{self.prefix}{message}")
+
+    def warning(self, message):
+        """Write one prefixed WARNING message.
+
+        Args: message is the text to log.
+        Returns: None.
+        """
+        self.log.warning(f"{self.prefix}{message}")
+
+    def error(self, message, exc_info=None):
+        """Write one prefixed ERROR message, optionally with a traceback.
+
+        Args: message is the text to log; exc_info is an exception, True for
+            the one being handled, or None.
+        Returns: None.
+        """
+        self.log.error(f"{self.prefix}{message}", exc_info=exc_info)
+
+    def exception(self, message):
+        """Write one prefixed ERROR message with the current exception's traceback.
+
+        Args: message is the text to log; call from an except block.
+        Returns: None.
+        """
+        self.log.exception(f"{self.prefix}{message}")
 
 
 def demo_infos(count):
@@ -63,6 +105,9 @@ class Channel:
         Returns: None.
         """
         self.info = info
+        reporter = error_reports.current_reporter()
+        if reporter is not None:
+            reporter.update_context(serials=[info.serial])
         self.demo_source = demo
         self.log = PrefixedLog(log, "")  # the window names cameras when several
         self.engine = engine
@@ -219,7 +264,7 @@ def open_camera_channels(log):
             channel.open()
             return channels
         except Exception as exc:
-            log.write(f"Could not open {channel.label}: {exc}")
+            error_reports.caught(log, exc, "camera_open", f"Could not open {channel.label}")
             error = exc
     raise error
 

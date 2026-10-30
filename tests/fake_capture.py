@@ -14,7 +14,7 @@ DSHOW_BASE = 700  # OpenCV encodes the backend in an index's high digits
 
 
 class ListLog:
-    """Collect log messages in memory."""
+    """Collect log messages in memory, with their levels."""
 
     def __init__(self):
         """Create an empty log.
@@ -23,14 +23,64 @@ class ListLog:
         Returns: None.
         """
         self.lines = []
+        self.records = []  # (level name, message, exc_info)
+
+    def _add(self, level, message, exc_info=None):
+        """Record one message.
+
+        Args: level is the level name; message the text; exc_info as logging takes it.
+        Returns: None.
+        """
+        self.lines.append(message)
+        self.records.append((level, message, exc_info))
 
     def write(self, message):
-        """Record one message.
+        """Record one INFO message.
 
         Args: message is the text to keep.
         Returns: None.
         """
-        self.lines.append(message)
+        self._add("INFO", message)
+
+    def debug(self, message):
+        """Record one DEBUG message.
+
+        Args: message is the text to keep.
+        Returns: None.
+        """
+        self._add("DEBUG", message)
+
+    def info(self, message):
+        """Record one INFO message.
+
+        Args: message is the text to keep.
+        Returns: None.
+        """
+        self._add("INFO", message)
+
+    def warning(self, message):
+        """Record one WARNING message.
+
+        Args: message is the text to keep.
+        Returns: None.
+        """
+        self._add("WARNING", message)
+
+    def error(self, message, exc_info=None):
+        """Record one ERROR message.
+
+        Args: message is the text to keep; exc_info is kept for assertions.
+        Returns: None.
+        """
+        self._add("ERROR", message, exc_info)
+
+    def exception(self, message):
+        """Record one ERROR message with the current exception.
+
+        Args: message is the text to keep.
+        Returns: None.
+        """
+        self._add("ERROR", message, True)
 
 
 def bgr_frame(width=720, height=480, value=100):

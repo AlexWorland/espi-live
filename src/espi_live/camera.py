@@ -32,6 +32,7 @@ _system_lock = threading.Lock()
 _system = None
 _system_module = None  # the PySpin module _system came from
 _system_users = 0
+_library_version = None  # Spinnaker version, read when the System is first created
 
 
 @dataclass(frozen=True)
@@ -80,14 +81,37 @@ def acquire_system():
     Args: None. PySpin must already be loaded.
     Returns: The System instance; pair every call with release_system().
     """
-    global _system, _system_module, _system_users
+    global _system, _system_module, _system_users, _library_version
     with _system_lock:
         if _system is None or _system_module is not PySpin:
             _system = PySpin.System.GetInstance()
             _system_module = PySpin
             _system_users = 0
+            _library_version = read_library_version(_system)
         _system_users += 1
         return _system
+
+
+def read_library_version(system):
+    """Read the Spinnaker SDK version from the System.
+
+    Args: system is the PySpin System instance.
+    Returns: A string such as "4.2.0.88", or None when it cannot be read.
+    """
+    try:
+        version = system.GetLibraryVersion()
+        return f"{version.major}.{version.minor}.{version.type}.{version.build}"
+    except Exception:  # an SDK without the call, or a failed read
+        return None
+
+
+def spinnaker_version():
+    """Name the Spinnaker SDK version this run loaded, for logs and reports.
+
+    Args: None.
+    Returns: The version string, or None before a camera was searched for.
+    """
+    return _library_version
 
 
 def release_system():
@@ -121,7 +145,7 @@ def camera_info(cam, index):
 def list_cameras(log):
     """Enumerate the connected FLIR cameras without opening them.
 
-    Args: log has a write(message) method for cleanup errors.
+    Args: log is an AppLog or PrefixedLog, for cleanup errors.
     Returns: A list of CameraInfo in SDK order. Raises ImportError without
         PySpin, or the SDK's error when enumeration fails.
     """
@@ -140,7 +164,7 @@ def list_cameras(log):
             try:
                 release_system()
             except Exception as exc:
-                log.write(f"System cleanup error: {exc}")
+                log.warning(f"System cleanup error: {exc}")
 
 
 def set_enum(nodemap, name, entry_name):
@@ -204,15 +228,17 @@ def readable_float_node(nodemap, name):
 def try_setting(log, nodemap, setter, name, value):
     """Apply a camera setting while reporting PySpin failures.
 
-    Args: log has a write(message) method; nodemap owns the node; setter is a
+    Args: log is an AppLog or PrefixedLog; nodemap owns the node; setter is a
         setting function; name and value identify the requested setting.
     Returns: None.
     """
     try:
-        if not setter(nodemap, name, value):
-            log.write(f"Camera setting unavailable or read-only: {name}")
+        if setter(nodemap, name, value):
+            log.debug(f"Camera setting {name} = {value}")
+        else:
+            log.warning(f"Camera setting unavailable or read-only: {name}")
     except PySpin.SpinnakerException as exc:
-        log.write(f"Could not set {name}: {exc}")
+        log.warning(f"Could not set {name}: {exc}")
 
 
 def read_string(nodemap, name):
@@ -300,7 +326,7 @@ class CameraSession:
     def __init__(self, log, serial=None):
         """Initialize empty camera handles for a connection attempt.
 
-        Args: log has a write(message) method for diagnostics; serial picks
+        Args: log is an AppLog or PrefixedLog for diagnostics; serial picks
             a camera by DeviceSerialNumber, or None for the first camera.
         Returns: None.
         """
@@ -434,13 +460,13 @@ class CameraSession:
             try:
                 self.cam.EndAcquisition()
             except Exception as exc:
-                self.log.write(f"EndAcquisition error: {exc}")
+                self.log.warning(f"EndAcquisition error: {exc}")
             self.acquiring = False
         if self.initialized:
             try:
                 self.cam.DeInit()
             except Exception as exc:
-                self.log.write(f"DeInit error: {exc}")
+                self.log.warning(f"DeInit error: {exc}")
             self.initialized = False
         self.cam = None
         self.nodemap = None
@@ -448,13 +474,13 @@ class CameraSession:
             try:
                 self.cam_list.Clear()
             except Exception as exc:
-                self.log.write(f"Camera-list cleanup error: {exc}")
+                self.log.warning(f"Camera-list cleanup error: {exc}")
             self.cam_list = None
         if self.system is not None:
             try:
                 release_system()
             except Exception as exc:
-                self.log.write(f"System cleanup error: {exc}")
+                self.log.warning(f"System cleanup error: {exc}")
             self.system = None
 
 
