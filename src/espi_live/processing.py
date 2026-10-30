@@ -27,6 +27,10 @@ MAX_MEDIAN_WIDTH = 5
 # Camera-feed noise reduction keeps at most this share of the history per
 # frame (about a 20-frame memory), so the live image never freezes.
 MAX_DENOISE_STRENGTH = 0.95
+# The slider runs from 0 (off) to this. The number is how far it is turned
+# up, not the history weight: denoise_strength spreads the 20-frame memory
+# across the whole travel, so the low end is not a dead zone.
+MAX_DENOISE_PERCENT = 95
 
 
 def normalize_min_max(image):
@@ -97,6 +101,33 @@ def single_field(frame):
     Returns: A new array of the same shape built from the even rows.
     """
     return np.repeat(frame[0::2], 2, axis=0)[:frame.shape[0]]
+
+
+def denoise_strength(percent):
+    """Map the Noise reduction slider onto a history weight.
+
+    Reading the slider as a history weight (20 meaning "keep 20% of the
+    previous frame") leaves almost the whole travel invisible: 20 is only
+    about one frame of memory, so a still picture barely changes until the
+    slider is near the top. The slider instead means how far the control is
+    turned up. 0 is off, and each step adds the same amount of memory, from
+    one frame up to the 20-frame cap of MAX_DENOISE_STRENGTH. 10 is about
+    three frames. Speckle is unchanged either way; only frame-to-frame
+    flicker and motion trails change.
+
+    Args: percent is the slider value. 0 and below are off; values at or
+        above MAX_DENOISE_PERCENT stay at the cap.
+    Returns: The history weight for ESPIProcessor.denoise, from 0 to
+        MAX_DENOISE_STRENGTH.
+    """
+    if percent <= 0:
+        return 0.0
+    if percent >= MAX_DENOISE_PERCENT:
+        return MAX_DENOISE_STRENGTH
+    fraction = float(percent) / MAX_DENOISE_PERCENT
+    tau_max = 1.0 / (1.0 - MAX_DENOISE_STRENGTH)
+    tau = 1.0 + fraction * (tau_max - 1.0)
+    return 1.0 - 1.0 / tau
 
 
 def gamma_lut(gamma):

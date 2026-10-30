@@ -171,6 +171,39 @@ class EngineDemoTests(unittest.TestCase):
         self.assertEqual(int(packet.image[:20, :].min()), 0)  # banner background
         self.assertEqual(int(packet.image[:42, :].max()), 255)  # banner text
 
+    def test_gamma_reaches_every_view_and_changes_midtones(self):
+        """Raw, Previous and Reference publish the display gamma.
+
+        Raw stays gray even when a color palette is selected. A gamma other
+        than 1.0 changes rendered pixels that are not already black or white.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        for mode in ("Raw", "Previous", "Reference"):
+            self.engine.update_settings(mode=mode, gamma=0.5, clahe=False,
+                                        palette="Turbo", scale_range=True)
+            if mode == "Reference":
+                self.engine.request("reference")
+
+            def ready(mode=mode):
+                """True once this view carries gamma and a mid-tone pixel.
+
+                Args: mode is the view this iteration is waiting for.
+                Returns: True when the newest packet matches.
+                """
+                packet = self.engine.latest_packet()
+                return (packet is not None and packet.mode == mode and
+                        packet.gamma == 0.5 and
+                        np.any((packet.image > 0) & (packet.image < 255)))
+
+            self.assertTrue(wait_until(ready))
+            packet = self.engine.latest_packet()
+            self.assertEqual(packet.palette, "Gray" if mode == "Raw" else "Turbo")
+            plain = apply_palette(packet.image, packet.palette, 1.0)
+            self.assertFalse(np.array_equal(packet.render(), plain))
+
     def test_noise_reduction_filters_the_raw_feed(self):
         """Noise reduction runs on camera frames, so Raw view uses it too.
 
@@ -182,6 +215,75 @@ class EngineDemoTests(unittest.TestCase):
             self.engine.latest_packet() is not None and
             self.engine.latest_packet().sequence > 3)))
         self.assertEqual(self.engine.latest_packet().mode, "Raw")
+
+    def test_noise_reduction_changes_raw_previous_and_reference(self):
+        """The mapped slider changes the published pixels in every view.
+
+        The source alternates black and white. With the slider off, Raw is
+        one of those and the differences are 255. Turned up, Raw moves toward
+        gray and both differences shrink. Stretch is off so it cannot repaint
+        a quiet difference at full brightness.
+
+        Args: None.
+        Returns: None.
+        """
+        shape = (80, 60)
+        state = {"n": 0}
+
+        def next_frame(exposure_us, gain_db, now):
+            """Return the next black or white frame.
+
+            Args: exposure_us, gain_db and now are the demo source arguments.
+            Returns: A Mono8 frame.
+            """
+            state["n"] += 1
+            value = 0 if state["n"] % 2 == 0 else 255
+            return np.full(shape, value, dtype=np.uint8)
+
+        self.engine.demo_source.next_frame = next_frame
+        self.engine.update_settings(
+            fps=120, scale_range=False, clahe=False, smoothing=0, average=1,
+            rolling=False, invert=False, palette="Gray", mode="Raw",
+            noise_reduction=0)
+
+        def body():
+            """Read one pixel below the dummy-mode banner.
+
+            Args: None.
+            Returns: The pixel value, or None before a frame exists.
+            """
+            packet = self.engine.latest_packet()
+            if packet is None:
+                return None
+            return packet, int(packet.image[60, 30])
+
+        def wait_pixel(mode, percent, predicate, frames=40):
+            """Wait until a newer frame in this view meets the predicate.
+
+            Args: mode and percent are applied first; predicate takes the
+                pixel; frames is how many new frames to require.
+            Returns: True when the condition held.
+            """
+            self.engine.update_settings(mode=mode, noise_reduction=percent)
+            current = body()
+            start = 0 if current is None else current[0].sequence
+            return wait_until(lambda: (
+                (got := body()) is not None and got[0].mode == mode and
+                got[0].sequence >= start + frames and predicate(got[1])))
+
+        self.assertTrue(wait_pixel("Raw", 0, lambda v: v in (0, 255)))
+        self.assertTrue(wait_pixel("Raw", 10, lambda v: 40 < v < 220))
+        self.assertTrue(wait_pixel(
+            "Raw", 95, lambda v: abs(v - 127) < abs(153 - 127), frames=80))
+        self.assertTrue(wait_pixel("Previous", 0, lambda v: v == 255))
+        self.assertTrue(wait_pixel("Previous", 10, lambda v: v < 80))
+        self.assertTrue(wait_pixel("Previous", 95, lambda v: v < 20, frames=80))
+        self.assertTrue(wait_pixel("Reference", 0, lambda v: v in (0, 255)))
+        self.engine.request("reference")
+        self.assertTrue(wait_until(lambda: any(
+            "Captured reference" in line for line in self.log.lines)))
+        self.assertTrue(wait_pixel("Reference", 0, lambda v: v in (0, 255), frames=8))
+        self.assertTrue(wait_pixel("Reference", 95, lambda v: 80 < v < 200, frames=80))
 
     def test_measurement_save_and_recording(self):
         """Averaged differences publish, a save writes PNG+notes, AVI records.
@@ -220,6 +322,20 @@ class EngineDemoTests(unittest.TestCase):
         avi = os.path.join(recordings, os.listdir(recordings)[0])
         self.assertTrue(os.path.basename(avi).startswith("dummy_espi_previous_"))
         self.assertGreater(os.path.getsize(avi), 1000)
+
+    def test_save_pending_until_the_worker_writes_the_frame(self):
+        """A queued save counts as pending until the worker finishes it.
+
+        Args: None.
+        Returns: None.
+        """
+        engine = Engine(self.log)
+        self.assertFalse(engine.save_pending())
+        engine.request("save", title="", notes="")
+        self.assertTrue(engine.save_pending())
+        engine._handle_actions(ESPIProcessor(), None)
+        self.assertFalse(engine.save_pending())
+        self.assertTrue(any("No current display frame" in line for line in self.log.lines))
 
     def test_reference_mode_and_actions(self):
         """Reference capture and resets run on the worker without errors.

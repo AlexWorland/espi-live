@@ -647,9 +647,9 @@ python -m espi_live</code></pre>
         <div class="card-grid">
           <div class="card">
             <h4>Raw</h4>
-            <p>The direct Mono8 camera image with no subtraction, scaling,
-              gamma or palette. Use it for positioning, focusing and checking
-              exposure.</p>
+            <p>The direct Mono8 camera image with no subtraction, stretch or
+              palette; the gamma slider still applies. Use it for positioning,
+              focusing and checking exposure.</p>
           </div>
           <div class="card">
             <h4>Previous</h4>
@@ -689,11 +689,13 @@ python -m espi_live</code></pre>
             for. The default is 30 fps. The camera may deliver less if exposure,
             USB bandwidth or the camera's own limits prevent it.</li>
           <li><strong>Noise reduction</strong> — blends each camera frame with
-            the previous ones, 0–95% of the history kept (0 = off), to remove
-            random sensor noise in every view, Raw included, while keeping the
-            speckle ESPI fringes depend on. Higher values smooth more but leave
-            a trail behind motion and weaken <strong>Previous</strong>-view
-            fringes; a Reference captured with it on is less noisy too.</li>
+            the previous ones (0 = off, 95 = strongest; each step adds the same
+            amount of memory, so 10 keeps about three frames and 95 about
+            twenty) to remove random sensor noise in every view, Raw included,
+            while keeping the speckle ESPI fringes depend on. Higher values
+            smooth more but leave a trail behind motion and weaken
+            <strong>Previous</strong>-view fringes; a Reference captured with
+            it on is less noisy too.</li>
           <li><strong>Single field (interlaced camera)</strong> — shown for an
             interlaced analog source; on by default. It keeps one field,
             doubled to full height, removing the 1/60 s offset between fields
@@ -1544,7 +1546,8 @@ python -m espi_live</code></pre>
       <ul>
         <li><strong>Check for updates</strong> in the status bar or
           <strong>Help → Check for updates…</strong> checks on demand; it is
-          greyed out while a check runs.</li>
+          greyed out while a check runs. While the app stays open it also
+          checks on its own every few hours.</li>
         <li><code>espi-live --update</code> updates without opening a window;
           <code>--no-update-check</code> skips the startup check and source
           download.</li>
