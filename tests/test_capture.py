@@ -257,9 +257,11 @@ class SessionStreamTests(CaptureTestCase):
             return True, bgr_frame()
 
         session, _, _ = self.open_session(frames=frames)
-        error, state = session.grab(100)
+        with mock.patch.object(capture.time, "sleep") as sleep:
+            error, state = session.grab(100)
         self.assertEqual(state, "error")
         self.assertIn("device lost", str(error))
+        sleep.assert_called_once_with(0.1)
 
     def test_grab_rejects_unreadable_layout(self):
         """A frame layout that cannot become Mono8 is an error status.

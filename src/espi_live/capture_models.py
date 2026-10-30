@@ -75,13 +75,13 @@ class CaptureIdentity:
     name: str = ""
     backend: str = ""
     path: str = ""
-    vid: int = None
-    pid: int = None
+    vid: int | None = None
+    pid: int | None = None
     width: int = 0
     height: int = 0
     fourcc: str = ""
     fps: float = 0.0
-    adapter: CaptureAdapter = None
+    adapter: CaptureAdapter | None = None
 
     @property
     def supported(self):

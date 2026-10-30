@@ -180,6 +180,7 @@ class CaptureSession:
         try:
             ok, frame = self.cap.read()
         except cv2.error as exc:
+            time.sleep(timeout_ms / 1000.0)  # a dead driver raises at once; do not spin
             return exc, "error"
         if not ok or frame is None:
             time.sleep(timeout_ms / 1000.0)

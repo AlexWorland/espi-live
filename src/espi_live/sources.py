@@ -70,17 +70,21 @@ def open_first_live(log):
     Used to leave demo mode. Unsupported video devices are never tried.
 
     Args: log has a write(message) method.
-    Returns: An opened session. Raises the FLIR camera's error when nothing
-        opens.
+    Returns: An opened session. Raises the last failed attempt's error when
+        nothing opens, so a capture adapter's actionable message (close
+        WinTV / Hauppauge Capture) is the one the user sees; every failed
+        attempt is logged first.
     """
     candidates = [None] + [info for info in capture.list_capture_devices(log)
                            if is_supported(info)]
-    errors = []
+    error = None
     for info in candidates:
         session = camera.CameraSession(log) if info is None else make_session(log, info)
         try:
             session.open()
             return session
         except Exception as exc:
-            errors.append(exc)
-    raise errors[0]
+            label = "the FLIR camera" if info is None else info.label
+            log.write(f"Could not open {label}: {exc}")
+            error = exc
+    raise error

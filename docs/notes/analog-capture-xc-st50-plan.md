@@ -137,7 +137,7 @@
   - `sources.is_supported(info) -> bool`: True for Spinnaker; for capture, `adapter_for(info.vid, info.pid, info.model) is not None`.
   - `sources.auto_open_order(infos) -> list[CameraInfo]`: Spinnaker in order, then supported capture devices. Unsupported devices are left out.
   - `Engine(log, serial=None, tag=None, info=None)`: `open_camera()` uses `make_session` when `info` is given. Status lines use `session.describe(values)`.
-  - `_switch_live`: tries `CameraSession(log)`, then each supported capture device. When all fail it sends `switch_failed` with the first error. The `switched_live` payload is `detect_cameras(log)`.
+  - `_switch_live`: tries `CameraSession(log)`, then each supported capture device, logging each failed attempt. When all fail it sends `switch_failed` with the last error — the plan's original "first error" would hide the capture adapter's actionable message (close WinTV / Hauppauge Capture) behind the generic FLIR one. The `switched_live` payload is `detect_cameras(log)`.
   - `Channel.supported -> bool` (True for demo channels); `_new_engine` passes `info`.
   - `open_camera_channels(log)`: a channel for every detected camera. Candidates are tried in `auto_open_order`. With no candidates it raises `RuntimeError("No FLIR camera or recognised capture adapter detected.")`.
 

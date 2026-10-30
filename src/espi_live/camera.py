@@ -46,10 +46,10 @@ class CameraInfo:
     serial: str
     model: str = ""
     kind: str = "spinnaker"
-    index: int = None
-    backend: int = None
-    vid: int = None
-    pid: int = None
+    index: int | None = None
+    backend: int | None = None
+    vid: int | None = None
+    pid: int | None = None
     path: str = ""
 
     @property

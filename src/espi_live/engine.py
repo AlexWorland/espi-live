@@ -183,11 +183,15 @@ class Engine:
         return self.demo_source is not None
 
     def open_camera(self):
-        """Try to open the first FLIR camera; call before start().
+        """Open the camera chosen for this engine; call before start().
+
+        The camera is the first FLIR camera, or the video device given as
+        info when this engine belongs to a capture channel.
 
         Args: None.
-        Returns: None. Raises if PySpin or a camera is unavailable; the
-            engine is then unchanged and use_demo() may be called.
+        Returns: None. Raises if PySpin, the device or a camera is
+            unavailable; the engine is then unchanged and use_demo() may be
+            called.
         """
         attempt = (sources.make_session(self.log, self.info) if self.info is not None
                    else CameraSession(self.log, self.serial))

@@ -117,6 +117,49 @@ class ReportTextTests(unittest.TestCase):
                              info=CameraInfo("video 1", long_name, kind="capture"))
         self.assertLessEqual(len(camera_reports.browser_url(huge)), camera_reports.MAX_URL)
 
+    def test_prose_cannot_inject_markdown(self):
+        """A hostile device name cannot add Markdown structure to the report.
+
+        Args: None.
+        Returns: None.
+        """
+        evil = CaptureIdentity(name="`x` [a](b) **y**")
+        report = webcam_report(identity=evil,
+                               info=CameraInfo("video 1", evil.name, kind="capture"))
+        for text in (report.body, report.summary):
+            self.assertIn("\\`x\\` \\[a\\](b) \\*\\*y\\*\\*", text)
+            visible = [line for line in text.splitlines() if not line.startswith("<!--")]
+            self.assertTrue(all("[a](b)" not in line for line in visible))
+
+    def test_marker_survives_comment_breaking_names(self):
+        """A name containing "-->" cannot end the hidden marker early.
+
+        Args: None.
+        Returns: None.
+        """
+        report = webcam_report(identity=CaptureIdentity(name="a--->b"),
+                               info=CameraInfo("video 1", "a--->b", kind="capture"))
+        self.assertEqual(camera_reports.marker("a--->b"),
+                         "<!-- espi-live camera report: a- ->b -->")
+        self.assertTrue(report.body.endswith(camera_reports.marker("a--->b")))
+        self.assertNotIn("report: a--->b", report.body)
+        self.assertNotIn("report: a--->b", report.summary)
+
+    def test_browser_url_drops_unencodable_text(self):
+        """Characters a URL cannot carry are dropped instead of raising.
+
+        Args: None.
+        Returns: None.
+        """
+        name = "ok \ud800 𝄞 " + "N" * 9000
+        report = webcam_report(identity=CaptureIdentity(name=name),
+                               info=CameraInfo("video 1", name, kind="capture"))
+        url = camera_reports.browser_url(report)
+        self.assertLessEqual(len(url), camera_reports.MAX_URL)
+        body = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["body"][0]
+        self.assertIn("𝄞", body)
+        self.assertNotIn("\ud800", body)
+
     def test_save_report_overwrites(self):
         """The report is saved once per key under output/logs.
 

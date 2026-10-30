@@ -875,6 +875,26 @@ class SwitchLiveCameraListTests(CameraEngineCase):
         self.assertEqual(self.engine.camera_info.kind, "capture")
         self.assertTrue(self.engine.status()["camera"].startswith("Analog capture"))
 
+    def test_switch_failure_names_the_device(self):
+        """A capture device that cannot open reports why in switch_failed.
+
+        The FLIR camera's generic "no cameras" error must not hide the
+        adapter's actionable message (close WinTV / Hauppauge Capture).
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.clear()
+        self.enumerator.devices = [usb_live2()]
+        self.factory.opened = False
+        self.engine._switch_live(None, None)
+        message = self.wait_event("switch_failed")
+        self.assertIn("WinTV", message)
+        self.assertIn("Hauppauge USB-Live2", message)
+        self.assertTrue(self.engine.demo)
+        self.assertTrue(self.log.has("Could not open the FLIR camera"))
+        self.assertTrue(self.log.has("Still in dummy mode"))
+
 
 class CaptureEngineCase(CameraEngineCase):
     """Base class: engines whose source is a video-capture device."""

@@ -49,20 +49,36 @@ def marker(key):
     """Build the hidden marker that identifies a report in an issue body.
 
     Args: key is the report key.
-    Returns: An HTML comment string.
+    Returns: An HTML comment string; every run of two or more dashes in the
+        key is split so a device name cannot end the comment early and
+        inject text after it.
     """
-    return f"<!-- espi-live camera report: {key} -->"
+    return f"<!-- espi-live camera report: {re.sub(r'-{2,}', '- -', key)} -->"
 
 
 def cell(text):
     """Make text safe inside a Markdown table cell.
 
     Args: text is any value.
-    Returns: The text with pipes and backticks escaped and line breaks
-        turned into spaces.
+    Returns: The text with pipes, backticks and brackets escaped and line
+        breaks turned into spaces.
     """
     text = str(text).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    return text.replace("|", "\\|").replace("`", "\\`")
+    text = text.replace("|", "\\|").replace("`", "\\`")
+    return text.replace("[", "\\[").replace("]", "\\]")
+
+
+def prose(text):
+    """Make one line of report prose safe inside Markdown.
+
+    Args: text is any value, such as a device name the report quotes.
+    Returns: The text with the characters Markdown treats as structure
+        backslash-escaped and line breaks turned into spaces.
+    """
+    text = str(text).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    for character in "\\`*_[]":
+        text = text.replace(character, "\\" + character)
+    return text
 
 
 def fit(head, rows, tail, limit):
@@ -96,18 +112,18 @@ def capture_report(info, identity, details):
     else:
         key = name or info.serial
     description = identity.description()
-    facts = [f"- {line}" for line in description[1:]]
-    facts += [f"- ⚠ {note}" for note in identity.warnings()]
+    facts = [f"- {prose(line)}" for line in description[1:]]
+    facts += [f"- ⚠ {prose(note)}" for note in identity.warnings()]
     head = ["The viewer was switched to a video device it does not recognise yet. "
             "Everything it could read is below; add the device to "
             "`capture_models.ADAPTERS` if it should be supported.", "",
-            f"**{description[0]}**", *facts, "", "### What the device reports", "",
+            f"**{prose(description[0])}**", *facts, "", "### What the device reports", "",
             "| Item | Value |", "| --- | --- |"]
     rows = [f"| {cell(label)} | {cell(value)} |" for label, value in details]
     tail = ["", "### Where it was seen", "", *feedback.environment_lines(), "",
             "_Filed automatically by ESPI live when the device was switched on._",
             "", marker(key)]
-    summary = "\n".join([f"**{description[0]}**", *facts, "",
+    summary = "\n".join([f"**{prose(description[0])}**", *facts, "",
                          "_The full report is saved on the PC under output/logs/; "
                          "paste it below._", "", marker(key)])
     return Report(key=key, title=report_title(key),
@@ -119,7 +135,9 @@ def browser_url(report):
 
     Args: report is a Report.
     Returns: An https URL of at most MAX_URL characters; the summary is
-        shortened if needed (titles are already short).
+        shortened if needed (titles are already short), and characters that
+        cannot appear in a URL-encoded string (such as lone surrogates in a
+        device name) are dropped instead of raising.
     """
     body = report.summary
 
@@ -130,12 +148,13 @@ def browser_url(report):
         Returns: The URL.
         """
         query = urllib.parse.urlencode({"title": report.title, "body": body,
-                                        "labels": LABEL})
+                                        "labels": LABEL}, errors="ignore")
         return f"https://github.com/{feedback.repository()}/issues/new?{query}"
 
     url = build()
     while len(url) > MAX_URL:
-        body = body[:len(body) * 3 // 4]
+        cut = body[:len(body) * 3 // 4]
+        body = cut.encode("utf-8", "ignore").decode("utf-8", "ignore")
         url = build()
     return url
 
@@ -148,7 +167,7 @@ def save_report(report):
     """
     slug = re.sub(r"[^A-Za-z0-9.]+", "-", report.key).strip("-.") or "device"
     path = os.path.join(paths.output_folder("logs"), f"camera-report-{slug}.md")
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", errors="ignore") as handle:
         handle.write(f"# {report.title}\n\n{report.body}\n")
     return path
 
@@ -160,6 +179,7 @@ def find_report(key, token):
         public repository anonymously).
     Returns: The issue dict, or None. Raises feedback.FeedbackError.
     """
+    # per_page=100 reads the newest page only; ample for years of camera reports.
     query = urllib.parse.urlencode({"labels": LABEL, "state": "all", "per_page": 100})
     issues = feedback.github_request(
         "GET", f"/repos/{feedback.repository()}/issues?{query}", token)

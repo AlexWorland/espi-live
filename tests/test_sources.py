@@ -167,9 +167,17 @@ class OpenFirstLiveTests(SourcesTestCase):
         self.system.camera_list.cameras.clear()
         self.enumerator.devices = [usb_live2(0), usb_live2(1)]
         self.factory.opened = False
-        with self.assertRaisesRegex(RuntimeError, "No FLIR"):
+        with self.assertRaisesRegex(RuntimeError, "WinTV"):
             sources.open_first_live(self.log)
         self.assertEqual(len(self.factory.made), 2)
+        attempts = [line for line in self.log.lines if line.startswith("Could not open")]
+        self.assertEqual(len(attempts), 3)  # the FLIR camera, then both adapters
+        self.assertTrue(any("Could not open the FLIR camera: No FLIR" in line
+                            for line in self.log.lines))
+        self.assertTrue(any("Hauppauge USB-Live2 (video 1)" in line
+                            for line in self.log.lines))
+        self.assertTrue(any("Hauppauge USB-Live2 (video 2)" in line
+                            for line in self.log.lines))
 
 
 if __name__ == "__main__":
