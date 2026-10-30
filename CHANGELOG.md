@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-30 — Status-bar help tips
+
+### Previous state
+
+- Hovering a control shows what it does, and the shortcuts are listed in the View menu, but nothing in the window points them out. A new user can miss both.
+
+### Current state
+
+- A **Did you know** tip on the left of the status bar rotates about every 12 seconds and starts on a random tip, so it is not the same sentence every launch. Click the tip for the next one. The camera, recording and dummy-mode badges keep their width; the tip uses only the room left after them, and a narrow window shortens it with an ellipsis (or hides it) rather than covering **DUMMY MODE**.
+- Right-click the tip, or uncheck **View > Help tips**, to turn them off. The choice is remembered. The timer runs on the window's thread and does not touch the camera.
+- The tips cover hovering for a description, `S` and `F`, stretch clip and gamma, rolling and block average, Request feature, the dockable panels, switching cameras, and zoom and pan.
+- A first launch opens at 2100×900, wide enough for a whole tip beside the badges. A layout saved by an older version is kept.
+
 ## 2026-10-30 — Gamma in every view, and how it differs from stretch
 
 ### Previous state
