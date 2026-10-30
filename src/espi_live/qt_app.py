@@ -860,9 +860,18 @@ class FixedLabel(QLabel):
         """
         super().__init__()
         self._full = ""
+        self._hold = False  # when True, the bar may not shrink this label
         self._reserved = max(self.fontMetrics().horizontalAdvance(text)
                              for text in samples) + 2
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+    def hold_full_text(self):
+        """Keep the reserved width, so the samples are never shortened.
+
+        Args: None.
+        Returns: None.
+        """
+        self._hold = True
 
     def sizeHint(self):
         """Return the reserved width, whatever the text.
@@ -875,9 +884,13 @@ class FixedLabel(QLabel):
     def minimumSizeHint(self):
         """Allow shrinking to nothing when the window is too narrow.
 
+        A label that holds its text keeps the reserved width instead.
+
         Args: None.
         Returns: A QSize.
         """
+        if self._hold:
+            return self.sizeHint()
         return QSize(0, super().minimumSizeHint().height())
 
     def text(self):
@@ -1388,6 +1401,7 @@ class MainWindow(QMainWindow):
         bar.addPermanentWidget(self.frozen_badge)
         # Every readout has a fixed width, so no value can move its neighbours.
         self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
+        self.source_badge.hold_full_text()  # never "DUMM…"; the readouts ellipsize first
         self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
         self.range_status = FixedLabel("Input: 255–255    Scaled: 255–255",
                                        "Raw Mono8: no brightness scaling")

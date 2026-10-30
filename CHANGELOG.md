@@ -10,7 +10,7 @@
 
 - **Check for updates**, **Request feature** and **Open in Codex** are bordered buttons with padding, a background distinct from the status bar, and hover, pressed, focus and disabled states. The pointer changes to a hand over them.
 - **Check for updates** has a refresh icon and **Request feature** a lightbulb. The blue **Update available** button (download icon) stays the primary action, more prominent than the others, including while it reads **Downloading update…**.
-- A vertical line separates the buttons from the readouts. Busy labels (**Checking for updates…**, **Sending request…**, **Downloading update…**) stay disabled buttons and do not shift the readouts.
+- A vertical line separates the buttons from the readouts. Busy labels (**Checking for updates…**, **Sending request…**, **Downloading update…**) stay disabled buttons and do not shift the readouts. The source badge keeps its full text (**DUMMY MODE**, or the camera name); the numeric readouts shorten first if the window is narrow.
 
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 

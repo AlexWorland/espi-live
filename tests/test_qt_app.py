@@ -1425,6 +1425,9 @@ class PollingTests(WindowTestCase):
                          "Send a feature request to the developers (GitHub issue)")
         self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
         self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
+        self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
+        self.assertGreaterEqual(window.source_badge.width(),
+                                window.source_badge.sizeHint().width())
         self.assertEqual(window.status_actions_rule.frameShape(), qt_app.QFrame.Shape.VLine)
         window.check_button.setFocus(Qt.OtherFocusReason)
         self.assertTrue(window.check_button.hasFocus())
