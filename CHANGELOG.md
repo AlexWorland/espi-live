@@ -10,6 +10,18 @@
 
 - A camera that is turned back on starts at the exposure, gain and frame rate its sliders show. A new camera still starts at 8000 µs, 0 dB and 30 fps.
 
+## 2026-10-30 — Gamma in every view, and how it differs from stretch
+
+### Previous state
+
+- **Gamma** sat in the Display section with no explanation. In **Raw** (the view the program opens in) the slider did nothing: those frames were always drawn at gamma 1.0. **Previous** and **Reference** did apply it.
+- **Stretch to 0–255** is a straight remap of a measurement frame's range. With a good stretch, gamma's mid-tone shift is easy to mistake for the same control, or to miss entirely.
+
+### Current state
+
+- Gamma stays its own control in Display (not an advanced setting). Its tooltip, and the Stretch checkbox's, say what each one does: stretch sets contrast, gamma is the curve after that. Below 1.0 brightens dark fringes; above 1.0 darkens bright ones; 1.0 leaves mid-tones alone.
+- Raw, Previous and Reference all use the gamma slider. Raw still skips stretch and the color palette, so positioning pixels stay gray. The default is still 1.0, so an unchanged setup looks the same. Saved frames and recordings follow the screen.
+
 ## 2026-10-30 — Noise reduction works across the slider, and says so
 
 ### Previous state

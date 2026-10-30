@@ -74,8 +74,9 @@ class FramePacket:
     """One processed frame ready for display, saving or recording.
 
     image is a 2-D uint8 array that is never modified after publication.
-    palette and gamma are the color steps still to apply; Raw frames carry
-    ("Gray", 1.0), and CLAHE frames already include gamma.
+    palette and gamma are the color steps still to apply. Raw frames stay
+    Gray (no palette) and carry the display gamma. CLAHE frames already
+    include gamma.
     """
 
     sequence: int
@@ -162,7 +163,7 @@ class Engine:
         self._status = {
             "demo": False, "camera": "Camera values: waiting for connection",
             "range": "Input: —    Scaled: —",
-            "hint": "Raw view: direct Mono8 positioning",
+            "hint": "Raw view: camera pixels, with gamma; no stretch or palette",
             "processing": "Processing: —", "record": "Recording: off",
             "camera_fps": "Camera: — fps",
             "processed_fps": 0.0,
@@ -469,8 +470,8 @@ class Engine:
         sequence = 0
         frame = None
         demo_next = time.monotonic()
-        self.log.write("Streaming. Raw shows direct Mono8 pixels; Previous and "
-                       "Reference show ESPI differences.")
+        self.log.write("Streaming. Raw shows camera pixels with gamma only; "
+                       "Previous and Reference show ESPI differences.")
 
         while not self._stop.is_set():
             s = self.settings()
@@ -509,7 +510,7 @@ class Engine:
                                if s.ref_refresh_s > 0 else "Reference auto-refresh: off")
                 last_refresh = s.ref_refresh_s
             self._set_status(hint=(
-                "Raw view: direct Mono8 positioning"
+                "Raw view: camera pixels, with gamma; no stretch or palette"
                 if s.mode == "Raw" else
                 "Reference: press F or Set reference to capture a baseline"
                 if s.mode == "Reference" and processor.ref is None else
@@ -578,6 +579,7 @@ class Engine:
             palette, gamma = "Gray", 1.0
             if s.mode == "Raw":
                 image = frame
+                gamma = s.gamma  # curve only; Raw skips stretch and palette
                 if update_range:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
