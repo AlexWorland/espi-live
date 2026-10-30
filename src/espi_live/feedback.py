@@ -81,10 +81,10 @@ def validate(request):
 
 
 def environment_lines():
-    """Describe the build and platform of this copy.
+    """Describe this copy's build and platform for an issue.
 
     Args: None.
-    Returns: A list of Markdown bullet strings.
+    Returns: Two Markdown bullet strings: Build, then Platform.
     """
     return [f"- Build: {updater.describe_build()}",
             f"- Platform: {platform.system()} {platform.release()} "
@@ -150,6 +150,37 @@ def explain_http_error(exc):
     return FeedbackError(f"cannot reach GitHub: {getattr(exc, 'reason', exc)}")
 
 
+def github_request(method, path, token, payload=None):
+    """Call the GitHub REST API.
+
+    Args: method is "GET" or "POST"; path starts with "/repos/" and may
+        carry a query string; token authorizes the call ("" for an anonymous
+        call, enough to read a public repository); payload is the JSON body
+        to send, if any.
+    Returns: The decoded JSON reply. Raises FeedbackError on HTTP, network
+        or decoding errors.
+    """
+    headers = {"Accept": "application/vnd.github+json",
+               "User-Agent": "espi-live-feedback",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    http = urllib.request.Request(f"{updater.API_ROOT}{path}", data=data,
+                                  method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(http, timeout=updater.TIMEOUT_S,
+                                    context=updater.ssl_context()) as response:
+            return json.load(response)
+    except (urllib.error.URLError, OSError) as exc:
+        raise explain_http_error(exc) from exc
+    except ValueError as exc:
+        raise FeedbackError(f"unreadable reply from GitHub: {exc}") from exc
+
+
 def create_issue(payload):
     """File an issue with the feedback token.
 
@@ -159,22 +190,7 @@ def create_issue(payload):
     token = feedback_token()
     if not token:
         raise FeedbackError("this copy has no feedback token")
-    data = json.dumps(payload).encode("utf-8")
-    http = urllib.request.Request(
-        f"{updater.API_ROOT}/repos/{repository()}/issues", data=data, method="POST",
-        headers={"Accept": "application/vnd.github+json",
-                 "Content-Type": "application/json",
-                 "User-Agent": "espi-live-feedback",
-                 "X-GitHub-Api-Version": "2022-11-28",
-                 "Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(http, timeout=updater.TIMEOUT_S,
-                                    context=updater.ssl_context()) as response:
-            issue = json.load(response)
-    except (urllib.error.URLError, OSError) as exc:
-        raise explain_http_error(exc) from exc
-    except ValueError as exc:
-        raise FeedbackError(f"unreadable reply from GitHub: {exc}") from exc
+    issue = github_request("POST", f"/repos/{repository()}/issues", token, payload)
     return issue["html_url"]
 
 

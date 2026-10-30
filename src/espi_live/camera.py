@@ -37,10 +37,21 @@ _library_version = None  # Spinnaker version, read when the System is first crea
 
 @dataclass(frozen=True)
 class CameraInfo:
-    """Identity of one detected camera (or one synthetic demo source)."""
+    """Identity of one detected camera, video device or synthetic demo source.
+
+    kind is "spinnaker" for FLIR cameras or "capture" for OpenCV video
+    devices; a capture device's serial is a short "video N" id, and index,
+    backend, vid, pid and path are what the device enumerator reported.
+    """
 
     serial: str
     model: str = ""
+    kind: str = "spinnaker"
+    index: int | None = None
+    backend: int | None = None
+    vid: int | None = None
+    pid: int | None = None
+    path: str = ""
 
     @property
     def label(self):
@@ -310,6 +321,8 @@ def configure_camera(cam, log):
 class CameraSession:
     """Own a PySpin camera and its complete acquisition lifecycle."""
 
+    interlaced = False  # FLIR cameras deliver progressive frames
+
     def __init__(self, log, serial=None):
         """Initialize empty camera handles for a connection attempt.
 
@@ -428,6 +441,14 @@ class CameraSession:
             except PySpin.SpinnakerException:
                 values[key] = None
         return values
+
+    def describe(self, values):
+        """Format a read_values() result for the status line.
+
+        Args: values is the dict returned by read_values().
+        Returns: The status text.
+        """
+        return format_camera_values(values)
 
     def close(self):
         """Release acquisition, camera, list, and system in SDK-safe order.

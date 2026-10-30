@@ -8,8 +8,8 @@ import unittest
 import numpy as np
 
 from espi_live.processing import (MAX_DENOISE_STRENGTH, DemoSource, ESPIProcessor,
-                                  normalize_min_max, stretch_contrast,
-                                  watermark_demo)
+                                  normalize_min_max, single_field,
+                                  stretch_contrast, watermark_demo)
 
 
 class NormalizeTests(unittest.TestCase):
@@ -193,6 +193,35 @@ class ProcessorTests(unittest.TestCase):
         """
         image = np.full((2, 2), 2, dtype=np.uint8)
         self.assertIs(ESPIProcessor().average(image, 1), image)
+
+
+class SingleFieldTests(unittest.TestCase):
+    """Show one field of an interlaced frame at full height."""
+
+    def test_single_field_doubles_even_rows(self):
+        """Even rows are kept and each one repeated; the input is untouched.
+
+        Args: None.
+        Returns: None.
+        """
+        frame = np.arange(4, dtype=np.uint8).repeat(3).reshape(4, 3)
+        result = single_field(frame)
+        self.assertEqual(result[:, 0].tolist(), [0, 0, 2, 2])
+        self.assertEqual(frame[:, 0].tolist(), [0, 1, 2, 3])
+        self.assertEqual(result.dtype, np.uint8)
+
+    def test_single_field_keeps_every_height(self):
+        """NTSC, PAL and odd heights keep their shape.
+
+        Args: None.
+        Returns: None.
+        """
+        for height in (480, 576, 481):
+            frame = np.zeros((height, 8), dtype=np.uint8)
+            frame[1::2] = 255
+            result = single_field(frame)
+            self.assertEqual(result.shape, (height, 8))
+            self.assertEqual(int(result.max()), 0)
 
 
 class DemoTests(unittest.TestCase):

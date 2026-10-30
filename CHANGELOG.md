@@ -11,6 +11,24 @@
 - The log is built on the standard `logging` module: `HH:MM:SS LEVEL [thread] message` lines in the per-run file, the GUI log panel and the console, with a startup header (build and commit time, platform, library versions, front end, level). `--log-level {debug,info,warning}` or `ESPI_LOG_LEVEL` raises the detail (`debug` adds camera node writes, settings changes and frame timing), the newest 50 run logs are kept, `Help > Open log folder` opens the folder, warnings from Python and Qt are logged, `faulthandler` writes `espi_<timestamp>.crash` for native crashes (reported by the next start), and a UI stall longer than ~10 s dumps every thread's stack into the log.
 - Unexpected errors — uncaught exceptions on any thread (including Qt slots), engine and recorder failures, Qt critical messages and the previous run's crash file — are reported automatically as GitHub issues labelled `auto-error`. Each error carries a deterministic ID (`ESPI-ERR-v1-…`) from its exception type and code path, so the same bug is reported once across machines, install paths and runs: the existing issue gets one "seen again" comment per build, a regression in a newer build reopens it, wontfix issues stay quiet. Every report is scrubbed of home folders, user and host names, camera serials, saved-file names, e-mail addresses and token-like strings. Release builds report by default; `--no-error-reports`, `ESPI_ERROR_REPORTS=0` or **Help > Send error reports automatically** turns it off, and copies without the token get a **Report in browser…** link instead. The "ESPI stopped" dialog names the issue, and non-fatal errors show a status-bar message with the link. Issues are added to the **ESPI Live roadmap** project by a workflow using the new `PROJECT_PAT` secret.
 
+## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
+
+### Previous state
+
+- Only FLIR/Spinnaker cameras could be used. The lab's second camera, an analog Sony XC-ST50 connected through a Hauppauge USB-Live2 capture stick, was not seen at all.
+- A camera the viewer did not know was only mentioned in the log.
+
+### Current state
+
+- **XC-ST50 through a USB-Live2:**
+  - The stick appears in the camera list as **Hauppauge USB-Live2 (video N)**, next to any Blackfly or on its own, and works with every view, averaging, saving and recording feature.
+  - Startup opens a Blackfly first; with none connected it opens the USB-Live2. **Switch to live capture** in demo mode follows the same order.
+- **Fixed controls:** exposure, gain and frame rate are set on the analog camera itself, so those controls are disabled for it. The status line shows the capture size and the measured frame rate. The viewer selects the composite input and asks for 720 × 480; a different delivered size (for example PAL 720 × 576) gets a warning.
+- **Single field (interlaced camera)**, on by default, shows one field of each interlaced frame repeated to full height, so the 1/60 s between fields cannot blur the fringes; it halves the vertical detail. Changing it clears the reference and the averages.
+- **Other video devices** (webcams, other capture sticks) are listed as **not yet supported** and are never opened unless chosen. Compressed video gets an "unsuitable for ESPI" warning.
+- **Camera reports:** switching on an unrecognised video device files a GitHub issue labelled `camera-support` with what the device reports, once per device type across all PCs. The status appears under the camera information. Copies without a feedback token save the report to `output/logs/camera-report-*.md` and offer **Report this camera** instead.
+- **Packaging:** builds include `cv2_enumerate_cameras` to list video devices by name and USB ID, and `--check` reports whether it is present.
+
 ## 2026-10-29 — Open in Codex
 
 ### Previous state

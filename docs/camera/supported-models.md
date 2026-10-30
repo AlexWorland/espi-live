@@ -73,6 +73,15 @@ viewer logs that they have not been tested and relies on their reported limits.
   `AcquisitionFrameRate` maximum, so a 20 MP camera runs at its own maximum
   (about 16–18 fps). Display, saving and recording use the frame's actual size.
 
+## Analog cameras through a capture adapter
+
+Cameras that are not FLIR/Spinnaker cameras reach the viewer as video devices
+through OpenCV. The first is the Sony XC-ST50 on a Hauppauge USB-Live2; see
+`sony-xc-st50-usb-live2.md`. Recognised adapters are listed in
+`capture_models.ADAPTERS`. Other video devices are listed as "not yet
+supported", opened only when someone switches them on, and then reported to
+GitHub as `camera-support` issues.
+
 ## Sources
 
 - Teledyne, "Understanding Teledyne FLIR machine vision part numbers": <https://www.teledynevisionsolutions.com/support/support-center/article/iis/understanding-product-part-numbers/>

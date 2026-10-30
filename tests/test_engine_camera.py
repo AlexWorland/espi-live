@@ -13,8 +13,11 @@ from unittest import mock
 
 import numpy as np
 
-from espi_live import camera, engine, paths
+from espi_live import camera, capture, engine, paths
+from espi_live.camera import CameraInfo
 from espi_live.engine import Engine, WindowsPreviewTimer
+from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
+                          interlaced_frame, usb_live2, webcam)
 from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
 from list_log import ListLog
@@ -92,9 +95,14 @@ class CameraEngineCase(unittest.TestCase):
         self.log = ListLog()
         self.cam = FakeCamera()
         self.system = FakeSystem([self.cam])
-        patcher = mock.patch.object(camera, "PySpin", make_pyspin(self.system))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.enumerator = FakeEnumerator()  # no video devices unless a test adds some
+        self.factory = FakeCaptureFactory()
+        for patcher in (mock.patch.object(camera, "PySpin", make_pyspin(self.system)),
+                        mock.patch.object(capture, "load_enumerator",
+                                          return_value=self.enumerator),
+                        mock.patch.object(capture.cv2, "VideoCapture", self.factory)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.engine = Engine(self.log)
         self.addCleanup(self.shutdown)
 
@@ -853,7 +861,194 @@ class SwitchLiveCameraListTests(CameraEngineCase):
         Args: None.
         Returns: None.
         """
-        with mock.patch.object(engine, "list_cameras", side_effect=RuntimeError("bus")):
+        with mock.patch.object(camera, "list_cameras", side_effect=RuntimeError("bus")):
             self.engine._switch_live(None, None)
         self.assertEqual(self.wait_event("switched_live"), [])
-        self.assertTrue(self.log.has("Could not list the other cameras: bus"))
+        self.assertTrue(self.log.has("Could not list FLIR cameras: bus"))
+
+    def test_switch_live_falls_back_to_usb_live2(self):
+        """Without a FLIR camera, demo mode switches to a recognised adapter.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.clear()
+        self.enumerator.devices = [usb_live2()]
+        self.engine._switch_live(None, None)
+        cameras = self.wait_event("switched_live")
+        self.assertEqual([(info.kind, info.serial) for info in cameras],
+                         [("capture", "video 1")])
+        self.assertFalse(self.engine.demo)
+        self.assertEqual(self.engine.camera_info.kind, "capture")
+        self.assertTrue(self.engine.status()["camera"].startswith("Analog capture"))
+
+    def test_switch_failure_names_the_device(self):
+        """A capture device that cannot open reports why in switch_failed.
+
+        The FLIR camera's generic "no cameras" error must not hide the
+        adapter's actionable message (close WinTV / Hauppauge Capture).
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.clear()
+        self.enumerator.devices = [usb_live2()]
+        self.factory.opened = False
+        self.engine._switch_live(None, None)
+        message = self.wait_event("switch_failed")
+        self.assertIn("WinTV", message)
+        self.assertIn("Hauppauge USB-Live2", message)
+        self.assertTrue(self.engine.demo)
+        self.assertTrue(self.log.has("Could not open the FLIR camera"))
+        self.assertTrue(self.log.has("Still in dummy mode"))
+
+
+class CaptureEngineCase(CameraEngineCase):
+    """Base class: engines whose source is a video-capture device."""
+
+    def capture_engine(self, enumerated=None):
+        """Create an engine for an enumerated video device.
+
+        Args: enumerated is the fake device to open (a USB-Live2 by default).
+        Returns: The Engine (opened, not started).
+        """
+        enumerated = enumerated or usb_live2()
+        info = CameraInfo("video 1", enumerated.name, kind="capture",
+                          index=enumerated.index, backend=enumerated.backend,
+                          vid=enumerated.vid, pid=enumerated.pid)
+        self.engine = Engine(self.log, tag=info.serial, info=info)
+        self.engine.open_camera()
+        return self.engine
+
+
+class CaptureEngineTests(CaptureEngineCase):
+    """An engine whose source is a video-capture device."""
+
+    def test_engine_streams_from_capture(self):
+        """Frames flow from the capture device; the status names the capture.
+
+        Args: None.
+        Returns: None.
+        """
+        engine_ = self.capture_engine()
+        identity = self.wait_event("camera_identity")
+        self.assertEqual(identity.short_name(), "Hauppauge USB-Live2")
+        self.assertEqual(self.wait_event("camera_limits"), {})
+        engine_.start()
+        self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
+        self.assertEqual(engine_.latest_packet().image.shape, (480, 720))
+        self.assertTrue(engine_.status()["camera"].startswith("Analog capture 720 × 480"))
+        self.assertEqual(engine_.camera_info.kind, "capture")
+
+    def test_unplugged_device_keeps_engine_running(self):
+        """A device that stops sending frames leaves the engine waiting, not dead.
+
+        Args: None.
+        Returns: None.
+        """
+        self.factory.frames = [bgr_frame()] * 4 + [None]
+        engine_ = self.capture_engine()
+        engine_.start()
+        self.assertTrue(wait_until(
+            lambda: engine_.status()["processing"] == "Waiting for camera frame",
+            timeout=5.0))
+        self.assertTrue(engine_._thread.is_alive())
+        errors = [line for line in self.log.lines if "acquisition error" in line]
+        self.assertEqual(len(errors), 1)
+
+    def test_engine_applies_single_field_to_interlaced_source(self):
+        """Single field is on by default for the USB-Live2 and can be turned off.
+
+        Args: None.
+        Returns: None.
+        """
+        self.factory.frames = [interlaced_frame()]
+        engine_ = self.capture_engine()
+        self.assertTrue(engine_.settings().single_field)
+        engine_.start()
+        self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
+        self.assertEqual(int(engine_.latest_packet().image.max()), 0)
+        engine_.update_settings(single_field=False)
+        self.assertTrue(wait_until(
+            lambda: int(engine_.latest_packet().image[1].max()) == 255))
+        self.assertTrue(self.log.has("Fields: full interlaced frames"))
+
+    def test_toggle_resets_reference(self):
+        """Switching fields drops the reference, which must be captured again.
+
+        Args: None.
+        Returns: None.
+        """
+        engine_ = self.capture_engine()
+        engine_.update_settings(mode="Reference")
+        engine_.start()
+        self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
+        engine_.request("reference")
+        self.assertTrue(wait_until(lambda: "press F" not in engine_.status()["hint"]))
+        engine_.update_settings(single_field=False)
+        self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
+        engine_.update_settings(single_field=True)
+        self.assertTrue(wait_until(
+            lambda: self.log.has("Fields: single field (even rows, line-doubled)")))
+
+
+class SingleFieldFlirTests(CameraEngineCase):
+    """Single-field mode never touches progressive FLIR frames."""
+
+    def test_single_field_ignored_for_blackfly(self):
+        """Odd rows of a FLIR frame survive with single field on.
+
+        Args: None.
+        Returns: None.
+        """
+        frame = np.zeros((48, 64), dtype=np.uint8)
+        frame[1::2] = 255
+        self.cam.frame_source = lambda: FakeImage(frame.copy())
+        self.engine.open_camera()
+        self.assertTrue(self.engine.settings().single_field)
+        self.engine.start()
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        self.assertEqual(int(self.engine.latest_packet().image[1].max()), 255)
+
+
+class CameraReportEventTests(CaptureEngineCase):
+    """Unrecognised video devices produce a camera report when opened."""
+
+    def reports(self):
+        """Collect the camera_report payloads queued so far.
+
+        Args: None.
+        Returns: A list of Report.
+        """
+        return [payload for kind, payload in self.events() if kind == "camera_report"]
+
+    def test_engine_reports_only_unrecognised_capture(self):
+        """A webcam is reported; the USB-Live2 and a Blackfly are not.
+
+        Args: None.
+        Returns: None.
+        """
+        self.capture_engine(webcam())
+        reports = self.reports()
+        self.assertEqual(len(reports), 1)
+        self.assertTrue(reports[0].key.startswith("Webcam C270"))
+        self.assertIn("| Device name | Webcam C270 |", reports[0].body)
+        self.capture_engine(usb_live2())
+        self.assertEqual(self.reports(), [])
+        self.engine = Engine(self.log)
+        self.engine.open_camera()
+        self.assertEqual(self.reports(), [])
+
+    def test_engine_report_survives_detail_failure(self):
+        """If the details cannot be read the report is still sent, without them.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(capture.CaptureSession, "read_details",
+                               side_effect=RuntimeError("driver")):
+            self.capture_engine(webcam())
+        reports = self.reports()
+        self.assertEqual(len(reports), 1)
+        self.assertNotIn("| Device name |", reports[0].body)
+        self.assertTrue(self.log.has("Could not read the device details: driver"))

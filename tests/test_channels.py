@@ -10,9 +10,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from espi_live import camera, channels, paths
+from espi_live import camera, capture, channels, paths
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine
+from fake_capture import FakeCaptureFactory, FakeEnumerator, usb_live2, webcam
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from test_engine_camera import ListLog, wait_until
 
@@ -34,9 +35,14 @@ class ChannelTestCase(unittest.TestCase):
         self.log = ListLog()
         self.system = FakeSystem([FakeCamera(serial="1", model="BFS"),
                                   FakeCamera(serial="2", model="BFS")])
-        patcher = mock.patch.object(camera, "PySpin", make_pyspin(self.system))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.enumerator = FakeEnumerator()  # no video devices unless a test adds some
+        self.factory = FakeCaptureFactory()
+        for patcher in (mock.patch.object(camera, "PySpin", make_pyspin(self.system)),
+                        mock.patch.object(capture, "load_enumerator",
+                                          return_value=self.enumerator),
+                        mock.patch.object(capture.cv2, "VideoCapture", self.factory)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.channels = []
         self.addCleanup(self.stop_all)
 
@@ -259,6 +265,55 @@ class StartupHelperTests(ChannelTestCase):
         self.system.camera_list.cameras.clear()
         with self.assertRaisesRegex(RuntimeError, "No FLIR"):
             channels.open_camera_channels(self.log)
+
+    def test_startup_opens_usb_live2_without_blackfly(self):
+        """With no FLIR camera the USB-Live2 opens; a webcam is listed but left off.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.clear()
+        self.enumerator.devices = [webcam(0), usb_live2(1)]
+        found = channels.open_camera_channels(self.log)
+        self.channels.extend(found)
+        self.assertEqual([c.info.serial for c in found], ["video 1", "video 2"])
+        self.assertEqual([c.active for c in found], [False, True])
+        self.assertEqual([made.index for made in self.factory.made], [usb_live2(1).index])
+        self.assertEqual(found[1].engine.camera_info.kind, "capture")
+
+    def test_startup_with_only_webcam_raises(self):
+        """A webcam alone is never opened at startup; demo mode is offered.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.clear()
+        self.enumerator.devices = [webcam()]
+        with self.assertRaisesRegex(
+                RuntimeError, "No FLIR camera or recognised capture adapter detected"):
+            channels.open_camera_channels(self.log)
+        self.assertEqual(self.factory.made, [])
+
+    def test_channel_supported(self):
+        """FLIR cameras, recognised adapters and demo sources are supported.
+
+        Args: None.
+        Returns: None.
+        """
+        def info(enumerated):
+            """Build a capture CameraInfo for a fake enumerated device.
+
+            Args: enumerated is a fake_capture device.
+            Returns: A CameraInfo of kind "capture".
+            """
+            return CameraInfo("video 1", enumerated.name, kind="capture",
+                              index=enumerated.index, backend=enumerated.backend,
+                              vid=enumerated.vid, pid=enumerated.pid)
+
+        self.assertTrue(self.channel(CameraInfo("1", "BFS")).supported)
+        self.assertTrue(self.channel(info(usb_live2())).supported)
+        self.assertFalse(self.channel(info(webcam())).supported)
+        self.assertTrue(self.channel(CameraInfo("dummy 1"), demo=True).supported)
 
     def test_demo_channels_open_only_the_first(self):
         """demo_channels makes N synthetic cameras with the first opened.
