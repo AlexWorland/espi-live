@@ -32,18 +32,19 @@ from datetime import datetime
 import cv2
 import numpy as np
 from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QSettings, QSize,
-                           Qt, QtMsgType, QTimer, QUrl, Signal, qInstallMessageHandler)
-from PySide6.QtGui import (QAction, QDesktopServices, QFontMetrics, QImage, QKeySequence, QOffscreenSurface,
-                           QOpenGLContext, QPainter, QSurfaceFormat, QVector4D)
+                            Qt, QtMsgType, QTimer, QUrl, Signal, qInstallMessageHandler)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFontMetrics, QIcon, QImage,
+                           QKeySequence, QOffscreenSurface, QOpenGLContext, QPainter,
+                           QPainterPath, QPalette, QPen, QPixmap, QSurfaceFormat, QVector4D)
 from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, QButtonGroup,
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QDockWidget, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QMainWindow, QMessageBox, QPlainTextEdit,
-                               QProxyStyle, QPushButton, QSizePolicy, QSlider, QStyle,
-                               QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
+                               QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+                               QPlainTextEdit, QProxyStyle, QPushButton, QSizePolicy, QSlider,
+                               QStyle, QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
 
 from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
@@ -236,6 +237,142 @@ def describe_session(channels, display):
 
 # Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
 FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
+# Status-bar actions. palette() follows the light or dark theme at startup.
+# The blue update button stays the primary action, distinct from the red badge.
+STATUS_BUTTON_STYLE = """
+QPushButton {
+    border: 1px solid palette(mid);
+    border-radius: 4px;
+    padding: 2px 8px;
+    background: palette(base);
+    color: palette(button-text);
+}
+QPushButton:hover {
+    border-color: palette(highlight);
+    background: palette(midlight);
+}
+QPushButton:pressed {
+    background: palette(mid);
+    border-color: palette(dark);
+}
+QPushButton:focus {
+    border-color: palette(highlight);
+}
+QPushButton:disabled {
+    color: palette(placeholder-text);
+    background: palette(window);
+    border: 1px solid palette(mid);
+}
+"""
+UPDATE_BUTTON_STYLE = """
+QPushButton {
+    border: 1px solid #163a6b;
+    border-radius: 4px;
+    padding: 2px 8px;
+    background: #1d4f91;
+    color: white;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background: #2a64b0;
+    border-color: #102848;
+}
+QPushButton:pressed {
+    background: #163a6b;
+    border-color: #0c1e36;
+}
+QPushButton:focus {
+    border-color: #8eb4e8;
+}
+QPushButton:disabled {
+    background: #8aa4c4;
+    color: #f4f7fb;
+    border: 1px solid #6d88a8;
+    font-weight: bold;
+}
+"""
+
+
+def _paint_status_icon(kind, color):
+    """Draw a 16px monochrome icon for a status-bar action.
+
+    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Returns: A QPixmap with a transparent background.
+    """
+    pixmap = QPixmap(16, 16)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                   Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if kind == "refresh":
+            painter.drawArc(2, 2, 12, 12, 40 * 16, 280 * 16)
+            painter.setBrush(color)
+            arrow = QPainterPath()
+            arrow.moveTo(7, 1)
+            arrow.lineTo(13, 1)
+            arrow.lineTo(13, 7)
+            painter.drawPath(arrow)
+        elif kind == "download":
+            painter.drawLine(8, 2, 8, 9)
+            painter.drawLine(4, 6, 8, 11)
+            painter.drawLine(12, 6, 8, 11)
+            painter.drawLine(3, 13, 13, 13)
+        elif kind == "idea":
+            painter.drawEllipse(4, 1, 8, 8)
+            painter.drawLine(6, 9, 6, 12)
+            painter.drawLine(10, 9, 10, 12)
+            painter.drawLine(6, 12, 10, 12)
+            painter.drawLine(7, 14, 9, 14)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _status_icon(kind, color):
+    """Build a status-bar icon, with a dimmer copy for the disabled state.
+
+    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Returns: A QIcon.
+    """
+    icon = QIcon()
+    icon.addPixmap(_paint_status_icon(kind, color), QIcon.Mode.Normal, QIcon.State.Off)
+    dimmed = QColor(color)
+    dimmed.setAlpha(150)
+    icon.addPixmap(_paint_status_icon(kind, dimmed), QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
+
+
+def _arm_status_button(button, style, texts, icon=None):
+    """Give a status-bar control button chrome, a pointer and a fixed width.
+
+    The width fits every label the button shows, so a busy label cannot push
+    the readouts sideways.
+
+    Args: button is a QPushButton; style is its style sheet; texts are the
+        labels; icon is a QIcon, or None.
+    Returns: The fixed width in pixels.
+    """
+    button.setFlat(False)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setFocusPolicy(Qt.StrongFocus)
+    button.setStyleSheet(style)
+    if icon is not None:
+        button.setIcon(icon)
+        button.setIconSize(QSize(16, 16))
+    current = button.text()
+    width = 0
+    for text in texts:
+        button.setText(text)
+        width = max(width, button.sizeHint().width())
+    button.setText(current)
+    button.setFixedWidth(width)
+    return width
+
+
 # Long enough that a moving pointer does not flash a tip; short enough to wait for.
 TOOLTIP_DELAY_MS = 600
 TOOLTIP_FALL_ASLEEP_MS = 0  # the next control waits too, so sweeping does not pop tips
@@ -1174,9 +1311,18 @@ class FixedLabel(QLabel):
         """
         super().__init__()
         self._full = ""
+        self._hold = False  # when True, the bar may not shrink this label
         self._reserved = max(self.fontMetrics().horizontalAdvance(text)
                              for text in samples) + 2
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+    def hold_full_text(self):
+        """Keep the reserved width, so the samples are never shortened.
+
+        Args: None.
+        Returns: None.
+        """
+        self._hold = True
 
     def sizeHint(self):
         """Return the reserved width, whatever the text.
@@ -1189,9 +1335,13 @@ class FixedLabel(QLabel):
     def minimumSizeHint(self):
         """Allow shrinking to nothing when the window is too narrow.
 
+        A label that holds its text keeps the reserved width instead.
+
         Args: None.
         Returns: A QSize.
         """
+        if self._hold:
+            return self.sizeHint()
         return QSize(0, super().minimumSizeHint().height())
 
     def text(self):
@@ -1802,7 +1952,7 @@ class MainWindow(QMainWindow):
                 set_tooltip(button, tip)
 
     def _build_status_bar(self):
-        """Create the status-bar readouts.
+        """Create the status-bar readouts and action buttons.
 
         Args: None.
         Returns: None.
@@ -1834,6 +1984,7 @@ class MainWindow(QMainWindow):
         bar.addPermanentWidget(self.frozen_badge)
         # Every readout has a fixed width, so no value can move its neighbours.
         self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
+        self.source_badge.hold_full_text()  # never "DUMM…"; the readouts ellipsize first
         self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
         set_tooltip(self.record_label,
                     "Whether this camera is recording, and the rate the file is "
@@ -1860,22 +2011,26 @@ class MainWindow(QMainWindow):
         set_tooltip(self.pixel_status,
                     "Brightness from 0 to 255 of the image pixel under the pointer.")
         # The two update buttons are never shown together, so they share one
-        # fixed-width slot that stays put whichever is visible.
+        # fixed-width slot that stays put whichever is visible. They are real
+        # buttons (border, icon, pointer), split from the readouts by a rule.
         self.update_button = QPushButton()  # shown when a newer build exists
         self.update_button.setVisible(False)
         set_tooltip(self.update_button, "Download the newer build of ESPI live.")
-        self.update_button.setStyleSheet("background:#1d4f91;color:white;font-weight:bold;")
         self.update_button.clicked.connect(self._update_clicked)
         self.check_button = QPushButton("Check for updates")  # until a newer build is found
-        self.check_button.setFlat(True)
         set_tooltip(self.check_button, "Check GitHub for a newer build of ESPI live.")
         self.check_button.clicked.connect(self._check_updates_now)
-        bold = self.update_button.font()
-        bold.setBold(True)
-        metrics = QFontMetrics(bold)
-        slot_width = max(metrics.horizontalAdvance(text) for text in (
-            "Install update", "Downloading update… 100%",
-            "Restart to update", "Check for updates", "Checking for updates…")) + 24
+        ink = self.check_button.palette().color(QPalette.ColorRole.ButtonText)
+        update_width = _arm_status_button(
+            self.update_button, UPDATE_BUTTON_STYLE,
+            ("Install update", "Downloading update… 100%",
+             "Restart to update"),
+            _status_icon("download", QColor(Qt.white)))
+        check_width = _arm_status_button(
+            self.check_button, STATUS_BUTTON_STYLE,
+            ("Check for updates", "Checking for updates…"),
+            _status_icon("refresh", ink))
+        slot_width = max(update_width, check_width)
         self.update_slot = QWidget()
         slot = QGridLayout(self.update_slot)
         slot.setContentsMargins(0, 0, 0, 0)
@@ -1885,21 +2040,31 @@ class MainWindow(QMainWindow):
         self.update_slot.setFixedWidth(slot_width)
         bar.addPermanentWidget(self.update_slot)
         self.feature_button = QPushButton("Request feature")
-        self.feature_button.setFlat(True)
         set_tooltip(self.feature_button,
                     "Send a feature request to the developers as a GitHub issue.")
         self.feature_button.clicked.connect(lambda: self._request_feature())
+        _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE,
+                           ("Request feature", "Sending request…"),
+                           _status_icon("idea", ink))
         bar.addPermanentWidget(self.feature_button)
         self.codex_button = QPushButton(CODEX_LABEL)
-        self.codex_button.setFlat(True)
         set_tooltip(self.codex_button,
                     "Ask OpenAI's Codex how ESPI live works, using this build's "
                     "real source code.")
-        self.codex_button.setFixedWidth(max(
-            QFontMetrics(self.codex_button.font()).horizontalAdvance(text)
-            for text in (CODEX_LABEL, CODEX_BUSY_LABEL)) + 24)
         self.codex_button.clicked.connect(self._open_codex)
+        _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE,
+                           (CODEX_LABEL, CODEX_BUSY_LABEL))
         bar.addPermanentWidget(self.codex_button)
+        self.status_actions_rule = QFrame()
+        self.status_actions_rule.setFrameShape(QFrame.Shape.VLine)
+        self.status_actions_rule.setFrameShadow(QFrame.Shadow.Sunken)
+        self.status_actions_rule.setFixedWidth(10)
+        bar.addPermanentWidget(self.status_actions_rule)
+        buttons = (self.update_button, self.check_button, self.feature_button,
+                   self.codex_button)
+        height = max(button.sizeHint().height() for button in buttons)
+        for button in buttons:
+            button.setFixedHeight(height)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
             bar.addPermanentWidget(widget)
