@@ -86,13 +86,86 @@ MAX_ZOOM = 64.0
 ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
 CODEX_LABEL = "Open in Codex"
 CODEX_BUSY_LABEL = "Getting source…"
-LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are ignored
+LAYOUT_VERSION = 5  # bump when docks/toolbars change so stale saved layouts are ignored
 TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
 DEFAULT_LIMITS = {"ExposureTime": (0, 50000), "Gain": (0, 30),
                   "AcquisitionFrameRate": (0, 60)}
 # Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
 FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
+# Previous and Reference views run in this order. Raw stops after noise reduction.
+PIPELINE = ("noise reduction → difference → average → speckle filter → "
+            "stretch → invert → gamma/CLAHE → palette")
+# Opt-in processing setups. Exposure, gain, frame rate and recording stay put.
+PROCESSING_PRESETS = {
+    "Live preview": {
+        "mode": "Previous",
+        "noise_reduction": 0.0,
+        "average": 1,
+        "rolling": False,
+        "ref_refresh_s": 0.0,
+        "smoothing": 0,
+        "smoothing_method": "Gaussian",
+        "scale_range": True,
+        "clip_percent": 0.0,
+        "invert": False,
+        "palette": "Gray",
+        "gamma": 1.0,
+        "clahe": False,
+    },
+    "Measurement": {
+        "mode": "Reference",
+        "noise_reduction": 0.0,
+        "average": 8,
+        "rolling": False,
+        "ref_refresh_s": 2.0,
+        "smoothing": 3,
+        "smoothing_method": "Median",
+        "scale_range": True,
+        "clip_percent": 0.5,
+        "invert": False,
+        "palette": "Gray",
+        "gamma": 1.0,
+        "clahe": True,
+    },
+}
+PRESET_TIPS = {
+    "Live preview": "Watch fringes form while you align the setup: Previous view, "
+                    "no averaging, no noise reduction, speckle filter off. "
+                    "Does not change exposure, gain, frame rate or recording.",
+    "Measurement": "A still object against one reference: Reference view, 8-frame "
+                   "block average, Median filter 3 px, reference refresh 2 s. "
+                   "Does not change exposure, gain, frame rate or recording.",
+}
+SETTINGS_GUIDE = f"""A typical ESPI measurement starts with one of the two presets. Neither changes exposure, gain, frame rate or recording.
+
+Live preview — while you aim the camera and check that fringes form.
+  View: Previous. Average N: 1 (off). Rolling average: off.
+  Noise reduction: 0. Speckle filter: off. Ref. refresh: 0.
+  Stretch to 0–255: on. Palette: Gray. Gamma: 1.0. CLAHE: off.
+  Switch the view to Raw to frame the object. Raw skips every step after noise reduction.
+
+Measurement — a still object, compared with one reference.
+  View: Reference. Press F (or Set reference) once the object is still.
+  Average N: 8 with Rolling average off: one clean image every 8 frames.
+  Speckle filter: Median, width 3 px, well below the fringe spacing.
+  Ref. refresh: 2 s. That cancels slow drift (air, heat). Motion slower than the refresh disappears; use 0 and press F when you need one fixed before/after.
+  Noise reduction: 0. Raise it only when the camera is noisy and the object is still.
+  Stretch to 0–255: on, clip 0.5% so a few speckles don't flatten the contrast.
+  Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
+
+Processing order (Previous and Reference views):
+  {PIPELINE}
+
+Raw view applies noise reduction only, then shows the camera pixels.
+
+Three controls that are easy to mix up:
+  Noise reduction blends camera frames over time, before the difference. It removes sensor noise and keeps the speckle. It trails motion and weakens Previous-view fringes.
+  Average N blends difference frames. It reduces speckle noise in the fringes. Off (block): one image per N frames. On (rolling): the full frame rate, with a lag of about N frames.
+  The speckle filter blurs each difference image in space. Gaussian softens edges at any width. Median keeps fringe edges and stops at 5 px. Keep the width well below the fringe spacing or the fringes disappear.
+
+Hover any control for the same advice: what it does, when to use it, and a starting value.
+"""
 
 
 def request_gl_format():
@@ -708,6 +781,33 @@ class FeatureRequestDialog(QDialog):
         super().accept()
 
 
+class SettingsGuideDialog(QDialog):
+    """Explain the processing controls and offer the two starting presets."""
+
+    def __init__(self, parent):
+        """Build the guide text and the buttons that apply a preset.
+
+        Args: parent is the main window; its apply_preset handles the buttons.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Which settings should I use?")
+        self.resize(680, 640)
+        self.guide = QPlainTextEdit(SETTINGS_GUIDE)
+        self.guide.setReadOnly(True)
+        self.guide.setObjectName("settingsGuide")
+        buttons = QDialogButtonBox()
+        live = buttons.addButton("Apply Live preview", QDialogButtonBox.ActionRole)
+        measure = buttons.addButton("Apply Measurement", QDialogButtonBox.ActionRole)
+        close = buttons.addButton(QDialogButtonBox.Close)
+        live.clicked.connect(lambda: parent.apply_preset("Live preview"))
+        measure.clicked.connect(lambda: parent.apply_preset("Measurement"))
+        close.clicked.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.guide, 1)
+        layout.addWidget(buttons)
+
+
 class FixedLabel(QLabel):
     """A status-bar label whose width never depends on its text.
 
@@ -1112,9 +1212,12 @@ class MainWindow(QMainWindow):
         add(self.single_field)
         self.noise_reduction = SliderSpin(0, 95, 1, 0, s.noise_reduction, " %")
         self.noise_reduction.setToolTip(
-            "Blend each camera frame with the previous ones to remove sensor "
-            "noise in every view; speckle is kept. Higher values smooth more "
-            "but trail motion and weaken Previous-view fringes. 0 = off.")
+            "Blends each camera frame with the previous ones before the "
+            "difference, so random sensor noise drops while the speckle stays. "
+            "Use it when the live image is grainy and the object is still. It "
+            "trails motion and weakens Previous-view fringes. Unlike Average N "
+            "(which blends difference frames) or the speckle filter (which "
+            "blurs in space). Start at 0; try 30–50 only for a noisy, still scene.")
         self.noise_reduction.valueChanged.connect(
             lambda v: self.engine.update_settings(noise_reduction=v))
         add(self.noise_reduction, "Noise reduction")
@@ -1122,21 +1225,33 @@ class MainWindow(QMainWindow):
         note(self.camera_label)
 
         heading("ESPI measurement")
+        self._add_preset_buttons(add)
         self.average = SliderSpin(1, 60, 1, 0, s.average)
-        self.average.setToolTip("Frames averaged to reduce speckle noise; 1 turns averaging off")
+        self.average.setToolTip(
+            "How many difference frames are combined to quiet speckle in the "
+            "fringes. Use it in Previous or Reference view when one difference "
+            "is too speckled to read. 1 turns it off and keeps the full frame "
+            "rate. Start at 8 for a measurement; use 1 while aligning.")
         self.average.valueChanged.connect(
             lambda v: self.engine.update_settings(average=int(v)))
         add(self.average, "Average N")
         self.rolling = QCheckBox("Rolling average (updates every frame)")
-        self.rolling.setToolTip("Off: one image per N frames. On: a running average "
-                                "that keeps the camera's frame rate.")
+        self.rolling.setToolTip(
+            "Off: a block average, one image every N frames, then a fresh start. "
+            "Use that when each result should stand alone. On: a running average "
+            "that keeps the full frame rate but lags behind motion by about N "
+            "frames. Start off for a measurement; turn it on to watch a slow "
+            "change continuously.")
         self.rolling.setChecked(s.rolling)
         self.rolling.toggled.connect(lambda on: self.engine.update_settings(rolling=on))
         add(self.rolling)
         self.ref_refresh = SliderSpin(0, 10, 0.1, 1, s.ref_refresh_s, " s")
         self.ref_refresh.setToolTip(
-            "Reference view: recapture the reference this often so slow drift "
-            "(air, heat) cancels out. 0 keeps one reference until you press F.")
+            "In Reference view, recaptures the baseline this often so slow drift "
+            "(air, heat) cancels out of the fringes. A shorter time hides real "
+            "motion that is slower than the refresh. 0 keeps one reference until "
+            "you press F. Start at 0 for a single before/after; try 2 s when the "
+            "setup drifts and the change you care about is faster than that.")
         self.ref_refresh.valueChanged.connect(
             lambda v: self.engine.update_settings(ref_refresh_s=v))
         add(self.ref_refresh, "Ref. refresh")
@@ -1145,23 +1260,37 @@ class MainWindow(QMainWindow):
         self.smoothing_combo = QComboBox()
         self.smoothing_combo.addItems(SMOOTHING_METHODS)
         self.smoothing_combo.setCurrentText(s.smoothing_method)
-        self.smoothing_combo.setToolTip("Gaussian: any width. Median keeps fringe "
-                                        "edges sharper and is capped at 5 px.")
+        self.smoothing_combo.setToolTip(
+            "Blurs each difference image so pixel-scale speckle fades and broader "
+            "fringes stand out. Gaussian softens edges and accepts any width. "
+            "Median keeps fringe edges sharper and is capped at 5 px so the frame "
+            "rate holds. Use Median when the fringe edges matter; Gaussian for a "
+            "softer look. Start with Median.")
         self.smoothing_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(smoothing_method=name))
         self.smoothing = SliderSpin(0, 31, 1, 0, s.smoothing, " px")
-        self.smoothing.setToolTip("Blur width that removes pixel-scale speckle; "
-                                  "keep it well below the fringe spacing. 0 = off.")
+        self.smoothing.setToolTip(
+            "Width of the speckle filter, in pixels. Keep it well below the "
+            "fringe spacing or the fringes blur away with the speckle. 0 turns "
+            "the filter off. Start at 3 px and raise it only while the fringes "
+            "stay sharp.")
         self.smoothing.valueChanged.connect(
             lambda v: self.engine.update_settings(smoothing=int(v)))
         add(self.smoothing_combo, "Speckle filter")
         add(self.smoothing, "Filter width")
         self.scale_range = QCheckBox("Stretch to 0–255")
+        self.scale_range.setToolTip(
+            "Maps the darkest and brightest pixels of each difference image to "
+            "0 and 255 so faint fringes fill the display. Leave it on for almost "
+            "every measurement; turn it off to see the raw difference values. "
+            "Start on.")
         self.scale_range.setChecked(s.scale_range)
         self.scale_range.toggled.connect(
             lambda on: self.engine.update_settings(scale_range=on))
         self.invert = QCheckBox("Invert")
-        self.invert.setToolTip("Swap bright and dark fringes")
+        self.invert.setToolTip(
+            "Swaps bright and dark fringes. Use it when the pattern is easier to "
+            "read the other way around. Start off.")
         self.invert.setChecked(s.invert)
         self.invert.toggled.connect(lambda on: self.engine.update_settings(invert=on))
         toggles = QWidget()
@@ -1172,9 +1301,11 @@ class MainWindow(QMainWindow):
         toggles_row.addStretch(1)
         add(toggles)
         self.clip = SliderSpin(0, 10, 0.1, 1, s.clip_percent, " %")
-        self.clip.setToolTip("Stretch: let this share of the darkest and brightest "
-                             "pixels saturate so stray speckles don't flatten the "
-                             "contrast. 0 = exact min/max.")
+        self.clip.setToolTip(
+            "With Stretch on, lets this share of the darkest and brightest pixels "
+            "saturate so a few stray speckles don't flatten the contrast. 0 uses "
+            "the exact minimum and maximum. Start at 0; try 0.5% when speckles "
+            "wash the image out.")
         self.clip.valueChanged.connect(
             lambda v: self.engine.update_settings(clip_percent=v))
         add(self.clip, "Stretch clip")
@@ -1183,11 +1314,24 @@ class MainWindow(QMainWindow):
         self.palette_combo = QComboBox()
         self.palette_combo.addItems(PALETTES)
         self.palette_combo.setCurrentText(s.palette)
+        self.palette_combo.setToolTip(
+            "Colors the stretched image. Gray shows brightness and is what you "
+            "want for a measurement. A color palette (Turbo, Jet and the others) "
+            "makes small steps easier to see; pair it with CLAHE. Start with Gray.")
         self.palette_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(palette=name))
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
+        self.gamma.setToolTip(
+            "Brightens or darkens the mid-tones after stretching. 1.0 leaves them "
+            "unchanged. Raise it (try 1.4) when fringes sit in the dark areas; "
+            "lower it (try 0.7) when they look washed out. Start at 1.0.")
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
         self.clahe = QCheckBox("CLAHE (color palettes only)")
+        self.clahe.setToolTip(
+            "Boosts local contrast so faint fringes show up in a color palette. "
+            "It does nothing while the palette is Gray. Turn it on when a color "
+            "palette still looks flat; leave it off when the gray values must "
+            "stay as they are. Start on with a color palette, and off with Gray.")
         self.clahe.setChecked(s.clahe)
         self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
         add(self.palette_combo, "Palette")
@@ -1212,6 +1356,44 @@ class MainWindow(QMainWindow):
         self.controls_dock.setObjectName("controls")
         self.controls_dock.setWidget(panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
+
+    def _add_preset_buttons(self, add):
+        """Add the Live preview and Measurement buttons to the controls grid.
+
+        Args: add places a widget on the next controls-grid row.
+        Returns: None.
+        """
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        for name, tip in PRESET_TIPS.items():
+            button = QPushButton(name)
+            button.setToolTip(tip)
+            button.clicked.connect(
+                lambda _checked=False, name=name: self.apply_preset(name))
+            row.addWidget(button)
+        add(row_widget)
+
+    def apply_preset(self, name):
+        """Apply a processing preset to the displayed camera.
+
+        Exposure, gain, frame rate, recording and the single-field option are
+        left as they are. The controls update to match.
+
+        Args: name is a key of PROCESSING_PRESETS.
+        Returns: None.
+        """
+        self.engine.update_settings(**PROCESSING_PRESETS[name])
+        self._load_settings(self.engine.settings(), self.current.limits)
+        self.log.write(f"Preset applied: {name}")
+
+    def _show_settings_guide(self):
+        """Open the guide to the processing controls and the two presets.
+
+        Args: None.
+        Returns: None.
+        """
+        SettingsGuideDialog(self).exec()
 
     def _build_log(self):
         """Create the log dock.
@@ -1340,6 +1522,8 @@ class MainWindow(QMainWindow):
                              "A reset average · Q/Esc quit")
 
         help_menu = self.menuBar().addMenu("&Help")
+        guide = help_menu.addAction("Which settings should I use?")
+        guide.triggered.connect(self._show_settings_guide)
         check = help_menu.addAction("Check for updates…")
         check.triggered.connect(self._check_updates_now)
         request = help_menu.addAction("Request a feature…")

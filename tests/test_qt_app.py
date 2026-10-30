@@ -1183,6 +1183,95 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertEqual(self.window.hover, (3, 4))
 
 
+class SettingsGuideTests(WindowTestCase):
+    """Tooltips, the settings guide and the two processing presets."""
+
+    def test_processing_controls_explain_use_and_a_starting_value(self):
+        """Each processing control says what it does and where to start.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        expected = {
+            w.noise_reduction: ("sensor noise", "Start at 0"),
+            w.average: ("difference frames", "Start at 8"),
+            w.rolling: ("one image", "frame rate", "lag"),
+            w.ref_refresh: ("drift", "Start at 0"),
+            w.smoothing_combo: ("Gaussian", "Median", "5 px"),
+            w.smoothing: ("fringe spacing", "Start at 3"),
+            w.scale_range: ("0 and 255", "Start on"),
+            w.invert: ("bright and dark", "Start off"),
+            w.clip: ("speckles", "Start at 0"),
+            w.palette_combo: ("Start with Gray",),
+            w.gamma: ("Start at 1.0",),
+            w.clahe: ("color palette", "Gray"),
+        }
+        for widget, phrases in expected.items():
+            tip = widget.toolTip()
+            for phrase in phrases:
+                self.assertIn(phrase, tip)
+
+    def test_presets_apply_processing_and_leave_the_camera_alone(self):
+        """Live preview and Measurement set processing, not exposure or recording.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.exposure.spin.setValue(1234)
+        w.gain.spin.setValue(2.5)
+        w.fps.spin.setValue(15)
+        w.record_button.setChecked(True)
+        w.single_field.setChecked(False)
+        buttons = {b.text(): b for b in w.controls_dock.findChildren(qt_app.QPushButton)}
+        buttons["Measurement"].click()
+        s = self.engine.settings()
+        self.assertEqual(s.mode, "Reference")
+        self.assertEqual((s.average, s.rolling, s.ref_refresh_s), (8, False, 2.0))
+        self.assertEqual((s.smoothing, s.smoothing_method), (3, "Median"))
+        self.assertEqual((s.noise_reduction, s.clip_percent, s.clahe), (0.0, 0.5, True))
+        self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
+        self.assertFalse(s.single_field)
+        self.assertEqual(w.average.value(), 8)
+        self.assertTrue(w.mode_group.checkedButton().text() == "Reference")
+        buttons["Live preview"].click()
+        s = self.engine.settings()
+        self.assertEqual(qt_app.PROCESSING_PRESETS["Live preview"]["mode"], s.mode)
+        self.assertEqual((s.average, s.smoothing, s.clahe, s.ref_refresh_s), (1, 0, False, 0.0))
+        self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
+        self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
+        self.assertIn("Preset applied: Live preview", self.log.lines)
+        self.assertIn("exposure", buttons["Live preview"].toolTip())
+
+    def test_guide_lists_the_pipeline_and_applies_a_preset(self):
+        """The Help guide matches the README and its buttons apply a preset.
+
+        Args: None.
+        Returns: None.
+        """
+        with open(os.path.join(paths.PROJECT_ROOT, "README.md"), encoding="utf-8") as handle:
+            readme = handle.read()
+        self.assertIn(qt_app.PIPELINE, readme)
+        self.assertIn(qt_app.PIPELINE, qt_app.SETTINGS_GUIDE)
+        help_menu = self.window.menuBar().actions()[-1].menu()
+        entry = next(a for a in help_menu.actions()
+                     if a.text() == "Which settings should I use?")
+        with mock.patch.object(qt_app.SettingsGuideDialog, "exec", return_value=0) as shown:
+            entry.trigger()
+        shown.assert_called_once()
+        dialog = qt_app.SettingsGuideDialog(self.window)
+        self.assertEqual(dialog.guide.toPlainText(), qt_app.SETTINGS_GUIDE)
+        buttons = {b.text(): b for b in dialog.findChildren(qt_app.QPushButton)}
+        buttons["Apply Measurement"].click()
+        self.assertEqual(self.engine.settings().mode, "Reference")
+        self.assertEqual(self.engine.settings().average, 8)
+        buttons["Apply Live preview"].click()
+        self.assertEqual(self.engine.settings().mode, "Previous")
+        buttons["Close"].click()
+        self.assertFalse(dialog.isVisible())
+
+
 class MainWindowGlTests(WindowTestCase):
     """The GPU view can be selected."""
 
