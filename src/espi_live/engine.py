@@ -32,8 +32,9 @@ from espi_live import sources
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
-                                  gamma_lut, single_field, smooth_speckle,
-                                  stretch_contrast, watermark_demo)
+                                  denoise_strength, gamma_lut, single_field,
+                                  smooth_speckle, stretch_contrast,
+                                  watermark_demo)
 from espi_live.recording import AVIRecorder, recording_path, save_frame
 
 CAMERA_TIMEOUT_MS = 100
@@ -52,7 +53,7 @@ class Settings:
     exposure_us: float = 8000.0
     gain_db: float = 0.0
     fps: float = 30.0
-    noise_reduction: float = 0.0  # % of history blended into each camera frame; 0 = off
+    noise_reduction: float = 0.0  # 0–95 slider; 0 = off. See denoise_strength.
     average: int = 1
     rolling: bool = False         # running average instead of one image per N frames
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
@@ -154,6 +155,8 @@ class Engine:
         self._settings = Settings()
         self._settings_lock = threading.Lock()
         self._actions = queue.SimpleQueue()
+        self._saves_waiting = 0  # frame saves queued or being written
+        self._saves_lock = threading.Lock()
         self._packet = None
         self._packet_lock = threading.Lock()
         self._status = {
@@ -329,7 +332,19 @@ class Engine:
             carries every detected CameraInfo).
         Returns: None.
         """
+        if action == "save":
+            with self._saves_lock:
+                self._saves_waiting += 1
         self._actions.put((action, payload))
+
+    def save_pending(self):
+        """Report whether a frame save is queued or being written.
+
+        Args: None.
+        Returns: True until the worker has finished that save.
+        """
+        with self._saves_lock:
+            return self._saves_waiting > 0
 
     def latest_packet(self):
         """Return the newest published frame.
@@ -522,7 +537,7 @@ class Engine:
             if s.single_field and self.camera is not None and self.camera.interlaced:
                 frame = single_field(frame)
 
-            frame = processor.denoise(frame, s.noise_reduction / 100.0)
+            frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
             now = time.monotonic()
             last_valid = now
             if not self.demo:
@@ -686,15 +701,19 @@ class Engine:
             except queue.Empty:
                 return processor, frame
             if action == "save":
-                packet = payload.get("packet")  # a frozen display's packet
-                if packet is None:
-                    packet = self.latest_packet()
-                if packet is None:
-                    self.log.write("No current display frame is ready to save.")
-                else:
-                    save_frame(packet.render(), payload.get("title", ""),
-                               payload.get("notes", ""), packet.demo, self.log,
-                               self.tag, frozen_at=payload.get("frozen_at"))
+                try:
+                    packet = payload.get("packet")  # a frozen display's packet
+                    if packet is None:
+                        packet = self.latest_packet()
+                    if packet is None:
+                        self.log.write("No current display frame is ready to save.")
+                    else:
+                        save_frame(packet.render(), payload.get("title", ""),
+                                   payload.get("notes", ""), packet.demo, self.log,
+                                   self.tag, frozen_at=payload.get("frozen_at"))
+                finally:
+                    with self._saves_lock:
+                        self._saves_waiting -= 1
             elif action == "reset_previous":
                 processor.prev = None
                 self.log.write("Reset previous frame.")

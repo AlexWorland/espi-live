@@ -18,6 +18,7 @@ the displayed camera's own engine and settings.
 
 import html
 import math
+import random
 import sys
 import textwrap
 import time
@@ -42,8 +43,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
 from espi_live import camera_reports, codex, feedback, source_code, tips, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.logs import AppLog
-from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
-                                  palette_rgb_table)
+from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
+                                  VIEW_MODES, palette_rgb_table)
 
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
 GL_TEXTURE_2D = 0x0DE1
@@ -93,6 +94,9 @@ LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are
 # layout is left alone; a narrower window keeps the badge and elides the tip.
 DEFAULT_WIDTH = 2100
 DEFAULT_HEIGHT = 900
+# A camera PC can stay open for days. Recheck well inside GitHub's rate limit.
+UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
+UPDATE_CHECK_JITTER_MS = 20 * 60 * 1000
 TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
 DEFAULT_LIMITS = {"ExposureTime": (0, 50000), "Gain": (0, 30),
@@ -1121,8 +1125,9 @@ class MainWindow(QMainWindow):
             (opened, not yet started); the first active one is displayed;
             log is the AppLog; use_gl selects the GPU view instead of the CPU
             fallback; check_updates looks for a newer prebuilt binary at
-            startup and downloads this build's source code if it is missing
-            (otherwise that waits for Open in Codex).
+            startup and again every few hours, and downloads this build's
+            source code if it is missing (otherwise that waits for Open in
+            Codex). False skips every update check, including the later ones.
         Returns: None.
         """
         super().__init__()
@@ -1134,8 +1139,13 @@ class MainWindow(QMainWindow):
         self.closing = False
         self.updates = updater.UpdateWorker()
         self.update_info = None
+        self.announced_build = None  # build number last named in the status bar
         self.update_manual = False  # report "up to date" and errors in dialogs
         self.pending_update = None  # unpacked build to install on exit
+        self._periodic_checks = False
+        self.update_timer = QTimer(self)
+        self.update_timer.setSingleShot(True)
+        self.update_timer.timeout.connect(self._periodic_update_check)
         self.relaunch_after_exit = False
         self.feedback = feedback.FeedbackWorker()
         self.reports = camera_reports.CameraReportWorker()
@@ -1202,7 +1212,9 @@ class MainWindow(QMainWindow):
         if not self.tips.hidden:
             self.tip_timer.start()
         if check_updates and updater.unavailable_reason() is None:
+            self._periodic_checks = True
             self.updates.check()
+            self._schedule_update_check()
         if check_updates:
             self.source.start()  # downloads this build's source if it is missing
 
@@ -1499,14 +1511,29 @@ class MainWindow(QMainWindow):
             lambda on: self.engine.update_settings(single_field=on))
         self.single_field.hide()
         add(self.single_field)
-        self.noise_reduction = SliderSpin(0, 95, 1, 0, s.noise_reduction, " %")
+        self.noise_reduction = SliderSpin(0, MAX_DENOISE_PERCENT, 1, 0,
+                                          s.noise_reduction, " %")
         self.noise_reduction.set_description(
-            "Blend each camera frame with the previous ones to remove sensor "
-            "noise in every view; speckle is kept. Higher values smooth more "
-            "but trail motion and weaken Previous-view fringes. 0 = off.")
+            "Settle flickering sensor noise in Raw, Previous and Reference by "
+            "blending each camera frame with the ones before it. The speckle "
+            "grain stays, so a still speckle image looks almost the same: "
+            "watch for less boiling and a trail when something moves. Stretch "
+            "to 0–255 repaints a quieter difference at full brightness; judge "
+            "it with stretch off, or by the status bar's Input range. This is "
+            "not the Speckle filter (that blurs the grain) or Average N (that "
+            "smooths the fringe picture). 0 = off. The number is how far the "
+            "control is turned up, not the share of the previous frame kept: "
+            "low values already blend several frames, and "
+            f"{MAX_DENOISE_PERCENT} trails motion the most, which also softens "
+            "Previous-view fringes.")
         self.noise_reduction.valueChanged.connect(
             lambda v: self.engine.update_settings(noise_reduction=v))
         add(self.noise_reduction, "Noise reduction")
+        self.noise_note = QLabel(
+            "Grain stays. Look for less flicker and a motion trail, not a "
+            "smoother still image. Stretch hides a quieter difference. Not "
+            "the Speckle filter or Average N.")
+        note(self.noise_note)
         self.camera_label = QLabel()
         note(self.camera_label)
 
@@ -1754,7 +1781,7 @@ class MainWindow(QMainWindow):
         bold.setBold(True)
         metrics = QFontMetrics(bold)
         slot_width = max(metrics.horizontalAdvance(text) for text in (
-            "Update available: build 9999 (abcdef0)", "Downloading update… 100%",
+            "Install update", "Downloading update… 100%",
             "Restart to update", "Check for updates", "Checking for updates…")) + 24
         self.update_slot = QWidget()
         slot = QGridLayout(self.update_slot)
@@ -2518,6 +2545,71 @@ class MainWindow(QMainWindow):
 
     # ----- updates -----------------------------------------------------------
 
+    def _schedule_update_check(self):
+        """Arm the next update check a few hours from now, with a little jitter.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.closing or not self._periodic_checks:
+            return
+        spread = random.randint(-UPDATE_CHECK_JITTER_MS, UPDATE_CHECK_JITTER_MS)
+        self.update_timer.start(UPDATE_CHECK_INTERVAL_MS + spread)
+
+    def _capture_busy(self):
+        """Report whether a recording or a frame save should wait out this check.
+
+        Args: None.
+        Returns: True while any camera is recording, finishing a recording,
+            or still saving a frame.
+        """
+        for engine in self._all_engines():
+            if engine.settings().record:
+                return True
+            if engine.status().get("record") != "Recording: off":
+                return True
+            if engine.save_pending():
+                return True
+        return False
+
+    def _periodic_update_check(self):
+        """Check for a newer build, unless one is already running or capture is busy.
+
+        A skipped tick still schedules the next one. The check is not manual,
+        so a failure is only written to the log. Nothing is scheduled once
+        the window is closing.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.closing or not self._periodic_checks:
+            return
+        if not self.updates.busy and self.pending_update is None and not self._capture_busy():
+            self.updates.check()
+        self._schedule_update_check()
+
+    def _show_available_update(self, info):
+        """Point the status-bar button at a newer build.
+
+        The button reads "Install update"; the version numbers stay in the
+        tooltip ("Build 42 → 45"). The first time a build number is seen, a
+        brief status message is shown. A later check that finds the same
+        build leaves the button as it is and does not repeat the message.
+
+        Args: info is the UpdateInfo.
+        Returns: None.
+        """
+        self.update_info = info
+        self.update_button.setText("Install update")
+        set_tooltip(self.update_button,
+                    f"Build {updater.current_build()} → {info.build}.",
+                    "Download the newer build of ESPI live.")
+        self.update_button.setVisible(True)
+        self.update_button.setEnabled(True)
+        if self.announced_build != info.build:
+            self.announced_build = info.build
+            self.statusBar().showMessage(f"Update available: {info.label()}", 10000)
+
     def _check_updates_now(self):
         """Check for a newer build on request and report the result in a dialog.
 
@@ -2579,7 +2671,8 @@ class MainWindow(QMainWindow):
         Args: None.
         Returns: None.
         """
-        if self.updates.busy and self.update_info is not None and not self.pending_update:
+        if (self.updates.busy and self.updates.downloading and self.update_info is not None
+                and not self.pending_update):
             done, total = self.updates.progress
             percent = f" {100 * done / total:.0f}%" if total else ""
             self.update_button.setText(f"Downloading update…{percent}")
@@ -2594,11 +2687,8 @@ class MainWindow(QMainWindow):
                 if manual:
                     QMessageBox.information(self, "Updates", "ESPI live is up to date.")
             elif kind == "checked":
-                self.update_info = payload
                 self.log.write(f"Update available: {payload.label()}")
-                self.update_button.setText(f"Update available: {payload.label()}")
-                self.update_button.setToolTip("Download the new build")
-                self.update_button.setVisible(True)
+                self._show_available_update(payload)
                 if manual:
                     self._update_clicked()
             elif kind == "check_failed":
@@ -2609,13 +2699,14 @@ class MainWindow(QMainWindow):
                 self.pending_update = payload
                 self.log.write("Update downloaded; it installs when ESPI live restarts")
                 self.update_button.setText("Restart to update")
-                self.update_button.setToolTip("Restart now, or the update installs on exit")
+                set_tooltip(self.update_button,
+                            "Restart now to install the downloaded build, or close ESPI live "
+                            "and the update installs on exit.")
                 self.update_button.setEnabled(True)
                 self._offer_restart()
             elif kind == "download_failed":
                 self.log.write(f"Update download failed: {payload}")
-                self.update_button.setText(f"Update available: {self.update_info.label()}")
-                self.update_button.setEnabled(True)
+                self._show_available_update(self.update_info)
                 QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
         self._sync_check_button()
 
@@ -2728,6 +2819,7 @@ class MainWindow(QMainWindow):
         if not self.closing:
             self.closing = True
             self.tip_timer.stop()
+            self.update_timer.stop()
             self.statusBar().showMessage("Finishing recordings and releasing the camera…")
             for engine in self._all_engines():
                 engine.stop()
@@ -2771,8 +2863,9 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
     """Start the Qt front end.
 
     Args: force_demo skips camera detection and starts synthetic video;
-        check_updates looks for a newer prebuilt binary and downloads this
-        build's source code (if missing) at startup;
+        check_updates looks for a newer prebuilt binary (at startup and
+        every few hours) and downloads this build's source code (if missing)
+        at startup;
         demo_cameras is how many synthetic cameras demo mode simulates.
     Returns: The process exit code.
     """

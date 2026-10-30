@@ -13,6 +13,17 @@
 - The tips cover hovering for a description, `S` and `F`, stretch clip and gamma, rolling and block average, Request feature, the dockable panels, switching cameras, and zoom and pan.
 - A first launch opens at 2100×900, wide enough for a whole tip beside the badges. A layout saved by an older version is kept.
 
+## 2026-10-30 — Noise reduction works across the slider, and says so
+
+### Previous state
+
+- **Noise reduction** read its 0–95 slider as the share of the previous frame to keep. Twenty was about one frame of memory, so most of the travel did almost nothing, and the speckle grain (which the control keeps on purpose) made a still image look unchanged. It was easy to take it for the Speckle filter or Average N, and **Stretch to 0–255** repaints a quieter difference at full brightness, which hides the change again.
+
+### Current state
+
+- The same slider, still 0 = off and 95 = strongest, now means how far the control is turned up. Each step adds the same amount of memory, so 10 is about three frames and 95 is still the old cap of about twenty. The default stays 0. The speckle grain is still kept.
+- The hover tip, which also shows the current value, and a note under the slider say what to look for (less flicker, a trail when something moves) and what will not change (a still speckle image; stretch hides a quieter difference), and that this is not the Speckle filter or Average N.
+
 ## 2026-10-30 — Feature requests are filed by the app
 
 ### Previous state
@@ -40,6 +51,18 @@
 - Tips wait 600 ms, including when the pointer moves from one control to the next, so they do not flash. They open beside the control and never over the live image; the image itself has no tooltip. The shortcut list is in the View menu.
 - Disabled controls still show their tip, so an analog camera's exposure, gain and frame rate still say they are set on the camera, and dummy mode still says those three are simulated.
 - The old Tk window is not part of the application any more (`--ui tk` is gone), so this is the Qt window only.
+
+## 2026-10-30 — Updates are noticed while the app stays open
+
+### Previous state
+
+- A prebuilt copy looked for a newer build once, at startup. A camera PC left running for days never noticed a build released after it opened.
+- The status-bar button read **Update available:** followed by the version.
+
+### Current state
+
+- While the app is open it checks again about every three hours, a little earlier or later each time. It skips a check that would overlap one already running, a download, a recording or a frame save. `--no-update-check` turns the later checks off too. Running from source still does not update itself.
+- When a newer build is found the button reads **Install update** (the versions are in the tooltip, such as "Build 42 → 45") and the status bar mentions it once. Finding that same build again leaves the button as it is. A check that fails only goes to the log, and an update already found stays on the button. Downloading and restarting work as before: the new build is installed only after the camera is released.
 
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 

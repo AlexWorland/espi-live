@@ -7,7 +7,8 @@ import unittest
 
 import numpy as np
 
-from espi_live.processing import (MAX_DENOISE_STRENGTH, DemoSource, ESPIProcessor,
+from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_DENOISE_STRENGTH,
+                                  DemoSource, ESPIProcessor, denoise_strength,
                                   normalize_min_max, single_field,
                                   stretch_contrast, watermark_demo)
 
@@ -173,6 +174,78 @@ class ProcessorTests(unittest.TestCase):
         raw_error = np.abs(noisy - speckle).mean()
         filtered_error = np.abs(result.astype(np.float32) - speckle).mean()
         self.assertLess(filtered_error, raw_error / 2)
+
+    def test_denoise_strength_is_off_at_zero_and_capped_at_the_top(self):
+        """The slider's ends stay off and at the old strongest blend.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(denoise_strength(0), 0.0)
+        self.assertEqual(denoise_strength(-5), 0.0)
+        self.assertEqual(denoise_strength(MAX_DENOISE_PERCENT), MAX_DENOISE_STRENGTH)
+        self.assertEqual(denoise_strength(100), MAX_DENOISE_STRENGTH)
+
+    def test_denoise_strength_grows_evenly_and_the_low_end_is_useful(self):
+        """Low slider positions blend several frames, and higher means more.
+
+        A linear history weight at 10 was 0.10, about one frame. The mapped
+        weight must be well above that, and the sequence must not go backwards.
+
+        Args: None.
+        Returns: None.
+        """
+        strengths = [denoise_strength(percent) for percent in range(0, 96)]
+        self.assertEqual(strengths, sorted(strengths))
+        self.assertGreater(denoise_strength(10), 0.5)
+        self.assertLess(denoise_strength(94), MAX_DENOISE_STRENGTH)
+
+    def test_low_slider_changes_raw_previous_and_reference(self):
+        """A low setting moves all three views more than the old linear blend.
+
+        Frames alternate black and white, so an unfiltered difference is 255
+        and a blend pulls Raw toward gray. The reference is taken once the
+        blend has settled, while noise reduction is on.
+
+        Args: None.
+        Returns: None.
+        """
+        frames = [np.full((8, 8), 0 if i % 2 == 0 else 255, dtype=np.uint8)
+                  for i in range(40)]
+        off = self._views(frames, 0)
+        low = self._views(frames, 10)
+        high = self._views(frames, MAX_DENOISE_PERCENT)
+        self.assertIn(int(off["Raw"][-1][0, 0]), (0, 255))
+        self.assertGreater(int(low["Raw"][-1][0, 0]), 40)
+        self.assertLess(int(low["Raw"][-1][0, 0]), 220)
+        self.assertLess(abs(int(high["Raw"][-1][0, 0]) - 127),
+                        abs(int(low["Raw"][-1][0, 0]) - 127))
+        self.assertEqual(int(off["Previous"][-1][0, 0]), 255)
+        self.assertLess(int(low["Previous"][-1][0, 0]), 80)
+        self.assertLess(int(high["Previous"][-1][0, 0]),
+                        int(low["Previous"][-1][0, 0]))
+        self.assertIn(int(off["Reference"][-1][0, 0]), (0, 255))
+        self.assertLess(int(low["Reference"][-1][0, 0]), 200)
+        self.assertLess(int(high["Reference"][-1][0, 0]),
+                        int(low["Reference"][-1][0, 0]))
+
+    def _views(self, frames, percent):
+        """Run the engine's order: denoise, then each view, on one processor.
+
+        Args: frames is a list of Mono8 arrays; percent is the slider value.
+        Returns: A dict of mode name to the list of uint8 images.
+        """
+        proc = ESPIProcessor()
+        strength = denoise_strength(percent)
+        images = {mode: [] for mode in ("Raw", "Previous", "Reference")}
+        for index, frame in enumerate(frames):
+            frame = proc.denoise(frame, strength)
+            if index == 30:
+                proc.set_reference(frame, 0.0)
+            images["Raw"].append(frame.copy())
+            images["Previous"].append(proc.difference(frame, "Previous").copy())
+            images["Reference"].append(proc.difference(frame, "Reference").copy())
+        return images
 
     def test_block_average_returns_none_until_full_then_mean(self):
         """Block averaging withholds output until the count is reached.
