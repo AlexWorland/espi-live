@@ -79,9 +79,12 @@ def self_check():
         pyspin = f"PySpin {load_pyspin().__file__}"
     except ImportError:
         pyspin = "PySpin not bundled (demo only)"
+    from espi_live.capture import load_enumerator  # imports only; lists nothing
+    video = ("Video devices: cv2_enumerate_cameras "
+             + ("available" if load_enumerator() else "not installed"))
     print(f"Self-check OK: Python {sys.version.split()[0]}, NumPy {numpy.__version__}, "
           f"OpenCV {cv2.__version__}, PySide6 {PySide6.__version__}; {pyspin}; "
-          f"{updater.describe_build()}")
+          f"{video}; {updater.describe_build()}")
     return 0
 
 

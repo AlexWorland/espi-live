@@ -26,11 +26,13 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
-from espi_live import feedback, paths, qt_app, updater
+from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, updater
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
 from espi_live.channels import Channel, demo_channels
 from espi_live.engine import Engine, FramePacket
+from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
+from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 
 APP = QApplication.instance() or QApplication(sys.argv)
 
@@ -2935,6 +2937,210 @@ class FeatureRequestTests(WindowTestCase):
         retry, browser = self.failed_choice("cancel")
         retry.assert_not_called()
         browser.assert_not_called()
+
+
+class FakeReportWorker:
+    """Stand-in for CameraReportWorker that records reports and never files."""
+
+    def __init__(self):
+        """Create an idle worker.
+
+        Args: None.
+        Returns: None.
+        """
+        self.events = queue.Queue()
+        self.submitted = []
+
+    def submit(self, report):
+        """Record a report.
+
+        Args: report is a camera_reports.Report.
+        Returns: True.
+        """
+        self.submitted.append(report)
+        return True
+
+
+ANALOG_TIP = "Set on the camera itself; not adjustable over analog video"
+
+
+class CaptureWindowTests(unittest.TestCase):
+    """A Blackfly, a USB-Live2 (displayed) and a webcam in one window."""
+
+    def setUp(self):
+        """Build the window over fake cameras and fake video devices.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        self.dialogs = make_dialogs()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        system = FakeSystem([FakeCamera(serial="1", model="Blackfly S BFS-U3-63S4M")])
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(qt_app.camera_reports, "CameraReportWorker",
+                                  FakeReportWorker),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
+                mock.patch.object(camera, "PySpin", make_pyspin(system)),
+                mock.patch.object(capture, "load_enumerator",
+                                  return_value=FakeEnumerator([usb_live2(0), webcam(1)])),
+                mock.patch.object(capture.cv2, "VideoCapture",
+                                  FakeCaptureFactory(frames=[interlaced_frame()]))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        self.channels = [Channel(self.log, info) for info in sources.detect_cameras(self.log)]
+        self.flir, self.usb, self.webcam = self.channels
+        self.usb.open()
+        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.addCleanup(self.cleanup_window)
+        self.window._handle_events()  # identity and limits queued by the open
+
+    def cleanup_window(self):
+        """Close the window, which stops and waits for every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.window.deleteLater()
+
+    def show_webcam_report(self):
+        """Display the webcam and wait until its engine sends a camera report.
+
+        Args: None.
+        Returns: The Report the window submitted.
+        """
+        window = self.window
+        window.show_channel(self.webcam)
+
+        def submitted():
+            """Process engine events and look for the submitted report.
+
+            Args: None.
+            Returns: True once a report was submitted.
+            """
+            window._handle_events()
+            return bool(window.reports.submitted)
+
+        self.assertTrue(wait_for(submitted))
+        return window.reports.submitted[0]
+
+    def test_capture_channel_disables_camera_controls(self):
+        """Analog cameras get fixed controls and a field toggle; FLIR ones do not.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertIs(window.current, self.usb)
+        for widget in (window.exposure, window.gain, window.fps):
+            self.assertFalse(widget.isEnabled())
+            self.assertEqual(widget.toolTip(), ANALOG_TIP)
+        self.assertFalse(window.single_field.isHidden())
+        self.assertTrue(window.single_field.isChecked())
+        self.assertTrue(window.report_label.isHidden())
+        window.show_channel(self.flir)
+        for widget in (window.exposure, window.gain, window.fps):
+            self.assertTrue(widget.isEnabled())
+            self.assertEqual(widget.toolTip(), "")
+        self.assertTrue(window.single_field.isHidden())
+
+    def test_single_field_checkbox_updates_engine(self):
+        """Unticking the field toggle switches the engine to full frames.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.single_field.setChecked(False)
+        self.assertFalse(self.usb.engine.settings().single_field)
+        self.window.single_field.setChecked(True)
+        self.assertTrue(self.usb.engine.settings().single_field)
+
+    def test_unsupported_marker_in_camera_list(self):
+        """Only the unrecognised webcam is marked in the camera list.
+
+        Args: None.
+        Returns: None.
+        """
+        combo = self.window.camera_combo
+        self.assertEqual([combo.itemText(i) for i in range(combo.count())],
+                         ["Blackfly S BFS-U3-63S4M (1)", "Hauppauge USB-Live2 (video 1)",
+                          "Webcam C270 (video 2) · not yet supported"])
+
+    def test_camera_report_event_submits_and_shows_state(self):
+        """Switching the webcam on files a report; its state shows under the camera.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        report = self.show_webcam_report()
+        self.assertTrue(report.key.startswith("Webcam C270"))
+        self.assertIs(self.webcam.report, report)
+        self.assertFalse(window.report_label.isHidden())
+        self.assertIn("Reporting this camera", window.report_label.text())
+        url = "https://github.com/owner/repo/issues/3"
+        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
+            url=url, created=True))))
+        window._poll_status()
+        self.assertIn(url, window.report_label.text())
+        self.assertTrue(window.report_button.isHidden())
+        self.assertTrue(any(url in line for line in self.log.lines))
+        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
+            path="out/logs/camera-report.md"))))
+        window._handle_report_events()
+        self.assertIn("saved to out/logs/camera-report.md", window.report_label.text())
+        self.assertFalse(window.report_button.isHidden())
+        window.show_channel(self.usb)
+        self.assertTrue(window.report_label.isHidden())
+        self.assertTrue(window.report_button.isHidden())
+
+    def test_report_button_opens_browser(self):
+        """The button opens the prefilled page, or warns when no browser opens.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        report = self.show_webcam_report()
+        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
+            error="offline"))))
+        window._handle_report_events()
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                               return_value=True) as open_url:
+            window.report_button.click()
+        self.assertIn("labels=camera-support", open_url.call_args[0][0].toString())
+        self.dialogs.warning.assert_not_called()
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl", return_value=False):
+            window.report_button.click()
+        self.dialogs.warning.assert_called_once_with(
+            window, "Report this camera", "Could not open a web browser.")
+
+
+class DemoCaptureControlsTests(WindowTestCase):
+    """Dummy mode shows neither analog controls nor camera reports."""
+
+    def test_demo_hides_report_and_capture_controls(self):
+        """The field toggle and report line stay hidden; sliders stay simulated.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertTrue(window.single_field.isHidden())
+        self.assertTrue(window.report_label.isHidden())
+        self.assertTrue(window.report_button.isHidden())
+        self.assertTrue(window.exposure.isEnabled())
+        self.assertEqual(window.exposure.toolTip(), "Simulated in dummy mode")
 
 
 class CodexTests(WindowTestCase):

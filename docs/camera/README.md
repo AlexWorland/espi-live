@@ -13,6 +13,7 @@ ranges, and SDK names can differ with firmware and installed Spinnaker version.
 | Features, settings, or limits specific to the BFS-U3-63S4M-C | `blackfly-bfs-u3-63s4m-c.md` |
 | Preview latency, USB throughput, frame rate, ROI, pixel format, or triggering | `acquisition-and-performance.md` |
 | Model detection, other FLIR models, or `camera_models.py` | `supported-models.md` |
+| The analog Sony XC-ST50, the Hauppauge USB-Live2, `capture.py`, `capture_models.py`, `sources.py` or camera reports | `sony-xc-st50-usb-live2.md` |
 
 For camera edits, load the first file plus the file(s) matching the changed
 feature. The vendored examples in `third_party/flir-spinnaker-4.2/Examples/Python3/` are

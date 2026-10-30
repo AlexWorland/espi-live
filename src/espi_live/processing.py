@@ -86,6 +86,19 @@ def smooth_speckle(image, method, size):
     return cv2.GaussianBlur(image, (size, size), 0)
 
 
+def single_field(frame):
+    """Show one field of an interlaced frame at full height.
+
+    The two fields of an analog frame are exposed 1/60 s apart; keeping only
+    the even rows removes that offset, and repeating each row keeps the
+    frame's size and aspect, so display, saving and recording stay alike.
+
+    Args: frame is a 2-D image.
+    Returns: A new array of the same shape built from the even rows.
+    """
+    return np.repeat(frame[0::2], 2, axis=0)[:frame.shape[0]]
+
+
 def gamma_lut(gamma):
     """Build the 256-entry gamma lookup table used for display.
 
