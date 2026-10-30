@@ -19,24 +19,26 @@ the displayed camera's own engine and settings.
 import html
 import math
 import sys
+import textwrap
 import time
 from datetime import datetime
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon, QImage, QKeySequence,
-                           QOffscreenSurface, QOpenGLContext, QPainter, QPainterPath, QPalette,
-                           QPen, QPixmap, QSurfaceFormat, QVector4D)
+from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QSettings, QSize, Qt, QTimer,
+                            QUrl, Signal)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFontMetrics, QIcon, QImage,
+                           QKeySequence, QOffscreenSurface, QOpenGLContext, QPainter,
+                           QPainterPath, QPalette, QPen, QPixmap, QSurfaceFormat, QVector4D)
 from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup,
+from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, QButtonGroup,
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QPushButton, QSizePolicy, QSlider, QTextEdit,
-                               QToolBar, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QProxyStyle, QPushButton, QSizePolicy, QSlider,
+                               QStyle, QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
 
 from espi_live import camera_reports, codex, feedback, source_code, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
@@ -228,6 +230,224 @@ def _arm_status_button(button, style, texts, icon=None):
     button.setText(current)
     button.setFixedWidth(width)
     return width
+
+
+# Long enough that a moving pointer does not flash a tip; short enough to wait for.
+TOOLTIP_DELAY_MS = 600
+TOOLTIP_FALL_ASLEEP_MS = 0  # the next control waits too, so sweeping does not pop tips
+TOOLTIP_WRAP = 52  # characters; keeps a tip about as wide as the controls dock
+TOOLTIP_MARGIN = 2
+TOOLTIP_CHROME = 18  # Qt's tooltip frame, so the estimated size is not smaller than the real one
+SIMULATED_TIP = "Simulated in dummy mode"
+ZOOM_SLIDER_TIP = ("Drag, click or scroll to zoom. The mouse wheel and "
+                   "drag-to-pan on the image still work.")
+MODE_TIPS = {
+    "Raw": ("Raw: the camera's Mono8 image, for aiming and focusing. "
+            "No difference, stretch, gamma or palette."),
+    "Previous": ("Previous: the difference from the last frame, so fringes show "
+                 "what just changed. Shortcut: R restarts that difference."),
+    "Reference": ("Reference: the difference from a stored frame. Shortcut: F "
+                  "stores the live frame. Ref. refresh can recapture it on a "
+                  "timer so slow drift cancels."),
+}
+
+
+def format_tooltip(*parts):
+    """Wrap tooltip paragraphs so the popup stays about as wide as the controls.
+
+    Args: parts are paragraphs; blank ones are dropped. A newline inside a
+        part starts a new paragraph, and a short part such as "Now: 8000 µs"
+        stays on its own line.
+    Returns: Plain text with newlines.
+    """
+    lines = []
+    for part in parts:
+        for paragraph in part.split("\n"):
+            paragraph = paragraph.strip()
+            if paragraph:
+                lines.extend(textwrap.wrap(paragraph, width=TOOLTIP_WRAP))
+    return "\n".join(lines)
+
+
+def set_tooltip(target, *parts):
+    """Explain a control. Disabled widgets still show the tip.
+
+    Args: target is a QWidget or QAction; parts are paragraphs.
+    Returns: None.
+    """
+    target.setToolTip(format_tooltip(*parts))
+    if isinstance(target, QWidget):
+        target.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+
+
+class TooltipDelayStyle(QProxyStyle):
+    """Pause before a tooltip, including when the pointer moves to the next control."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        """Return the hover delays for tooltips and delegate every other hint.
+
+        Args: hint is a QStyle.StyleHint; option, widget and returnData are
+            the Qt arguments for this hint.
+        Returns: Milliseconds, or the base style's answer.
+        """
+        if hint == QStyle.SH_ToolTip_WakeUpDelay:
+            return TOOLTIP_DELAY_MS
+        if hint == QStyle.SH_ToolTip_FallAsleepDelay:
+            return TOOLTIP_FALL_ASLEEP_MS
+        return super().styleHint(hint, option, widget, returnData)
+
+
+def install_tooltip_delay():
+    """Apply the tooltip delay once for this process.
+
+    Args: None. A QApplication must already exist.
+    Returns: None.
+    """
+    app = QApplication.instance()
+    if isinstance(app.style(), TooltipDelayStyle):
+        return
+    app.setStyle(TooltipDelayStyle())
+
+
+def tooltip_size(text):
+    """Estimate the rectangle Qt will give a tooltip.
+
+    Args: text is the tooltip, which may contain newlines.
+    Returns: A QSize in pixels.
+    """
+    metrics = QFontMetrics(QToolTip.font())
+    lines = text.split("\n")
+    width = max(metrics.horizontalAdvance(line) for line in lines) + TOOLTIP_CHROME
+    height = metrics.lineSpacing() * len(lines) + TOOLTIP_CHROME
+    return QSize(width, height)
+
+
+def image_global_rect(image):
+    """Return the live image's global rectangle, or None when it is not shown.
+
+    Args: image is the image view, or None.
+    Returns: A QRect, or None.
+    """
+    if image is None or not image.isVisible():
+        return None
+    return QRect(image.mapToGlobal(QPoint(0, 0)), image.size())
+
+
+def _screen_rect(widget, screen):
+    """Choose the desktop rectangle a tooltip must stay inside.
+
+    Args: widget is the control; screen is an explicit QRect, or None to use
+        the widget's screen.
+    Returns: A QRect.
+    """
+    if screen is not None:
+        return screen
+    widget_screen = widget.screen()
+    if widget_screen is None:
+        return QRect(0, 0, 4096, 4096)
+    return widget_screen.availableGeometry()
+
+
+def _candidate_points(origin, widget_size, tip_size, blocked):
+    """List tooltip positions, nearest to the control first.
+
+    When the control sits on the image, later positions are outside that image.
+
+    Args: origin is the control's global top-left; widget_size is the
+        control's size; tip_size is the tooltip size; blocked is the image
+        QRect, or None.
+    Returns: A list of QPoint.
+    """
+    points = [
+        QPoint(origin.x(), origin.y() + widget_size.height() + TOOLTIP_MARGIN),
+        QPoint(origin.x(), origin.y() - tip_size.height() - TOOLTIP_MARGIN),
+        QPoint(origin.x() + widget_size.width() + TOOLTIP_MARGIN, origin.y()),
+        QPoint(origin.x() - tip_size.width() - TOOLTIP_MARGIN, origin.y()),
+    ]
+    if blocked is not None:
+        points.extend((
+            QPoint(blocked.left(), blocked.bottom() + TOOLTIP_MARGIN),
+            QPoint(blocked.left(), blocked.top() - tip_size.height() - TOOLTIP_MARGIN),
+            QPoint(blocked.right() + TOOLTIP_MARGIN, blocked.top()),
+            QPoint(blocked.left() - tip_size.width() - TOOLTIP_MARGIN, blocked.top()),
+        ))
+    return points
+
+
+def _fits(pos, size, screen, blocked):
+    """Report whether a tooltip is fully on screen and off the live image.
+
+    Args: pos is the global top-left; size is the tooltip size; screen is
+        the available QRect; blocked is the image QRect, or None.
+    Returns: True when the rectangle can be used.
+    """
+    rect = QRect(pos, size)
+    if not screen.contains(rect):
+        return False
+    return blocked is None or not blocked.intersects(rect)
+
+
+def _clamp_point(pos, size, screen):
+    """Move a tooltip so it lies inside the screen.
+
+    Args: pos is the preferred global top-left; size is the tooltip size;
+        screen is the available QRect.
+    Returns: A QPoint.
+    """
+    x = min(max(pos.x(), screen.left()), max(screen.left(), screen.right() - size.width() + 1))
+    y = min(max(pos.y(), screen.top()), max(screen.top(), screen.bottom() - size.height() + 1))
+    return QPoint(x, y)
+
+
+def _nudge_on_screen(pos, size, screen, blocked):
+    """Slide a tip onto the screen without moving it onto the image.
+
+    Args: pos is the preferred global top-left; size is the tooltip size;
+        screen is the available QRect; blocked is the image QRect, or None.
+    Returns: A QPoint, or None when the slide would cover the image or the
+        tip still cannot fit.
+    """
+    if blocked is not None and blocked.intersects(QRect(pos, size)):
+        return None
+    nudged = _clamp_point(pos, size, screen)
+    rect = QRect(nudged, size)
+    if not screen.contains(rect):
+        return None
+    if blocked is not None and blocked.intersects(rect):
+        return None
+    return nudged
+
+
+def tooltip_position(widget, text, image=None, screen=None):
+    """Choose where a tooltip opens so it does not cover the live image.
+
+    The image view itself never takes a tooltip: a popup there would hide the
+    measurement. Qt still waits TOOLTIP_DELAY_MS before asking for a tip, and
+    the tip is not modal, so it does not block the controls.
+
+    Args: widget is the control under the pointer; text is the tip; image is
+        the image view to keep clear, or None; screen is the available
+        desktop rectangle, or None to use the widget's screen.
+    Returns: A QPoint in global coordinates.
+    """
+    size = tooltip_size(text)
+    screen = _screen_rect(widget, screen)
+    origin = widget.mapToGlobal(QPoint(0, 0))
+    blocked = image_global_rect(image)
+    points = _candidate_points(origin, widget.size(), size, blocked)
+    for pos in points:
+        if _fits(pos, size, screen, blocked):
+            return pos
+    for pos in points:
+        nudged = _nudge_on_screen(pos, size, screen, blocked)
+        if nudged is not None:
+            return nudged
+    # Covering the measurement is worse than a tip that runs off the screen.
+    if blocked is not None:
+        for pos in points:
+            if not QRect(pos, size).intersects(blocked):
+                return pos
+    return _clamp_point(points[0], size, screen)
 
 
 def request_gl_format():
@@ -675,6 +895,8 @@ class SliderSpin(QWidget):
         """
         super().__init__()
         self.step = step
+        self._description = ""
+        self._note = ""
         self.slider = QSlider(Qt.Horizontal)
         self.spin = QDoubleSpinBox()
         self.spin.setDecimals(decimals)
@@ -682,6 +904,8 @@ class SliderSpin(QWidget):
         self.spin.setSuffix(suffix)
         self.spin.setKeyboardTracking(False)
         self.spin.setFixedWidth(104)  # equal widths keep every value column aligned
+        for widget in (self, self.slider, self.spin):
+            widget.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.slider, 1)
@@ -713,6 +937,55 @@ class SliderSpin(QWidget):
         self.slider.setValue(round(self.spin.value() / self.step))
         self.spin.blockSignals(False)
         self.slider.blockSignals(False)
+        self._apply_tooltip()
+
+    def set_description(self, text):
+        """Say what this control does. The live value is added to the tooltip.
+
+        Args: text explains the control, including a typical value where one helps.
+        Returns: None.
+        """
+        self._description = text
+        self._apply_tooltip()
+
+    def set_note(self, text):
+        """Add a situation line, such as dummy mode or an analog camera.
+
+        Args: text is the extra line, or "" to remove it.
+        Returns: None.
+        """
+        self._note = text
+        self._apply_tooltip()
+
+    def _value_text(self):
+        """Format the current value with its unit.
+
+        Args: None.
+        Returns: A string such as "8000 µs" or "1.0".
+        """
+        value = self.spin.value()
+        if self.spin.decimals() == 0:
+            number = str(int(round(value)))
+        else:
+            number = f"{value:.{self.spin.decimals()}f}"
+        return f"{number}{self.spin.suffix()}"
+
+    def _apply_tooltip(self):
+        """Rebuild the tooltip from the description, the live value and any note.
+
+        Args: None.
+        Returns: None.
+        """
+        parts = []
+        if self._description:
+            parts.append(self._description)
+            parts.append(f"Now: {self._value_text()}")
+        if self._note:
+            parts.append(self._note)
+        text = format_tooltip(*parts)
+        super().setToolTip(text)
+        self.slider.setToolTip(text)
+        self.spin.setToolTip(text)
 
     def value(self):
         """Return the current value.
@@ -731,6 +1004,7 @@ class SliderSpin(QWidget):
         self.slider.blockSignals(True)
         self.slider.setValue(round(value / self.step))
         self.slider.blockSignals(False)
+        self._apply_tooltip()
         self.valueChanged.emit(value)
 
 
@@ -766,8 +1040,43 @@ class ShortcutFilter(QObject):
         return self.window.handle_key(event.key())
 
 
+class TooltipFilter(QObject):
+    """Open control tooltips beside the control, never over the live image."""
+
+    def __init__(self, window):
+        """Attach to a main window.
+
+        Args: window is the MainWindow whose image must stay visible.
+        Returns: None.
+        """
+        super().__init__(window)
+        self.window = window
+
+    def eventFilter(self, watched, event):
+        """Place a tooltip off the image. The image itself gets none.
+
+        Qt sends this event only after the hover delay, and the tip is not
+        modal, so it does not block the controls under it.
+
+        Args: watched is the object under the pointer; event is the Qt event.
+        Returns: True when this filter handled the event.
+        """
+        if event.type() != QEvent.ToolTip or not isinstance(watched, QWidget):
+            return False
+        if watched.window() is not self.window:
+            return False
+        if watched is self.window.view:
+            QToolTip.hideText()
+            return True
+        text = watched.toolTip()
+        if not text:
+            return False
+        QToolTip.showText(tooltip_position(watched, text, self.window.view), text, watched)
+        return True
+
+
 class FeatureRequestDialog(QDialog):
-    """Collect a feature request: title, description, name and enrichment."""
+    """Collect a feature request: title, description and name."""
 
     def __init__(self, parent, request=None):
         """Build the form, prefilled from an earlier attempt or saved name.
@@ -778,36 +1087,39 @@ class FeatureRequestDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("Request a feature")
-        self.resize(560, 460)
+        self.resize(560, 420)
         settings = QSettings("ESPI", "espi_live")
         self.title = QLineEdit(request.title if request else "")
         self.title.setMaxLength(feedback.MAX_TITLE)
         self.title.setPlaceholderText("Short summary, e.g. Export the reference frame")
+        set_tooltip(self.title, "Short summary of the change you want. Required.")
         self.description = QPlainTextEdit(request.description if request else "")
         self.description.setPlaceholderText(
-            "What would you like ESPI live to do, and why? What are you "
-            "measuring when you need it?")
+            "What would you like ESPI live to do, and why? Leave this blank "
+            "to have it written from the title.")
+        set_tooltip(self.description,
+                    "What ESPI live should do. Optional. A blank description is "
+                    "written up from the title. Text you write is kept and expanded.")
         self.submitter = QLineEdit(request.submitter if request else
                                    settings.value("feedback/name", "", str))
         self.submitter.setPlaceholderText("Optional, so we can follow up")
-        self.enrich = QCheckBox("Enrich with GitHub Copilot")
-        self.enrich.setToolTip(
-            "After the issue is filed, GitHub Copilot adds a structured version "
-            "(summary, proposed behavior, acceptance criteria) below your text.")
-        self.enrich.setChecked(request.enrich if request else
-                               settings.value("feedback/enrich", True, bool))
+        set_tooltip(self.submitter,
+                    "Optional name so the developers can follow up. Remembered on "
+                    "this computer.")
         form = QFormLayout()
         form.addRow("Title", self.title)
         form.addRow("Description", self.description)
         form.addRow("Your name", self.submitter)
-        form.addRow("", self.enrich)
         note = QLabel(f"Filed as a GitHub issue in {feedback.repository()}, with "
-                      "this build's version and platform.")
+                      "this build's version and platform. A blank description is "
+                      "written from the title; text you write is kept and expanded.")
         note.setWordWrap(True)
         note.setStyleSheet("color: gray;")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText(
-            "Send" if feedback.feedback_token() else "Open in browser…")
+        send = buttons.button(QDialogButtonBox.Ok)
+        send.setText("Submit")
+        set_tooltip(send, "File this request as a GitHub issue.")
+        set_tooltip(buttons.button(QDialogButtonBox.Cancel), "Close without submitting.")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
@@ -823,11 +1135,10 @@ class FeatureRequestDialog(QDialog):
         """
         return feedback.FeatureRequest(
             title=self.title.text(), description=self.description.toPlainText(),
-            enrich=self.enrich.isChecked(), submitter=self.submitter.text(),
-            source=source)
+            submitter=self.submitter.text(), source=source)
 
     def accept(self):
-        """Close only when the request is complete; remember name and choice.
+        """Close only when the request has a title; remember the name.
 
         Args: None.
         Returns: None.
@@ -839,7 +1150,6 @@ class FeatureRequestDialog(QDialog):
             return
         settings = QSettings("ESPI", "espi_live")
         settings.setValue("feedback/name", self.submitter.text().strip())
-        settings.setValue("feedback/enrich", self.enrich.isChecked())
         super().accept()
 
 
@@ -935,6 +1245,8 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         super().__init__()
+        install_tooltip_delay()
+        self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.channels = list(channels)
         self.current = next(channel for channel in self.channels if channel.active)
         self.log = log
@@ -983,7 +1295,10 @@ class MainWindow(QMainWindow):
         self._rebuild_cameras()
         self._set_demo(self.current.demo)
         self.shortcut_filter = ShortcutFilter(self)
-        QApplication.instance().installEventFilter(self.shortcut_filter)
+        self.tooltip_filter = TooltipFilter(self)
+        app = QApplication.instance()
+        app.installEventFilter(self.shortcut_filter)
+        app.installEventFilter(self.tooltip_filter)
 
         settings = QSettings("ESPI", "espi_live")
         if not self.restoreGeometry(settings.value("geometry", b"")):
@@ -1041,6 +1356,7 @@ class MainWindow(QMainWindow):
         bar = QToolBar("Actions", self)
         bar.setObjectName("actions")
         bar.setMovable(False)
+        bar.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.addToolBar(Qt.TopToolBarArea, bar)
         self.actions_bar = bar
 
@@ -1049,6 +1365,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(mode)
             button.setCheckable(True)
             button.setChecked(mode == s.mode)
+            set_tooltip(button, MODE_TIPS[mode])
             self.mode_group.addButton(button)
             bar.addWidget(button)
         self.mode_group.buttonClicked.connect(
@@ -1057,30 +1374,41 @@ class MainWindow(QMainWindow):
 
         self.record_button = QPushButton("Record AVI")
         self.record_button.setCheckable(True)
+        set_tooltip(self.record_button,
+                    "Write the displayed image to an AVI at a steady rate. Changing "
+                    "the view or the averaging starts a new file. Frames are skipped "
+                    "when encoding falls behind, and the last frame is repeated when "
+                    "it is slower.")
         self.record_button.toggled.connect(
             lambda on: self.engine.update_settings(record=on))
         bar.addWidget(self.record_button)
         bar.addSeparator()
         self.freeze_button = QPushButton("Freeze (Space)")
         self.freeze_button.setCheckable(True)
-        self.freeze_button.setToolTip(
-            "Hold the displayed image to inspect it (zoom, pan, read pixel values) "
-            "without saving anything. The camera keeps acquiring, processing and "
-            "recording; S saves the held image.")
+        set_tooltip(self.freeze_button,
+                    "Hold the displayed image to inspect it (zoom, pan, read pixel "
+                    "values) without saving anything. The camera keeps acquiring, "
+                    "processing and recording. Shortcut: Space. S saves the held image.")
         self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
         self.freeze_button.toggled.connect(self.set_frozen)
         bar.addWidget(self.freeze_button)
         for label, tip, handler in (
-                ("Save frame (S)", "Save the displayed frame with its title and notes",
+                ("Save frame (S)",
+                 "Save the displayed frame as a PNG, plus a notes file when the title "
+                 "or notes box is filled in. Shortcut: S.",
                  self.save_frame),
-                ("Set reference (F)", "Use the current frame as the Reference view's base",
+                ("Set reference (F)",
+                 "Use the current live frame as the Reference view's base. Shortcut: F.",
                  lambda: self.engine.request("reference")),
-                ("Reset last (R)", "Restart the Previous view's difference",
+                ("Reset last (R)",
+                 "Restart the Previous view's difference from the next frame. Shortcut: R.",
                  lambda: self.engine.request("reset_previous")),
-                ("Reset average (A)", "Discard the frames averaged so far",
+                ("Reset average (A)",
+                 "Discard the frames averaged so far and start the average again. "
+                 "Shortcut: A.",
                  lambda: self.engine.request("reset_average"))):
             button = QPushButton(label)
-            button.setToolTip(tip)
+            set_tooltip(button, tip)
             button.clicked.connect(handler)
             bar.addWidget(button)
 
@@ -1096,27 +1424,28 @@ class MainWindow(QMainWindow):
             ZOOM_TICKS * math.log(1.25) / math.log(MAX_ZOOM) / 3))
         self.zoom_slider.setPageStep(ZOOM_TICKS // 6)
         self.zoom_slider.setFixedWidth(130)
-        self.zoom_slider.setToolTip("Drag, click or scroll to zoom; the mouse "
-                                    "wheel and drag-to-pan on the image still work")
+        self.zoom_slider.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.zoom_slider.valueChanged.connect(
             lambda ticks: self.view.set_zoom(MAX_ZOOM ** (ticks / ZOOM_TICKS)))
         self.zoom_label = QLabel()
         self.zoom_label.setMinimumWidth(44)
-        self.zoom_label.setToolTip("100% = whole image fits the window")
+        set_tooltip(self.zoom_label, "100% means the whole image fits the window.")
         self.view.zoomChanged.connect(self._show_zoom)
         fit_button = QPushButton("Fit")
-        fit_button.setToolTip("Show the whole image (0)")
+        set_tooltip(fit_button, "Show the whole image. Shortcut: 0.")
         fit_button.clicked.connect(self.view.fit)
         actual_button = QPushButton("1:1")
-        actual_button.setToolTip("One camera pixel per screen pixel (1)")
+        set_tooltip(actual_button, "One camera pixel per screen pixel. Shortcut: 1.")
         actual_button.clicked.connect(self.view.actual_size)
         zoom_icon = QLabel("Zoom")
         zoom_icon.setContentsMargins(0, 0, 4, 0)
+        set_tooltip(zoom_icon, "Zoom from the whole image (100%) up to 64 times.")
         bar.addWidget(zoom_icon)
         bar.addWidget(self.zoom_slider)
         bar.addWidget(self.zoom_label)
         bar.addWidget(fit_button)
         bar.addWidget(actual_button)
+        self._show_zoom(self.view.zoom)
 
     def _build_controls(self):
         """Create the controls dock as one aligned grid of settings.
@@ -1126,6 +1455,7 @@ class MainWindow(QMainWindow):
         """
         s = self.engine.settings()
         panel = QWidget()
+        panel.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         column = QVBoxLayout(panel)
         column.setContentsMargins(10, 8, 10, 8)
 
@@ -1139,8 +1469,9 @@ class MainWindow(QMainWindow):
         display_row = QHBoxLayout()
         display_row.addWidget(QLabel("Display"))
         self.camera_combo = QComboBox()
-        self.camera_combo.setToolTip("Camera shown in the window; the controls "
-                                     "below change this camera's settings")
+        set_tooltip(self.camera_combo,
+                    "Camera shown in the window. The controls below change this "
+                    "camera's settings.")
         self.camera_combo.currentIndexChanged.connect(self._camera_chosen)
         display_row.addWidget(self.camera_combo, 1)
         cameras.addLayout(display_row)
@@ -1167,6 +1498,11 @@ class MainWindow(QMainWindow):
             "border-radius:4px;")
         column.addWidget(self.demo_banner)
         self.switch_live_button = QPushButton("Switch to live capture")
+        set_tooltip(self.switch_live_button,
+                    "Look again for a FLIR camera or a recognised capture device and "
+                    "leave synthetic video. Dummy mode stays on if nothing is found. "
+                    "A demo recording stops first so synthetic frames are not written "
+                    "into a live file.")
         self.switch_live_button.clicked.connect(
             lambda: self.engine.request("switch_live"))
         column.addWidget(self.switch_live_button)
@@ -1227,19 +1563,35 @@ class MainWindow(QMainWindow):
         self.report_label.setTextFormat(Qt.RichText)
         self.report_label.setOpenExternalLinks(True)
         self.report_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        set_tooltip(self.report_label,
+                    "Whether a report for this unrecognised camera was filed, and a "
+                    "link to the issue when one was.")
         self.report_label.hide()
         add(self.report_label)
         self.report_button = QPushButton("Report this camera")
-        self.report_button.setToolTip("Open GitHub's new-issue page with this camera's "
-                                      "details; this copy cannot file reports itself")
+        set_tooltip(self.report_button,
+                    "Open GitHub's new-issue page with this camera's details. This "
+                    "copy cannot file reports itself.")
         self.report_button.clicked.connect(self._open_report_in_browser)
         self.report_button.hide()
         add(self.report_button)
         self.exposure = SliderSpin(*DEFAULT_LIMITS["ExposureTime"], 1, 0,
                                    s.exposure_us, " µs")
+        self.exposure.set_description(
+            "How long each frame collects light. Raise it when the speckle field "
+            "is too dim; lower it when motion blurs or the frame rate falls. A "
+            "typical starting point is 8000 µs.")
         self.gain = SliderSpin(*DEFAULT_LIMITS["Gain"], 0.1, 1, s.gain_db, " dB")
+        self.gain.set_description(
+            "Sensor gain. Raise it only when exposure is already as long as the "
+            "frame rate allows: it brightens the image and adds noise. A typical "
+            "value is 0 dB.")
         self.fps = SliderSpin(*DEFAULT_LIMITS["AcquisitionFrameRate"], 0.1, 1,
                               s.fps, " fps")
+        self.fps.set_description(
+            "Requested acquisition rate. The camera may run slower when exposure "
+            "or bandwidth does not allow the request; the status bar shows the "
+            "rate it actually reaches. A typical value is 30 fps.")
         self.exposure.valueChanged.connect(
             lambda v: self.engine.update_settings(exposure_us=v))
         self.gain.valueChanged.connect(lambda v: self.engine.update_settings(gain_db=v))
@@ -1248,18 +1600,18 @@ class MainWindow(QMainWindow):
         add(self.gain, "Gain")
         add(self.fps, "Requested FPS")
         self.single_field = QCheckBox("Single field (interlaced camera)")
-        self.single_field.setToolTip(
-            "Show only the even rows of each interlaced frame, doubled to full "
-            "height: removes the 1/60 s offset between the two fields (cleaner "
-            "fringes) at half the vertical detail. Changing it clears the "
-            "reference and the averages.")
+        set_tooltip(self.single_field,
+                    "Show only the even rows of each interlaced frame, doubled to full "
+                    "height: removes the 1/60 s offset between the two fields (cleaner "
+                    "fringes) at half the vertical detail. Changing it clears the "
+                    "reference and the averages. On by default for an interlaced camera.")
         self.single_field.setChecked(s.single_field)
         self.single_field.toggled.connect(
             lambda on: self.engine.update_settings(single_field=on))
         self.single_field.hide()
         add(self.single_field)
         self.noise_reduction = SliderSpin(0, 95, 1, 0, s.noise_reduction, " %")
-        self.noise_reduction.setToolTip(
+        self.noise_reduction.set_description(
             "Blend each camera frame with the previous ones to remove sensor "
             "noise in every view; speckle is kept. Higher values smooth more "
             "but trail motion and weaken Previous-view fringes. 0 = off.")
@@ -1271,20 +1623,26 @@ class MainWindow(QMainWindow):
 
         heading("ESPI measurement")
         self.average = SliderSpin(1, 60, 1, 0, s.average)
-        self.average.setToolTip("Frames averaged to reduce speckle noise; 1 turns averaging off")
+        self.average.set_description(
+            "How many difference frames are averaged to reduce speckle noise. "
+            "1 turns averaging off. A typical start is 1, then raise it when "
+            "speckle hides the fringes.")
         self.average.valueChanged.connect(
             lambda v: self.engine.update_settings(average=int(v)))
         add(self.average, "Average N")
         self.rolling = QCheckBox("Rolling average (updates every frame)")
-        self.rolling.setToolTip("Off: one image per N frames. On: a running average "
-                                "that keeps the camera's frame rate.")
+        set_tooltip(self.rolling,
+                    "Off: one image per N frames. On: a running average that keeps "
+                    "the camera's frame rate. Use it when you want to watch fringes "
+                    "move instead of waiting for each block of N frames.")
         self.rolling.setChecked(s.rolling)
         self.rolling.toggled.connect(lambda on: self.engine.update_settings(rolling=on))
         add(self.rolling)
         self.ref_refresh = SliderSpin(0, 10, 0.1, 1, s.ref_refresh_s, " s")
-        self.ref_refresh.setToolTip(
+        self.ref_refresh.set_description(
             "Reference view: recapture the reference this often so slow drift "
-            "(air, heat) cancels out. 0 keeps one reference until you press F.")
+            "(air, heat) cancels out. 0 keeps one reference until you press F. "
+            "A typical value is 0 unless the setup drifts.")
         self.ref_refresh.valueChanged.connect(
             lambda v: self.engine.update_settings(ref_refresh_s=v))
         add(self.ref_refresh, "Ref. refresh")
@@ -1293,23 +1651,31 @@ class MainWindow(QMainWindow):
         self.smoothing_combo = QComboBox()
         self.smoothing_combo.addItems(SMOOTHING_METHODS)
         self.smoothing_combo.setCurrentText(s.smoothing_method)
-        self.smoothing_combo.setToolTip("Gaussian: any width. Median keeps fringe "
-                                        "edges sharper and is capped at 5 px.")
+        set_tooltip(self.smoothing_combo,
+                    "Gaussian: any width. Median keeps fringe edges sharper and is "
+                    "capped at 5 px so the frame rate holds. Use Median when a wide "
+                    "Gaussian blurs the fringes.")
         self.smoothing_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(smoothing_method=name))
         self.smoothing = SliderSpin(0, 31, 1, 0, s.smoothing, " px")
-        self.smoothing.setToolTip("Blur width that removes pixel-scale speckle; "
-                                  "keep it well below the fringe spacing. 0 = off.")
+        self.smoothing.set_description(
+            "Blur width that removes pixel-scale speckle. Keep it well below the "
+            "fringe spacing. 0 = off. A typical start is 0, then a few pixels.")
         self.smoothing.valueChanged.connect(
             lambda v: self.engine.update_settings(smoothing=int(v)))
         add(self.smoothing_combo, "Speckle filter")
         add(self.smoothing, "Filter width")
         self.scale_range = QCheckBox("Stretch to 0–255")
+        set_tooltip(self.scale_range,
+                    "Map each difference frame's darkest and brightest pixels, after "
+                    "Stretch clip, to 0 and 255 so fringes fill the display. Off "
+                    "keeps the difference values as they are. The status bar shows "
+                    "both ranges. On by default. Raw view is not stretched.")
         self.scale_range.setChecked(s.scale_range)
         self.scale_range.toggled.connect(
             lambda on: self.engine.update_settings(scale_range=on))
         self.invert = QCheckBox("Invert")
-        self.invert.setToolTip("Swap bright and dark fringes")
+        set_tooltip(self.invert, "Swap bright and dark fringes.")
         self.invert.setChecked(s.invert)
         self.invert.toggled.connect(lambda on: self.engine.update_settings(invert=on))
         toggles = QWidget()
@@ -1320,9 +1686,10 @@ class MainWindow(QMainWindow):
         toggles_row.addStretch(1)
         add(toggles)
         self.clip = SliderSpin(0, 10, 0.1, 1, s.clip_percent, " %")
-        self.clip.setToolTip("Stretch: let this share of the darkest and brightest "
-                             "pixels saturate so stray speckles don't flatten the "
-                             "contrast. 0 = exact min/max.")
+        self.clip.set_description(
+            "Stretch: let this share of the darkest and brightest pixels saturate "
+            "so stray speckles don't flatten the contrast. 0 = exact min/max. A "
+            "typical value is 0, or about 0.5% when a few speckles dominate.")
         self.clip.valueChanged.connect(
             lambda v: self.engine.update_settings(clip_percent=v))
         add(self.clip, "Stretch clip")
@@ -1331,11 +1698,23 @@ class MainWindow(QMainWindow):
         self.palette_combo = QComboBox()
         self.palette_combo.addItems(PALETTES)
         self.palette_combo.setCurrentText(s.palette)
+        set_tooltip(self.palette_combo,
+                    "Colors for a difference image. Gray shows the measurement; "
+                    "Turbo, Jet, Hot, Viridis, Plasma and Inferno make small "
+                    "brightness steps easier to see. Raw view ignores it.")
         self.palette_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(palette=name))
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
+        self.gamma.set_description(
+            "Display brightness curve for difference images. 1.0 leaves values "
+            "unchanged; lower than 1 darkens midtones and higher than 1 brightens "
+            "them. Raw view ignores it. A typical value is 1.0.")
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
         self.clahe = QCheckBox("CLAHE (color palettes only)")
+        set_tooltip(self.clahe,
+                    "Local contrast for color palettes only; Gray ignores it. Turn "
+                    "it on when a color map looks flat, and off when it exaggerates "
+                    "speckle. On by default.")
         self.clahe.setChecked(s.clahe)
         self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
         add(self.palette_combo, "Palette")
@@ -1345,8 +1724,14 @@ class MainWindow(QMainWindow):
         heading("Saved frame details")
         self.frame_title = QLineEdit()
         self.frame_title.setPlaceholderText("Title (optional)")
+        set_tooltip(self.frame_title,
+                    "Optional words added to the saved PNG's filename. Shortcut: S "
+                    "saves the frame.")
         self.frame_notes = QPlainTextEdit()
         self.frame_notes.setPlaceholderText("Notes (optional)")
+        set_tooltip(self.frame_notes,
+                    "Optional notes written beside the PNG when you save. Leave the "
+                    "title and the notes blank to save the image only. Shortcut: S.")
         self.frame_notes.setFixedHeight(48)
         add(self.frame_title)
         add(self.frame_notes)
@@ -1360,6 +1745,7 @@ class MainWindow(QMainWindow):
         self.controls_dock.setObjectName("controls")
         self.controls_dock.setWidget(panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
+        self._tip_dock_buttons(self.controls_dock)
 
     def _build_log(self):
         """Create the log dock.
@@ -1369,6 +1755,8 @@ class MainWindow(QMainWindow):
         """
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        set_tooltip(self.log_view, "Messages from this run, including the camera, "
+                    "recording and updates. The same text is written to the log file.")
         self.log_view.setMaximumBlockCount(2000)
         font = self.log_view.font()
         font.setStyleHint(font.StyleHint.Monospace)
@@ -1378,7 +1766,25 @@ class MainWindow(QMainWindow):
         self.log_dock.setObjectName("log")
         self.log_dock.setWidget(self.log_view)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        self._tip_dock_buttons(self.log_dock)
         self.resizeDocks([self.log_dock], [120], Qt.Vertical)
+
+    def _tip_dock_buttons(self, dock):
+        """Explain the float and close buttons Qt puts on a dock title.
+
+        Args: dock is a QDockWidget.
+        Returns: None.
+        """
+        tips = {
+            "qt_dockwidget_floatbutton":
+                "Float this panel in its own window, or dock it again.",
+            "qt_dockwidget_closebutton":
+                "Hide this panel. The View menu shows it again.",
+        }
+        for button in dock.findChildren(QAbstractButton):
+            tip = tips.get(button.objectName())
+            if tip:
+                set_tooltip(button, tip)
 
     def _build_status_bar(self):
         """Create the status-bar readouts and action buttons.
@@ -1387,41 +1793,58 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         bar = self.statusBar()
+        bar.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.hint_label = QLabel()  # left side; elides first when space runs out
         self.hint_label.setMinimumWidth(0)
         self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        set_tooltip(self.hint_label, "What the current view is showing.")
         bar.addWidget(self.hint_label, 1)
         # Leftmost permanent item: showing it only narrows the hint, so it moves
         # nothing else.
         self.frozen_badge = QLabel("  FROZEN  ")
         self.frozen_badge.setStyleSheet(FROZEN_STYLE)
-        self.frozen_badge.setToolTip("The image on screen is held; the camera keeps "
-                                     "running. Press Space to return to live.")
+        set_tooltip(self.frozen_badge,
+                    "The image on screen is held; the camera keeps running. "
+                    "Shortcut: Space returns to live.")
         self.frozen_badge.setVisible(False)
         bar.addPermanentWidget(self.frozen_badge)
         # Every readout has a fixed width, so no value can move its neighbours.
         self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
         self.source_badge.hold_full_text()  # never "DUMM…"; the readouts ellipsize first
         self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
+        set_tooltip(self.record_label,
+                    "Whether this camera is recording, and the rate the file is "
+                    "being written.")
         self.range_status = FixedLabel("Input: 255–255    Scaled: 255–255",
                                        "Raw Mono8: no brightness scaling")
+        set_tooltip(self.range_status,
+                    "Brightness before and after stretch to 0–255, measured before "
+                    "gamma and the palette. Raw view is not scaled.")
         self.camera_fps_status = FixedLabel(  # sensor rate, then what the app keeps up with
             "Camera: 999.9 fps (simulated)")
-        self.camera_fps_status.setToolTip(
-            "Camera: the camera's resulting acquisition rate (AcquisitionResultingFrameRate)\n"
-            "Processed: frames the app received and processed\n"
-            "Displayed: frames drawn on screen")
+        set_tooltip(self.camera_fps_status,
+                    "Camera: the camera's resulting acquisition rate "
+                    "(AcquisitionResultingFrameRate).",
+                    "Processed: frames the app received and processed.",
+                    "Displayed: frames drawn on screen.")
         self.speed_status = FixedLabel(
             "Processed: 999.9 fps    Work: 99.9 ms/frame    Displayed: 999.9 fps")
+        set_tooltip(self.speed_status,
+                    "Processed: frames the app kept up with. Work: time spent on "
+                    "each frame. Displayed: frames drawn, or frozen while the "
+                    "display is held.")
         self.pixel_status = FixedLabel("x 3088, y 2064: 255")
+        set_tooltip(self.pixel_status,
+                    "Brightness from 0 to 255 of the image pixel under the pointer.")
         # The two update buttons are never shown together, so they share one
         # fixed-width slot that stays put whichever is visible. They are real
         # buttons (border, icon, pointer), split from the readouts by a rule.
         self.update_button = QPushButton()  # shown when a newer build exists
         self.update_button.setVisible(False)
+        set_tooltip(self.update_button, "Download the newer build of ESPI live.")
         self.update_button.clicked.connect(self._update_clicked)
         self.check_button = QPushButton("Check for updates")  # until a newer build is found
-        self.check_button.setToolTip("Check GitHub for a newer build of ESPI live")
+        set_tooltip(self.check_button, "Check GitHub for a newer build of ESPI live.")
         self.check_button.clicked.connect(self._check_updates_now)
         ink = self.check_button.palette().color(QPalette.ColorRole.ButtonText)
         update_width = _arm_status_button(
@@ -1443,15 +1866,17 @@ class MainWindow(QMainWindow):
         self.update_slot.setFixedWidth(slot_width)
         bar.addPermanentWidget(self.update_slot)
         self.feature_button = QPushButton("Request feature")
-        self.feature_button.setToolTip("Send a feature request to the developers (GitHub issue)")
+        set_tooltip(self.feature_button,
+                    "Send a feature request to the developers as a GitHub issue.")
         self.feature_button.clicked.connect(lambda: self._request_feature())
         _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE,
                            ("Request feature", "Sending request…"),
                            _status_icon("idea", ink))
         bar.addPermanentWidget(self.feature_button)
         self.codex_button = QPushButton(CODEX_LABEL)
-        self.codex_button.setToolTip("Ask OpenAI's Codex how ESPI live works, using this "
-                                     "build's real source code")
+        set_tooltip(self.codex_button,
+                    "Ask OpenAI's Codex how ESPI live works, using this build's "
+                    "real source code.")
         self.codex_button.clicked.connect(self._open_codex)
         _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE,
                            (CODEX_LABEL, CODEX_BUSY_LABEL))
@@ -1476,16 +1901,23 @@ class MainWindow(QMainWindow):
         Args: None.
         Returns: None.
         """
+        self.menuBar().setAttribute(Qt.WA_AlwaysShowToolTips, True)
         menu = self.menuBar().addMenu("&View")
+        set_tooltip(self.controls_dock.toggleViewAction(), "Show or hide the Controls panel.")
+        set_tooltip(self.log_dock.toggleViewAction(), "Show or hide the Log panel.")
+        set_tooltip(self.actions_bar.toggleViewAction(), "Show or hide the toolbar.")
         menu.addAction(self.controls_dock.toggleViewAction())
         menu.addAction(self.log_dock.toggleViewAction())
         menu.addAction(self.actions_bar.toggleViewAction())
         menu.addSeparator()
-        for text, key, handler in (("Fit to window", "0", self.view.fit),
-                                   ("Actual size", "1", self.view.actual_size)):
+        for text, key, tip, handler in (
+                ("Fit to window", "0", "Show the whole image. Shortcut: 0.", self.view.fit),
+                ("Actual size", "1",
+                 "One camera pixel per screen pixel. Shortcut: 1.", self.view.actual_size)):
             action = QAction(text, self)
             action.setShortcut(QKeySequence(key))
             action.setShortcutContext(Qt.WidgetShortcut)  # keys go via handle_key
+            set_tooltip(action, tip)
             action.triggered.connect(handler)
             menu.addAction(action)
         menu.addSeparator()
@@ -1493,23 +1925,34 @@ class MainWindow(QMainWindow):
         self.freeze_action.setCheckable(True)
         self.freeze_action.setShortcut(QKeySequence("Space"))
         self.freeze_action.setShortcutContext(Qt.WidgetShortcut)  # via handle_key
+        set_tooltip(self.freeze_action,
+                    "Hold the displayed image without saving it. The camera keeps "
+                    "running. Shortcut: Space.")
         self.freeze_action.triggered.connect(self.set_frozen)
         menu.addAction(self.freeze_action)
         menu.addSeparator()
+        # The live image has no tooltip: a popup there would hide the measurement.
+        # The shortcut list lives here instead.
         hint = menu.addAction("Wheel to zoom, drag to pan, Q or Esc to quit")
         hint.setEnabled(False)  # a reminder, not a command
-        self.view.setToolTip("Wheel: zoom · drag: pan · 0: fit · 1: actual size\n"
-                             "Space freeze · S save · F set reference · R reset last · "
-                             "A reset average · Q/Esc quit")
+        set_tooltip(hint,
+                    "Wheel: zoom. Drag: pan. 0: fit. 1: actual size. Space: freeze. "
+                    "S: save. F: set reference. R: reset last. A: reset average. "
+                    "Q or Esc: quit.")
 
         help_menu = self.menuBar().addMenu("&Help")
         check = help_menu.addAction("Check for updates…")
+        set_tooltip(check, "Check GitHub for a newer build of ESPI live.")
         check.triggered.connect(self._check_updates_now)
         request = help_menu.addAction("Request a feature…")
+        set_tooltip(request, "Send a feature request to the developers as a GitHub issue.")
         request.triggered.connect(lambda: self._request_feature())
         ask = help_menu.addAction("Ask Codex about the source code…")
+        set_tooltip(ask, "Ask OpenAI's Codex how ESPI live works, using this build's "
+                    "real source code.")
         ask.triggered.connect(self._open_codex)
         about = help_menu.addAction("About ESPI live")
+        set_tooltip(about, "Show the version and build of this copy.")
         about.triggered.connect(lambda: QMessageBox.about(
             self, "About ESPI live", updater.describe_build()))
 
@@ -1536,13 +1979,16 @@ class MainWindow(QMainWindow):
         self.camera_checks, self.camera_states = [], []
         for row, channel in enumerate(self.channels):
             check = QCheckBox(channel.info.serial)
-            check.setToolTip(f"{channel.label}: acquire, process and (when Record is "
-                             "on) record this camera even while another one is "
-                             "displayed. The displayed camera always processes.")
+            set_tooltip(check,
+                        f"{channel.label}: acquire, process and (when Record is on) "
+                        "record this camera even while another one is displayed. The "
+                        "displayed camera always processes.")
             check.toggled.connect(
                 lambda on, channel=channel: self._set_processing(channel, on))
             state = QLabel()
             state.setStyleSheet("color: palette(placeholder-text);")
+            set_tooltip(state, "This camera's processed frame rate, REC while it "
+                        "records, and frozen while its display is held.")
             self.camera_rows.addWidget(check, row, 0)
             self.camera_rows.addWidget(state, row, 1)
             self.camera_checks.append(check)
@@ -1743,8 +2189,6 @@ class MainWindow(QMainWindow):
         self.source_badge.setStyleSheet(
             "background:#8b0000;color:white;font-weight:bold;" if demo else
             "background:#1f6f3f;color:white;font-weight:bold;")
-        for widget in (self.exposure, self.gain, self.fps):
-            widget.setToolTip("Simulated in dummy mode" if demo else "")
         self._sync_source_controls()
         self._show_report()
 
@@ -1760,10 +2204,17 @@ class MainWindow(QMainWindow):
         """
         channel = self.current
         analog = not channel.demo and channel.info.kind == "capture"
+        if analog:
+            note = ANALOG_CONTROL_TIP
+        elif not self.demo_banner.isHidden():
+            # isHidden, not isVisible: the banner is flagged shown before the
+            # window itself is on screen, which is when this first runs.
+            note = SIMULATED_TIP
+        else:
+            note = ""
         for widget in (self.exposure, self.gain, self.fps):
             widget.setEnabled(not analog)
-            if analog:
-                widget.setToolTip(ANALOG_CONTROL_TIP)
+            widget.set_note(note)
         self.single_field.setVisible(
             not channel.demo and getattr(channel.identity, "interlaced", False))
 
@@ -1895,7 +2346,9 @@ class MainWindow(QMainWindow):
         self.zoom_slider.blockSignals(True)  # don't feed the value back to the view
         self.zoom_slider.setValue(round(ZOOM_TICKS * math.log(zoom) / math.log(MAX_ZOOM)))
         self.zoom_slider.blockSignals(False)
-        self.zoom_label.setText(f"{100 * zoom:.0f}%")
+        percent = f"{100 * zoom:.0f}%"
+        self.zoom_label.setText(percent)
+        self.zoom_slider.setToolTip(format_tooltip(ZOOM_SLIDER_TIP, f"Now: {percent}"))
 
     def _set_hover(self, x, y):
         """Remember the image pixel under the cursor for the readout.
@@ -1976,9 +2429,7 @@ class MainWindow(QMainWindow):
     # ----- feature requests --------------------------------------------------
 
     def _request_feature(self, previous=None):
-        """Ask for a feature request and send it in the background.
-
-        Without a feedback token the request opens as a prefilled GitHub page.
+        """Ask for a feature request and file it in the background.
 
         Args: previous is a FeatureRequest to restore after a failed send.
         Returns: None.
@@ -1990,23 +2441,10 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         request = dialog.request("dummy mode" if self.engine.demo else "camera")
-        if not feedback.feedback_token():
-            self._open_request_in_browser(request)
-            return
         self.feedback.submit(request)
         self.feature_button.setEnabled(False)
         self.feature_button.setText("Sending request…")
         self.log.write(f"Sending feature request: {request.title.strip()}")
-
-    def _open_request_in_browser(self, request):
-        """Open GitHub's new-issue page prefilled with the request.
-
-        Args: request is the FeatureRequest.
-        Returns: None.
-        """
-        if not QDesktopServices.openUrl(QUrl(feedback.browser_url(request))):
-            QMessageBox.warning(self, "Request a feature",
-                                "Could not open a web browser.")
 
     def _handle_feedback_events(self):
         """Report feature requests that were sent or failed.
@@ -2023,26 +2461,18 @@ class MainWindow(QMainWindow):
             self.feature_button.setText("Request feature")
             if kind == "sent":
                 self.log.write(f"Feature request filed: {payload}")
-                extra = ("<br><br>GitHub Copilot will add a structured version to "
-                         "the issue in a minute or two." if request.enrich else "")
-                box = QMessageBox(QMessageBox.Information, "Request sent",
-                                  f"Thank you. Your request is filed as "
-                                  f'<a href="{payload}">{payload}</a>.{extra}', parent=self)
-                box.setTextFormat(Qt.RichText)
-                box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                box = QMessageBox(QMessageBox.Information, "Request submitted",
+                                  "Your request was submitted.", parent=self)
                 box.exec()
             else:
                 self.log.write(f"Feature request failed: {payload}")
                 box = QMessageBox(QMessageBox.Warning, "Request not sent",
                                   f"The request could not be sent: {payload}.", parent=self)
                 retry = box.addButton("Edit and retry", QMessageBox.AcceptRole)
-                browser = box.addButton("Open in browser", QMessageBox.ActionRole)
                 box.addButton(QMessageBox.Cancel)
                 box.exec()
                 if box.clickedButton() is retry:
                     self._request_feature(request)
-                elif box.clickedButton() is browser:
-                    self._open_request_in_browser(request)
 
     # ----- source code and Codex ---------------------------------------------
 
@@ -2363,7 +2793,9 @@ class MainWindow(QMainWindow):
             settings = QSettings("ESPI", "espi_live")
             settings.setValue("geometry", self.saveGeometry())
             settings.setValue("windowState", self.saveState(LAYOUT_VERSION))
-        QApplication.instance().removeEventFilter(self.shortcut_filter)
+        app = QApplication.instance()
+        app.removeEventFilter(self.shortcut_filter)
+        app.removeEventFilter(self.tooltip_filter)
         event.accept()
 
 
