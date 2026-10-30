@@ -128,6 +128,7 @@ class FakeUpdateWorker:
         self.events = queue.Queue()
         self.progress = (0, 0)
         self.busy = False
+        self.downloading = False
         self.checks = 0
         self.downloads = []
         self.download_result = True
@@ -1060,6 +1061,9 @@ class MainWindowBuildTests(WindowTestCase):
         window.frame_timer.stop()
         window.status_timer.stop()
         self.assertEqual(window.updates.checks, 1)
+        self.assertTrue(window.update_timer.isActive())
+        span = abs(window.update_timer.interval() - qt_app.UPDATE_CHECK_INTERVAL_MS)
+        self.assertLessEqual(span, qt_app.UPDATE_CHECK_JITTER_MS)
         window.close()
 
     def test_mode_button_changes_engine_mode(self):
@@ -2671,17 +2675,29 @@ class UpdateFlowTests(WindowTestCase):
         self.assertTrue(any(line.startswith("Up to date") for line in self.log.lines))
 
     def test_new_build_shows_update_button(self):
-        """A newer build is remembered and shown on the status-bar button.
+        """A newer build becomes Install update, with versions in the tooltip.
+
+        The status bar mentions it once. A later check that finds the same
+        build keeps the button and does not repeat the message.
 
         Args: None.
         Returns: None.
         """
         info = make_info()
-        self.post("checked", info)
+        with mock.patch.object(qt_app.updater, "current_build", return_value=42):
+            self.post("checked", info)
         self.assertIs(self.window.update_info, info)
         self.assertFalse(self.window.update_button.isHidden())
-        self.assertIn("build 99", self.window.update_button.text())
+        self.assertEqual(self.window.update_button.text(), "Install update")
+        self.assertIn("Build 42 → 99", self.window.update_button.toolTip())
+        self.assertIn("Download", self.window.update_button.toolTip())
+        self.assertEqual(self.window.statusBar().currentMessage(),
+                         f"Update available: {info.label()}")
         self.dialogs.question.assert_not_called()
+        self.window.statusBar().clearMessage()
+        self.post("checked", info)
+        self.assertEqual(self.window.statusBar().currentMessage(), "")
+        self.assertEqual(self.window.update_button.text(), "Install update")
 
     def test_new_build_found_by_manual_check_prompts_download(self):
         """A manual check that finds a build goes straight to the download prompt.
@@ -2728,7 +2744,8 @@ class UpdateFlowTests(WindowTestCase):
         self.window.update_button.setEnabled(False)
         self.post("download_failed", "disk full")
         self.assertTrue(self.window.update_button.isEnabled())
-        self.assertIn("build 99", self.window.update_button.text())
+        self.assertEqual(self.window.update_button.text(), "Install update")
+        self.assertIn("Build 0 → 99", self.window.update_button.toolTip())
         self.dialogs.warning.assert_called_once()
 
     def test_progress_is_shown_while_downloading(self):
@@ -2739,6 +2756,7 @@ class UpdateFlowTests(WindowTestCase):
         """
         self.window.update_info = make_info()
         self.window.updates.busy = True
+        self.window.updates.downloading = True
         self.window.updates.progress = (25, 100)
         self.window._handle_update_events()
         self.assertEqual(self.window.update_button.text(), "Downloading update… 25%")
@@ -2789,6 +2807,142 @@ class UpdateFlowTests(WindowTestCase):
         self.window.updates.busy = False
         self.post("downloaded", "staged-path")
         self.assertTrue(self.window.check_button.isHidden())
+
+    def checking_window(self):
+        """Build a window whose periodic update check is armed.
+
+        Args: None.
+        Returns: The MainWindow. The startup check has already run once.
+        """
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            window = demo_window(self.engine, self.log, check_updates=True)
+        self.addCleanup(window.frame_timer.stop)
+        self.addCleanup(window.status_timer.stop)
+        self.addCleanup(window.update_timer.stop)
+        self.addCleanup(window.close)
+        self.addCleanup(window.deleteLater)
+        return window
+
+    def test_no_update_check_disables_the_periodic_timer(self):
+        """A window opened with checks off never arms the timer or checks.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertFalse(self.window._periodic_checks)
+        self.assertFalse(self.window.update_timer.isActive())
+        self.window.update_timer.timeout.emit()
+        self.window._schedule_update_check()
+        self.assertFalse(self.window.update_timer.isActive())
+        self.assertEqual(self.window.updates.checks, 0)
+
+    def test_unavailable_updates_do_not_start_the_periodic_timer(self):
+        """Source checkouts keep today's behavior: no check and no timer.
+
+        Args: None.
+        Returns: None.
+        """
+        window = demo_window(self.engine, self.log, check_updates=True)
+        self.addCleanup(window.frame_timer.stop)
+        self.addCleanup(window.status_timer.stop)
+        self.addCleanup(window.close)
+        self.addCleanup(window.deleteLater)
+        self.assertFalse(window._periodic_checks)
+        self.assertFalse(window.update_timer.isActive())
+        self.assertEqual(window.updates.checks, 0)
+
+    def test_periodic_timer_fires_a_silent_check(self):
+        """When the timer fires, another check starts and is not manual.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.checking_window()
+        window.updates.checks = 0
+        window.update_timer.timeout.emit()
+        self.assertEqual(window.updates.checks, 1)
+        self.assertFalse(window.update_manual)
+        self.assertTrue(window.update_timer.isActive())
+
+    def test_periodic_check_skips_while_busy_recording_or_saving(self):
+        """A tick waits while a check, download, recording or save is in progress.
+
+        A downloaded build waiting to install is left alone too, so Restart
+        to update is not replaced. A skipped tick still schedules the next one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.checking_window()
+        window.updates.checks = 0
+        window.update_timer.stop()
+        window.updates.busy = True
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.assertTrue(window.update_timer.isActive())
+        window.updates.busy = False
+        window.pending_update = "staged"
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        window.pending_update = None
+        self.engine.update_settings(record=True)
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.engine.update_settings(record=False)
+        self.engine._set_status(record="Recording: finishing file")
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.engine._set_status(record="Recording: off")
+        self.engine.request("save", title="", notes="")
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.assertTrue(self.engine.save_pending())
+
+    def test_periodic_check_stops_when_the_window_is_closing(self):
+        """Closing does not start a check or arm another one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.checking_window()
+        window.updates.checks = 0
+        window.closing = True
+        window.update_timer.stop()
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.assertFalse(window.update_timer.isActive())
+
+    def test_failed_check_keeps_a_found_update_and_stays_silent(self):
+        """A later failed check leaves Install update up and shows no dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("checked", make_info())
+        self.window.statusBar().clearMessage()
+        self.post("check_failed", "offline")
+        self.assertEqual(self.window.update_button.text(), "Install update")
+        self.assertFalse(self.window.update_button.isHidden())
+        self.assertIn("Build 0 → 99", self.window.update_button.toolTip())
+        self.dialogs.warning.assert_not_called()
+        self.assertEqual(self.window.statusBar().currentMessage(), "")
+        self.assertTrue(any("offline" in line for line in self.log.lines))
+
+    def test_recheck_does_not_relabel_the_button_as_a_download(self):
+        """A check that follows a found build keeps the Install update label.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("checked", make_info())
+        self.window.updates.busy = True
+        self.window.updates.downloading = False
+        self.window._handle_update_events()
+        self.assertEqual(self.window.update_button.text(), "Install update")
 
 
 class CloseTests(WindowTestCase):
