@@ -154,6 +154,8 @@ class Engine:
         self._settings = Settings()
         self._settings_lock = threading.Lock()
         self._actions = queue.SimpleQueue()
+        self._saves_waiting = 0  # frame saves queued or being written
+        self._saves_lock = threading.Lock()
         self._packet = None
         self._packet_lock = threading.Lock()
         self._status = {
@@ -329,7 +331,19 @@ class Engine:
             carries every detected CameraInfo).
         Returns: None.
         """
+        if action == "save":
+            with self._saves_lock:
+                self._saves_waiting += 1
         self._actions.put((action, payload))
+
+    def save_pending(self):
+        """Report whether a frame save is queued or being written.
+
+        Args: None.
+        Returns: True until the worker has finished that save.
+        """
+        with self._saves_lock:
+            return self._saves_waiting > 0
 
     def latest_packet(self):
         """Return the newest published frame.
@@ -686,15 +700,19 @@ class Engine:
             except queue.Empty:
                 return processor, frame
             if action == "save":
-                packet = payload.get("packet")  # a frozen display's packet
-                if packet is None:
-                    packet = self.latest_packet()
-                if packet is None:
-                    self.log.write("No current display frame is ready to save.")
-                else:
-                    save_frame(packet.render(), payload.get("title", ""),
-                               payload.get("notes", ""), packet.demo, self.log,
-                               self.tag, frozen_at=payload.get("frozen_at"))
+                try:
+                    packet = payload.get("packet")  # a frozen display's packet
+                    if packet is None:
+                        packet = self.latest_packet()
+                    if packet is None:
+                        self.log.write("No current display frame is ready to save.")
+                    else:
+                        save_frame(packet.render(), payload.get("title", ""),
+                                   payload.get("notes", ""), packet.demo, self.log,
+                                   self.tag, frozen_at=payload.get("frozen_at"))
+                finally:
+                    with self._saves_lock:
+                        self._saves_waiting -= 1
             elif action == "reset_previous":
                 processor.prev = None
                 self.log.write("Reset previous frame.")

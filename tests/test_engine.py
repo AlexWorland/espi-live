@@ -221,6 +221,20 @@ class EngineDemoTests(unittest.TestCase):
         self.assertTrue(os.path.basename(avi).startswith("dummy_espi_previous_"))
         self.assertGreater(os.path.getsize(avi), 1000)
 
+    def test_save_pending_until_the_worker_writes_the_frame(self):
+        """A queued save counts as pending until the worker finishes it.
+
+        Args: None.
+        Returns: None.
+        """
+        engine = Engine(self.log)
+        self.assertFalse(engine.save_pending())
+        engine.request("save", title="", notes="")
+        self.assertTrue(engine.save_pending())
+        engine._handle_actions(ESPIProcessor(), None)
+        self.assertFalse(engine.save_pending())
+        self.assertTrue(any("No current display frame" in line for line in self.log.lines))
+
     def test_reference_mode_and_actions(self):
         """Reference capture and resets run on the worker without errors.
 

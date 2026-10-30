@@ -28,6 +28,18 @@
 - Disabled controls still show their tip, so an analog camera's exposure, gain and frame rate still say they are set on the camera, and dummy mode still says those three are simulated.
 - The old Tk window is not part of the application any more (`--ui tk` is gone), so this is the Qt window only.
 
+## 2026-10-30 — Updates are noticed while the app stays open
+
+### Previous state
+
+- A prebuilt copy looked for a newer build once, at startup. A camera PC left running for days never noticed a build released after it opened.
+- The status-bar button read **Update available:** followed by the version.
+
+### Current state
+
+- While the app is open it checks again about every three hours, a little earlier or later each time. It skips a check that would overlap one already running, a download, a recording or a frame save. `--no-update-check` turns the later checks off too. Running from source still does not update itself.
+- When a newer build is found the button reads **Install update** (the versions are in the tooltip, such as "Build 42 → 45") and the status bar mentions it once. Finding that same build again leaves the button as it is. A check that fails only goes to the log, and an update already found stays on the button. Downloading and restarting work as before: the new build is installed only after the camera is released.
+
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 
 ### Previous state
