@@ -1377,7 +1377,8 @@ class PollingTests(WindowTestCase):
         window = self.window
         window.show()
         QApplication.processEvents()
-        items = (window.update_slot, window.feature_button, window.source_badge,
+        items = (window.update_slot, window.feature_button, window.codex_button,
+                 window.source_badge,
                  window.record_label, window.range_status, window.camera_fps_status,
                  window.speed_status, window.pixel_status)
 
@@ -2669,6 +2670,213 @@ class FeatureRequestTests(WindowTestCase):
         retry, browser = self.failed_choice("cancel")
         retry.assert_not_called()
         browser.assert_not_called()
+
+
+class CodexTests(WindowTestCase):
+    """Open in Codex: getting the source, the first-use dialog and opening the
+    app, with the source worker, settings and dialogs faked."""
+
+    FOLDER = os.path.join(tempfile.gettempdir(), "espi-live-source")
+
+    def setUp(self):
+        """Build the window with a source worker that never starts a thread.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        self.window.source = mock.MagicMock(busy=False, events=queue.Queue())
+        self.window.source.start.return_value = True
+        patcher = mock.patch.object(qt_app.codex, "write_guide", return_value=None)
+        self.write_guide = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def ready(self, note=""):
+        """Deliver a "source ready" event.
+
+        Args: note is the event's log line.
+        Returns: None.
+        """
+        self.window.source.events.put(("ready", (self.FOLDER, note)))
+        self.window._handle_source_events()
+
+    def buttons(self, choice, count):
+        """Make the next message box report one of its added buttons as clicked.
+
+        Args: choice is the index of the clicked button; count is how many
+            buttons the box adds.
+        Returns: None.
+        """
+        box = self.dialogs.return_value
+        made = [object() for _ in range(count)]
+        box.addButton.side_effect = made
+        box.clickedButton.return_value = made[choice]
+
+    def test_entry_points_exist(self):
+        """The status bar button and the Help menu entry both open Codex.
+
+        Args: None.
+        Returns: None.
+        """
+        help_menu = self.window.menuBar().actions()[-1].menu()
+        entry = next(a for a in help_menu.actions()
+                     if a.text() == "Ask Codex about the source code…")
+        with mock.patch.object(self.window, "_open_codex") as open_codex:
+            entry.trigger()
+            self.window.codex_button.click()
+        self.assertEqual(open_codex.call_count, 2)
+        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+
+    def test_startup_gets_the_source_only_with_update_checks(self):
+        """The startup check runs unless GitHub is off limits at startup.
+
+        Args: None.
+        Returns: None.
+        """
+        worker = mock.MagicMock()
+        with mock.patch.object(qt_app.source_code, "SourceWorker", return_value=worker):
+            for check_updates in (False, True):
+                engine = Engine(self.log)
+                engine.use_demo()
+                window = demo_window(engine, self.log, check_updates=check_updates)
+                window.frame_timer.stop()
+                window.status_timer.stop()
+                window.deleteLater()
+        worker.start.assert_called_once_with()
+
+    def test_click_before_the_source_is_ready_downloads_then_opens(self):
+        """Without the source the button waits for it, then opens Codex.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._open_codex()
+        self.assertFalse(self.window.codex_button.isEnabled())
+        self.assertEqual(self.window.codex_button.text(), "Getting source…")
+        self.window.source.start.assert_called_once_with()
+        FakeSettings.store["codex/intro_shown"] = True
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                               return_value=True) as open_url:
+            self.ready("Downloaded the source code")
+        self.assertTrue(self.window.codex_button.isEnabled())
+        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+        self.assertIn("Downloaded the source code", self.log.lines)
+        self.write_guide.assert_called_once_with(self.FOLDER)
+        url = open_url.call_args.args[0]
+        self.assertEqual(url.toEncoded().data().decode(), qt_app.codex.deep_link(self.FOLDER))
+        self.assertIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
+        self.assertIn("Opening Codex", self.window.statusBar().currentMessage())
+
+    def test_ready_source_at_startup_opens_nothing(self):
+        """The startup event only records the folder.
+
+        Args: None.
+        Returns: None.
+        """
+        before = list(self.log.lines)
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
+            self.ready()
+        self.assertEqual(self.window.source_folder, self.FOLDER)
+        open_url.assert_not_called()
+        self.assertEqual(self.log.lines, before)
+
+    def test_click_while_downloading_waits(self):
+        """A click during the startup download opens Codex when it finishes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.source.start.return_value = False
+        self.window._open_codex()
+        self.assertTrue(self.window.codex_when_ready)
+        self.assertIn("Still downloading", self.window.statusBar().currentMessage())
+
+    def test_failed_download(self):
+        """A failure is logged, and reported in a dialog only after a click.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.source.events.put(("failed", "offline"))
+        self.window._handle_source_events()
+        self.assertIn("Source code not available: offline", self.log.lines)
+        self.dialogs.warning.assert_not_called()
+        self.window._open_codex()
+        self.window.source.events.put(("failed", "R&D <offline>"))
+        self.window._handle_source_events()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("could not be downloaded: R&amp;D &lt;offline&gt;",
+                      self.dialogs.warning.call_args.args[2])
+        self.assertTrue(self.window.codex_button.isEnabled())
+        self.assertIsNone(self.window.source_folder)
+
+    def test_first_use_explains_and_remembers(self):
+        """The first open asks first; cancelling opens nothing and asks again.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                               return_value=True) as open_url:
+            with mock.patch.object(self.window, "_codex_intro", return_value=False):
+                self.window._open_codex()
+            open_url.assert_not_called()
+            self.assertNotIn("codex/intro_shown", FakeSettings.store)
+            with mock.patch.object(self.window, "_codex_intro", return_value=True) as intro:
+                self.window._open_codex()
+                self.window._open_codex()
+        intro.assert_called_once_with()
+        self.assertTrue(FakeSettings.store["codex/intro_shown"])
+        self.assertEqual(open_url.call_count, 2)
+
+    def test_intro_buttons(self):
+        """Open Codex goes on; Get Codex opens the download page; Cancel stops.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        self.buttons(0, 3)
+        self.assertTrue(self.window._codex_intro())
+        self.assertIn(self.FOLDER, self.dialogs.call_args.args[2])
+        self.buttons(2, 3)
+        self.assertFalse(self.window._codex_intro())
+        self.buttons(1, 3)
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
+            self.assertFalse(self.window._codex_intro())
+        self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
+
+    def test_guide_that_cannot_be_written_warns(self):
+        """A read-only source folder is reported and Codex is not opened.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        FakeSettings.store["codex/intro_shown"] = True
+        self.write_guide.side_effect = PermissionError("read-only")
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
+            self.window._open_codex()
+        open_url.assert_not_called()
+        self.assertIn("read-only", self.dialogs.warning.call_args.args[2])
+
+    def test_missing_codex_offers_the_download(self):
+        """When no app takes the link, a dialog offers the download page.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        FakeSettings.store["codex/intro_shown"] = True
+        for choice, opened in ((1, 1), (0, 2)):
+            self.buttons(choice, 2)
+            with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                                   return_value=False) as open_url:
+                self.window._open_codex()
+            self.assertEqual(open_url.call_count, opened)
+            self.assertEqual(self.dialogs.call_args.args[1], "Codex not found")
+        self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
 
 
 if __name__ == "__main__":
