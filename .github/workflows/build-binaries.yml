@@ -396,6 +396,12 @@ jobs:
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
           args=(--noconfirm --clean --paths src --distpath dist --workpath build)
+          # The Help menu opens the bundled HTML user guide; ship it as data.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            args+=(--add-data "src/espi_live/user_guide.html;espi_live")
+          else
+            args+=(--add-data "src/espi_live/user_guide.html:espi_live")
+          fi
           # camera.py imports PySpin lazily through importlib, so PyInstaller cannot see it.
           if [ -n "${{ matrix.sdk_files }}" ]; then
             args+=(--hidden-import PySpin --collect-all PySpin)

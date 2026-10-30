@@ -18,6 +18,7 @@ the displayed camera's own engine and settings.
 
 import html
 import math
+import os
 import random
 import sys
 import textwrap
@@ -42,6 +43,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
 
 from espi_live import camera_reports, codex, feedback, source_code, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
+from espi_live.guide import guide_path
 from espi_live.logs import AppLog
 from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
                                   VIEW_MODES, palette_rgb_table)
@@ -1814,6 +1816,12 @@ class MainWindow(QMainWindow):
                     "Q or Esc: quit.")
 
         help_menu = self.menuBar().addMenu("&Help")
+        guide = help_menu.addAction("User Guide")
+        guide.setShortcut(QKeySequence.HelpContents)
+        set_tooltip(guide, "Open the illustrated user guide in your browser. "
+                    "Shortcut: F1.")
+        guide.triggered.connect(self.show_guide)
+        help_menu.addSeparator()
         check = help_menu.addAction("Check for updates…")
         set_tooltip(check, "Check GitHub for a newer build of ESPI live.")
         check.triggered.connect(self._check_updates_now)
@@ -1828,6 +1836,24 @@ class MainWindow(QMainWindow):
         set_tooltip(about, "Show the version and build of this copy.")
         about.triggered.connect(lambda: QMessageBox.about(
             self, "About ESPI live", updater.describe_build()))
+
+    def show_guide(self):
+        """Open the bundled HTML user guide in the default browser.
+
+        Args: None.
+        Returns: None; reports the path when the browser cannot be started.
+        """
+        path = guide_path()
+        if not os.path.isfile(path):
+            QMessageBox.warning(
+                self, "User guide missing",
+                f"The user guide could not be found at:\n{path}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            QMessageBox.information(
+                self, "User guide",
+                "The default browser could not be opened. Open this file "
+                f"manually:\n{path}")
 
     # ----- cameras -------------------------------------------------------------
 

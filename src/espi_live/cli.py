@@ -2,9 +2,11 @@
 
 import argparse
 import importlib
+import os
 import sys
 
 from espi_live import updater
+from espi_live.guide import guide_path
 
 
 def cli(argv=None):
@@ -73,6 +75,10 @@ def self_check():
         for module in ("espi_live.engine", "espi_live.qt_app", "espi_live.updater",
                        "espi_live.changes"):
             importlib.import_module(module)
+        if not os.path.isfile(guide_path()):
+            print("Self-check failed: user guide missing at "
+                  f"{guide_path()}", file=sys.stderr)
+            return 1
     except Exception as exc:
         print(f"Self-check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
