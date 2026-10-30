@@ -32,8 +32,9 @@ from espi_live import sources
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
-                                  gamma_lut, single_field, smooth_speckle,
-                                  stretch_contrast, watermark_demo)
+                                  denoise_strength, gamma_lut, single_field,
+                                  smooth_speckle, stretch_contrast,
+                                  watermark_demo)
 from espi_live.recording import AVIRecorder, recording_path, save_frame
 
 CAMERA_TIMEOUT_MS = 100
@@ -52,7 +53,7 @@ class Settings:
     exposure_us: float = 8000.0
     gain_db: float = 0.0
     fps: float = 30.0
-    noise_reduction: float = 0.0  # % of history blended into each camera frame; 0 = off
+    noise_reduction: float = 0.0  # 0–95 slider; 0 = off. See denoise_strength.
     average: int = 1
     rolling: bool = False         # running average instead of one image per N frames
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
@@ -522,7 +523,7 @@ class Engine:
             if s.single_field and self.camera is not None and self.camera.interlaced:
                 frame = single_field(frame)
 
-            frame = processor.denoise(frame, s.noise_reduction / 100.0)
+            frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
             now = time.monotonic()
             last_valid = now
             if not self.demo:

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-30 — Noise reduction works across the slider, and says so
+
+### Previous state
+
+- **Noise reduction** read its 0–95 slider as the share of the previous frame to keep. Twenty was about one frame of memory, so most of the travel did almost nothing, and the speckle grain (which the control keeps on purpose) made a still image look unchanged. It was easy to take it for the Speckle filter or Average N, and **Stretch to 0–255** repaints a quieter difference at full brightness, which hides the change again.
+
+### Current state
+
+- The same slider, still 0 = off and 95 = strongest, now means how far the control is turned up. Each step adds the same amount of memory, so 10 is about three frames and 95 is still the old cap of about twenty. The default stays 0. The speckle grain is still kept.
+- The hover tip, which also shows the current value, and a note under the slider say what to look for (less flicker, a trail when something moves) and what will not change (a still speckle image; stretch hides a quieter difference), and that this is not the Speckle filter or Average N.
+
 ## 2026-10-30 — Feature requests are filed by the app
 
 ### Previous state

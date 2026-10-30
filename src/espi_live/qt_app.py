@@ -42,8 +42,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
 from espi_live import camera_reports, codex, feedback, source_code, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.logs import AppLog
-from espi_live.processing import (PALETTES, SMOOTHING_METHODS, VIEW_MODES,
-                                  palette_rgb_table)
+from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
+                                  VIEW_MODES, palette_rgb_table)
 
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
 GL_TEXTURE_2D = 0x0DE1
@@ -1460,14 +1460,29 @@ class MainWindow(QMainWindow):
             lambda on: self.engine.update_settings(single_field=on))
         self.single_field.hide()
         add(self.single_field)
-        self.noise_reduction = SliderSpin(0, 95, 1, 0, s.noise_reduction, " %")
+        self.noise_reduction = SliderSpin(0, MAX_DENOISE_PERCENT, 1, 0,
+                                          s.noise_reduction, " %")
         self.noise_reduction.set_description(
-            "Blend each camera frame with the previous ones to remove sensor "
-            "noise in every view; speckle is kept. Higher values smooth more "
-            "but trail motion and weaken Previous-view fringes. 0 = off.")
+            "Settle flickering sensor noise in Raw, Previous and Reference by "
+            "blending each camera frame with the ones before it. The speckle "
+            "grain stays, so a still speckle image looks almost the same: "
+            "watch for less boiling and a trail when something moves. Stretch "
+            "to 0–255 repaints a quieter difference at full brightness; judge "
+            "it with stretch off, or by the status bar's Input range. This is "
+            "not the Speckle filter (that blurs the grain) or Average N (that "
+            "smooths the fringe picture). 0 = off. The number is how far the "
+            "control is turned up, not the share of the previous frame kept: "
+            "low values already blend several frames, and "
+            f"{MAX_DENOISE_PERCENT} trails motion the most, which also softens "
+            "Previous-view fringes.")
         self.noise_reduction.valueChanged.connect(
             lambda v: self.engine.update_settings(noise_reduction=v))
         add(self.noise_reduction, "Noise reduction")
+        self.noise_note = QLabel(
+            "Grain stays. Look for less flicker and a motion trail, not a "
+            "smoother still image. Stretch hides a quieter difference. Not "
+            "the Speckle filter or Average N.")
+        note(self.noise_note)
         self.camera_label = QLabel()
         note(self.camera_label)
 
