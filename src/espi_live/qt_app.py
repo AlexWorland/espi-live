@@ -57,8 +57,8 @@ ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video
 GAMMA_TIP = (
     "Shifts mid-tones after Stretch to 0–255, in Raw, Previous and Reference. "
     "Stretch is a straight remap of this frame's dark-to-bright range "
-    "(contrast); gamma is a curve on top of that. Below 1.0 brightens dark "
-    "fringes, above 1.0 darkens bright ones. With a good stretch, start at 1.0."
+    "(contrast); gamma is a curve on top of that. Below 1.0 darkens mid-tones, "
+    "above 1.0 brightens them. With a good stretch, start at 1.0."
 )
 STRETCH_TIP = (
     "Map each difference frame's darkest and brightest pixels, after Stretch "
