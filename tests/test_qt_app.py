@@ -1396,7 +1396,7 @@ class SettingsGuideTests(WindowTestCase):
         self.assertIn(qt_app.PIPELINE, readme)
         self.assertIn(qt_app.PIPELINE, qt_app.SETTINGS_GUIDE)
         self.assertIn("display gamma", qt_app.SETTINGS_GUIDE)
-        self.assertIn("Below 1.0 brightens dark", " ".join(self.window.gamma.toolTip().split()))
+        self.assertIn("Below 1.0 darkens mid-tones", " ".join(self.window.gamma.toolTip().split()))
         help_menu = self.window.menuBar().actions()[-1].menu()
         entry = next(a for a in help_menu.actions()
                      if a.text() == "Which settings should I use?")
