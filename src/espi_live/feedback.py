@@ -1,16 +1,16 @@
 """Send feature requests from the app to GitHub as issues.
 
-A request becomes an issue labelled ``feature-request`` in the repository the
-build came from. With "enrich" ticked it also gets the ``enrich`` label, which
-starts the ``enrich-feature-request.yml`` workflow: GitHub Copilot rewrites
-the request into a structured spec and appends it to the issue, so the app
-itself holds no AI credentials.
+A request becomes an issue labelled ``feature-request`` and ``enrich`` in the
+repository the build came from. The ``enrich`` label starts
+``enrich-feature-request.yml``: GitHub Copilot writes a structured spec from
+the title when the description is empty, and expands the user's text when it
+is not, then appends that spec to the issue. The app itself holds no AI
+credentials.
 
 Builds embed a token from the ``FEEDBACK_TOKEN`` secret (a fine-grained token
 with only Issues: read & write on this repository); ``feedback-token.txt``
 beside the program or ``ESPI_FEEDBACK_TOKEN`` overrides it. Without a token
-the request can still be opened in a browser as a prefilled new-issue page.
-No GUI imports: the front ends drive this module.
+the request cannot be filed. No GUI imports: the front ends drive this module.
 """
 
 import json
@@ -19,7 +19,6 @@ import platform
 import queue
 import threading
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -44,7 +43,6 @@ class FeatureRequest:
 
     title: str
     description: str
-    enrich: bool = False
     submitter: str = ""
     source: str = ""  # "camera" or "dummy mode"; empty when unknown
 
@@ -71,13 +69,14 @@ def feedback_token():
 def validate(request):
     """Check that a request is complete enough to file.
 
+    A description is optional: an empty one is filled in from the title when
+    the issue is enriched.
+
     Args: request is a FeatureRequest.
     Returns: None. Raises FeedbackError naming the missing part.
     """
     if not request.title.strip():
         raise FeedbackError("enter a short title")
-    if not request.description.strip():
-        raise FeedbackError("describe the feature you would like")
 
 
 def environment_lines():
@@ -108,27 +107,20 @@ def context_lines(request):
 def issue_payload(request):
     """Build the GitHub "create issue" body for a request.
 
+    Every request is labelled for enrichment. The user's description is kept
+    when they wrote one; otherwise the body says so, and enrichment writes the
+    spec from the title.
+
     Args: request is a validated FeatureRequest.
     Returns: A dict with title, body and labels.
     """
-    labels = [REQUEST_LABEL] + ([ENRICH_LABEL] if request.enrich else [])
-    body = "\n".join([request.description.strip(), "", "---",
+    description = request.description.strip()
+    opening = description if description else "_No description was given._"
+    body = "\n".join([opening, "", "---",
                       "_Sent from ESPI live's **Request feature** button._", "",
                       *context_lines(request)])
     return {"title": request.title.strip()[:MAX_TITLE], "body": body,
-            "labels": labels}
-
-
-def browser_url(request):
-    """Build a prefilled new-issue page for filing without a token.
-
-    Args: request is a FeatureRequest.
-    Returns: The https URL; labels apply only if the signed-in user may set them.
-    """
-    payload = issue_payload(request)
-    query = urllib.parse.urlencode({"title": payload["title"], "body": payload["body"],
-                                    "labels": ",".join(payload["labels"])})
-    return f"https://github.com/{repository()}/issues/new?{query}"
+            "labels": [REQUEST_LABEL, ENRICH_LABEL]}
 
 
 def explain_http_error(exc):
@@ -209,7 +201,9 @@ class FeedbackWorker:
 
     The front end polls ``events`` for ("sent", (request, url)) and
     ("failed", (request, message)); the request is returned so a failure can
-    fall back to the browser without losing the text.
+    be edited and retried without losing the text. Any exception other
+    than FeedbackError is a bug, so after posting the failure it is re-raised
+    for threading.excepthook to log and report.
     """
 
     def __init__(self):
@@ -239,8 +233,11 @@ class FeedbackWorker:
             """
             try:
                 self.events.put(("sent", (request, submit(request))))
-            except Exception as exc:
+            except FeedbackError as exc:
                 self.events.put(("failed", (request, str(exc))))
+            except Exception as exc:
+                self.events.put(("failed", (request, f"{type(exc).__name__}: {exc}")))
+                raise
             finally:
                 self.busy = False
 

@@ -1389,6 +1389,22 @@ class UpdateWorkerTests(unittest.TestCase):
         threading.Event().wait(0.05)
         self.assertFalse(worker.busy)
 
+    def test_unexpected_failure_posts_message_and_reraises(self):
+        """A bug in a job posts the failure and reaches threading.excepthook.
+
+        Args: None.
+        Returns: None.
+        """
+        worker = updater.UpdateWorker()
+        with mock.patch.object(updater, "check_for_update",
+                               side_effect=RuntimeError("boom")), \
+                mock.patch.object(updater.threading, "excepthook") as hook:
+            worker.check()
+            self.assertEqual(worker.events.get(timeout=5),
+                             ("check_failed", "RuntimeError: boom"))
+        hook.assert_called_once()
+        self.assertIs(hook.call_args.args[0].exc_type, RuntimeError)
+
     def test_second_job_is_refused_while_busy(self):
         """A job started while another runs returns False.
 

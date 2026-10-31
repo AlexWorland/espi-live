@@ -12,9 +12,11 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import logging
 import queue
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -22,23 +24,32 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
-from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QKeyEvent, QSurfaceFormat
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QHelpEvent, QKeyEvent, QSurfaceFormat
+from PySide6.QtWidgets import (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QApplication,
+                               QComboBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QStyle,
+                               QTextEdit, QWidget)
 
 from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, updater
+from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
+from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
 from espi_live.channels import Channel, demo_channels
 from espi_live.engine import Engine, FramePacket
-from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
-from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
+from list_log import ListLog
 
 APP = QApplication.instance() or QApplication(sys.argv)
 
+FINGERPRINT_UI = "ESPI-ERR-v1-" + "b" * 12
 
-class FakeLog:
+
+class FakeLog(ListLog):
     """In-memory stand-in for AppLog."""
+
+    level = logging.INFO
+    path = None
+    crash_path = None
 
     def __init__(self):
         """Create an empty log.
@@ -46,16 +57,17 @@ class FakeLog:
         Args: None.
         Returns: None.
         """
-        self.lines = []
+        super().__init__()
         self.pending = []
+        self.ticks = 0
 
-    def write(self, message):
+    def _add(self, level, message, exc_info=None):
         """Record one message for assertions and for drain().
 
-        Args: message is the text to keep.
+        Args: level, message and exc_info as ListLog takes them.
         Returns: None.
         """
-        self.lines.append(message)
+        super()._add(level, message, exc_info)
         self.pending.append(message + "\n")
 
     def drain(self):
@@ -66,6 +78,30 @@ class FakeLog:
         """
         text, self.pending = "".join(self.pending), []
         return text
+
+    def recent_lines(self):
+        """Return the newest lines, as AppLog does for error reports.
+
+        Args: None.
+        Returns: The last 40 lines.
+        """
+        return self.lines[-40:]
+
+    def uptime(self):
+        """Pretend the run started a minute ago.
+
+        Args: None.
+        Returns: 60.0.
+        """
+        return 60.0
+
+    def watchdog_tick(self):
+        """Count UI ticks instead of arming faulthandler.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ticks += 1
 
     def start(self):
         """Pretend to open a log file.
@@ -126,6 +162,7 @@ class FakeUpdateWorker:
         self.events = queue.Queue()
         self.progress = (0, 0)
         self.busy = False
+        self.downloading = False
         self.checks = 0
         self.downloads = []
         self.download_result = True
@@ -913,6 +950,34 @@ class SliderSpinTests(unittest.TestCase):
         self.assertEqual(self.control.value(), 1.0)
         self.assertEqual(self.control.slider.maximum(), 2)
 
+    def test_tooltip_tracks_the_value_and_an_optional_note(self):
+        """The tip names the control, the live value and a situation line.
+
+        Args: None.
+        Returns: None.
+        """
+        self.control.set_description("Scale factor. A typical value is 2.")
+        self.assertIn("Now: 2.0 x", self.control.toolTip())
+        self.assertEqual(self.control.slider.toolTip(), self.control.toolTip())
+        self.assertEqual(self.control.spin.toolTip(), self.control.toolTip())
+        self.control.set_note("Simulated in dummy mode")
+        self.assertIn("Simulated in dummy mode", self.control.toolTip())
+        self.control.slider.setValue(8)
+        self.assertIn("Now: 4.0 x", self.control.toolTip())
+        self.control.set_note("")
+        self.assertNotIn("Simulated", self.control.toolTip())
+
+    def test_integer_value_is_shown_without_decimals(self):
+        """A whole-number control does not show a fractional part.
+
+        Args: None.
+        Returns: None.
+        """
+        control = qt_app.SliderSpin(0, 10, 1, 0, 3, " px")
+        self.addCleanup(control.deleteLater)
+        control.set_description("Width.")
+        self.assertIn("Now: 3 px", control.toolTip())
+
 
 class WindowTestCase(unittest.TestCase):
     """Base class: a MainWindow on a demo engine with every side effect faked."""
@@ -982,7 +1047,8 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertFalse(self.window.switch_live_button.isHidden())
         self.assertTrue(self.window.camera_label.isHidden())
         self.assertIn("DUMMY", self.window.source_badge.text())
-        self.assertEqual(self.window.exposure.toolTip(), "Simulated in dummy mode")
+        self.assertIn("Simulated in dummy mode", self.window.exposure.toolTip())
+        self.assertIn("Now: 8000 µs", self.window.exposure.toolTip())
 
     def test_set_demo_false_switches_to_camera_indicators(self):
         """Leaving demo mode hides every dummy indicator.
@@ -996,7 +1062,10 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertTrue(self.window.switch_live_button.isHidden())
         self.assertFalse(self.window.camera_label.isHidden())
         self.assertIn("Camera", self.window.source_badge.text())
-        self.assertEqual(self.window.exposure.toolTip(), "")
+        tip = self.window.exposure.toolTip()
+        self.assertNotIn("Simulated", tip)
+        self.assertIn("collects light", tip)
+        self.assertIn("Now: 8000 µs", tip)
 
     def test_first_run_uses_default_window_size(self):
         """Without saved geometry the window opens at 1400x900.
@@ -1026,6 +1095,9 @@ class MainWindowBuildTests(WindowTestCase):
         window.frame_timer.stop()
         window.status_timer.stop()
         self.assertEqual(window.updates.checks, 1)
+        self.assertTrue(window.update_timer.isActive())
+        span = abs(window.update_timer.interval() - qt_app.UPDATE_CHECK_INTERVAL_MS)
+        self.assertLessEqual(span, qt_app.UPDATE_CHECK_JITTER_MS)
         window.close()
 
     def test_mode_button_changes_engine_mode(self):
@@ -1091,8 +1163,43 @@ class MainWindowBuildTests(WindowTestCase):
         s = self.engine.settings()
         self.assertEqual((s.exposure_us, s.gain_db, s.fps), (1234, 3.5, 12.5))
         self.assertEqual(s.noise_reduction, 60)
+        tip = " ".join(w.noise_reduction.toolTip().split())
+        self.assertIn("grain stays", tip)
+        self.assertIn("Speckle filter", tip)
+        self.assertIn("Average N", tip)
+        self.assertIn("Stretch", tip)
+        self.assertIn("Now: 60 %", tip)
+        note = w.noise_note.text()
+        self.assertIn("Grain stays", note)
+        self.assertIn("Speckle filter", note)
+        self.assertIn("Average N", note)
         self.assertEqual((s.average, s.ref_refresh_s, s.smoothing), (5, 2.5, 3))
         self.assertEqual((s.clip_percent, s.gamma), (1.5, 1.7))
+
+    def test_gamma_stays_its_own_control_and_explains_stretch(self):
+        """Gamma is a visible Display slider, with a tip that contrasts stretch.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        gamma = self.window.gamma
+        self.assertTrue(gamma.isVisible())
+        self.assertFalse(gamma.isHidden())
+        tip = gamma.toolTip()
+        self.assertIn("Stretch", qt_app.GAMMA_TIP)
+        self.assertIn("Stretch", tip)
+        self.assertIn("1.0", tip)
+        self.assertIn("Now: 1.0", tip)
+        self.assertEqual(gamma.slider.toolTip(), tip)
+        self.assertEqual(gamma.spin.toolTip(), tip)
+        labels = [label for label in self.window.controls_dock.findChildren(QLabel)
+                  if label.text() == "Gamma"]
+        self.assertEqual([label.toolTip() for label in labels], [tip])
+        stretch = self.window.scale_range.toolTip()
+        self.assertIn("Raw", stretch)
+        self.assertIn("gamma", stretch.lower())
+        self.assertNotIn("advanced", tip.lower())
 
     def test_checkboxes_and_combos_update_engine_settings(self):
         """Check boxes and combo boxes write their engine settings.
@@ -1183,6 +1290,37 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertEqual(self.window.hover, (3, 4))
 
 
+def _dock_controls_missing_tooltips(dock):
+    """List interactive controls in a dock that have no tooltip.
+
+    The spin box's internal editor is part of the spin box, so it is not
+    listed on its own. A new slider, button, combo or text field with no
+    tooltip fails the suite.
+
+    Args: dock is the controls QDockWidget.
+    Returns: Widgets that still need a tooltip.
+    """
+    kinds = (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
+             QLineEdit, QPlainTextEdit, QTextEdit)
+    containers = (QAbstractSpinBox, QComboBox, QPlainTextEdit, QTextEdit)
+    missing = []
+    for widget in dock.findChildren(QWidget):
+        if not isinstance(widget, kinds):
+            continue
+        parent = widget.parentWidget()
+        inside = False
+        while parent is not None:
+            if isinstance(parent, containers):
+                inside = True
+                break
+            parent = parent.parentWidget()
+        if inside:
+            continue
+        if not widget.toolTip().strip():
+            missing.append(widget)
+    return missing
+
+
 class SettingsGuideTests(WindowTestCase):
     """Tooltips, the settings guide and the two processing presets."""
 
@@ -1208,7 +1346,7 @@ class SettingsGuideTests(WindowTestCase):
             w.clahe: ("color palette", "Gray"),
         }
         for widget, phrases in expected.items():
-            tip = widget.toolTip()
+            tip = " ".join(widget.toolTip().split())
             for phrase in phrases:
                 self.assertIn(phrase, tip)
 
@@ -1254,6 +1392,8 @@ class SettingsGuideTests(WindowTestCase):
             readme = handle.read()
         self.assertIn(qt_app.PIPELINE, readme)
         self.assertIn(qt_app.PIPELINE, qt_app.SETTINGS_GUIDE)
+        self.assertIn("display gamma", qt_app.SETTINGS_GUIDE)
+        self.assertIn("Below 1.0 brightens dark", " ".join(self.window.gamma.toolTip().split()))
         help_menu = self.window.menuBar().actions()[-1].menu()
         entry = next(a for a in help_menu.actions()
                      if a.text() == "Which settings should I use?")
@@ -1270,6 +1410,310 @@ class SettingsGuideTests(WindowTestCase):
         self.assertEqual(self.engine.settings().mode, "Previous")
         buttons["Close"].click()
         self.assertFalse(dialog.isVisible())
+
+
+class TooltipCoverageTests(WindowTestCase):
+    """Every control explains itself, and tips stay off the live image."""
+
+    def test_controls_dock_rejects_a_control_without_a_tooltip(self):
+        """A controls-dock slider, button, combo or text field must have a tip.
+
+        Args: None.
+        Returns: None.
+        """
+        missing = _dock_controls_missing_tooltips(self.window.controls_dock)
+        self.assertEqual([type(widget).__name__ for widget in missing], [])
+
+    def test_sliders_include_the_live_value_and_shortcuts(self):
+        """Slider tips name the current value; shortcut controls name the key.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIn("Now: 1.0", self.window.gamma.toolTip())
+        self.assertIn("1.0", self.window.gamma.toolTip())
+        self.window.gamma.set_value(2.5)
+        self.assertIn("Now: 2.5", self.window.gamma.toolTip())
+        self.assertIn("Now: 8000 µs", self.window.exposure.toolTip())
+        self.assertIn("Now: 100%", self.window.zoom_slider.toolTip())
+        self.window._show_zoom(8)
+        self.assertIn("Now: 800%", self.window.zoom_slider.toolTip())
+        self.assertIn("Shortcut: S", self.window.frame_title.toolTip())
+        self.assertIn("Shortcut: Space", self.window.freeze_button.toolTip())
+        for button in self.window.mode_group.buttons():
+            self.assertIn(button.text(), button.toolTip())
+        self.assertIn("AVI", self.window.record_button.toolTip())
+        self.assertEqual(self.window.view.toolTip(), "")
+
+    def test_menus_and_status_badges_have_tooltips(self):
+        """Menu actions and status readouts say what they show.
+
+        Args: None.
+        Returns: None.
+        """
+        for name in ("hint_label", "frozen_badge", "source_badge", "record_label",
+                     "range_status", "camera_fps_status", "speed_status", "pixel_status",
+                     "update_button", "check_button", "feature_button", "codex_button"):
+            self.assertTrue(getattr(self.window, name).toolTip().strip(), name)
+        for top in self.window.menuBar().actions():
+            for action in top.menu().actions():
+                if not action.isSeparator():
+                    self.assertTrue(action.toolTip().strip(), action.text())
+        self.assertIn("Space", self.window.freeze_action.toolTip())
+        self.assertTrue(self.window.record_button.testAttribute(Qt.WA_AlwaysShowToolTips))
+        self.assertTrue(self.window.testAttribute(Qt.WA_AlwaysShowToolTips))
+
+    def test_tooltip_delay_is_installed_once(self):
+        """Tips wait briefly, and a second install does not replace the style.
+
+        Args: None.
+        Returns: None.
+        """
+        style = QApplication.style()
+        self.assertIsInstance(style, qt_app.TooltipDelayStyle)
+        self.assertEqual(style.styleHint(QStyle.SH_ToolTip_WakeUpDelay), qt_app.TOOLTIP_DELAY_MS)
+        self.assertEqual(style.styleHint(QStyle.SH_ToolTip_FallAsleepDelay),
+                         qt_app.TOOLTIP_FALL_ASLEEP_MS)
+        self.assertIsInstance(style.styleHint(QStyle.SH_EtchDisabledText), int)
+        qt_app.install_tooltip_delay()
+        self.assertIs(QApplication.style(), style)
+
+    def _tip_event(self, widget):
+        """Build the hover event Qt sends after the tooltip delay.
+
+        Args: widget is the control under the pointer.
+        Returns: A QHelpEvent.
+        """
+        local = QPoint(1, 1)
+        return QHelpEvent(QEvent.ToolTip, local, widget.mapToGlobal(local))
+
+    def test_a_control_tooltip_is_placed_off_the_image(self):
+        """The filter shows the tip, and the rectangle misses the image.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        QApplication.processEvents()
+        slider = self.window.gamma.slider
+        with mock.patch.object(qt_app.QToolTip, "showText") as show:
+            self.assertTrue(self.window.tooltip_filter.eventFilter(
+                slider, self._tip_event(slider)))
+        pos, text, widget = show.call_args.args
+        self.assertIs(widget, slider)
+        self.assertIn("Now:", text)
+        view = self.window.view
+        view_rect = QRect(view.mapToGlobal(QPoint(0, 0)), view.size())
+        self.assertGreater(view_rect.width(), 0)
+        self.assertFalse(view_rect.intersects(QRect(pos, qt_app.tooltip_size(text))))
+
+    def test_the_image_never_shows_a_tooltip(self):
+        """A tip on the image view is swallowed so the picture stays visible.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.view.setToolTip("would cover the fringes")
+        with mock.patch.object(qt_app.QToolTip, "showText") as show, \
+                mock.patch.object(qt_app.QToolTip, "hideText") as hide:
+            self.assertTrue(self.window.tooltip_filter.eventFilter(
+                self.window.view, self._tip_event(self.window.view)))
+        show.assert_not_called()
+        hide.assert_called_once()
+
+    def test_filter_ignores_other_events_windows_and_empty_tips(self):
+        """Only a tip on one of this window's controls is handled.
+
+        Args: None.
+        Returns: None.
+        """
+        filt = self.window.tooltip_filter
+        self.assertFalse(filt.eventFilter(self.window.gamma, QEvent(QEvent.Leave)))
+        self.assertFalse(filt.eventFilter(QObject(), self._tip_event(self.window.gamma)))
+        outsider = QPushButton("no")
+        outsider.setToolTip("elsewhere")
+        self.addCleanup(outsider.deleteLater)
+        self.assertFalse(filt.eventFilter(outsider, self._tip_event(outsider)))
+        self.assertFalse(filt.eventFilter(
+            self.window.demo_banner, self._tip_event(self.window.demo_banner)))
+
+
+class TooltipPlacementTests(unittest.TestCase):
+    """Tooltip geometry stays on screen and off the image."""
+
+    def setUp(self):
+        """A host, an image and a control, in one coordinate system.
+
+        Args: None.
+        Returns: None.
+        """
+        self.screen = QRect(-10000, -10000, 40000, 40000)
+        self.host = QWidget()
+        self.host.setGeometry(0, 0, 2000, 1400)
+        self.image = QWidget(self.host)
+        self.image.setGeometry(200, 80, 900, 700)
+        self.control = QPushButton("Gamma", self.host)
+        self.control.setGeometry(1200, 200, 140, 28)
+        self.control.setToolTip("Brighten midtones")
+        self.host.show()
+
+    def tearDown(self):
+        """Delete the host.
+
+        Args: None.
+        Returns: None.
+        """
+        self.host.deleteLater()
+
+    def _image_rect(self):
+        """Return the image in global coordinates.
+
+        Args: None.
+        Returns: A QRect.
+        """
+        return QRect(self.image.mapToGlobal(QPoint(0, 0)), self.image.size())
+
+    def test_a_tip_beside_the_image_opens_under_the_control(self):
+        """A control clear of the image keeps the nearest position.
+
+        Args: None.
+        Returns: None.
+        """
+        pos = qt_app.tooltip_position(self.control, "Hi", self.image, self.screen)
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos, QPoint(origin.x(), origin.y() + self.control.height()
+                                     + qt_app.TOOLTIP_MARGIN))
+        self.assertFalse(self._image_rect().intersects(
+            QRect(pos, qt_app.tooltip_size("Hi"))))
+
+    def test_a_tip_on_the_image_moves_outside_it(self):
+        """Every side of a control sitting on the image is rejected.
+
+        Args: None.
+        Returns: None.
+        """
+        self.control.setGeometry(500, 400, 40, 24)
+        text = "Brightness"
+        pos = qt_app.tooltip_position(self.control, text, self.image, self.screen)
+        self.assertFalse(self._image_rect().intersects(
+            QRect(pos, qt_app.tooltip_size(text))))
+
+    def test_a_hidden_image_does_not_move_the_tip(self):
+        """No visible image means the tip opens just below the control.
+
+        Args: None.
+        Returns: None.
+        """
+        self.control.setGeometry(500, 400, 40, 24)
+        self.image.hide()
+        pos = qt_app.tooltip_position(self.control, "Hi", self.image, self.screen)
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos.y(), origin.y() + self.control.height() + qt_app.TOOLTIP_MARGIN)
+
+    def test_missing_image_uses_the_first_candidate(self):
+        """None for the image is the same as a hidden one.
+
+        Args: None.
+        Returns: None.
+        """
+        pos = qt_app.tooltip_position(self.control, "Hi", None, self.screen)
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos, QPoint(origin.x(), origin.y() + self.control.height()
+                                     + qt_app.TOOLTIP_MARGIN))
+
+    def test_a_wide_tip_slides_onto_the_screen_beside_the_image(self):
+        """A tip that hangs off the screen moves sideways, still clear of the image.
+
+        Args: None.
+        Returns: None.
+        """
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        text = "word " * 30
+        size = qt_app.tooltip_size(text)
+        # The unnudged tip hangs off the right; sliding it left still clears the image.
+        screen = QRect(origin.x() - 200, origin.y() - 20, size.width() + 160, 400)
+        pos = qt_app.tooltip_position(self.control, text, self.image, screen)
+        rect = QRect(pos, size)
+        self.assertTrue(screen.contains(rect))
+        self.assertFalse(self._image_rect().intersects(rect))
+        self.assertLess(pos.x(), origin.x())
+
+    def test_a_tip_may_leave_the_screen_to_spare_the_image(self):
+        """An off-screen tip is kept when the on-screen one would cover the image.
+
+        Args: None.
+        Returns: None.
+        """
+        image = self._image_rect()
+        screen = QRect(image.x() + 10, image.y() + 10, max(1, image.width() - 20),
+                       max(1, image.height() - 20))
+        text = "Brighten the midtones of a difference image"
+        pos = qt_app.tooltip_position(self.control, text, self.image, screen)
+        self.assertFalse(self._image_rect().intersects(
+            QRect(pos, qt_app.tooltip_size(text))))
+        self.assertFalse(screen.contains(QRect(pos, qt_app.tooltip_size(text))))
+
+    def test_a_tiny_screen_clamps_the_tip(self):
+        """When nothing fits, the tip is pushed to the screen's top-left.
+
+        Args: None.
+        Returns: None.
+        """
+        screen = QRect(0, 0, 20, 20)
+        text = "one\ntwo\nthree\nfour"
+        pos = qt_app.tooltip_position(self.control, text, None, screen)
+        self.assertEqual(pos, QPoint(screen.left(), screen.top()))
+
+    def test_no_widget_screen_uses_a_fallback_desktop(self):
+        """A widget with no screen still gets a tip below it.
+
+        Args: None.
+        Returns: None.
+        """
+
+        class NoScreen(QPushButton):
+            """A button whose screen() is missing."""
+
+            def screen(self):
+                """Report that no screen is attached.
+
+                Args: None.
+                Returns: None.
+                """
+                return None
+
+        button = NoScreen("n", self.host)
+        button.setGeometry(10, 10, 40, 20)
+        button.show()
+        pos = qt_app.tooltip_position(button, "Hi")
+        origin = button.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos, QPoint(origin.x(), origin.y() + button.height()
+                                     + qt_app.TOOLTIP_MARGIN))
+
+    def test_the_widget_screen_is_used_when_none_is_passed(self):
+        """Omitting the screen reads it from the widget.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIsNotNone(self.control.screen())
+        pos = qt_app.tooltip_position(self.control, "Hi")
+        origin = self.control.mapToGlobal(QPoint(0, 0))
+        self.assertEqual(pos.y(), origin.y() + self.control.height() + qt_app.TOOLTIP_MARGIN)
+
+    def test_format_tooltip_wraps_and_drops_blank_parts(self):
+        """Long text wraps; a blank part adds no line.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.format_tooltip(), "")
+        self.assertEqual(qt_app.format_tooltip("  ", ""), "")
+        wrapped = qt_app.format_tooltip("word " * 40)
+        self.assertGreater(wrapped.count("\n"), 0)
+        self.assertLessEqual(max(len(line) for line in wrapped.split("\n")), qt_app.TOOLTIP_WRAP)
+        self.assertGreater(qt_app.tooltip_size(wrapped).height(),
+                           qt_app.tooltip_size("word").height())
 
 
 class MainWindowGlTests(WindowTestCase):
@@ -1469,7 +1913,7 @@ class PollingTests(WindowTestCase):
         window.show()
         QApplication.processEvents()
         items = (window.update_slot, window.feature_button, window.codex_button,
-                 window.source_badge,
+                 window.status_actions_rule, window.source_badge,
                  window.record_label, window.range_status, window.camera_fps_status,
                  window.speed_status, window.pixel_status)
 
@@ -1493,6 +1937,104 @@ class PollingTests(WindowTestCase):
         window.check_button.setVisible(True)
         window.update_button.setVisible(False)
         self.assertEqual(geometry(), before)
+
+    def test_status_actions_look_like_buttons(self):
+        """Idle, checking, update, sending and disabled states stay buttons.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        for button in (window.check_button, window.feature_button, window.codex_button):
+            self.assert_button_chrome(button, primary=False)
+        self.assertFalse(window.check_button.icon().isNull())
+        self.assertFalse(window.feature_button.icon().isNull())
+        self.assertTrue(window.codex_button.icon().isNull())
+        self.assertEqual(window.check_button.toolTip(),
+                         qt_app.format_tooltip("Check GitHub for a newer build of ESPI live."))
+        self.assertEqual(window.feature_button.toolTip(),
+                         qt_app.format_tooltip(
+                             "Send a feature request to the developers as a GitHub issue."))
+        self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
+        self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
+        self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
+        self.assertGreaterEqual(window.source_badge.width(),
+                                window.source_badge.sizeHint().width())
+        self.assertEqual(window.status_actions_rule.frameShape(), qt_app.QFrame.Shape.VLine)
+        window.check_button.setFocus(Qt.OtherFocusReason)
+        self.assertTrue(window.check_button.hasFocus())
+
+        window.updates.busy = True
+        window._sync_check_button()
+        self.assertFalse(window.check_button.isEnabled())
+        self.assertEqual(window.check_button.text(), "Checking for updates…")
+        self.assert_button_chrome(window.check_button, primary=False)
+        self.assert_has_frame(window.check_button)
+
+        window.updates.busy = False
+        window.update_info = make_info()
+        window.update_button.setText("Install update")
+        window.update_button.setVisible(True)
+        window._sync_check_button()
+        self.assertTrue(window.check_button.isHidden())
+        self.assertFalse(window.update_button.isHidden())
+        self.assert_button_chrome(window.update_button, primary=True)
+        self.assert_has_frame(window.update_button)
+        self.assertLessEqual(window.update_button.sizeHint().width(),
+                             window.update_button.width())
+
+        window.update_button.setEnabled(False)
+        window.update_button.setText("Downloading update… 25%")
+        self.assertFalse(window.update_button.isEnabled())
+        self.assert_button_chrome(window.update_button, primary=True)
+        self.assert_has_frame(window.update_button)
+        self.assertLessEqual(window.update_button.sizeHint().width(),
+                             window.update_button.width())
+
+        window.feature_button.setEnabled(False)
+        window.feature_button.setText("Sending request…")
+        self.assert_button_chrome(window.feature_button, primary=False)
+        self.assert_has_frame(window.feature_button)
+        self.assertLessEqual(window.feature_button.sizeHint().width(),
+                             window.feature_button.width())
+        self.assertEqual(window.feature_button.toolTip(),
+                         qt_app.format_tooltip(
+                             "Send a feature request to the developers as a GitHub issue."))
+
+    def assert_button_chrome(self, button, primary):
+        """Check the border, pointer, focus and state rules of one button.
+
+        Args: button is a QPushButton; primary is True for the blue update button.
+        Returns: None.
+        """
+        sheet = button.styleSheet()
+        self.assertFalse(button.isFlat())
+        self.assertEqual(button.cursor().shape(), Qt.PointingHandCursor)
+        self.assertEqual(button.focusPolicy(), Qt.StrongFocus)
+        for state in (":hover", ":pressed", ":focus", ":disabled"):
+            self.assertIn(state, sheet)
+        self.assertIn("border-radius", sheet)
+        if primary:
+            self.assertIn("#1d4f91", sheet)
+            self.assertIn("font-weight: bold", sheet)
+        else:
+            self.assertNotIn("#1d4f91", sheet)
+            self.assertIn("palette(base)", sheet)
+
+    def assert_has_frame(self, button):
+        """The painted edge differs from the fill, so the control is not flat text.
+
+        Args: button is a visible QPushButton.
+        Returns: None.
+        """
+        image = button.grab().toImage()
+        mid_x = max(1, image.width() // 2)
+        center = image.pixelColor(mid_x, image.height() // 2)
+        edge = image.pixelColor(mid_x, 1)
+        self.assertNotEqual((center.red(), center.green(), center.blue()),
+                            (edge.red(), edge.green(), edge.blue()))
 
     def test_fixed_label_keeps_full_text_but_shows_an_ellipsis(self):
         """A label too narrow for its text shows "…" yet still reports the full string.
@@ -1568,6 +2110,2120 @@ class PollingTests(WindowTestCase):
         self.assertEqual(self.window.pixel_status.text(), "")
 
 
+class EngineEventTests(WindowTestCase):
+    """Reaction to engine events."""
+
+    def test_camera_limits_set_slider_ranges(self):
+        """camera_limits updates the ranges of the controls it names.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.events.put(("camera_limits", {
+            "ExposureTime": (10, 20000), "Gain": (0, 12)}))
+        self.window._handle_events()
+        self.assertEqual(self.window.exposure.spin.maximum(), 20000)
+        self.assertEqual(self.window.gain.spin.maximum(), 12)
+        self.assertEqual(self.window.fps.spin.maximum(), 60)
+
+    def test_camera_identity_names_the_model(self):
+        """camera_identity puts the model in the title, badge and controls.
+
+        Args: None.
+        Returns: None.
+        """
+        source, self.engine.demo_source = self.engine.demo_source, None
+        self.addCleanup(setattr, self.engine, "demo_source", source)
+        self.engine.events.put(("camera_identity", CameraIdentity(
+            vendor="FLIR", model="Blackfly S BFS-U3-70S7C", serial="42")))
+        self.window._handle_events()
+        self.assertEqual(self.window.windowTitle(), "ESPI live — BFS-U3-70S7C")
+        self.assertEqual(self.window.source_badge.text(), "  BFS-U3-70S7C  ")
+        self.assertIn("S/N 42", self.window.source_badge.toolTip())
+        self.assertFalse(self.window.model_label.isHidden())
+        self.assertIn("⚠ Colour camera", self.window.model_label.text())
+
+    def test_camera_identity_is_hidden_in_dummy_mode(self):
+        """A known camera is not advertised while synthetic video runs.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.camera_identity = CameraIdentity(model="BFS-U3-63S4M")
+        self.window._set_demo(True)
+        self.assertIn("DUMMY MODE", self.window.windowTitle())
+        self.assertTrue(self.window.model_label.isHidden())
+        self.assertEqual(self.window.source_badge.toolTip(),
+                         "Synthetic video: no camera data")
+
+    def test_camera_limits_set_frame_rate_range(self):
+        """camera_limits can also set the frame-rate range.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.events.put(("camera_limits", {"AcquisitionFrameRate": (1, 25)}))
+        self.window._handle_events()
+        self.assertEqual(self.window.fps.spin.maximum(), 25)
+
+    def test_record_off_unchecks_button_without_touching_engine(self):
+        """record_off clears the button silently.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.record_button.setChecked(True)
+        self.engine.update_settings(record=True)
+        self.engine.events.put(("record_off", None))
+        self.window._handle_events()
+        self.assertFalse(self.window.record_button.isChecked())
+        self.assertTrue(self.engine.settings().record)
+
+    def test_switched_live_selects_raw_and_leaves_demo(self):
+        """switched_live selects Raw, unchecks record and hides demo indicators.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.record_button.setChecked(True)
+        self.engine.events.put(("switched_live", None))
+        self.window._handle_events()
+        checked = [b.text() for b in self.window.mode_group.buttons() if b.isChecked()]
+        self.assertEqual(checked, ["Raw"])
+        self.assertFalse(self.window.record_button.isChecked())
+        self.assertEqual(self.window.windowTitle(), "ESPI live")
+
+    def test_switch_failed_warns_and_keeps_demo(self):
+        """switch_failed warns the user and stays in demo mode.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.events.put(("switch_failed", "no camera"))
+        self.window._handle_events()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("no camera", self.dialogs.warning.call_args.args[2])
+        self.assertIn("DUMMY", self.window.windowTitle())
+
+    def test_fatal_shows_error_and_closes(self):
+        """fatal shows a critical dialog and closes the window.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.events.put(("fatal", ("kaboom", None)))
+        with mock.patch.object(self.window, "close") as close:
+            self.window._handle_events()
+        self.assertEqual(self.dialogs.call_args.args[1:], ("ESPI stopped", "kaboom"))
+        self.dialogs.return_value.exec.assert_called_once()
+        close.assert_called_once()
+
+    def test_stopped_closes_unless_already_closing(self):
+        """stopped closes the window once, and is ignored while closing.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window, "close") as close:
+            self.engine.events.put(("stopped", None))
+            self.window._handle_events()
+            self.window.closing = True
+            self.engine.events.put(("stopped", None))
+            self.window._handle_events()
+        close.assert_called_once()
+
+
+class MultiCameraTests(unittest.TestCase):
+    """Several cameras: the drop-down, process checkboxes and per-camera settings."""
+
+    def setUp(self):
+        """Build a window over three synthetic cameras (only the first open).
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        self.dialogs = make_dialogs()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        self.channels = demo_channels(self.log, 3)
+        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.addCleanup(self.cleanup_window)
+
+    def cleanup_window(self):
+        """Close the window, which stops and waits for every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_single_camera_hides_the_camera_list(self):
+        """With one camera there is no drop-down and no log prefix.
+
+        Args: None.
+        Returns: None.
+        """
+        engine = Engine(self.log)
+        engine.use_demo()
+        window = demo_window(engine, self.log)
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        self.assertTrue(window.cameras_box.isHidden())
+        self.assertEqual(window.windowTitle(), "ESPI live — DUMMY MODE")
+
+    def test_cameras_are_listed_with_the_displayed_one_locked_on(self):
+        """The drop-down lists every camera; the shown one must keep processing.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertFalse(window.cameras_box.isHidden())
+        self.assertEqual(window.camera_combo.count(), 3)
+        self.assertEqual([c.isChecked() for c in window.camera_checks], [True, False, False])
+        self.assertEqual([c.isEnabled() for c in window.camera_checks], [False, True, True])
+        self.assertIn("(DEMO1) — DUMMY MODE", window.windowTitle())
+        self.assertEqual(self.channels[1].log.prefix, "[DEMO2] ")
+
+    def test_process_checkbox_starts_and_stops_a_background_camera(self):
+        """Checking starts the camera's engine; unchecking stops it, keeping settings.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.channels[1]
+        self.window.camera_checks[1].setChecked(True)
+        self.assertTrue(second.active)
+        self.assertTrue(wait_for(lambda: second.engine.latest_packet() is not None))
+        second.engine.update_settings(gain_db=6.0)
+        self.window.camera_checks[1].setChecked(False)
+        self.assertFalse(second.active)
+        self.assertEqual(second.settings.gain_db, 6.0)
+        self.assertIn("Processing off: Synthetic camera (DEMO2) (settings kept)",
+                      self.log.lines)
+
+    def test_the_displayed_camera_cannot_be_turned_off(self):
+        """A request to stop the displayed camera is ignored.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._set_processing(self.channels[0], False)
+        self.assertTrue(self.channels[0].active)
+        self.assertTrue(self.window.camera_checks[0].isChecked())
+
+    def test_choosing_a_camera_shows_its_own_settings(self):
+        """The controls switch to the chosen camera's settings and limits.
+
+        Args: None.
+        Returns: None.
+        """
+        window, second = self.window, self.channels[1]
+        second.settings = replace(second.settings, exposure_us=2500.0, mode="Previous",
+                                  palette="Jet", rolling=True, noise_reduction=40.0)
+        second.limits = {"Gain": (0.0, 12.0)}
+        window.exposure.set_value(4000.0)
+        window.exposure.valueChanged.emit(4000.0)
+        window.camera_combo.setCurrentIndex(1)
+        self.assertIs(window.current, second)
+        self.assertTrue(second.active)
+        self.assertEqual(window.exposure.value(), 2500.0)
+        self.assertEqual(window.noise_reduction.value(), 40.0)
+        self.assertEqual(window.gain.spin.maximum(), 12.0)
+        self.assertEqual(window.palette_combo.currentText(), "Jet")
+        self.assertTrue(window.rolling.isChecked())
+        checked = [b.text() for b in window.mode_group.buttons() if b.isChecked()]
+        self.assertEqual(checked, ["Previous"])
+        self.assertEqual([c.isEnabled() for c in window.camera_checks], [True, False, True])
+        window.gain.valueChanged.emit(5.0)  # controls now act on the second camera
+        self.assertEqual(second.engine.settings().gain_db, 5.0)
+        self.assertEqual(self.channels[0].engine.settings().gain_db, 0.0)
+        self.assertEqual(self.channels[0].engine.settings().exposure_us, 4000.0)
+        window.camera_combo.setCurrentIndex(0)
+        self.assertEqual(window.exposure.value(), 4000.0)
+        self.assertEqual(window.gain.spin.maximum(), 30.0)
+
+    def test_choosing_the_same_or_no_camera_does_nothing(self):
+        """Re-selecting the shown camera or an empty index changes nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window, "_load_settings") as load:
+            self.window._camera_chosen(-1)
+            self.window.show_channel(self.channels[0])
+        load.assert_not_called()
+
+    def test_status_column_shows_display_rate_and_recording(self):
+        """Each row shows displayed, processed fps, REC, or off.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.camera_checks[1].setChecked(True)
+        self.channels[1].engine.update_settings(record=True)
+        self.window._poll_status()
+        states = [label.text() for label in self.window.camera_states]
+        self.assertTrue(states[0].startswith("displayed · "))
+        self.assertTrue(states[1].endswith(" · REC"))
+        self.assertEqual(states[2], "off")
+
+    def test_freeze_belongs_to_the_displayed_camera(self):
+        """Each camera keeps its own frozen frame across display switches.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first = self.window, self.channels[0]
+        frozen = make_packet(sequence=1)
+        first.engine._packet = frozen
+        window._poll_frame()
+        window.set_frozen(True)
+        window._poll_status()
+        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
+        window.camera_combo.setCurrentIndex(1)  # the second camera is live
+        self.assertIsNone(window.current.frozen)
+        self.assertIsNone(window.view.packet)
+        self.assertTrue(window.frozen_banner.isHidden())
+        self.assertFalse(window.freeze_button.isChecked())
+        window._poll_status()
+        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
+        self.assertFalse(window.camera_states[1].text().endswith(" · frozen"))
+        window.camera_combo.setCurrentIndex(0)  # back: the held frame is shown at once
+        self.assertIs(window.view.packet, frozen)
+        self.assertFalse(window.frozen_banner.isHidden())
+        self.assertTrue(window.freeze_button.isChecked())
+        first.engine._packet = make_packet(sequence=2)
+        window._poll_frame()
+        self.assertIs(window.view.packet, frozen)
+
+    def test_turning_off_a_frozen_background_camera_drops_its_frame(self):
+        """A camera whose processing is turned off loses its frozen frame.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first = self.window, self.channels[0]
+        first.engine._packet = make_packet(sequence=1)
+        window._poll_frame()
+        window.set_frozen(True)
+        window.camera_combo.setCurrentIndex(1)
+        window.camera_checks[0].setChecked(False)
+        self.assertFalse(first.active)
+        self.assertIsNone(first.frozen)
+
+
+    def test_background_events_do_not_change_the_shown_controls(self):
+        """Limits are stored and record_off ignored for a camera not shown.
+
+        Args: None.
+        Returns: None.
+        """
+        window, second = self.window, self.channels[1]
+        window.camera_checks[1].setChecked(True)
+        window.record_button.setChecked(True)
+        second.engine.events.put(("camera_limits", {"Gain": (0.0, 9.0)}))
+        second.engine.events.put(("record_off", None))
+        window._handle_events()
+        self.assertEqual(second.limits, {"Gain": (0.0, 9.0)})
+        self.assertEqual(window.gain.spin.maximum(), 30.0)
+        self.assertTrue(window.record_button.isChecked())
+
+    def test_each_camera_keeps_its_own_model(self):
+        """A background camera's model is stored; the title follows the display.
+
+        Args: None.
+        Returns: None.
+        """
+        window, first, second = self.window, self.channels[0], self.channels[1]
+        window.camera_checks[1].setChecked(True)
+        for channel in (first, second):  # pretend both are real cameras
+            source, channel.engine.demo_source = channel.engine.demo_source, None
+            self.addCleanup(setattr, channel.engine, "demo_source", source)
+        first.engine.events.put(("camera_identity", CameraIdentity(
+            model="Blackfly S BFS-U3-63S4M", serial="DEMO1")))
+        second.engine.events.put(("camera_identity", CameraIdentity(
+            model="Blackfly S BFS-U3-70S7C", serial="DEMO2")))
+        window._handle_events()
+        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-63S4M (DEMO1)")
+        self.assertEqual(second.identity.model, "Blackfly S BFS-U3-70S7C")
+        window.camera_combo.setCurrentIndex(1)
+        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-70S7C (DEMO2)")
+        self.assertIn("⚠ Colour camera", window.model_label.text())
+
+    def test_failed_open_of_the_shown_camera_returns_to_another(self):
+        """open_failed warns, turns that camera off and shows a running one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.camera_combo.setCurrentIndex(2)
+        third = self.channels[2]
+        third.engine.events.put(("open_failed", "busy"))
+        window._handle_events()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("busy", self.dialogs.warning.call_args.args[2])
+        self.assertFalse(third.active)
+        self.assertIs(window.current, self.channels[0])
+        self.assertEqual(window.camera_combo.currentIndex(), 0)
+
+    def test_fatal_error_in_a_background_camera_keeps_the_window(self):
+        """A background camera's error names it and turns it off only.
+
+        Args: None.
+        Returns: None.
+        """
+        window, second = self.window, self.channels[1]
+        window.camera_checks[1].setChecked(True)
+        second.engine.events.put(("fatal", ("kaboom", None)))
+        with mock.patch.object(window, "close") as close:
+            window._handle_events()
+        close.assert_not_called()
+        self.assertIn("Synthetic camera (DEMO2): kaboom", self.dialogs.call_args.args[2])
+        self.assertFalse(second.active)
+        self.assertFalse(window.camera_checks[1].isChecked())
+        self.assertIs(window.current, self.channels[0])
+
+    def test_unexpected_stop_of_the_shown_camera_shows_another(self):
+        """If the shown camera stops while another runs, that one is shown.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.camera_checks[1].setChecked(True)
+        self.channels[0].engine.events.put(("stopped", None))
+        window._handle_events()
+        self.assertIs(window.current, self.channels[1])
+        self.assertFalse(self.channels[0].active)
+
+    def test_going_live_replaces_synthetic_cameras_with_real_ones(self):
+        """switched_live keeps the shown channel and lists the real cameras.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.camera_checks[1].setChecked(True)
+        demo_two = self.channels[1]
+        shown = self.channels[0]
+        shown.engine.camera_info = CameraInfo("111", "BFS")
+        cameras = [CameraInfo("111", "BFS"), CameraInfo("222", "BFS")]
+        shown.engine.events.put(("switched_live", cameras))
+        window._handle_events()
+        self.assertEqual([c.info.serial for c in window.channels], ["111", "222"])
+        self.assertIs(window.channels[0], shown)
+        self.assertEqual(shown.engine.tag, "111")
+        self.assertFalse(window.channels[1].active)
+        self.assertFalse(demo_two.active)
+        self.assertIn(demo_two, window.retired_channels)
+        self.assertEqual(window.camera_combo.itemText(1), "BFS (222)")
+        self.assertIn("ESPI live — BFS (111)", window.windowTitle())
+
+    def test_close_stops_every_engine(self):
+        """Closing stops the running and the retired engines.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.camera_checks[1].setChecked(True)
+        self.window.camera_checks[1].setChecked(False)
+        self.window.camera_checks[2].setChecked(True)
+        engines = self.window._all_engines()
+        self.assertEqual(len(engines), 3)
+        self.window.close()
+        self.assertTrue(all(engine._stop.is_set() for engine in engines))
+        self.assertTrue(self.window.wait_for_engines(5.0))
+
+
+class UpdateFlowTests(WindowTestCase):
+    """Update checks, downloads and restart offers, with no network."""
+
+    def test_manual_check_reports_unavailable_updates(self):
+        """When updates are off the reason is shown in a dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._check_updates_now()
+        self.dialogs.information.assert_called_once()
+        self.assertIn("disabled in tests", self.dialogs.information.call_args.args[2])
+
+    def test_manual_check_with_pending_update_offers_restart(self):
+        """A downloaded update turns the manual check into a restart offer.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.pending_update = "staged"
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            self.window._check_updates_now()
+        self.dialogs.question.assert_called_once()
+        self.assertEqual(self.dialogs.question.call_args.args[1], "Update ready")
+
+    def test_manual_check_while_busy_only_shows_status(self):
+        """A busy worker is not started again.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.updates.busy = True
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            self.window._check_updates_now()
+        self.assertEqual(self.window.updates.checks, 0)
+        self.assertIn("already running", self.window.statusBar().currentMessage())
+
+    def test_manual_check_starts_a_check_in_manual_mode(self):
+        """An idle manual check starts the worker and reports results in dialogs.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            self.window._check_updates_now()
+        self.assertEqual(self.window.updates.checks, 1)
+        self.assertTrue(self.window.update_manual)
+
+    def test_update_click_with_pending_update_offers_restart(self):
+        """Clicking the button after a download offers the restart.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.pending_update = "staged"
+        self.window.update_button.click()
+        self.assertEqual(self.dialogs.question.call_args.args[1], "Update ready")
+
+    def test_update_click_without_info_or_while_busy_does_nothing(self):
+        """No known update, or a busy worker, means no dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._update_clicked()
+        self.window.update_info = make_info()
+        self.window.updates.busy = True
+        self.window._update_clicked()
+        self.dialogs.question.assert_not_called()
+
+    def test_update_click_yes_starts_download(self):
+        """Confirming the dialog starts the download and disables the button.
+
+        Args: None.
+        Returns: None.
+        """
+        self.dialogs.question.return_value = self.dialogs.Yes
+        self.window.update_info = make_info()
+        self.window._update_clicked()
+        self.assertEqual(len(self.window.updates.downloads), 1)
+        self.assertFalse(self.window.update_button.isEnabled())
+        self.assertTrue(any("Downloading update" in line for line in self.log.lines))
+
+    def test_update_click_no_does_not_download(self):
+        """Declining the dialog downloads nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        self.window._update_clicked()
+        self.assertEqual(self.window.updates.downloads, [])
+
+    def test_update_click_yes_with_busy_download_keeps_button(self):
+        """If the worker refuses the download the button stays enabled.
+
+        Args: None.
+        Returns: None.
+        """
+        self.dialogs.question.return_value = self.dialogs.Yes
+        self.window.updates.download_result = False
+        self.window.update_info = make_info()
+        self.window._update_clicked()
+        self.assertTrue(self.window.update_button.isEnabled())
+
+    def test_offer_restart_yes_closes_and_marks_relaunch(self):
+        """Choosing Yes flags a relaunch and closes the window.
+
+        Args: None.
+        Returns: None.
+        """
+        self.dialogs.question.return_value = self.dialogs.Yes
+        with mock.patch.object(self.window, "close") as close:
+            self.window._offer_restart()
+        self.assertTrue(self.window.relaunch_after_exit)
+        close.assert_called_once()
+
+    def test_offer_restart_no_keeps_running(self):
+        """Choosing No leaves the window open and no relaunch flagged.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window, "close") as close:
+            self.window._offer_restart()
+        self.assertFalse(self.window.relaunch_after_exit)
+        close.assert_not_called()
+
+    def post(self, kind, payload):
+        """Queue an updater event and process it.
+
+        Args: kind and payload are the event name and data.
+        Returns: None.
+        """
+        self.window.updates.events.put((kind, payload))
+        self.window._handle_update_events()
+
+    def test_up_to_date_is_logged_and_silent_unless_manual(self):
+        """An up-to-date result logs, and shows a dialog only when manual.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("checked", None)
+        self.dialogs.information.assert_not_called()
+        self.window.update_manual = True
+        self.post("checked", None)
+        self.dialogs.information.assert_called_once()
+        self.assertFalse(self.window.update_manual)
+        self.assertTrue(any(line.startswith("Up to date") for line in self.log.lines))
+
+    def test_new_build_shows_update_button(self):
+        """A newer build becomes Install update, with versions in the tooltip.
+
+        The status bar mentions it once. A later check that finds the same
+        build keeps the button and does not repeat the message.
+
+        Args: None.
+        Returns: None.
+        """
+        info = make_info()
+        with mock.patch.object(qt_app.updater, "current_build", return_value=42):
+            self.post("checked", info)
+        self.assertIs(self.window.update_info, info)
+        self.assertFalse(self.window.update_button.isHidden())
+        self.assertEqual(self.window.update_button.text(), "Install update")
+        self.assertIn("Build 42 → 99", self.window.update_button.toolTip())
+        self.assertIn("Download", self.window.update_button.toolTip())
+        self.assertEqual(self.window.statusBar().currentMessage(),
+                         f"Update available: {info.label()}")
+        self.dialogs.question.assert_not_called()
+        self.window.statusBar().clearMessage()
+        self.post("checked", info)
+        self.assertEqual(self.window.statusBar().currentMessage(), "")
+        self.assertEqual(self.window.update_button.text(), "Install update")
+
+    def test_new_build_found_by_manual_check_prompts_download(self):
+        """A manual check that finds a build goes straight to the download prompt.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_manual = True
+        self.post("checked", make_info())
+        self.dialogs.question.assert_called_once()
+
+    def test_failed_check_is_logged_and_warned_only_when_manual(self):
+        """A failed check warns the user only for manual checks.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("check_failed", "offline")
+        self.dialogs.warning.assert_not_called()
+        self.window.update_manual = True
+        self.post("check_failed", "offline")
+        self.dialogs.warning.assert_called_once()
+        self.assertTrue(any("offline" in line for line in self.log.lines))
+
+    def test_downloaded_build_is_staged_and_restart_offered(self):
+        """A finished download is staged and the restart is offered.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("downloaded", "staged-path")
+        self.assertEqual(self.window.pending_update, "staged-path")
+        self.assertEqual(self.window.update_button.text(), "Restart to update")
+        self.assertTrue(self.window.update_button.isEnabled())
+        self.assertEqual(self.dialogs.question.call_args.args[1], "Update ready")
+
+    def test_failed_download_restores_button_and_warns(self):
+        """A failed download re-enables the button and warns.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        self.window.update_button.setEnabled(False)
+        self.post("download_failed", "disk full")
+        self.assertTrue(self.window.update_button.isEnabled())
+        self.assertEqual(self.window.update_button.text(), "Install update")
+        self.assertIn("Build 0 → 99", self.window.update_button.toolTip())
+        self.dialogs.warning.assert_called_once()
+
+    def test_progress_is_shown_while_downloading(self):
+        """Download progress appears as a percentage on the button.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        self.window.updates.busy = True
+        self.window.updates.downloading = True
+        self.window.updates.progress = (25, 100)
+        self.window._handle_update_events()
+        self.assertEqual(self.window.update_button.text(), "Downloading update… 25%")
+        self.window.updates.progress = (0, 0)
+        self.window._handle_update_events()
+        self.assertEqual(self.window.update_button.text(), "Downloading update…")
+
+    def test_check_button_runs_a_manual_check(self):
+        """The status-bar button checks like Help > Check for updates….
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            self.window.check_button.click()
+        self.assertEqual(self.window.updates.checks, 1)
+        self.assertTrue(self.window.update_manual)
+
+    def test_check_button_greys_out_while_a_check_runs(self):
+        """A running check (startup or manual) disables the button until it ends.
+
+        Args: None.
+        Returns: None.
+        """
+        for kind, payload in (("checked", None), ("check_failed", "offline")):
+            with self.subTest(kind=kind):
+                self.window.updates.busy = True
+                self.window._handle_update_events()
+                self.assertFalse(self.window.check_button.isEnabled())
+                self.assertIn("Checking", self.window.check_button.text())
+                self.window.updates.busy = False
+                self.post(kind, payload)
+                self.assertTrue(self.window.check_button.isEnabled())
+                self.assertEqual(self.window.check_button.text(), "Check for updates")
+
+    def test_check_button_gives_way_to_a_found_build(self):
+        """Once a newer build is known only the blue button shows, through its download.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("checked", make_info())
+        self.assertTrue(self.window.check_button.isHidden())
+        self.assertFalse(self.window.update_button.isHidden())
+        self.window.updates.busy = True  # downloads run on the same worker
+        self.window._handle_update_events()
+        self.assertTrue(self.window.check_button.isHidden())
+        self.window.updates.busy = False
+        self.post("downloaded", "staged-path")
+        self.assertTrue(self.window.check_button.isHidden())
+
+    def checking_window(self):
+        """Build a window whose periodic update check is armed.
+
+        Args: None.
+        Returns: The MainWindow. The startup check has already run once.
+        """
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            window = demo_window(self.engine, self.log, check_updates=True)
+        self.addCleanup(window.frame_timer.stop)
+        self.addCleanup(window.status_timer.stop)
+        self.addCleanup(window.update_timer.stop)
+        self.addCleanup(window.close)
+        self.addCleanup(window.deleteLater)
+        return window
+
+    def test_no_update_check_disables_the_periodic_timer(self):
+        """A window opened with checks off never arms the timer or checks.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertFalse(self.window._periodic_checks)
+        self.assertFalse(self.window.update_timer.isActive())
+        self.window.update_timer.timeout.emit()
+        self.window._schedule_update_check()
+        self.assertFalse(self.window.update_timer.isActive())
+        self.assertEqual(self.window.updates.checks, 0)
+
+    def test_unavailable_updates_do_not_start_the_periodic_timer(self):
+        """Source checkouts keep today's behavior: no check and no timer.
+
+        Args: None.
+        Returns: None.
+        """
+        window = demo_window(self.engine, self.log, check_updates=True)
+        self.addCleanup(window.frame_timer.stop)
+        self.addCleanup(window.status_timer.stop)
+        self.addCleanup(window.close)
+        self.addCleanup(window.deleteLater)
+        self.assertFalse(window._periodic_checks)
+        self.assertFalse(window.update_timer.isActive())
+        self.assertEqual(window.updates.checks, 0)
+
+    def test_periodic_timer_fires_a_silent_check(self):
+        """When the timer fires, another check starts and is not manual.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.checking_window()
+        window.updates.checks = 0
+        window.update_timer.timeout.emit()
+        self.assertEqual(window.updates.checks, 1)
+        self.assertFalse(window.update_manual)
+        self.assertTrue(window.update_timer.isActive())
+
+    def test_periodic_check_skips_while_busy_recording_or_saving(self):
+        """A tick waits while a check, download, recording or save is in progress.
+
+        A downloaded build waiting to install is left alone too, so Restart
+        to update is not replaced. A skipped tick still schedules the next one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.checking_window()
+        window.updates.checks = 0
+        window.update_timer.stop()
+        window.updates.busy = True
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.assertTrue(window.update_timer.isActive())
+        window.updates.busy = False
+        window.pending_update = "staged"
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        window.pending_update = None
+        self.engine.update_settings(record=True)
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.engine.update_settings(record=False)
+        self.engine._set_status(record="Recording: finishing file")
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.engine._set_status(record="Recording: off")
+        self.engine.request("save", title="", notes="")
+        window.updates.checks = 0
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.assertTrue(self.engine.save_pending())
+
+    def test_periodic_check_stops_when_the_window_is_closing(self):
+        """Closing does not start a check or arm another one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.checking_window()
+        window.updates.checks = 0
+        window.closing = True
+        window.update_timer.stop()
+        window._periodic_update_check()
+        self.assertEqual(window.updates.checks, 0)
+        self.assertFalse(window.update_timer.isActive())
+
+    def test_failed_check_keeps_a_found_update_and_stays_silent(self):
+        """A later failed check leaves Install update up and shows no dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("checked", make_info())
+        self.window.statusBar().clearMessage()
+        self.post("check_failed", "offline")
+        self.assertEqual(self.window.update_button.text(), "Install update")
+        self.assertFalse(self.window.update_button.isHidden())
+        self.assertIn("Build 0 → 99", self.window.update_button.toolTip())
+        self.dialogs.warning.assert_not_called()
+        self.assertEqual(self.window.statusBar().currentMessage(), "")
+        self.assertTrue(any("offline" in line for line in self.log.lines))
+
+    def test_recheck_does_not_relabel_the_button_as_a_download(self):
+        """A check that follows a found build keeps the Install update label.
+
+        Args: None.
+        Returns: None.
+        """
+        self.post("checked", make_info())
+        self.window.updates.busy = True
+        self.window.updates.downloading = False
+        self.window._handle_update_events()
+        self.assertEqual(self.window.update_button.text(), "Install update")
+
+
+class CloseTests(WindowTestCase):
+    """closeEvent and a real engine round trip."""
+
+    def test_close_stops_engine_and_saves_layout(self):
+        """Closing stops the engine, shows a message and stores the layout.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.assertTrue(self.window.closing)
+        self.assertTrue(self.engine._stop.is_set())
+        self.assertIn("geometry", FakeSettings.store)
+        self.assertIn("windowState", FakeSettings.store)
+
+    def test_close_waits_until_engine_has_finished(self):
+        """Closing keeps pumping events while the engine is still stopping.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.engine, "wait", side_effect=[False, True]) as wait:
+            self.window.close()
+        self.assertEqual(wait.call_count, 2)
+
+    def test_second_close_does_not_stop_engine_again(self):
+        """A repeated close skips the shutdown work.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        with mock.patch.object(self.engine, "stop") as stop:
+            self.window.close()
+        stop.assert_not_called()
+
+    def test_saved_geometry_is_restored_by_next_window(self):
+        """A new window restores the geometry saved by the previous one.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.resize(1000, 700)
+        self.window.close()
+        engine = Engine(self.log)
+        engine.use_demo()
+        window = demo_window(engine, self.log)
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.status_timer.stop)
+        self.addCleanup(window.frame_timer.stop)
+        self.addCleanup(window.close)
+        self.assertEqual(window.height(), 700)  # not the 1400x900 default
+
+    def test_running_demo_engine_feeds_the_view(self):
+        """A started demo engine publishes frames that the window draws.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.start()
+        deadline = time.monotonic() + 5.0
+        while self.engine.latest_packet() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.window._poll_frame()
+        self.assertEqual(self.window.drawn_frames, 1)
+        self.assertIsNotNone(self.window.view.image_size)
+        self.window.close()
+        self.assertTrue(self.engine.wait(5.0))
+
+
+class FinishUpdateTests(unittest.TestCase):
+    """finish_update installs a staged build after the window closed."""
+
+    def make_window(self, relaunch, wait_result=True):
+        """Build a stand-in closed window with a staged update.
+
+        Args: relaunch is relaunch_after_exit; wait_result is engine.wait's result.
+        Returns: A SimpleNamespace window.
+        """
+        return SimpleNamespace(pending_update="staged", relaunch_after_exit=relaunch,
+                               wait_for_engines=mock.MagicMock(return_value=wait_result))
+
+    def test_nothing_happens_without_window_or_pending_update(self):
+        """No window, or nothing staged, installs nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        log = FakeLog()
+        with mock.patch.object(qt_app.updater, "install_update") as install:
+            qt_app.finish_update(None, log)
+            qt_app.finish_update(SimpleNamespace(pending_update=None), log)
+        install.assert_not_called()
+
+    def test_installs_without_relaunch_when_not_requested(self):
+        """Installing on exit does not relaunch unless the user chose Yes.
+
+        Args: None.
+        Returns: None.
+        """
+        log, window = FakeLog(), self.make_window(False)
+        with mock.patch.object(qt_app.updater, "install_update",
+                               return_value="/app") as install, \
+                mock.patch.object(qt_app.updater, "relaunch") as relaunch:
+            qt_app.finish_update(window, log)
+        install.assert_called_once_with("staged")
+        relaunch.assert_not_called()
+        self.assertIn("Installed update: /app", log.lines)
+
+    def test_relaunches_once_camera_is_released(self):
+        """A requested relaunch happens after the engine has stopped.
+
+        Args: None.
+        Returns: None.
+        """
+        log, window = FakeLog(), self.make_window(True)
+        with mock.patch.object(qt_app.updater, "install_update", return_value="/app"), \
+                mock.patch.object(qt_app.updater, "relaunch") as relaunch:
+            qt_app.finish_update(window, log)
+        relaunch.assert_called_once_with(sys.argv[1:])
+        self.assertIn("Restarting into the new build", log.lines)
+
+    def test_does_not_relaunch_while_camera_is_still_open(self):
+        """If the engine did not stop in time the new build is not started.
+
+        Args: None.
+        Returns: None.
+        """
+        log, window = FakeLog(), self.make_window(True, wait_result=False)
+        with mock.patch.object(qt_app.updater, "install_update", return_value="/app"), \
+                mock.patch.object(qt_app.updater, "relaunch") as relaunch:
+            qt_app.finish_update(window, log)
+        relaunch.assert_not_called()
+        self.assertTrue(any("not released in time" in line for line in log.lines))
+
+    def test_install_errors_are_logged(self):
+        """UpdateError and OSError during install are logged, not raised.
+
+        Args: None.
+        Returns: None.
+        """
+        for error in (updater.UpdateError("bad zip"), OSError("denied")):
+            log = FakeLog()
+            with mock.patch.object(qt_app.updater, "install_update", side_effect=error):
+                qt_app.finish_update(self.make_window(False), log)
+            self.assertTrue(any("could not be installed" in line for line in log.lines))
+
+
+class ShortcutFilterConstructionTests(unittest.TestCase):
+    """ShortcutFilter keeps a reference to its window."""
+
+    def test_filter_remembers_window(self):
+        """The filter stores the window it routes keys to.
+
+        Args: None.
+        Returns: None.
+        """
+        window = QLineEdit()
+        self.addCleanup(window.deleteLater)
+        self.assertIs(qt_app.ShortcutFilter(window).window, window)
+
+
+class RunTests(unittest.TestCase):
+    """run() startup logic with the channels, window and dialogs faked."""
+
+    def setUp(self):
+        """Patch everything run() touches that would block or hit hardware.
+
+        Args: None.
+        Returns: None.
+        """
+        self.log = FakeLog()
+        self.engine = mock.MagicMock()
+        self.channel = mock.MagicMock(active=True, engine=self.engine)
+        self.idle = mock.MagicMock(active=False)
+        self.cameras = mock.MagicMock(return_value=[self.channel, self.idle])
+        self.demos = mock.MagicMock(return_value=[self.channel])
+        self.window = mock.MagicMock()
+        self.dialogs = make_dialogs(qt_app.QMessageBox.Yes)
+        self.opengl = mock.MagicMock(return_value=(True, "OpenGL 4.1 on X"))
+        self.finish = mock.MagicMock()
+        self.main_window = mock.MagicMock(return_value=self.window)
+        self.cleanup = mock.MagicMock()
+        self.startup_cleanup = mock.MagicMock(return_value=self.cleanup)
+        self.reporting = mock.MagicMock()
+        self.reporting_class = mock.MagicMock(return_value=self.reporting)
+        for patcher in (
+                mock.patch.object(qt_app, "Reporting", self.reporting_class),
+                mock.patch.object(qt_app.updater, "StartupCleanup", self.startup_cleanup),
+                mock.patch.object(qt_app, "request_gl_format"),
+                mock.patch.object(qt_app, "AppLog", return_value=self.log),
+                mock.patch.object(qt_app, "open_camera_channels", self.cameras),
+                mock.patch.object(qt_app, "demo_channels", self.demos),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app, "opengl_available", self.opengl),
+                mock.patch.object(qt_app, "MainWindow", self.main_window),
+                mock.patch.object(qt_app, "finish_update", self.finish),
+                mock.patch.object(qt_app.QApplication, "exec", return_value=7)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_forced_demo_uses_demo_source_and_gpu_view(self):
+        """force_demo skips the camera, builds the GPU window and returns exec's code.
+
+        Args: None.
+        Returns: None.
+        """
+        code = qt_app.run(force_demo=True, check_updates=False, demo_cameras=2)
+        self.assertEqual(code, 7)
+        self.cameras.assert_not_called()
+        self.demos.assert_called_once_with(self.log, 2)
+        self.assertEqual(self.main_window.call_args.args[0], [self.channel])
+        self.assertEqual(self.main_window.call_args.args[2:], (True, False, self.reporting))
+        self.window.show.assert_called_once()
+        self.engine.start.assert_called_once()
+        self.finish.assert_called_once_with(self.window, self.log)
+        self.assertIn("closed", self.log.lines)
+        self.assertIn("Display: GPU (OpenGL 4.1 on X)", self.log.lines)
+
+    def test_cpu_fallback_is_logged_when_opengl_is_missing(self):
+        """Without OpenGL the CPU view is chosen and the reason logged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.opengl.return_value = (False, "no OpenGL context")
+        qt_app.run(force_demo=True)
+        self.assertEqual(self.main_window.call_args.args[2], False)
+        self.assertIn("Display: CPU fallback (no OpenGL context)", self.log.lines)
+
+    def test_cameras_are_used_when_one_opens(self):
+        """Detected cameras are shown; only the opened one is started.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.run()
+        self.cameras.assert_called_once_with(self.log)
+        self.demos.assert_not_called()
+        self.assertEqual(self.main_window.call_args.args[0], [self.channel, self.idle])
+        self.engine.start.assert_called_once()
+        self.idle.engine.start.assert_not_called()
+
+    def test_missing_camera_with_accepted_prompt_falls_back_to_demo(self):
+        """No camera plus Yes at the prompt starts demo mode.
+
+        Args: None.
+        Returns: None.
+        """
+        self.cameras.side_effect = RuntimeError("no camera")
+        self.assertEqual(qt_app.run(), 7)
+        self.dialogs.question.assert_called_once()
+        self.demos.assert_called_once_with(self.log, 1)
+        self.assertTrue(any("Camera startup unavailable" in line
+                            for line in self.log.lines))
+
+    def test_missing_camera_with_declined_prompt_exits_cleanly(self):
+        """No camera plus No at the prompt exits 0 without a window.
+
+        Args: None.
+        Returns: None.
+        """
+        self.cameras.side_effect = RuntimeError("no camera")
+        self.dialogs.question.return_value = self.dialogs.No
+        self.assertEqual(qt_app.run(), 0)
+        self.main_window.assert_not_called()
+        self.finish.assert_called_once_with(None, self.log)
+
+    def test_opened_engines_are_released_when_the_window_fails(self):
+        """If building the window raises, opened engines are stopped and waited for.
+
+        Args: None.
+        Returns: None.
+        """
+        self.main_window.side_effect = RuntimeError("no window")
+        with self.assertRaises(RuntimeError):
+            qt_app.run()
+        self.engine.stop.assert_called_once()
+        self.engine.wait.assert_called_once_with(8.0)
+        self.idle.engine.stop.assert_not_called()
+        self.finish.assert_called_once_with(None, self.log)
+
+    def test_startup_cleanup_logs_and_stops_before_an_update_installs(self):
+        """Old copies are cleaned up with messages to the log, and the cleanup
+        stops before finish_update can install a new build.
+
+        Args: None.
+        Returns: None.
+        """
+        order = mock.MagicMock()
+        order.attach_mock(self.cleanup.stop, "stop")
+        order.attach_mock(self.finish, "finish")
+        qt_app.run(force_demo=True)
+        self.startup_cleanup.assert_called_once_with(self.log.write)
+        self.cleanup.start.assert_called_once_with()
+        self.assertEqual([name for name, _, _ in order.mock_calls], ["stop", "finish"])
+
+    def test_log_file_path_is_reported_when_available(self):
+        """The log file path from AppLog.start is written to the log.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.run(force_demo=True)
+        self.assertIn("Log file: fake.log", self.log.lines)
+
+    def test_missing_log_file_is_not_reported(self):
+        """If no log file could be opened no path line is written.
+
+        Args: None.
+        Returns: None.
+        """
+        self.log.start = lambda: None
+        qt_app.run(force_demo=True)
+        self.assertFalse(any(line.startswith("Log file:") for line in self.log.lines))
+
+
+class FeatureRequestTests(WindowTestCase):
+    """The Request feature dialog, sending and result reporting, with no network."""
+
+    REQUEST = feedback.FeatureRequest(title="Export reference", description="As PNG",
+                                      submitter="Sam", source="camera")
+
+    def setUp(self):
+        """Build the window with a fake token and a worker that never starts a thread.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        patcher = mock.patch.object(qt_app.feedback, "feedback_token", return_value="t")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.window.feedback = mock.MagicMock(busy=False, events=queue.Queue())
+
+    def test_entry_points_exist(self):
+        """The status bar button and the Help menu entry both open the request.
+
+        Args: None.
+        Returns: None.
+        """
+        help_menu = self.window.menuBar().actions()[-1].menu()
+        entry = next(a for a in help_menu.actions() if a.text() == "Request a feature…")
+        with mock.patch.object(self.window, "_request_feature") as request:
+            entry.trigger()
+            self.window.feature_button.click()
+        self.assertEqual(request.call_count, 2)
+
+    def test_dialog_restores_a_request_and_reads_it_back(self):
+        """A previous request refills the form, and Submit files it.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window, self.REQUEST)
+        self.assertEqual(dialog.request("camera"), self.REQUEST)
+        self.assertFalse(dialog.findChildren(qt_app.QCheckBox))
+        send = dialog.findChild(qt_app.QDialogButtonBox).button(qt_app.QDialogButtonBox.Ok)
+        self.assertEqual(send.text(), "Submit")
+        self.assertIn("GitHub issue", send.toolTip())
+        self.assertIn("Required", dialog.title.toolTip())
+        self.assertIn("blank", dialog.description.toolTip())
+        self.assertIn("follow up", dialog.submitter.toolTip())
+
+    def test_dialog_defaults_come_from_settings_without_a_token(self):
+        """A fresh form uses the saved name and still offers Submit.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store.update({"feedback/name": "Kim"})
+        with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""):
+            dialog = qt_app.FeatureRequestDialog(self.window)
+        self.assertEqual(dialog.submitter.text(), "Kim")
+        send = dialog.findChild(qt_app.QDialogButtonBox).button(qt_app.QDialogButtonBox.Ok)
+        self.assertEqual(send.text(), "Submit")
+        cancel = dialog.findChild(qt_app.QDialogButtonBox).button(qt_app.QDialogButtonBox.Cancel)
+        self.assertIn("without submitting", cancel.toolTip())
+
+    def test_accept_refuses_a_blank_title(self):
+        """A blank title warns and keeps the dialog open.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window)
+        dialog.description.setPlainText("A description")
+        dialog.accept()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("title", self.dialogs.warning.call_args.args[2])
+        self.assertEqual(dialog.result(), 0)
+
+    def test_accept_allows_a_blank_description(self):
+        """A title alone is enough; enrichment writes the description.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window)
+        dialog.title.setText("Only a title")
+        dialog.accept()
+        self.dialogs.warning.assert_not_called()
+        self.assertEqual(dialog.result(), qt_app.QDialog.Accepted)
+        self.assertEqual(dialog.request("camera").description, "")
+
+    def test_accept_remembers_the_name(self):
+        """A complete request closes the dialog and saves the name.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = qt_app.FeatureRequestDialog(self.window, self.REQUEST)
+        dialog.accept()
+        self.assertEqual(dialog.result(), qt_app.QDialog.Accepted)
+        self.assertEqual(FakeSettings.store["feedback/name"], "Sam")
+        self.assertNotIn("feedback/enrich", FakeSettings.store)
+
+    def run_request(self, result):
+        """Open the request flow with the dialog's exec() returning result.
+
+        Args: result is the dialog code exec() returns.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.FeatureRequestDialog, "exec", return_value=result), \
+                mock.patch.object(qt_app.FeatureRequestDialog, "request",
+                                  return_value=self.REQUEST):
+            self.window._request_feature()
+
+    def test_request_is_sent_in_the_background(self):
+        """An accepted dialog submits through the worker and shows a busy button.
+
+        Args: None.
+        Returns: None.
+        """
+        self.run_request(qt_app.QDialog.Accepted)
+        self.window.feedback.submit.assert_called_once_with(self.REQUEST)
+        self.assertFalse(self.window.feature_button.isEnabled())
+        self.assertEqual(self.window.feature_button.text(), "Sending request…")
+        self.assertIn("Sending feature request: Export reference", self.log.lines)
+
+    def test_cancel_sends_nothing(self):
+        """A cancelled dialog submits nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.run_request(qt_app.QDialog.Rejected)
+        self.window.feedback.submit.assert_not_called()
+
+    def test_busy_worker_only_shows_status(self):
+        """A second request while one is sending is refused with a status message.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.feedback.busy = True
+        self.window._request_feature()
+        self.assertIn("still being sent", self.window.statusBar().currentMessage())
+
+    def test_without_token_the_app_still_files_the_request(self):
+        """A copy without a token still submits; it does not open a browser.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""), \
+                mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
+            self.run_request(qt_app.QDialog.Accepted)
+        self.window.feedback.submit.assert_called_once_with(self.REQUEST)
+        open_url.assert_not_called()
+
+    def test_sent_request_confirms_submission(self):
+        """A filed request restores the button and says it was submitted.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.feature_button.setEnabled(False)
+        url = "https://github.com/o/r/issues/9"
+        self.window.feedback.events.put(("sent", (self.REQUEST, url)))
+        self.window._handle_feedback_events()
+        self.assertTrue(self.window.feature_button.isEnabled())
+        self.assertEqual(self.window.feature_button.text(), "Request feature")
+        self.assertIn(f"Feature request filed: {url}", self.log.lines)
+        self.assertEqual(self.dialogs.call_args.args[2], "Your request was submitted.")
+        self.dialogs.return_value.exec.assert_called_once()
+
+    def failed_choice(self, choice):
+        """Report a failed send and click one of the offered buttons.
+
+        Args: choice is "retry" or "cancel".
+        Returns: The _request_feature mock.
+        """
+        box = self.dialogs.return_value
+        buttons = {"retry": object(), "cancel": object()}
+        box.addButton.side_effect = [buttons["retry"], buttons["cancel"]]
+        box.clickedButton.return_value = buttons[choice]
+        self.window.feedback.events.put(("failed", (self.REQUEST, "offline")))
+        with mock.patch.object(self.window, "_request_feature") as retry:
+            self.window._handle_feedback_events()
+        self.assertIn("Feature request failed: offline", self.log.lines)
+        return retry
+
+    def test_failed_request_can_be_retried(self):
+        """Edit and retry reopens the dialog with the same request.
+
+        Args: None.
+        Returns: None.
+        """
+        retry = self.failed_choice("retry")
+        retry.assert_called_once_with(self.REQUEST)
+
+    def test_failed_request_can_be_dismissed(self):
+        """Cancel does nothing more.
+
+        Args: None.
+        Returns: None.
+        """
+        retry = self.failed_choice("cancel")
+        retry.assert_not_called()
+
+
+class FakeReportWorker:
+    """Stand-in for CameraReportWorker that records reports and never files."""
+
+    def __init__(self):
+        """Create an idle worker.
+
+        Args: None.
+        Returns: None.
+        """
+        self.events = queue.Queue()
+        self.submitted = []
+
+    def submit(self, report):
+        """Record a report.
+
+        Args: report is a camera_reports.Report.
+        Returns: True.
+        """
+        self.submitted.append(report)
+        return True
+
+
+ANALOG_TIP = "Set on the camera itself; not adjustable over analog video"
+
+
+class CaptureWindowTests(unittest.TestCase):
+    """A Blackfly, a USB-Live2 (displayed) and a webcam in one window."""
+
+    def setUp(self):
+        """Build the window over fake cameras and fake video devices.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        self.dialogs = make_dialogs()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        system = FakeSystem([FakeCamera(serial="1", model="Blackfly S BFS-U3-63S4M")])
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(qt_app.camera_reports, "CameraReportWorker",
+                                  FakeReportWorker),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
+                mock.patch.object(camera, "PySpin", make_pyspin(system)),
+                mock.patch.object(capture, "load_enumerator",
+                                  return_value=FakeEnumerator([usb_live2(0), webcam(1)])),
+                mock.patch.object(capture.cv2, "VideoCapture",
+                                  FakeCaptureFactory(frames=[interlaced_frame()]))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        self.channels = [Channel(self.log, info) for info in sources.detect_cameras(self.log)]
+        self.flir, self.usb, self.webcam = self.channels
+        self.usb.open()
+        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.addCleanup(self.cleanup_window)
+        self.window._handle_events()  # identity and limits queued by the open
+
+    def cleanup_window(self):
+        """Close the window, which stops and waits for every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.window.deleteLater()
+
+    def show_webcam_report(self):
+        """Display the webcam and wait until its engine sends a camera report.
+
+        Args: None.
+        Returns: The Report the window submitted.
+        """
+        window = self.window
+        window.show_channel(self.webcam)
+
+        def submitted():
+            """Process engine events and look for the submitted report.
+
+            Args: None.
+            Returns: True once a report was submitted.
+            """
+            window._handle_events()
+            return bool(window.reports.submitted)
+
+        self.assertTrue(wait_for(submitted))
+        return window.reports.submitted[0]
+
+    def test_capture_channel_disables_camera_controls(self):
+        """Analog cameras get fixed controls and a field toggle; FLIR ones do not.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertIs(window.current, self.usb)
+        for widget in (window.exposure, window.gain, window.fps):
+            self.assertFalse(widget.isEnabled())
+            self.assertIn(ANALOG_TIP, " ".join(widget.toolTip().split()))
+            self.assertIn("Now:", widget.toolTip())
+        self.assertFalse(window.single_field.isHidden())
+        self.assertTrue(window.single_field.isChecked())
+        self.assertTrue(window.report_label.isHidden())
+        window.show_channel(self.flir)
+        for widget in (window.exposure, window.gain, window.fps):
+            self.assertTrue(widget.isEnabled())
+            self.assertNotIn("analog video", widget.toolTip())
+            self.assertNotIn("Simulated", widget.toolTip())
+            self.assertIn("Now:", widget.toolTip())
+        self.assertTrue(window.single_field.isHidden())
+
+    def test_single_field_checkbox_updates_engine(self):
+        """Unticking the field toggle switches the engine to full frames.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.single_field.setChecked(False)
+        self.assertFalse(self.usb.engine.settings().single_field)
+        self.window.single_field.setChecked(True)
+        self.assertTrue(self.usb.engine.settings().single_field)
+
+    def test_unsupported_marker_in_camera_list(self):
+        """Only the unrecognised webcam is marked in the camera list.
+
+        Args: None.
+        Returns: None.
+        """
+        combo = self.window.camera_combo
+        self.assertEqual([combo.itemText(i) for i in range(combo.count())],
+                         ["Blackfly S BFS-U3-63S4M (1)", "Hauppauge USB-Live2 (video 1)",
+                          "Webcam C270 (video 2) · not yet supported"])
+
+    def test_camera_report_event_submits_and_shows_state(self):
+        """Switching the webcam on files a report; its state shows under the camera.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        report = self.show_webcam_report()
+        self.assertTrue(report.key.startswith("Webcam C270"))
+        self.assertIs(self.webcam.report, report)
+        self.assertFalse(window.report_label.isHidden())
+        self.assertIn("Reporting this camera", window.report_label.text())
+        url = "https://github.com/owner/repo/issues/3"
+        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
+            url=url, created=True))))
+        window._poll_status()
+        self.assertIn(url, window.report_label.text())
+        self.assertTrue(window.report_button.isHidden())
+        self.assertTrue(any(url in line for line in self.log.lines))
+        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
+            path="out/logs/camera-report.md"))))
+        window._handle_report_events()
+        self.assertIn("saved to out/logs/camera-report.md", window.report_label.text())
+        self.assertFalse(window.report_button.isHidden())
+        window.show_channel(self.usb)
+        self.assertTrue(window.report_label.isHidden())
+        self.assertTrue(window.report_button.isHidden())
+
+    def test_report_button_opens_browser(self):
+        """The button opens the prefilled page, or warns when no browser opens.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        report = self.show_webcam_report()
+        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
+            error="offline"))))
+        window._handle_report_events()
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                               return_value=True) as open_url:
+            window.report_button.click()
+        self.assertIn("labels=camera-support", open_url.call_args[0][0].toString())
+        self.dialogs.warning.assert_not_called()
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl", return_value=False):
+            window.report_button.click()
+        self.dialogs.warning.assert_called_once_with(
+            window, "Report this camera", "Could not open a web browser.")
+
+
+class DemoCaptureControlsTests(WindowTestCase):
+    """Dummy mode shows neither analog controls nor camera reports."""
+
+    def test_demo_hides_report_and_capture_controls(self):
+        """The field toggle and report line stay hidden; sliders stay simulated.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertTrue(window.single_field.isHidden())
+        self.assertTrue(window.report_label.isHidden())
+        self.assertTrue(window.report_button.isHidden())
+        self.assertTrue(window.exposure.isEnabled())
+        self.assertIn("Simulated in dummy mode", window.exposure.toolTip())
+        self.assertIn("Now: 8000 µs", window.exposure.toolTip())
+
+
+class QtMessageHandlerTests(unittest.TestCase):
+    """handle_qt_message: Qt's own messages logged and reported."""
+
+    def setUp(self):
+        """Install a mock reporter for capture_message.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter = mock.MagicMock()
+        patcher = mock.patch.object(qt_app.error_reports, "_reporter", self.reporter)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_info_and_warning_messages_are_only_logged(self):
+        """Warnings land in the log with their category; nothing is reported.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertLogs("espi_live.qt", "WARNING") as captured:
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtWarningMsg,
+                                     SimpleNamespace(category="qt.opengl"), "slow shader")
+        self.assertIn("Qt (qt.opengl): slow shader", captured.output[0])
+        with self.assertLogs("espi_live.qt", "INFO") as captured:
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtInfoMsg, None, "hello")
+        self.assertIn("Qt: hello", captured.output[0])
+        self.reporter.capture_message.assert_not_called()
+
+    def test_critical_and_fatal_messages_are_reported(self):
+        """Criticals report the message with the active Python stack.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtCriticalMsg,
+                                     SimpleNamespace(category="default"), "context lost")
+        call = self.reporter.capture_message.call_args
+        self.assertEqual(call.args[0], "critical")
+        self.assertEqual(call.args[1], "context lost")
+        self.assertIn("handle_qt_message", call.args[3])
+
+    def test_fatal_messages_also_drop_the_crash_handler(self):
+        """A fatal Qt message covers the coming abort, so faulthandler steps aside.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app, "faulthandler") as faulthandler, \
+                self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+        self.assertEqual(self.reporter.capture_message.call_args.args[0], "fatal")
+        faulthandler.disable.assert_called_once()
+
+
+    def test_fatal_keeps_native_diagnostics_without_a_saved_report(self):
+        """Disabled or failed reporting preserves faulthandler for the abort.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter.capture_message.return_value = None
+        with mock.patch.object(qt_app, "faulthandler") as handler, \
+                self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+            with mock.patch.object(qt_app.error_reports, "_reporter", None):
+                qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+        handler.disable.assert_not_called()
+
+
+class SettingOnTests(unittest.TestCase):
+    """Reading QSettings flags stored as text."""
+
+    def test_false_spellings(self):
+        """False, 0 and their text forms are off.
+
+        Args: None.
+        Returns: None.
+        """
+        for value in (False, 0, "false", "0", " FALSE "):
+            self.assertFalse(qt_app.setting_on(value), value)
+
+    def test_everything_else_is_on(self):
+        """True, numbers and unknown text are on.
+
+        Args: None.
+        Returns: None.
+        """
+        for value in (True, 1, "yes", None):
+            self.assertTrue(qt_app.setting_on(value), value)
+
+
+class ReportingClassTests(unittest.TestCase):
+    """The run's Reporting: switches, hooks, Qt handler and worker."""
+
+    def setUp(self):
+        """Patch QSettings with the fake store and clear the level environment.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        patcher = mock.patch.object(qt_app, "QSettings", FakeSettings)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        outputs = mock.patch.object(paths, "OUTPUT_DIR", tmp.name)
+        outputs.start()
+        self.addCleanup(outputs.stop)
+        self.log = FakeLog()
+
+    def reporting(self):
+        """Build a Reporting for these tests.
+
+        Args: None.
+        Returns: The Reporting.
+        """
+        reporting = qt_app.Reporting(self.log)
+        self.addCleanup(reporting.stop)
+        return reporting
+
+    def test_init_reads_the_saved_choice(self):
+        """The stored choice decides the reporter's initial state.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}):
+            off = self.reporting()
+            self.assertFalse(off.reporter.enabled)
+            self.assertIn("source checkouts", off.forced)
+        FakeSettings.store[qt_app.error_reports.SETTING_KEY] = "false"
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            self.assertFalse(self.reporting().reporter.enabled)
+            FakeSettings.store.clear()
+            self.assertTrue(self.reporting().reporter.enabled)
+        self.assertEqual(off.reporter.context.get("front_end"), "Qt")
+        self.assertIn(off.worker.kick, off.reporter.listeners)
+
+    def test_start_installs_hooks_and_drains_old_crashes(self):
+        """Starting hooks Python and Qt, logs the state and sends old crashes.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        handler = mock.MagicMock(return_value="PREVIOUS")
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}), \
+                mock.patch.object(qt_app, "qInstallMessageHandler", handler), \
+                mock.patch.object(reporting.reporter, "collect_native_crashes") as collect, \
+                mock.patch.object(reporting.worker, "start") as start:
+            try:
+                reporting.start(self.log)
+                self.assertIn("Error reports: off", self.log.lines[-1])
+                collect.assert_called_once_with(None)
+                start.assert_called_once()
+                handler.assert_called_once_with(qt_app.handle_qt_message)
+                self.assertEqual(reporting.previous_handler, "PREVIOUS")
+                self.assertIsNotNone(reporting.hooks)
+            finally:
+                reporting.stop()
+        handler.assert_called_with("PREVIOUS")
+        self.assertIsNone(reporting.hooks)
+        self.assertIsNone(qt_app.error_reports.current_reporter())
+
+    def test_choose_records_the_choice_and_kicks(self):
+        """The Help-menu choice is saved, applied and kicks the worker.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            reporting = self.reporting()
+            with mock.patch.object(reporting.worker, "kick") as kick:
+                reporting.choose(False, self.log)
+                self.assertFalse(FakeSettings.store[qt_app.error_reports.SETTING_KEY])
+                self.assertFalse(reporting.reporter.enabled)
+                self.assertIn("Error reports: off", self.log.lines[-1])
+                kick.assert_not_called()
+                reporting.choose(True, self.log)
+                self.assertTrue(reporting.reporter.enabled)
+                kick.assert_called_once()
+
+    def test_stop_restores_the_previous_handler(self):
+        """Stopping uninstalls the hooks and the Qt message handler.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        before = (sys.excepthook, threading.excepthook, sys.unraisablehook)
+        with mock.patch.object(reporting.worker, "start"):
+            reporting.start(self.log)
+        self.assertNotEqual(sys.excepthook, before[0])
+        reporting.stop()
+        self.assertEqual((sys.excepthook, threading.excepthook, sys.unraisablehook), before)
+        self.assertIsNone(qt_app.error_reports.current_reporter())
+        with mock.patch.object(reporting.worker, "stop") as stop:
+            reporting.stop()
+        stop.assert_called_once()
+
+
+class SessionDescriptionTests(unittest.TestCase):
+    """describe_session's Spinnaker note."""
+
+    def test_the_sdk_version_is_appended_when_known(self):
+        """A loaded Spinnaker shows up in the session line.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.camera, "spinnaker_version",
+                               return_value="4.2.0.88"):
+            line = qt_app.describe_session(
+                [mock.MagicMock(demo=True, label="Synthetic camera (DEMO1)", active=True)],
+                "GPU")
+        self.assertIn("dummy mode, 1 synthetic camera(s)", line)
+        self.assertIn("display GPU; Spinnaker 4.2.0.88", line)
+
+    def test_mixed_channels_are_listed(self):
+        """A camera channel is named, with its processing state.
+
+        Args: None.
+        Returns: None.
+        """
+        camera = mock.MagicMock(demo=False, label="[12345678] BFS-U3-63S4M", active=True)
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value=None):
+            line = qt_app.describe_session([camera], "CPU")
+        self.assertEqual(line, "Session: 1 camera(s): [12345678] BFS-U3-63S4M (processing)"
+                               "; display CPU")
+
+
+class ErrorReportUITests(WindowTestCase):
+    """The window's error-report menu, status and dialogs."""
+
+    def reporting(self, enabled=True, forced=None):
+        """Build a reporting stand-in with a working event queue.
+
+        Args: enabled and forced describe the reporter state.
+        Returns: A MagicMock reporting.
+        """
+        reporting = mock.MagicMock(reporter=mock.MagicMock(enabled=enabled), forced=forced)
+        reporting.worker = mock.MagicMock(events=queue.Queue())
+        return reporting
+
+    def test_the_action_mirrors_the_reporter(self):
+        """The checkable action shows the state and explains itself.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.reporting = self.reporting()
+        self.window._sync_reports_action()
+        self.assertTrue(self.window.reports_action.isChecked())
+        self.assertTrue(self.window.reports_action.isEnabled())
+        self.assertIn("public GitHub issues", self.window.reports_action.toolTip())
+
+    def test_a_forced_off_shows_the_reason(self):
+        """When a switch forces reporting off, the action is locked.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.reporting = self.reporting(enabled=False,
+                                               forced="turned off with --no-error-reports")
+        self.window._sync_reports_action()
+        self.assertFalse(self.window.reports_action.isChecked())
+        self.assertFalse(self.window.reports_action.isEnabled())
+        self.assertEqual(self.window.reports_action.toolTip(),
+                         "Off: turned off with --no-error-reports")
+
+    def test_the_menu_choice_reaches_reporting(self):
+        """Toggling the action calls Reporting.choose and refreshes the menu.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        self.window._choose_error_reports(True)
+        reporting.choose.assert_called_once_with(True, self.window.log)
+        self.assertTrue(self.window.reports_action.isChecked())
+
+    def test_open_log_folder_opens_the_log_directory(self):
+        """The log's folder opens in the desktop file manager.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = "/x/runs/espi_1.log"
+        with mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = True
+            self.window._open_log_folder()
+        self.assertEqual(desktop.openUrl.call_args.args[0].path(), "/x/runs")
+
+    def test_open_log_folder_without_a_log_file(self):
+        """Without a log file the default logs folder is opened.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = None
+        with mock.patch.object(qt_app.paths, "output_folder", return_value="/fake/logs"), \
+                mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = True
+            self.window._open_log_folder()
+        self.assertEqual(desktop.openUrl.call_args.args[0].path(), "/fake/logs")
+
+    def test_open_log_folder_falls_back_to_a_message(self):
+        """If the desktop refuses, the path is shown in a dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = "/x/runs/espi_1.log"
+        with mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = False
+            self.window._open_log_folder()
+        self.assertIn("/x/runs", self.dialogs.information.call_args.args[2])
+
+    def test_open_log_folder_survives_an_unavailable_folder(self):
+        """A failing folder lookup becomes a warning dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = None
+        with mock.patch.object(qt_app.paths, "output_folder",
+                               side_effect=OSError("gone")):
+            self.window._open_log_folder()
+        self.assertIn("unavailable", self.dialogs.warning.call_args.args[2])
+
+    def test_report_context_describes_demo_mode(self):
+        """Demo runs say so and list the demo serials.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value=None):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(call.kwargs["source"], "dummy mode")
+        self.assertEqual(call.kwargs["cameras"], 1)
+        self.assertEqual(call.kwargs["serials"], ["DEMO1"])
+
+    def test_report_context_describes_the_camera(self):
+        """A camera run names the model and scrubs its serials.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        camera = mock.MagicMock(demo=False, identity=None)
+        camera.info = SimpleNamespace(serial="SN-1", model="")
+        original, original_channels = self.window.current, self.window.channels
+        self.addCleanup(setattr, self.window, "current", original)
+        self.addCleanup(setattr, self.window, "channels", original_channels)
+        self.window.current = camera
+        self.window.channels = [camera]
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value="4.2"):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(call.kwargs["source"], "camera (model unknown)")
+        self.assertEqual(call.kwargs["serials"], ["SN-1"])
+        self.assertEqual(call.kwargs["spinnaker"], "4.2")
+
+        camera.identity = SimpleNamespace(short_name=lambda: "BFS-U3-63S4M", serial="SN-1")
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value="4.2"):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(
+            call.kwargs["source"], "camera BFS-U3-63S4M")
+        self.assertEqual(call.kwargs["serials"], ["SN-1", "SN-1"])
+
+    def test_report_context_accepts_analog_capture_identity(self):
+        """An analog identity has no hardware serial and must not break polling.
+
+        Args: None.
+        Returns: None.
+        """
+        from espi_live.capture_models import CaptureIdentity
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        channel = SimpleNamespace(demo=False, identity=CaptureIdentity(name="USB-Live2"),
+                                  info=CameraInfo("video 0", "USB-Live2", kind="capture"))
+        with mock.patch.object(self.window, "current", channel), \
+                mock.patch.object(self.window, "channels", [channel]):
+            self.window._update_report_context()
+        context = reporting.reporter.update_context.call_args.kwargs
+        self.assertEqual(context["serials"], ["video 0"])
+        self.assertEqual(context["source"], "camera USB-Live2")
+
+    def test_report_outcomes_reach_the_status_bar(self):
+        """A delivered report shows its outcome with the issue link.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/owner/repo/issues/5")
+        reporting.worker.events.put(("outcome", outcome))
+        with mock.patch.object(self.window.error_report_timer, "start") as timer:
+            self.window._handle_error_report_events()
+        self.assertEqual(self.window.report_outcomes[FINGERPRINT_UI], outcome)
+        self.assertIn("Reported as <a href=", self.window.error_report_label.text())
+        timer.assert_called_once()
+        self.assertIn(FINGERPRINT_UI, self.window.error_report_label.toolTip())
+
+    def test_report_outcomes_fill_an_open_fatal_dialog(self):
+        """While the "ESPI stopped" dialog is open its line is updated in place.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        box = mock.MagicMock()
+        self.window.fatal_boxes[FINGERPRINT_UI] = (box, "kaboom")
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/owner/repo/issues/5")
+        reporting.worker.events.put(("outcome", outcome))
+        self.window._handle_error_report_events()
+        box.setText.assert_called_once()
+        text = box.setText.call_args.args[0]
+        self.assertIn("kaboom", text)
+        self.assertIn("Reported as", text)
+        self.assertIn(FINGERPRINT_UI, text)
+        self.assertFalse(self.window.error_report_label.isVisibleTo(self.window))
+
+    def test_outcome_html_links_the_issue(self):
+        """The outcome line becomes a link when there is an issue.
+
+        Args: None.
+        Returns: None.
+        """
+        html = qt_app.MainWindow._outcome_html
+        self.assertEqual(html(None), "Reporting this error…")
+        plain = qt_app.error_reports.Outcome(FINGERPRINT_UI, "saved")
+        self.assertEqual(html(plain), "Report saved; it will be sent next time")
+        linked = qt_app.error_reports.Outcome(FINGERPRINT_UI, "fixed", url="https://x/y")
+        self.assertEqual(html(linked), "Fixed in a newer build; update to get the fix")
+        browser = qt_app.error_reports.Outcome(FINGERPRINT_UI, "browser",
+                                               url="https://x/y?a=b&c=d")
+        self.assertEqual(html(browser),
+                         'Not sent automatically: <a href="https://x/y?a=b&amp;c=d">'
+                         'Report in browser…</a>')
+        created = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/o/r/issues/5")
+        self.assertEqual(html(created),
+                         'Reported as <a href="https://github.com/o/r/issues/5">#5</a>')
+
+    def test_fatal_text_gains_the_report_line(self):
+        """The stopped-dialog text carries the report state and the error ID.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.window._fatal_text("kaboom", None), "kaboom")
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "saved")
+        self.window.report_outcomes[FINGERPRINT_UI] = outcome
+        text = self.window._fatal_text("kaboom", FINGERPRINT_UI)
+        self.assertTrue(text.startswith("kaboom<br><br>Report saved"))
+        self.assertIn(f"Error ID {FINGERPRINT_UI}", text)
+
+    def test_show_fatal_registers_its_dialog(self):
+        """While a fatal dialog is open its fingerprint is tracked, then freed.
+
+        Args: None.
+        Returns: None.
+        """
+        seen = {}
+
+        def fake_exec():
+            """Record what the window tracked while the dialog was open.
+
+            Args: None.
+            Returns: None.
+            """
+            seen.update(self.window.fatal_boxes)
+
+        self.dialogs.return_value.exec.side_effect = fake_exec
+        self.window._show_fatal("kaboom", FINGERPRINT_UI)
+        self.assertEqual(seen[FINGERPRINT_UI][1], "kaboom")
+        self.assertEqual(self.window.fatal_boxes, {})
+        self.assertEqual(self.dialogs.call_args.args[1:],
+                         ("ESPI stopped", self.window._fatal_text("kaboom", FINGERPRINT_UI)))
+
+    def test_report_status_variants(self):
+        """Each outcome kind shows the right status-bar text.
+
+        Args: None.
+        Returns: None.
+        """
+        cases = {
+            "declined": None,
+            "fixed": "Check for updates",
+            "saved": "will be reported next time",
+            "created": "Unexpected error: Reported as"}
+        for kind, needle in cases.items():
+            outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, kind, 5,
+                                                   "https://github.com/o/r/issues/5")
+            self.window.error_report_label.setVisible(False)
+            with mock.patch.object(self.window.error_report_timer, "start") as timer:
+                self.window._show_report_status(outcome)
+            if needle is None:
+                self.assertFalse(self.window.error_report_label.isVisibleTo(self.window))
+                timer.assert_not_called()
+                continue
+            self.assertIn(needle, self.window.error_report_label.text())
+            timer.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
 class FreezeTests(WindowTestCase):
     """Freezing the displayed image without saving it (issue #14)."""
 
@@ -1789,1449 +4445,6 @@ class FreezeTests(WindowTestCase):
         self.assertFalse(self.window.freeze_button.isChecked())
 
 
-class EngineEventTests(WindowTestCase):
-    """Reaction to engine events."""
-
-    def test_camera_limits_set_slider_ranges(self):
-        """camera_limits updates the ranges of the controls it names.
-
-        Args: None.
-        Returns: None.
-        """
-        self.engine.events.put(("camera_limits", {
-            "ExposureTime": (10, 20000), "Gain": (0, 12)}))
-        self.window._handle_events()
-        self.assertEqual(self.window.exposure.spin.maximum(), 20000)
-        self.assertEqual(self.window.gain.spin.maximum(), 12)
-        self.assertEqual(self.window.fps.spin.maximum(), 60)
-
-    def test_camera_identity_names_the_model(self):
-        """camera_identity puts the model in the title, badge and controls.
-
-        Args: None.
-        Returns: None.
-        """
-        source, self.engine.demo_source = self.engine.demo_source, None
-        self.addCleanup(setattr, self.engine, "demo_source", source)
-        self.engine.events.put(("camera_identity", CameraIdentity(
-            vendor="FLIR", model="Blackfly S BFS-U3-70S7C", serial="42")))
-        self.window._handle_events()
-        self.assertEqual(self.window.windowTitle(), "ESPI live — BFS-U3-70S7C")
-        self.assertEqual(self.window.source_badge.text(), "  BFS-U3-70S7C  ")
-        self.assertIn("S/N 42", self.window.source_badge.toolTip())
-        self.assertFalse(self.window.model_label.isHidden())
-        self.assertIn("⚠ Colour camera", self.window.model_label.text())
-
-    def test_camera_identity_is_hidden_in_dummy_mode(self):
-        """A known camera is not advertised while synthetic video runs.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.camera_identity = CameraIdentity(model="BFS-U3-63S4M")
-        self.window._set_demo(True)
-        self.assertIn("DUMMY MODE", self.window.windowTitle())
-        self.assertTrue(self.window.model_label.isHidden())
-        self.assertEqual(self.window.source_badge.toolTip(),
-                         "Synthetic video: no camera data")
-
-    def test_camera_limits_set_frame_rate_range(self):
-        """camera_limits can also set the frame-rate range.
-
-        Args: None.
-        Returns: None.
-        """
-        self.engine.events.put(("camera_limits", {"AcquisitionFrameRate": (1, 25)}))
-        self.window._handle_events()
-        self.assertEqual(self.window.fps.spin.maximum(), 25)
-
-    def test_record_off_unchecks_button_without_touching_engine(self):
-        """record_off clears the button silently.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.record_button.setChecked(True)
-        self.engine.update_settings(record=True)
-        self.engine.events.put(("record_off", None))
-        self.window._handle_events()
-        self.assertFalse(self.window.record_button.isChecked())
-        self.assertTrue(self.engine.settings().record)
-
-    def test_switched_live_selects_raw_and_leaves_demo(self):
-        """switched_live selects Raw, unchecks record and hides demo indicators.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.record_button.setChecked(True)
-        self.engine.events.put(("switched_live", None))
-        self.window._handle_events()
-        checked = [b.text() for b in self.window.mode_group.buttons() if b.isChecked()]
-        self.assertEqual(checked, ["Raw"])
-        self.assertFalse(self.window.record_button.isChecked())
-        self.assertEqual(self.window.windowTitle(), "ESPI live")
-
-    def test_switch_failed_warns_and_keeps_demo(self):
-        """switch_failed warns the user and stays in demo mode.
-
-        Args: None.
-        Returns: None.
-        """
-        self.engine.events.put(("switch_failed", "no camera"))
-        self.window._handle_events()
-        self.dialogs.warning.assert_called_once()
-        self.assertIn("no camera", self.dialogs.warning.call_args.args[2])
-        self.assertIn("DUMMY", self.window.windowTitle())
-
-    def test_fatal_shows_error_and_closes(self):
-        """fatal shows a critical dialog and closes the window.
-
-        Args: None.
-        Returns: None.
-        """
-        self.engine.events.put(("fatal", "kaboom"))
-        with mock.patch.object(self.window, "close") as close:
-            self.window._handle_events()
-        self.dialogs.critical.assert_called_once()
-        close.assert_called_once()
-
-    def test_stopped_closes_unless_already_closing(self):
-        """stopped closes the window once, and is ignored while closing.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(self.window, "close") as close:
-            self.engine.events.put(("stopped", None))
-            self.window._handle_events()
-            self.window.closing = True
-            self.engine.events.put(("stopped", None))
-            self.window._handle_events()
-        close.assert_called_once()
-
-
-class MultiCameraTests(unittest.TestCase):
-    """Several cameras: the drop-down, process checkboxes and per-camera settings."""
-
-    def setUp(self):
-        """Build a window over three synthetic cameras (only the first open).
-
-        Args: None.
-        Returns: None.
-        """
-        FakeSettings.store = {}
-        self.dialogs = make_dialogs()
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        for patcher in (
-                mock.patch.object(qt_app, "QSettings", FakeSettings),
-                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
-                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
-                mock.patch.object(qt_app.updater, "unavailable_reason",
-                                  return_value="disabled in tests"),
-                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.log = FakeLog()
-        self.channels = demo_channels(self.log, 3)
-        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
-        self.window.frame_timer.stop()
-        self.window.status_timer.stop()
-        self.addCleanup(self.cleanup_window)
-
-    def cleanup_window(self):
-        """Close the window, which stops and waits for every engine.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.close()
-        self.window.deleteLater()
-
-    def test_single_camera_hides_the_camera_list(self):
-        """With one camera there is no drop-down and no log prefix.
-
-        Args: None.
-        Returns: None.
-        """
-        engine = Engine(self.log)
-        engine.use_demo()
-        window = demo_window(engine, self.log)
-        self.addCleanup(window.deleteLater)
-        self.addCleanup(window.close)
-        self.assertTrue(window.cameras_box.isHidden())
-        self.assertEqual(window.windowTitle(), "ESPI live — DUMMY MODE")
-
-    def test_cameras_are_listed_with_the_displayed_one_locked_on(self):
-        """The drop-down lists every camera; the shown one must keep processing.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        self.assertFalse(window.cameras_box.isHidden())
-        self.assertEqual(window.camera_combo.count(), 3)
-        self.assertEqual([c.isChecked() for c in window.camera_checks], [True, False, False])
-        self.assertEqual([c.isEnabled() for c in window.camera_checks], [False, True, True])
-        self.assertIn("(DEMO1) — DUMMY MODE", window.windowTitle())
-        self.assertEqual(self.channels[1].log.prefix, "[DEMO2] ")
-
-    def test_process_checkbox_starts_and_stops_a_background_camera(self):
-        """Checking starts the camera's engine; unchecking stops it, keeping settings.
-
-        Args: None.
-        Returns: None.
-        """
-        second = self.channels[1]
-        self.window.camera_checks[1].setChecked(True)
-        self.assertTrue(second.active)
-        self.assertTrue(wait_for(lambda: second.engine.latest_packet() is not None))
-        second.engine.update_settings(gain_db=6.0)
-        self.window.camera_checks[1].setChecked(False)
-        self.assertFalse(second.active)
-        self.assertEqual(second.settings.gain_db, 6.0)
-        self.assertIn("Processing off: Synthetic camera (DEMO2) (settings kept)",
-                      self.log.lines)
-
-    def test_the_displayed_camera_cannot_be_turned_off(self):
-        """A request to stop the displayed camera is ignored.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window._set_processing(self.channels[0], False)
-        self.assertTrue(self.channels[0].active)
-        self.assertTrue(self.window.camera_checks[0].isChecked())
-
-    def test_choosing_a_camera_shows_its_own_settings(self):
-        """The controls switch to the chosen camera's settings and limits.
-
-        Args: None.
-        Returns: None.
-        """
-        window, second = self.window, self.channels[1]
-        second.settings = replace(second.settings, exposure_us=2500.0, mode="Previous",
-                                  palette="Jet", rolling=True, noise_reduction=40.0)
-        second.limits = {"Gain": (0.0, 12.0)}
-        window.exposure.set_value(4000.0)
-        window.exposure.valueChanged.emit(4000.0)
-        window.camera_combo.setCurrentIndex(1)
-        self.assertIs(window.current, second)
-        self.assertTrue(second.active)
-        self.assertEqual(window.exposure.value(), 2500.0)
-        self.assertEqual(window.noise_reduction.value(), 40.0)
-        self.assertEqual(window.gain.spin.maximum(), 12.0)
-        self.assertEqual(window.palette_combo.currentText(), "Jet")
-        self.assertTrue(window.rolling.isChecked())
-        checked = [b.text() for b in window.mode_group.buttons() if b.isChecked()]
-        self.assertEqual(checked, ["Previous"])
-        self.assertEqual([c.isEnabled() for c in window.camera_checks], [True, False, True])
-        window.gain.valueChanged.emit(5.0)  # controls now act on the second camera
-        self.assertEqual(second.engine.settings().gain_db, 5.0)
-        self.assertEqual(self.channels[0].engine.settings().gain_db, 0.0)
-        self.assertEqual(self.channels[0].engine.settings().exposure_us, 4000.0)
-        window.camera_combo.setCurrentIndex(0)
-        self.assertEqual(window.exposure.value(), 4000.0)
-        self.assertEqual(window.gain.spin.maximum(), 30.0)
-
-    def test_choosing_the_same_or_no_camera_does_nothing(self):
-        """Re-selecting the shown camera or an empty index changes nothing.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(self.window, "_load_settings") as load:
-            self.window._camera_chosen(-1)
-            self.window.show_channel(self.channels[0])
-        load.assert_not_called()
-
-    def test_status_column_shows_display_rate_and_recording(self):
-        """Each row shows displayed, processed fps, REC, or off.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.camera_checks[1].setChecked(True)
-        self.channels[1].engine.update_settings(record=True)
-        self.window._poll_status()
-        states = [label.text() for label in self.window.camera_states]
-        self.assertTrue(states[0].startswith("displayed · "))
-        self.assertTrue(states[1].endswith(" · REC"))
-        self.assertEqual(states[2], "off")
-
-    def test_freeze_belongs_to_the_displayed_camera(self):
-        """Each camera keeps its own frozen frame across display switches.
-
-        Args: None.
-        Returns: None.
-        """
-        window, first = self.window, self.channels[0]
-        frozen = make_packet(sequence=1)
-        first.engine._packet = frozen
-        window._poll_frame()
-        window.set_frozen(True)
-        window._poll_status()
-        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
-        window.camera_combo.setCurrentIndex(1)  # the second camera is live
-        self.assertIsNone(window.current.frozen)
-        self.assertIsNone(window.view.packet)
-        self.assertTrue(window.frozen_banner.isHidden())
-        self.assertFalse(window.freeze_button.isChecked())
-        window._poll_status()
-        self.assertTrue(window.camera_states[0].text().endswith(" · frozen"))
-        self.assertFalse(window.camera_states[1].text().endswith(" · frozen"))
-        window.camera_combo.setCurrentIndex(0)  # back: the held frame is shown at once
-        self.assertIs(window.view.packet, frozen)
-        self.assertFalse(window.frozen_banner.isHidden())
-        self.assertTrue(window.freeze_button.isChecked())
-        first.engine._packet = make_packet(sequence=2)
-        window._poll_frame()
-        self.assertIs(window.view.packet, frozen)
-
-    def test_turning_off_a_frozen_background_camera_drops_its_frame(self):
-        """A camera whose processing is turned off loses its frozen frame.
-
-        Args: None.
-        Returns: None.
-        """
-        window, first = self.window, self.channels[0]
-        first.engine._packet = make_packet(sequence=1)
-        window._poll_frame()
-        window.set_frozen(True)
-        window.camera_combo.setCurrentIndex(1)
-        window.camera_checks[0].setChecked(False)
-        self.assertFalse(first.active)
-        self.assertIsNone(first.frozen)
-
-    def test_background_events_do_not_change_the_shown_controls(self):
-        """Limits are stored and record_off ignored for a camera not shown.
-
-        Args: None.
-        Returns: None.
-        """
-        window, second = self.window, self.channels[1]
-        window.camera_checks[1].setChecked(True)
-        window.record_button.setChecked(True)
-        second.engine.events.put(("camera_limits", {"Gain": (0.0, 9.0)}))
-        second.engine.events.put(("record_off", None))
-        window._handle_events()
-        self.assertEqual(second.limits, {"Gain": (0.0, 9.0)})
-        self.assertEqual(window.gain.spin.maximum(), 30.0)
-        self.assertTrue(window.record_button.isChecked())
-
-    def test_each_camera_keeps_its_own_model(self):
-        """A background camera's model is stored; the title follows the display.
-
-        Args: None.
-        Returns: None.
-        """
-        window, first, second = self.window, self.channels[0], self.channels[1]
-        window.camera_checks[1].setChecked(True)
-        for channel in (first, second):  # pretend both are real cameras
-            source, channel.engine.demo_source = channel.engine.demo_source, None
-            self.addCleanup(setattr, channel.engine, "demo_source", source)
-        first.engine.events.put(("camera_identity", CameraIdentity(
-            model="Blackfly S BFS-U3-63S4M", serial="DEMO1")))
-        second.engine.events.put(("camera_identity", CameraIdentity(
-            model="Blackfly S BFS-U3-70S7C", serial="DEMO2")))
-        window._handle_events()
-        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-63S4M (DEMO1)")
-        self.assertEqual(second.identity.model, "Blackfly S BFS-U3-70S7C")
-        window.camera_combo.setCurrentIndex(1)
-        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-70S7C (DEMO2)")
-        self.assertIn("⚠ Colour camera", window.model_label.text())
-
-    def test_failed_open_of_the_shown_camera_returns_to_another(self):
-        """open_failed warns, turns that camera off and shows a running one.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        window.camera_combo.setCurrentIndex(2)
-        third = self.channels[2]
-        third.engine.events.put(("open_failed", "busy"))
-        window._handle_events()
-        self.dialogs.warning.assert_called_once()
-        self.assertIn("busy", self.dialogs.warning.call_args.args[2])
-        self.assertFalse(third.active)
-        self.assertIs(window.current, self.channels[0])
-        self.assertEqual(window.camera_combo.currentIndex(), 0)
-
-    def test_fatal_error_in_a_background_camera_keeps_the_window(self):
-        """A background camera's error names it and turns it off only.
-
-        Args: None.
-        Returns: None.
-        """
-        window, second = self.window, self.channels[1]
-        window.camera_checks[1].setChecked(True)
-        second.engine.events.put(("fatal", "kaboom"))
-        with mock.patch.object(window, "close") as close:
-            window._handle_events()
-        close.assert_not_called()
-        self.assertIn("Synthetic camera (DEMO2): kaboom",
-                      self.dialogs.critical.call_args.args[2])
-        self.assertFalse(second.active)
-        self.assertFalse(window.camera_checks[1].isChecked())
-        self.assertIs(window.current, self.channels[0])
-
-    def test_unexpected_stop_of_the_shown_camera_shows_another(self):
-        """If the shown camera stops while another runs, that one is shown.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        window.camera_checks[1].setChecked(True)
-        self.channels[0].engine.events.put(("stopped", None))
-        window._handle_events()
-        self.assertIs(window.current, self.channels[1])
-        self.assertFalse(self.channels[0].active)
-
-    def test_going_live_replaces_synthetic_cameras_with_real_ones(self):
-        """switched_live keeps the shown channel and lists the real cameras.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        window.camera_checks[1].setChecked(True)
-        demo_two = self.channels[1]
-        shown = self.channels[0]
-        shown.engine.camera_info = CameraInfo("111", "BFS")
-        cameras = [CameraInfo("111", "BFS"), CameraInfo("222", "BFS")]
-        shown.engine.events.put(("switched_live", cameras))
-        window._handle_events()
-        self.assertEqual([c.info.serial for c in window.channels], ["111", "222"])
-        self.assertIs(window.channels[0], shown)
-        self.assertEqual(shown.engine.tag, "111")
-        self.assertFalse(window.channels[1].active)
-        self.assertFalse(demo_two.active)
-        self.assertIn(demo_two, window.retired_channels)
-        self.assertEqual(window.camera_combo.itemText(1), "BFS (222)")
-        self.assertIn("ESPI live — BFS (111)", window.windowTitle())
-
-    def test_close_stops_every_engine(self):
-        """Closing stops the running and the retired engines.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.camera_checks[1].setChecked(True)
-        self.window.camera_checks[1].setChecked(False)
-        self.window.camera_checks[2].setChecked(True)
-        engines = self.window._all_engines()
-        self.assertEqual(len(engines), 3)
-        self.window.close()
-        self.assertTrue(all(engine._stop.is_set() for engine in engines))
-        self.assertTrue(self.window.wait_for_engines(5.0))
-
-
-class UpdateFlowTests(WindowTestCase):
-    """Update checks, downloads and restart offers, with no network."""
-
-    def test_manual_check_reports_unavailable_updates(self):
-        """When updates are off the reason is shown in a dialog.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window._check_updates_now()
-        self.dialogs.information.assert_called_once()
-        self.assertIn("disabled in tests", self.dialogs.information.call_args.args[2])
-
-    def test_manual_check_with_pending_update_offers_restart(self):
-        """A downloaded update turns the manual check into a restart offer.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.pending_update = "staged"
-        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
-            self.window._check_updates_now()
-        self.dialogs.question.assert_called_once()
-        self.assertEqual(self.dialogs.question.call_args.args[1], "Update ready")
-
-    def test_manual_check_while_busy_only_shows_status(self):
-        """A busy worker is not started again.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.updates.busy = True
-        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
-            self.window._check_updates_now()
-        self.assertEqual(self.window.updates.checks, 0)
-        self.assertIn("already running", self.window.statusBar().currentMessage())
-
-    def test_manual_check_starts_a_check_in_manual_mode(self):
-        """An idle manual check starts the worker and reports results in dialogs.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
-            self.window._check_updates_now()
-        self.assertEqual(self.window.updates.checks, 1)
-        self.assertTrue(self.window.update_manual)
-
-    def test_update_click_with_pending_update_offers_restart(self):
-        """Clicking the button after a download offers the restart.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.pending_update = "staged"
-        self.window.update_button.click()
-        self.assertEqual(self.dialogs.question.call_args.args[1], "Update ready")
-
-    def test_update_click_without_info_or_while_busy_does_nothing(self):
-        """No known update, or a busy worker, means no dialog.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window._update_clicked()
-        self.window.update_info = make_info()
-        self.window.updates.busy = True
-        self.window._update_clicked()
-        self.dialogs.question.assert_not_called()
-
-    def test_update_click_yes_starts_download(self):
-        """Confirming the dialog starts the download and disables the button.
-
-        Args: None.
-        Returns: None.
-        """
-        self.dialogs.question.return_value = self.dialogs.Yes
-        self.window.update_info = make_info()
-        self.window._update_clicked()
-        self.assertEqual(len(self.window.updates.downloads), 1)
-        self.assertFalse(self.window.update_button.isEnabled())
-        self.assertTrue(any("Downloading update" in line for line in self.log.lines))
-
-    def test_update_click_no_does_not_download(self):
-        """Declining the dialog downloads nothing.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.update_info = make_info()
-        self.window._update_clicked()
-        self.assertEqual(self.window.updates.downloads, [])
-
-    def test_update_click_yes_with_busy_download_keeps_button(self):
-        """If the worker refuses the download the button stays enabled.
-
-        Args: None.
-        Returns: None.
-        """
-        self.dialogs.question.return_value = self.dialogs.Yes
-        self.window.updates.download_result = False
-        self.window.update_info = make_info()
-        self.window._update_clicked()
-        self.assertTrue(self.window.update_button.isEnabled())
-
-    def test_offer_restart_yes_closes_and_marks_relaunch(self):
-        """Choosing Yes flags a relaunch and closes the window.
-
-        Args: None.
-        Returns: None.
-        """
-        self.dialogs.question.return_value = self.dialogs.Yes
-        with mock.patch.object(self.window, "close") as close:
-            self.window._offer_restart()
-        self.assertTrue(self.window.relaunch_after_exit)
-        close.assert_called_once()
-
-    def test_offer_restart_no_keeps_running(self):
-        """Choosing No leaves the window open and no relaunch flagged.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(self.window, "close") as close:
-            self.window._offer_restart()
-        self.assertFalse(self.window.relaunch_after_exit)
-        close.assert_not_called()
-
-    def post(self, kind, payload):
-        """Queue an updater event and process it.
-
-        Args: kind and payload are the event name and data.
-        Returns: None.
-        """
-        self.window.updates.events.put((kind, payload))
-        self.window._handle_update_events()
-
-    def test_up_to_date_is_logged_and_silent_unless_manual(self):
-        """An up-to-date result logs, and shows a dialog only when manual.
-
-        Args: None.
-        Returns: None.
-        """
-        self.post("checked", None)
-        self.dialogs.information.assert_not_called()
-        self.window.update_manual = True
-        self.post("checked", None)
-        self.dialogs.information.assert_called_once()
-        self.assertFalse(self.window.update_manual)
-        self.assertTrue(any(line.startswith("Up to date") for line in self.log.lines))
-
-    def test_new_build_shows_update_button(self):
-        """A newer build is remembered and shown on the status-bar button.
-
-        Args: None.
-        Returns: None.
-        """
-        info = make_info()
-        self.post("checked", info)
-        self.assertIs(self.window.update_info, info)
-        self.assertFalse(self.window.update_button.isHidden())
-        self.assertIn("build 99", self.window.update_button.text())
-        self.dialogs.question.assert_not_called()
-
-    def test_new_build_found_by_manual_check_prompts_download(self):
-        """A manual check that finds a build goes straight to the download prompt.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.update_manual = True
-        self.post("checked", make_info())
-        self.dialogs.question.assert_called_once()
-
-    def test_failed_check_is_logged_and_warned_only_when_manual(self):
-        """A failed check warns the user only for manual checks.
-
-        Args: None.
-        Returns: None.
-        """
-        self.post("check_failed", "offline")
-        self.dialogs.warning.assert_not_called()
-        self.window.update_manual = True
-        self.post("check_failed", "offline")
-        self.dialogs.warning.assert_called_once()
-        self.assertTrue(any("offline" in line for line in self.log.lines))
-
-    def test_downloaded_build_is_staged_and_restart_offered(self):
-        """A finished download is staged and the restart is offered.
-
-        Args: None.
-        Returns: None.
-        """
-        self.post("downloaded", "staged-path")
-        self.assertEqual(self.window.pending_update, "staged-path")
-        self.assertEqual(self.window.update_button.text(), "Restart to update")
-        self.assertTrue(self.window.update_button.isEnabled())
-        self.assertEqual(self.dialogs.question.call_args.args[1], "Update ready")
-
-    def test_failed_download_restores_button_and_warns(self):
-        """A failed download re-enables the button and warns.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.update_info = make_info()
-        self.window.update_button.setEnabled(False)
-        self.post("download_failed", "disk full")
-        self.assertTrue(self.window.update_button.isEnabled())
-        self.assertIn("build 99", self.window.update_button.text())
-        self.dialogs.warning.assert_called_once()
-
-    def test_progress_is_shown_while_downloading(self):
-        """Download progress appears as a percentage on the button.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.update_info = make_info()
-        self.window.updates.busy = True
-        self.window.updates.progress = (25, 100)
-        self.window._handle_update_events()
-        self.assertEqual(self.window.update_button.text(), "Downloading update… 25%")
-        self.window.updates.progress = (0, 0)
-        self.window._handle_update_events()
-        self.assertEqual(self.window.update_button.text(), "Downloading update…")
-
-    def test_check_button_runs_a_manual_check(self):
-        """The status-bar button checks like Help > Check for updates….
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
-            self.window.check_button.click()
-        self.assertEqual(self.window.updates.checks, 1)
-        self.assertTrue(self.window.update_manual)
-
-    def test_check_button_greys_out_while_a_check_runs(self):
-        """A running check (startup or manual) disables the button until it ends.
-
-        Args: None.
-        Returns: None.
-        """
-        for kind, payload in (("checked", None), ("check_failed", "offline")):
-            with self.subTest(kind=kind):
-                self.window.updates.busy = True
-                self.window._handle_update_events()
-                self.assertFalse(self.window.check_button.isEnabled())
-                self.assertIn("Checking", self.window.check_button.text())
-                self.window.updates.busy = False
-                self.post(kind, payload)
-                self.assertTrue(self.window.check_button.isEnabled())
-                self.assertEqual(self.window.check_button.text(), "Check for updates")
-
-    def test_check_button_gives_way_to_a_found_build(self):
-        """Once a newer build is known only the blue button shows, through its download.
-
-        Args: None.
-        Returns: None.
-        """
-        self.post("checked", make_info())
-        self.assertTrue(self.window.check_button.isHidden())
-        self.assertFalse(self.window.update_button.isHidden())
-        self.window.updates.busy = True  # downloads run on the same worker
-        self.window._handle_update_events()
-        self.assertTrue(self.window.check_button.isHidden())
-        self.window.updates.busy = False
-        self.post("downloaded", "staged-path")
-        self.assertTrue(self.window.check_button.isHidden())
-
-
-class CloseTests(WindowTestCase):
-    """closeEvent and a real engine round trip."""
-
-    def test_close_stops_engine_and_saves_layout(self):
-        """Closing stops the engine, shows a message and stores the layout.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.close()
-        self.assertTrue(self.window.closing)
-        self.assertTrue(self.engine._stop.is_set())
-        self.assertIn("geometry", FakeSettings.store)
-        self.assertIn("windowState", FakeSettings.store)
-
-    def test_close_waits_until_engine_has_finished(self):
-        """Closing keeps pumping events while the engine is still stopping.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(self.engine, "wait", side_effect=[False, True]) as wait:
-            self.window.close()
-        self.assertEqual(wait.call_count, 2)
-
-    def test_second_close_does_not_stop_engine_again(self):
-        """A repeated close skips the shutdown work.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.close()
-        with mock.patch.object(self.engine, "stop") as stop:
-            self.window.close()
-        stop.assert_not_called()
-
-    def test_saved_geometry_is_restored_by_next_window(self):
-        """A new window restores the geometry saved by the previous one.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.resize(1000, 700)
-        self.window.close()
-        engine = Engine(self.log)
-        engine.use_demo()
-        window = demo_window(engine, self.log)
-        self.addCleanup(window.deleteLater)
-        self.addCleanup(window.status_timer.stop)
-        self.addCleanup(window.frame_timer.stop)
-        self.addCleanup(window.close)
-        self.assertEqual(window.height(), 700)  # not the 1400x900 default
-
-    def test_running_demo_engine_feeds_the_view(self):
-        """A started demo engine publishes frames that the window draws.
-
-        Args: None.
-        Returns: None.
-        """
-        self.engine.start()
-        deadline = time.monotonic() + 5.0
-        while self.engine.latest_packet() is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.window._poll_frame()
-        self.assertEqual(self.window.drawn_frames, 1)
-        self.assertIsNotNone(self.window.view.image_size)
-        self.window.close()
-        self.assertTrue(self.engine.wait(5.0))
-
-
-class FinishUpdateTests(unittest.TestCase):
-    """finish_update installs a staged build after the window closed."""
-
-    def make_window(self, relaunch, wait_result=True):
-        """Build a stand-in closed window with a staged update.
-
-        Args: relaunch is relaunch_after_exit; wait_result is engine.wait's result.
-        Returns: A SimpleNamespace window.
-        """
-        return SimpleNamespace(pending_update="staged", relaunch_after_exit=relaunch,
-                               wait_for_engines=mock.MagicMock(return_value=wait_result))
-
-    def test_nothing_happens_without_window_or_pending_update(self):
-        """No window, or nothing staged, installs nothing.
-
-        Args: None.
-        Returns: None.
-        """
-        log = FakeLog()
-        with mock.patch.object(qt_app.updater, "install_update") as install:
-            qt_app.finish_update(None, log)
-            qt_app.finish_update(SimpleNamespace(pending_update=None), log)
-        install.assert_not_called()
-
-    def test_installs_without_relaunch_when_not_requested(self):
-        """Installing on exit does not relaunch unless the user chose Yes.
-
-        Args: None.
-        Returns: None.
-        """
-        log, window = FakeLog(), self.make_window(False)
-        with mock.patch.object(qt_app.updater, "install_update",
-                               return_value="/app") as install, \
-                mock.patch.object(qt_app.updater, "relaunch") as relaunch:
-            qt_app.finish_update(window, log)
-        install.assert_called_once_with("staged")
-        relaunch.assert_not_called()
-        self.assertIn("Installed update: /app", log.lines)
-
-    def test_relaunches_once_camera_is_released(self):
-        """A requested relaunch happens after the engine has stopped.
-
-        Args: None.
-        Returns: None.
-        """
-        log, window = FakeLog(), self.make_window(True)
-        with mock.patch.object(qt_app.updater, "install_update", return_value="/app"), \
-                mock.patch.object(qt_app.updater, "relaunch") as relaunch:
-            qt_app.finish_update(window, log)
-        relaunch.assert_called_once_with(sys.argv[1:])
-        self.assertIn("Restarting into the new build", log.lines)
-
-    def test_does_not_relaunch_while_camera_is_still_open(self):
-        """If the engine did not stop in time the new build is not started.
-
-        Args: None.
-        Returns: None.
-        """
-        log, window = FakeLog(), self.make_window(True, wait_result=False)
-        with mock.patch.object(qt_app.updater, "install_update", return_value="/app"), \
-                mock.patch.object(qt_app.updater, "relaunch") as relaunch:
-            qt_app.finish_update(window, log)
-        relaunch.assert_not_called()
-        self.assertTrue(any("not released in time" in line for line in log.lines))
-
-    def test_install_errors_are_logged(self):
-        """UpdateError and OSError during install are logged, not raised.
-
-        Args: None.
-        Returns: None.
-        """
-        for error in (updater.UpdateError("bad zip"), OSError("denied")):
-            log = FakeLog()
-            with mock.patch.object(qt_app.updater, "install_update", side_effect=error):
-                qt_app.finish_update(self.make_window(False), log)
-            self.assertTrue(any("could not be installed" in line for line in log.lines))
-
-
-class ShortcutFilterConstructionTests(unittest.TestCase):
-    """ShortcutFilter keeps a reference to its window."""
-
-    def test_filter_remembers_window(self):
-        """The filter stores the window it routes keys to.
-
-        Args: None.
-        Returns: None.
-        """
-        window = QLineEdit()
-        self.addCleanup(window.deleteLater)
-        self.assertIs(qt_app.ShortcutFilter(window).window, window)
-
-
-class RunTests(unittest.TestCase):
-    """run() startup logic with the channels, window and dialogs faked."""
-
-    def setUp(self):
-        """Patch everything run() touches that would block or hit hardware.
-
-        Args: None.
-        Returns: None.
-        """
-        self.log = FakeLog()
-        self.engine = mock.MagicMock()
-        self.channel = mock.MagicMock(active=True, engine=self.engine)
-        self.idle = mock.MagicMock(active=False)
-        self.cameras = mock.MagicMock(return_value=[self.channel, self.idle])
-        self.demos = mock.MagicMock(return_value=[self.channel])
-        self.window = mock.MagicMock()
-        self.dialogs = make_dialogs(qt_app.QMessageBox.Yes)
-        self.opengl = mock.MagicMock(return_value=(True, "OpenGL 4.1 on X"))
-        self.finish = mock.MagicMock()
-        self.main_window = mock.MagicMock(return_value=self.window)
-        self.cleanup = mock.MagicMock()
-        self.startup_cleanup = mock.MagicMock(return_value=self.cleanup)
-        for patcher in (
-                mock.patch.object(qt_app.updater, "StartupCleanup", self.startup_cleanup),
-                mock.patch.object(qt_app, "request_gl_format"),
-                mock.patch.object(qt_app, "AppLog", return_value=self.log),
-                mock.patch.object(qt_app, "open_camera_channels", self.cameras),
-                mock.patch.object(qt_app, "demo_channels", self.demos),
-                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
-                mock.patch.object(qt_app, "opengl_available", self.opengl),
-                mock.patch.object(qt_app, "MainWindow", self.main_window),
-                mock.patch.object(qt_app, "finish_update", self.finish),
-                mock.patch.object(qt_app.QApplication, "exec", return_value=7)):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
-    def test_forced_demo_uses_demo_source_and_gpu_view(self):
-        """force_demo skips the camera, builds the GPU window and returns exec's code.
-
-        Args: None.
-        Returns: None.
-        """
-        code = qt_app.run(force_demo=True, check_updates=False, demo_cameras=2)
-        self.assertEqual(code, 7)
-        self.cameras.assert_not_called()
-        self.demos.assert_called_once_with(self.log, 2)
-        self.assertEqual(self.main_window.call_args.args[0], [self.channel])
-        self.assertEqual(self.main_window.call_args.args[2:], (True, False))
-        self.window.show.assert_called_once()
-        self.engine.start.assert_called_once()
-        self.finish.assert_called_once_with(self.window, self.log)
-        self.assertIn("closed", self.log.lines)
-        self.assertIn("Display: GPU (OpenGL 4.1 on X)", self.log.lines)
-
-    def test_cpu_fallback_is_logged_when_opengl_is_missing(self):
-        """Without OpenGL the CPU view is chosen and the reason logged.
-
-        Args: None.
-        Returns: None.
-        """
-        self.opengl.return_value = (False, "no OpenGL context")
-        qt_app.run(force_demo=True)
-        self.assertEqual(self.main_window.call_args.args[2], False)
-        self.assertIn("Display: CPU fallback (no OpenGL context)", self.log.lines)
-
-    def test_cameras_are_used_when_one_opens(self):
-        """Detected cameras are shown; only the opened one is started.
-
-        Args: None.
-        Returns: None.
-        """
-        qt_app.run()
-        self.cameras.assert_called_once_with(self.log)
-        self.demos.assert_not_called()
-        self.assertEqual(self.main_window.call_args.args[0], [self.channel, self.idle])
-        self.engine.start.assert_called_once()
-        self.idle.engine.start.assert_not_called()
-
-    def test_missing_camera_with_accepted_prompt_falls_back_to_demo(self):
-        """No camera plus Yes at the prompt starts demo mode.
-
-        Args: None.
-        Returns: None.
-        """
-        self.cameras.side_effect = RuntimeError("no camera")
-        self.assertEqual(qt_app.run(), 7)
-        self.dialogs.question.assert_called_once()
-        self.demos.assert_called_once_with(self.log, 1)
-        self.assertTrue(any("Camera startup unavailable" in line
-                            for line in self.log.lines))
-
-    def test_missing_camera_with_declined_prompt_exits_cleanly(self):
-        """No camera plus No at the prompt exits 0 without a window.
-
-        Args: None.
-        Returns: None.
-        """
-        self.cameras.side_effect = RuntimeError("no camera")
-        self.dialogs.question.return_value = self.dialogs.No
-        self.assertEqual(qt_app.run(), 0)
-        self.main_window.assert_not_called()
-        self.finish.assert_called_once_with(None, self.log)
-
-    def test_opened_engines_are_released_when_the_window_fails(self):
-        """If building the window raises, opened engines are stopped and waited for.
-
-        Args: None.
-        Returns: None.
-        """
-        self.main_window.side_effect = RuntimeError("no window")
-        with self.assertRaises(RuntimeError):
-            qt_app.run()
-        self.engine.stop.assert_called_once()
-        self.engine.wait.assert_called_once_with(8.0)
-        self.idle.engine.stop.assert_not_called()
-        self.finish.assert_called_once_with(None, self.log)
-
-    def test_startup_cleanup_logs_and_stops_before_an_update_installs(self):
-        """Old copies are cleaned up with messages to the log, and the cleanup
-        stops before finish_update can install a new build.
-
-        Args: None.
-        Returns: None.
-        """
-        order = mock.MagicMock()
-        order.attach_mock(self.cleanup.stop, "stop")
-        order.attach_mock(self.finish, "finish")
-        qt_app.run(force_demo=True)
-        self.startup_cleanup.assert_called_once_with(self.log.write)
-        self.cleanup.start.assert_called_once_with()
-        self.assertEqual([name for name, _, _ in order.mock_calls], ["stop", "finish"])
-
-    def test_log_file_path_is_reported_when_available(self):
-        """The log file path from AppLog.start is written to the log.
-
-        Args: None.
-        Returns: None.
-        """
-        qt_app.run(force_demo=True)
-        self.assertIn("Log file: fake.log", self.log.lines)
-
-    def test_missing_log_file_is_not_reported(self):
-        """If no log file could be opened no path line is written.
-
-        Args: None.
-        Returns: None.
-        """
-        self.log.start = lambda: None
-        qt_app.run(force_demo=True)
-        self.assertFalse(any(line.startswith("Log file:") for line in self.log.lines))
-
-
-class FeatureRequestTests(WindowTestCase):
-    """The Request feature dialog, sending and result reporting, with no network."""
-
-    REQUEST = feedback.FeatureRequest(title="Export reference", description="As PNG",
-                                      enrich=True, submitter="Sam", source="camera")
-
-    def setUp(self):
-        """Build the window with a fake token and a worker that never starts a thread.
-
-        Args: None.
-        Returns: None.
-        """
-        super().setUp()
-        patcher = mock.patch.object(qt_app.feedback, "feedback_token", return_value="t")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.window.feedback = mock.MagicMock(busy=False, events=queue.Queue())
-
-    def test_entry_points_exist(self):
-        """The status bar button and the Help menu entry both open the request.
-
-        Args: None.
-        Returns: None.
-        """
-        help_menu = self.window.menuBar().actions()[-1].menu()
-        entry = next(a for a in help_menu.actions() if a.text() == "Request a feature…")
-        with mock.patch.object(self.window, "_request_feature") as request:
-            entry.trigger()
-            self.window.feature_button.click()
-        self.assertEqual(request.call_count, 2)
-
-    def test_dialog_restores_a_request_and_reads_it_back(self):
-        """A previous request refills the form; Send is offered with a token.
-
-        Args: None.
-        Returns: None.
-        """
-        dialog = qt_app.FeatureRequestDialog(self.window, self.REQUEST)
-        self.assertEqual(dialog.request("camera"), self.REQUEST)
-        self.assertEqual(dialog.findChild(qt_app.QDialogButtonBox)
-                         .button(qt_app.QDialogButtonBox.Ok).text(), "Send")
-
-    def test_dialog_defaults_come_from_settings_without_a_token(self):
-        """A fresh form uses the saved name and choice and offers the browser.
-
-        Args: None.
-        Returns: None.
-        """
-        FakeSettings.store.update({"feedback/name": "Kim", "feedback/enrich": False})
-        with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""):
-            dialog = qt_app.FeatureRequestDialog(self.window)
-        self.assertEqual(dialog.submitter.text(), "Kim")
-        self.assertFalse(dialog.enrich.isChecked())
-        self.assertEqual(dialog.findChild(qt_app.QDialogButtonBox)
-                         .button(qt_app.QDialogButtonBox.Ok).text(), "Open in browser…")
-
-    def test_accept_refuses_an_incomplete_request(self):
-        """A blank description warns and keeps the dialog open.
-
-        Args: None.
-        Returns: None.
-        """
-        dialog = qt_app.FeatureRequestDialog(self.window)
-        dialog.title.setText("Only a title")
-        dialog.accept()
-        self.dialogs.warning.assert_called_once()
-        self.assertIn("describe", self.dialogs.warning.call_args.args[2])
-        self.assertEqual(dialog.result(), 0)
-
-    def test_accept_remembers_name_and_choice(self):
-        """A complete request closes the dialog and saves name and enrichment.
-
-        Args: None.
-        Returns: None.
-        """
-        dialog = qt_app.FeatureRequestDialog(self.window, self.REQUEST)
-        dialog.accept()
-        self.assertEqual(dialog.result(), qt_app.QDialog.Accepted)
-        self.assertEqual(FakeSettings.store["feedback/name"], "Sam")
-        self.assertTrue(FakeSettings.store["feedback/enrich"])
-
-    def run_request(self, result):
-        """Open the request flow with the dialog's exec() returning result.
-
-        Args: result is the dialog code exec() returns.
-        Returns: None.
-        """
-        with mock.patch.object(qt_app.FeatureRequestDialog, "exec", return_value=result), \
-                mock.patch.object(qt_app.FeatureRequestDialog, "request",
-                                  return_value=self.REQUEST):
-            self.window._request_feature()
-
-    def test_request_is_sent_in_the_background(self):
-        """An accepted dialog submits through the worker and shows a busy button.
-
-        Args: None.
-        Returns: None.
-        """
-        self.run_request(qt_app.QDialog.Accepted)
-        self.window.feedback.submit.assert_called_once_with(self.REQUEST)
-        self.assertFalse(self.window.feature_button.isEnabled())
-        self.assertEqual(self.window.feature_button.text(), "Sending request…")
-        self.assertIn("Sending feature request: Export reference", self.log.lines)
-
-    def test_cancel_sends_nothing(self):
-        """A cancelled dialog submits nothing.
-
-        Args: None.
-        Returns: None.
-        """
-        self.run_request(qt_app.QDialog.Rejected)
-        self.window.feedback.submit.assert_not_called()
-
-    def test_busy_worker_only_shows_status(self):
-        """A second request while one is sending is refused with a status message.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.feedback.busy = True
-        self.window._request_feature()
-        self.assertIn("still being sent", self.window.statusBar().currentMessage())
-
-    def test_without_token_the_browser_opens(self):
-        """Copies without a token open the prefilled GitHub page instead.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(qt_app.feedback, "feedback_token", return_value=""), \
-                mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                                  return_value=True) as open_url:
-            self.run_request(qt_app.QDialog.Accepted)
-        self.window.feedback.submit.assert_not_called()
-        self.assertIn("/issues/new?", open_url.call_args.args[0].toString())
-        self.dialogs.warning.assert_not_called()
-
-    def test_browser_failure_warns(self):
-        """A missing browser is reported.
-
-        Args: None.
-        Returns: None.
-        """
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl", return_value=False):
-            self.window._open_request_in_browser(self.REQUEST)
-        self.dialogs.warning.assert_called_once()
-
-    def test_sent_request_links_the_issue(self):
-        """A filed request restores the button, logs and links the issue.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.feature_button.setEnabled(False)
-        url = "https://github.com/o/r/issues/9"
-        self.window.feedback.events.put(("sent", (self.REQUEST, url)))
-        self.window._handle_feedback_events()
-        self.assertTrue(self.window.feature_button.isEnabled())
-        self.assertEqual(self.window.feature_button.text(), "Request feature")
-        self.assertIn(f"Feature request filed: {url}", self.log.lines)
-        text = self.dialogs.call_args.args[2]
-        self.assertIn(url, text)
-        self.assertIn("Copilot", text)
-        self.dialogs.return_value.exec.assert_called_once()
-
-    def failed_choice(self, choice):
-        """Report a failed send and click one of the offered buttons.
-
-        Args: choice is "retry", "browser" or "cancel".
-        Returns: (request_feature mock, open_request_in_browser mock).
-        """
-        box = self.dialogs.return_value
-        buttons = {"retry": object(), "browser": object(), "cancel": object()}
-        box.addButton.side_effect = [buttons["retry"], buttons["browser"], buttons["cancel"]]
-        box.clickedButton.return_value = buttons[choice]
-        self.window.feedback.events.put(("failed", (self.REQUEST, "offline")))
-        with mock.patch.object(self.window, "_request_feature") as retry, \
-                mock.patch.object(self.window, "_open_request_in_browser") as browser:
-            self.window._handle_feedback_events()
-        self.assertIn("Feature request failed: offline", self.log.lines)
-        return retry, browser
-
-    def test_failed_request_can_be_retried(self):
-        """Edit and retry reopens the dialog with the same request.
-
-        Args: None.
-        Returns: None.
-        """
-        retry, browser = self.failed_choice("retry")
-        retry.assert_called_once_with(self.REQUEST)
-        browser.assert_not_called()
-
-    def test_failed_request_can_open_in_browser(self):
-        """Open in browser keeps the text without retyping.
-
-        Args: None.
-        Returns: None.
-        """
-        retry, browser = self.failed_choice("browser")
-        browser.assert_called_once_with(self.REQUEST)
-        retry.assert_not_called()
-
-    def test_failed_request_can_be_dismissed(self):
-        """Cancel does nothing more.
-
-        Args: None.
-        Returns: None.
-        """
-        retry, browser = self.failed_choice("cancel")
-        retry.assert_not_called()
-        browser.assert_not_called()
-
-
-class FakeReportWorker:
-    """Stand-in for CameraReportWorker that records reports and never files."""
-
-    def __init__(self):
-        """Create an idle worker.
-
-        Args: None.
-        Returns: None.
-        """
-        self.events = queue.Queue()
-        self.submitted = []
-
-    def submit(self, report):
-        """Record a report.
-
-        Args: report is a camera_reports.Report.
-        Returns: True.
-        """
-        self.submitted.append(report)
-        return True
-
-
-ANALOG_TIP = "Set on the camera itself; not adjustable over analog video"
-
-
-class CaptureWindowTests(unittest.TestCase):
-    """A Blackfly, a USB-Live2 (displayed) and a webcam in one window."""
-
-    def setUp(self):
-        """Build the window over fake cameras and fake video devices.
-
-        Args: None.
-        Returns: None.
-        """
-        FakeSettings.store = {}
-        self.dialogs = make_dialogs()
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        system = FakeSystem([FakeCamera(serial="1", model="Blackfly S BFS-U3-63S4M")])
-        for patcher in (
-                mock.patch.object(qt_app, "QSettings", FakeSettings),
-                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
-                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
-                mock.patch.object(qt_app.updater, "unavailable_reason",
-                                  return_value="disabled in tests"),
-                mock.patch.object(qt_app.camera_reports, "CameraReportWorker",
-                                  FakeReportWorker),
-                mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
-                mock.patch.object(camera, "PySpin", make_pyspin(system)),
-                mock.patch.object(capture, "load_enumerator",
-                                  return_value=FakeEnumerator([usb_live2(0), webcam(1)])),
-                mock.patch.object(capture.cv2, "VideoCapture",
-                                  FakeCaptureFactory(frames=[interlaced_frame()]))):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.log = FakeLog()
-        self.channels = [Channel(self.log, info) for info in sources.detect_cameras(self.log)]
-        self.flir, self.usb, self.webcam = self.channels
-        self.usb.open()
-        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
-        self.window.frame_timer.stop()
-        self.window.status_timer.stop()
-        self.addCleanup(self.cleanup_window)
-        self.window._handle_events()  # identity and limits queued by the open
-
-    def cleanup_window(self):
-        """Close the window, which stops and waits for every engine.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.close()
-        self.window.deleteLater()
-
-    def show_webcam_report(self):
-        """Display the webcam and wait until its engine sends a camera report.
-
-        Args: None.
-        Returns: The Report the window submitted.
-        """
-        window = self.window
-        window.show_channel(self.webcam)
-
-        def submitted():
-            """Process engine events and look for the submitted report.
-
-            Args: None.
-            Returns: True once a report was submitted.
-            """
-            window._handle_events()
-            return bool(window.reports.submitted)
-
-        self.assertTrue(wait_for(submitted))
-        return window.reports.submitted[0]
-
-    def test_capture_channel_disables_camera_controls(self):
-        """Analog cameras get fixed controls and a field toggle; FLIR ones do not.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        self.assertIs(window.current, self.usb)
-        for widget in (window.exposure, window.gain, window.fps):
-            self.assertFalse(widget.isEnabled())
-            self.assertEqual(widget.toolTip(), ANALOG_TIP)
-        self.assertFalse(window.single_field.isHidden())
-        self.assertTrue(window.single_field.isChecked())
-        self.assertTrue(window.report_label.isHidden())
-        window.show_channel(self.flir)
-        for widget in (window.exposure, window.gain, window.fps):
-            self.assertTrue(widget.isEnabled())
-            self.assertEqual(widget.toolTip(), "")
-        self.assertTrue(window.single_field.isHidden())
-
-    def test_single_field_checkbox_updates_engine(self):
-        """Unticking the field toggle switches the engine to full frames.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.single_field.setChecked(False)
-        self.assertFalse(self.usb.engine.settings().single_field)
-        self.window.single_field.setChecked(True)
-        self.assertTrue(self.usb.engine.settings().single_field)
-
-    def test_unsupported_marker_in_camera_list(self):
-        """Only the unrecognised webcam is marked in the camera list.
-
-        Args: None.
-        Returns: None.
-        """
-        combo = self.window.camera_combo
-        self.assertEqual([combo.itemText(i) for i in range(combo.count())],
-                         ["Blackfly S BFS-U3-63S4M (1)", "Hauppauge USB-Live2 (video 1)",
-                          "Webcam C270 (video 2) · not yet supported"])
-
-    def test_camera_report_event_submits_and_shows_state(self):
-        """Switching the webcam on files a report; its state shows under the camera.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        report = self.show_webcam_report()
-        self.assertTrue(report.key.startswith("Webcam C270"))
-        self.assertIs(self.webcam.report, report)
-        self.assertFalse(window.report_label.isHidden())
-        self.assertIn("Reporting this camera", window.report_label.text())
-        url = "https://github.com/owner/repo/issues/3"
-        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
-            url=url, created=True))))
-        window._poll_status()
-        self.assertIn(url, window.report_label.text())
-        self.assertTrue(window.report_button.isHidden())
-        self.assertTrue(any(url in line for line in self.log.lines))
-        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
-            path="out/logs/camera-report.md"))))
-        window._handle_report_events()
-        self.assertIn("saved to out/logs/camera-report.md", window.report_label.text())
-        self.assertFalse(window.report_button.isHidden())
-        window.show_channel(self.usb)
-        self.assertTrue(window.report_label.isHidden())
-        self.assertTrue(window.report_button.isHidden())
-
-    def test_report_button_opens_browser(self):
-        """The button opens the prefilled page, or warns when no browser opens.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        report = self.show_webcam_report()
-        window.reports.events.put(("state", (report.key, camera_reports.ReportState(
-            error="offline"))))
-        window._handle_report_events()
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                               return_value=True) as open_url:
-            window.report_button.click()
-        self.assertIn("labels=camera-support", open_url.call_args[0][0].toString())
-        self.dialogs.warning.assert_not_called()
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl", return_value=False):
-            window.report_button.click()
-        self.dialogs.warning.assert_called_once_with(
-            window, "Report this camera", "Could not open a web browser.")
-
-
-class DemoCaptureControlsTests(WindowTestCase):
-    """Dummy mode shows neither analog controls nor camera reports."""
-
-    def test_demo_hides_report_and_capture_controls(self):
-        """The field toggle and report line stay hidden; sliders stay simulated.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        self.assertTrue(window.single_field.isHidden())
-        self.assertTrue(window.report_label.isHidden())
-        self.assertTrue(window.report_button.isHidden())
-        self.assertTrue(window.exposure.isEnabled())
-        self.assertEqual(window.exposure.toolTip(), "Simulated in dummy mode")
-
-
 class CodexTests(WindowTestCase):
     """Open in Codex: getting the source, the first-use dialog and opening the
     app, with the source worker, settings and dialogs faked."""
@@ -3439,5 +4652,3 @@ class CodexTests(WindowTestCase):
         self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
 
 
-if __name__ == "__main__":
-    unittest.main()

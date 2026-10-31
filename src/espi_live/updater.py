@@ -750,7 +750,10 @@ class UpdateWorker:
 
     The front end polls ``events`` for ("checked", UpdateInfo or None),
     ("check_failed", message), ("downloaded", staged_path) and
-    ("download_failed", message), and reads ``progress`` for a bar.
+    ("download_failed", message), and reads ``progress`` for a bar. An
+    UpdateError (network, disk or GitHub) only fails the job; any other
+    exception is a bug, so after posting the failure it is re-raised for
+    threading.excepthook to log and report.
     """
 
     def __init__(self):
@@ -762,17 +765,20 @@ class UpdateWorker:
         self.events = queue.Queue()
         self.progress = (0, 0)
         self.busy = False
+        self.downloading = False
 
-    def _run(self, job, ok_kind, fail_kind):
+    def _run(self, job, ok_kind, fail_kind, downloading=False):
         """Run one job on a daemon thread and report the outcome.
 
         Args: job is a callable returning the result; ok_kind and fail_kind
-            are the event names for success and failure.
+            are the event names for success and failure; downloading marks a
+            download, so the UI can show progress instead of a check.
         Returns: False if a job is already running, else True.
         """
         if self.busy:
             return False
         self.busy = True
+        self.downloading = downloading
 
         def work():
             """Thread body: run the job and post its event.
@@ -782,9 +788,13 @@ class UpdateWorker:
             """
             try:
                 self.events.put((ok_kind, job()))
-            except Exception as exc:
+            except UpdateError as exc:
                 self.events.put((fail_kind, str(exc)))
+            except Exception as exc:
+                self.events.put((fail_kind, f"{type(exc).__name__}: {exc}"))
+                raise
             finally:
+                self.downloading = False
                 self.busy = False
 
         threading.Thread(target=work, name="espi-updater", daemon=True).start()
@@ -815,4 +825,4 @@ class UpdateWorker:
             self.progress = (done, total)
 
         return self._run(lambda: download_update(info, report),
-                         "downloaded", "download_failed")
+                         "downloaded", "download_failed", downloading=True)
