@@ -53,6 +53,11 @@ from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
                                   VIEW_MODES, palette_rgb_table)
 
+# Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
+# layout is left alone; a narrower window keeps the badge and elides the tip.
+DEFAULT_WIDTH = 2100
+DEFAULT_HEIGHT = 900
+
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
 # Gamma stays its own Display control: it is a curve, not a second stretch.
 GAMMA_TIP = (
@@ -111,10 +116,6 @@ ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1.
 CODEX_LABEL = "Open in Codex"
 CODEX_BUSY_LABEL = "Getting source…"
 LAYOUT_VERSION = 5  # bump when docks/toolbars change so stale saved layouts are ignored
-# Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
-# layout is left alone; a narrower window keeps the badge and elides the tip.
-DEFAULT_WIDTH = 2100
-DEFAULT_HEIGHT = 900
 # A camera PC can stay open for days. Recheck well inside GitHub's rate limit.
 UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
 UPDATE_CHECK_JITTER_MS = 20 * 60 * 1000
