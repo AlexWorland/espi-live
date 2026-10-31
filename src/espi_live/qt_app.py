@@ -58,8 +58,8 @@ ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video
 GAMMA_TIP = (
     "Shifts mid-tones after Stretch to 0–255, in Raw, Previous and Reference. "
     "Stretch is a straight remap of this frame's dark-to-bright range "
-    "(contrast); gamma is a curve on top of that. Below 1.0 brightens dark "
-    "fringes, above 1.0 darkens bright ones. With a good stretch, start at 1.0."
+    "(contrast); gamma is a curve on top of that. Below 1.0 darkens mid-tones, "
+    "above 1.0 brightens them. With a good stretch, start at 1.0."
 )
 STRETCH_TIP = (
     "Map each difference frame's darkest and brightest pixels, after Stretch "
@@ -2329,12 +2329,6 @@ class MainWindow(QMainWindow):
                     "Q or Esc: quit.")
 
         help_menu = self.menuBar().addMenu("&Help")
-        guide = help_menu.addAction("User Guide")
-        guide.setShortcut(QKeySequence.HelpContents)
-        set_tooltip(guide, "Open the illustrated user guide in your browser. "
-                    "Shortcut: F1.")
-        guide.triggered.connect(self.show_guide)
-        help_menu.addSeparator()
         help_menu.setToolTipsVisible(True)
         guide = help_menu.addAction("Which settings should I use?")
         set_tooltip(guide, "Explain the processing controls and apply a starting preset.")
@@ -2356,6 +2350,12 @@ class MainWindow(QMainWindow):
         self.reports_action.toggled.connect(self._choose_error_reports)
         logs = help_menu.addAction("Open log folder")
         logs.triggered.connect(self._open_log_folder)
+        help_menu.addSeparator()
+        guide = help_menu.addAction("User Guide")
+        guide.setShortcut(QKeySequence.HelpContents)
+        set_tooltip(guide, "Open the illustrated user guide in your browser. "
+                    "Shortcut: F1.")
+        guide.triggered.connect(self.show_guide)
         help_menu.addSeparator()
         about = help_menu.addAction("About ESPI live")
         set_tooltip(about, "Show the version and build of this copy.")

@@ -61,7 +61,7 @@ class GuideTest(unittest.TestCase):
                           "Defaults and limits", "Packaged builds",
                           "Waiting for camera frame"):
             self.assertTrue(operation in text, f"missing section: {operation!r}")
-        self.assertTrue("below 1 <strong>brighten</strong>" in text)
+        self.assertTrue("below 1 <strong>darken</strong>" in text)
         self.assertTrue("Other changes do not split the file" in text)
         self.assertTrue("0–50,000 µs" in text)
         self.assertTrue("59 fps" in text)
@@ -80,7 +80,8 @@ class GuideTest(unittest.TestCase):
             self.assertIn(phrase, text)
         self.assertNotIn("8000 µs, 0 dB and 30 fps every time", text)
         self.assertNotIn("re-enter your exposure", text)
-        self.assertNotIn("&lt; 1 darkens", text)
+        self.assertIn("&lt; 1 darkens", text)
+        self.assertNotIn("auto-gain off, 8000 µs", text)
 
     def test_internal_links_have_targets(self):
         """Every in-page link points at an id that exists on the page.

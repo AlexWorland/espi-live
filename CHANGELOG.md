@@ -1,31 +1,5 @@
 # Changelog
 
-## 2026-10-30 — Status-bar help tips
-
-### Previous state
-
-- Hovering a control shows what it does, and the shortcuts are listed in the View menu, but nothing in the window points them out. A new user can miss both.
-
-### Current state
-
-- A **Did you know** tip on the left of the status bar rotates about every 12 seconds and starts on a random tip, so it is not the same sentence every launch. Click the tip for the next one. The camera, recording and dummy-mode badges keep their width; the tip uses only the room left after them, and a narrow window shortens it with an ellipsis (or hides it) rather than covering **DUMMY MODE**.
-- Right-click the tip, or uncheck **View > Help tips**, to turn them off. The choice is remembered. The timer runs on the window's thread and does not touch the camera.
-- The tips cover hovering for a description, `S` and `F`, stretch clip and gamma, rolling and block average, Request feature, the dockable panels, switching cameras, and zoom and pan.
-- A first launch opens at 2100×900, wide enough for a whole tip beside the badges. A layout saved by an older version is kept.
-
-## 2026-10-30 — Guidance for the processing controls
-
-### Previous state
-
-- Speckle filter, filter width, Average N, rolling average, reference refresh and noise reduction had tooltips that described the mechanism, or none (Gamma, Stretch to 0–255, Palette, CLAHE). Nothing said when to use a control or what to try first.
-
-### Current state
-
-- Each of those controls now says what it does, when to use it, and a starting value. **Help > Which settings should I use?** repeats that advice, including the processing order: noise reduction → difference → average → speckle filter → stretch → invert → gamma/CLAHE → palette.
-- **Live preview** and **Measurement** in the ESPI measurement section apply those starting points. They do not change exposure (8000 µs), gain (0 dB), frame rate (30 fps) or recording.
-- The remembered window layout resets once, so the taller controls panel is not clipped by an older saved size.
-
-
 ## 2026-10-30 — A restarted camera keeps its exposure, gain and frame rate
 
 ### Previous state
@@ -60,6 +34,18 @@
 - **Check for updates**, **Request feature** and **Open in Codex** are bordered buttons with padding, a background distinct from the status bar, and hover, pressed, focus and disabled states. The pointer changes to a hand over them.
 - **Check for updates** has a refresh icon and **Request feature** a lightbulb. The blue **Install update** button (download icon) stays the primary action, more prominent than the others, including while it reads **Downloading update…**.
 - A vertical line separates the buttons from the readouts. Busy labels (**Checking for updates…**, **Sending request…**, **Downloading update…**) stay disabled buttons and do not shift the readouts. The source badge keeps its full text (**DUMMY MODE**, or the camera name); the numeric readouts shorten first if the window is narrow.
+
+## 2026-10-30 — Guidance for the processing controls
+
+### Previous state
+
+- Speckle filter, filter width, Average N, rolling average, reference refresh and noise reduction had tooltips that described the mechanism, or none (Gamma, Stretch to 0–255, Palette, CLAHE). Nothing said when to use a control or what to try first.
+
+### Current state
+
+- Each of those controls now says what it does, when to use it, and a starting value. **Help > Which settings should I use?** repeats that advice, including the processing order: noise reduction → difference → average → speckle filter → stretch → invert → gamma/CLAHE → palette.
+- **Live preview** and **Measurement** in the ESPI measurement section apply those starting points. They do not change exposure (8000 µs), gain (0 dB), frame rate (30 fps) or recording.
+- The remembered window layout resets once, so the taller controls panel is not clipped by an older saved size.
 
 ## 2026-10-30 — Gamma in every view, and how it differs from stretch
 
@@ -108,6 +94,19 @@
 - There is no enrichment checkbox. Every request is labelled `enrich`. A blank description is filed from the title, and Copilot writes the spec; a description you write is kept and expanded.
 - **Submit** files the issue from the app. When it is sent, the dialog says the request was submitted. A failed send can be edited and retried. The app does not open a browser page for it.
 - A published build always contains the feedback token. The release build stops if that secret is missing, and `--check` says whether this copy has one. It never prints the token.
+
+## 2026-10-30 — Status-bar help tips
+
+### Previous state
+
+- Hovering a control shows what it does, and the shortcuts are listed in the View menu, but nothing in the window points them out. A new user can miss both.
+
+### Current state
+
+- A **Did you know** tip on the left of the status bar rotates about every 12 seconds and starts on a random tip, so it is not the same sentence every launch. Click the tip for the next one. The camera, recording and dummy-mode badges keep their width; the tip uses only the room left after them, and a narrow window shortens it with an ellipsis (or hides it) rather than covering **DUMMY MODE**.
+- Right-click the tip, or uncheck **View > Help tips**, to turn them off. The choice is remembered. The timer runs on the window's thread and does not touch the camera.
+- The tips cover hovering for a description, `S` and `F`, stretch clip and gamma, rolling and block average, Request feature, the dockable panels, switching cameras, and zoom and pan.
+- A first launch opens at 2100×900, wide enough for a whole tip beside the badges. A layout saved by an older version is kept.
 
 ## 2026-10-30 — Hover tooltips on every control
 

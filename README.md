@@ -6,6 +6,8 @@ The connected camera's model is detected automatically (from its GenICam identit
 
 The analog **Sony XC-ST50** works too, through a **Hauppauge USB-Live2** capture stick, alongside a Blackfly or on its own; see [Analog camera](#analog-camera-sony-xc-st50) below.
 
+**Help > User Guide** (also **F1**) opens the illustrated offline [user guide](src/espi_live/user_guide.html) in the default browser.
+
 ## Quick start
 
 ```sh
@@ -109,7 +111,7 @@ The **Open in Codex** button in the status bar (also **Help > Ask Codex about th
 
 ## Using the viewer
 
-One window holds the image, a toolbar with the view mode, Record, Freeze, Save frame, Set reference and the reset buttons, a **Controls** panel for camera, measurement and display settings, and a **Log** panel; both panels can be docked on any side, floated as separate windows, or hidden from the **View** menu, and the layout is remembered. The status bar shows a rotating **Did you know** tip, the current view's hint, FROZEN while the display is frozen, the Check for updates, Request feature and Open in Codex buttons, a separator, then the source (Camera or DUMMY MODE), the recording state, the measurement range, processing and display rates, and the value of the pixel under the cursor. The tip changes about every 12 seconds, starting on a random one; click it for the next. Right-click it, or uncheck **View > Help tips**, to turn the tips off, and that choice is remembered. The badges keep their place: a narrow window drops the tip before it crowds the dummy-mode badge, and shows it again, shortened with an ellipsis if needed, once there is room. The first launch opens wide enough for the whole tip. **Help > User Guide** (also **F1**) opens the illustrated offline [user guide](src/espi_live/user_guide.html) in the default browser.
+One window holds the image, a toolbar with the view mode, Record, Freeze, Save frame, Set reference and the reset buttons, a **Controls** panel for camera, measurement and display settings, and a **Log** panel; both panels can be docked on any side, floated as separate windows, or hidden from the **View** menu, and the layout is remembered. The status bar shows a rotating **Did you know** tip, the current view's hint, FROZEN while the display is frozen, the Check for updates, Request feature and Open in Codex buttons, a separator, then the source (Camera or DUMMY MODE), the recording state, the measurement range, processing and display rates, and the value of the pixel under the cursor. The tip changes about every 12 seconds, starting on a random one; click it for the next. Right-click it, or uncheck **View > Help tips**, to turn the tips off, and that choice is remembered. The badges keep their place: a narrow window drops the tip before it crowds the dummy-mode badge, and shows it again, shortened with an ellipsis if needed, once there is room. The first launch opens wide enough for the whole tip.
 
 Camera acquisition and ESPI processing run on their own thread, so moving, resizing or interacting with the window never pauses a measurement or a recording. The image is drawn by the GPU (OpenGL 3.3 through Qt): scaling, gamma and the color palette are applied in a shader. On machines without suitable OpenGL (for example some remote-desktop sessions) the app logs "Display: CPU fallback" and draws the same image on the CPU.
 
