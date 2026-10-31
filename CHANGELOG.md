@@ -35,6 +35,18 @@
 - **Check for updates** has a refresh icon and **Request feature** a lightbulb. The blue **Install update** button (download icon) stays the primary action, more prominent than the others, including while it reads **Downloading update…**.
 - A vertical line separates the buttons from the readouts. Busy labels (**Checking for updates…**, **Sending request…**, **Downloading update…**) stay disabled buttons and do not shift the readouts. The source badge keeps its full text (**DUMMY MODE**, or the camera name); the numeric readouts shorten first if the window is narrow.
 
+## 2026-10-30 — Guidance for the processing controls
+
+### Previous state
+
+- Speckle filter, filter width, Average N, rolling average, reference refresh and noise reduction had tooltips that described the mechanism, or none (Gamma, Stretch to 0–255, Palette, CLAHE). Nothing said when to use a control or what to try first.
+
+### Current state
+
+- Each of those controls now says what it does, when to use it, and a starting value. **Help > Which settings should I use?** repeats that advice, including the processing order: noise reduction → difference → average → speckle filter → stretch → invert → gamma/CLAHE → palette.
+- **Live preview** and **Measurement** in the ESPI measurement section apply those starting points. They do not change exposure (8000 µs), gain (0 dB), frame rate (30 fps) or recording.
+- The remembered window layout resets once, so the taller controls panel is not clipped by an older saved size.
+
 ## 2026-10-30 — Gamma in every view, and how it differs from stretch
 
 ### Previous state
