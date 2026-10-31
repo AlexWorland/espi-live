@@ -2080,16 +2080,18 @@ class PollingTests(WindowTestCase):
             self.assertIn("palette(base)", sheet)
 
     def assert_has_frame(self, button):
-        """The painted edge differs from the fill, so the control is not flat text.
+        """Compare the border with text-free padding at any display scale.
 
         Args: button is a visible QPushButton.
         Returns: None.
         """
         image = button.grab().toImage()
         mid_x = max(1, image.width() // 2)
-        center = image.pixelColor(mid_x, image.height() // 2)
-        edge = image.pixelColor(mid_x, 1)
-        self.assertNotEqual((center.red(), center.green(), center.blue()),
+        # QImage coordinates are physical pixels: a 1px border occupies only
+        # row 0 at 1x, but rows 0 and 1 at 2x. Sample the padding before text.
+        fill = image.pixelColor(mid_x, int(2 * image.devicePixelRatio()))
+        edge = image.pixelColor(mid_x, 0)
+        self.assertNotEqual((fill.red(), fill.green(), fill.blue()),
                             (edge.red(), edge.green(), edge.blue()))
 
     def test_fixed_label_keeps_full_text_but_shows_an_ellipsis(self):
