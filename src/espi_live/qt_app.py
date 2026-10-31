@@ -3501,20 +3501,22 @@ class MainWindow(QMainWindow):
 def finish_update(window, log):
     """Install a downloaded build after the window closed, and restart into it.
 
-    Runs once the engine has stopped, so the camera is free for the new copy.
+    Waits for every engine to stop before changing files, so the camera is
+    free for the new copy. A shutdown timeout leaves the installation alone.
 
     Args: window is the closed MainWindow (or None); log is the AppLog.
     Returns: None.
     """
     if window is None or not window.pending_update:
         return
+    if not window.wait_for_engines(5.0):
+        log.warning("The camera was not released in time; the update was not installed. "
+                    "Close any running copies and try the update again.")
+        return
     try:
         path = updater.install_update(window.pending_update)
         log.write(f"Installed update: {path}")
-        if window.relaunch_after_exit and not window.wait_for_engines(5.0):
-            log.write("The camera was not released in time; start ESPI live again "
-                      "to use the new build")
-        elif window.relaunch_after_exit:
+        if window.relaunch_after_exit:
             updater.relaunch(sys.argv[1:])
             log.write("Restarting into the new build")
     except (updater.UpdateError, OSError) as exc:
