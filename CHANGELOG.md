@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-30 — A restarted camera keeps its exposure, gain and frame rate
+
+### Previous state
+
+- Turning a camera off and on again started it at 8000 µs, 0 dB and 30 fps, while the sliders still showed the values saved for that camera. It stayed there until one of those three settings was moved.
+
+### Current state
+
+- A camera that is turned back on starts at the exposure, gain and frame rate its sliders show. A new camera still starts at 8000 µs, 0 dB and 30 fps.
+
 ## 2026-10-30 — Leveled logs and automatic error reports
 
 ### Previous state
@@ -87,7 +97,6 @@
 
 - While the app is open it checks again about every three hours, a little earlier or later each time. It skips a check that would overlap one already running, a download, a recording or a frame save. `--no-update-check` turns the later checks off too. Running from source still does not update itself.
 - When a newer build is found the button reads **Install update** (the versions are in the tooltip, such as "Build 42 → 45") and the status bar mentions it once. Finding that same build again leaves the button as it is. A check that fails only goes to the log, and an update already found stays on the button. Downloading and restarting work as before: the new build is installed only after the camera is released.
-
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 
 ### Previous state
