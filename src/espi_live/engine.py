@@ -22,13 +22,12 @@ import os
 import queue
 import threading
 import time
-import traceback
 from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
 
-from espi_live import sources
+from espi_live import error_reports, sources
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
@@ -43,6 +42,7 @@ READBACK_INTERVAL_S = 1.0
 RANGE_INTERVAL_S = 0.5
 RECORDER_FINISH_TIMEOUT_S = 5.0
 PREDECESSOR_TIMEOUT_S = 10.0  # open_on_start waits this long for the old engine
+TIMING_LOG_INTERVAL_S = 5.0  # DEBUG frame-timing lines at most this often
 
 
 @dataclass
@@ -139,11 +139,12 @@ class Engine:
     def __init__(self, log, serial=None, tag="", info=None):
         """Create an idle engine.
 
-        Args: log is an AppLog (or any object with write(message)); serial
-            selects a FLIR camera by serial number (None: the first camera);
-            tag is added to saved file names to tell cameras apart ("" for
-            none); info, when given, is the CameraInfo to open instead (a
-            FLIR camera or a video-capture device).
+        Args: log is an AppLog or PrefixedLog (write, debug, info, warning,
+            error, exception); serial selects a FLIR camera by serial number
+            (None: the first camera); tag is added to saved file names to
+            tell cameras apart ("" for none); info, when given, is the
+            CameraInfo to open instead (a FLIR camera or a video-capture
+            device).
         Returns: None.
         """
         self.log = log
@@ -244,9 +245,13 @@ class Engine:
         self.camera_info = session.info
         self.demo_source = None
         identity = session.identity
+        reporter = error_reports.current_reporter()
+        if reporter is not None:
+            reporter.update_context(serials=[session.info.serial,
+                                            getattr(identity, "serial", "")])
         self.log.write("Camera: " + " | ".join(identity.description()))
         for warning in identity.warnings():
-            self.log.write(f"Camera note: {warning}")
+            self.log.warning(f"Camera note: {warning}")
         self.events.put(("camera_identity", identity))
         self._set_status(demo=False, camera=session.describe(session.read_values()))
         self.events.put(("camera_limits", session.limits()))
@@ -327,6 +332,7 @@ class Engine:
         """
         with self._settings_lock:
             self._settings = replace(self._settings, **changes)
+        self.log.debug(f"Settings: {changes}")
 
     def request(self, action, **payload):
         """Queue a one-shot command for the worker.
@@ -386,7 +392,9 @@ class Engine:
         """Worker entry point: run the frame loop, then clean up.
 
         Args: None.
-        Returns: None; fatal errors are logged and sent as a "fatal" event.
+        Returns: None; fatal errors are logged with their traceback, reported
+            (error_reports) and sent as a "fatal" event whose payload is
+            (message, fingerprint or None).
         """
         self._recorder = None
         self._retired = []
@@ -395,9 +403,9 @@ class Engine:
                 return
             self._loop()
         except Exception as exc:
-            self.log.write(f"Stopped: {type(exc).__name__}: {exc}")
-            traceback.print_exc()
-            self.events.put(("fatal", f"{type(exc).__name__}: {exc}"))
+            report = error_reports.caught(self.log, exc, "engine", "Stopped", fatal=True)
+            self.events.put(("fatal", (f"{type(exc).__name__}: {exc}",
+                                       report.fingerprint if report else None)))
         finally:
             try:
                 if self._recorder is not None:
@@ -408,11 +416,9 @@ class Engine:
                 for old in self._retired:
                     old.done.wait(max(0.0, deadline - time.monotonic()))
                     if old.done.is_set():
-                        self.log.write(old.summary())
-                        if old.error is not None:
-                            self.log.write(f"Recording error: {old.error}")
+                        self._recording_finished(old)
                     else:
-                        self.log.write(
+                        self.log.warning(
                             f"Recording did not finish within 5 seconds: {old.path}")
                 self._retired = []
             finally:
@@ -433,13 +439,14 @@ class Engine:
         self._open_after = None
         if after is not None and not after.wait(PREDECESSOR_TIMEOUT_S):
             message = "the camera is still in use by its previous session"
+            self.log.warning(f"Could not open the camera: {message}")
         else:
             try:
                 self.open_camera()
                 return True
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
-        self.log.write(f"Could not open the camera: {message}")
+                error_reports.caught(self.log, exc, "camera_open", "Could not open the camera")
         self.events.put(("open_failed", message))
         return False
 
@@ -467,6 +474,7 @@ class Engine:
         window_start = time.monotonic()
         window_frames = 0
         window_work = 0.0
+        last_timing_log = 0.0
         sequence = 0
         frame = None
         demo_next = time.monotonic()
@@ -528,9 +536,9 @@ class Engine:
                     if state == "incomplete":
                         incomplete += 1
                         if incomplete % 30 == 1:
-                            self.log.write(f"Incomplete frames: {incomplete}")
+                            self.log.warning(f"Incomplete frames: {incomplete}")
                     elif time.monotonic() - last_error_log >= 5.0:
-                        self.log.write(f"Camera timeout or acquisition error: {grabbed}")
+                        self.log.warning(f"Camera timeout or acquisition error: {grabbed}")
                         last_error_log = time.monotonic()
                     if time.monotonic() - last_valid >= 1.0:
                         self._set_status(processing="Waiting for camera frame",
@@ -632,11 +640,14 @@ class Engine:
             if elapsed >= 1.0:
                 if self.demo:  # no sensor; the synthetic source runs at the request
                     self._set_status(camera_fps=f"Camera: {s.fps:.1f} fps (simulated)")
-                self._set_status(
-                    processed_fps=window_frames / elapsed,
-                    processing=(f"Processed: {window_frames / elapsed:.1f} fps    "
-                                f"Work: {1000 * window_work / max(1, window_frames):.1f}"
-                                " ms/frame"))
+                processing = (f"Processed: {window_frames / elapsed:.1f} fps    "
+                              f"Work: {1000 * window_work / max(1, window_frames):.1f}"
+                              " ms/frame")
+                self._set_status(processed_fps=window_frames / elapsed,
+                                 processing=processing)
+                if time.monotonic() - last_timing_log >= TIMING_LOG_INTERVAL_S:
+                    self.log.debug(f"Frame timing: {processing}")
+                    last_timing_log = time.monotonic()
                 window_start = time.monotonic()
                 window_frames = 0
                 window_work = 0.0
@@ -674,7 +685,7 @@ class Engine:
         except OSError as exc:
             self.update_settings(record=False)
             self.events.put(("record_off", None))
-            self.log.write(str(exc))
+            error_reports.caught(self.log, exc, "recorder", "Recording not started")
             return None
         self._set_status(record=f"Recording: {fps:.1f} fps")
         self.log.write(f"Recording AVI: {path} at {fps:.1f} fps")
@@ -688,12 +699,21 @@ class Engine:
         """
         for old in self._retired[:]:
             if old.done.is_set():
-                self.log.write(old.summary())
-                if old.error is not None:
-                    self.log.write(f"Recording error: {old.error}")
+                self._recording_finished(old)
                 self._retired.remove(old)
                 if self._recorder is None:
                     self._set_status(record="Recording: off")
+
+    def _recording_finished(self, recorder):
+        """Log a finished recording; a failed one is logged and, unless it is
+        a full or read-only disk, reported.
+
+        Args: recorder is an AVIRecorder whose thread has finished.
+        Returns: None.
+        """
+        self.log.write(recorder.summary())
+        if recorder.error is not None:
+            error_reports.caught(self.log, recorder.error, "recorder", "Recording error")
 
     def _handle_actions(self, processor, frame):
         """Run queued one-shot commands on the worker thread.
@@ -750,7 +770,7 @@ class Engine:
             attempt = sources.open_first_live(
                 self.log, settings.exposure_us, settings.gain_db, settings.fps)
         except Exception as exc:
-            self.log.write(f"Still in dummy mode: {exc}")
+            error_reports.caught(self.log, exc, "switch_live", "Still in dummy mode")
             self.events.put(("switch_failed", str(exc)))
             return processor, frame
         if self._recorder is not None:

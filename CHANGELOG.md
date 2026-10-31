@@ -10,6 +10,31 @@
 
 - A camera that is turned back on starts at the exposure, gain and frame rate its sliders show. A new camera still starts at 8000 µs, 0 dB and 30 fps.
 
+## 2026-10-30 — Leveled logs and automatic error reports
+
+### Previous state
+
+- The log was untyped text: `log.write(...)` lines with no levels, no startup header and no pruning of old log files. Tracebacks reached the log only from the engine's crash path and the front ends; exceptions in Qt slots, the recorder or background workers were lost. Qt warnings and criticals were not logged at all, and a native crash (inside PySpin, OpenCV or the GL driver) left nothing behind. Learning about a failure required someone at the camera PC to send the log file.
+
+### Current state
+
+- Review fixes: scrub every public report field, register camera serials before startup failures, and keep historical crash logs local. Analog camera identities no longer interrupt status polling. Opt-out stops queued delivery and subsequent GitHub writes, expired pending reports are dropped at startup, and held OS locks protect active logs and crash files from retention. Qt aborts retain native diagnostics when no report was saved; tests pin literal v1 fingerprints and restore exception hooks correctly.
+
+- The log is built on the standard `logging` module: `HH:MM:SS LEVEL [thread] message` lines in the per-run file, the GUI log panel and the console, with a startup header (build and commit time, platform, library versions, front end, level). `--log-level {debug,info,warning}` or `ESPI_LOG_LEVEL` raises the detail (`debug` adds camera node writes, settings changes and frame timing), the newest 50 run logs are kept, `Help > Open log folder` opens the folder, warnings from Python and Qt are logged, `faulthandler` writes `espi_<timestamp>.crash` for native crashes (reported by the next start), and a UI stall longer than ~10 s dumps every thread's stack into the log.
+- Unexpected errors — uncaught exceptions on any thread (including Qt slots), engine and recorder failures, Qt critical messages and the previous run's crash file — are reported automatically as GitHub issues labelled `auto-error`. Each error carries a deterministic ID (`ESPI-ERR-v1-…`) from its exception type and code path, so the same bug is reported once across machines, install paths and runs: the existing issue gets one "seen again" comment per build, a regression in a newer build reopens it, wontfix issues stay quiet. Every report is scrubbed of home folders, user and host names, camera serials, saved-file names, e-mail addresses and token-like strings. Release builds report by default; `--no-error-reports`, `ESPI_ERROR_REPORTS=0` or **Help > Send error reports automatically** turns it off, and copies without the token get a **Report in browser…** link instead. The "ESPI stopped" dialog names the issue, and non-fatal errors show a status-bar message with the link. Issues are added to the **ESPI Live roadmap** project by a workflow using the new `PROJECT_PAT` secret.
+
+## 2026-10-30 — Status-bar actions look like buttons
+
+### Previous state
+
+- **Check for updates** and **Request feature** were flat, so they read as status text like the frame-rate readouts. While a check or a request was in progress they were only grey text. The blue **Install update** button was a flat rectangle with no hover or pressed state.
+
+### Current state
+
+- **Check for updates**, **Request feature** and **Open in Codex** are bordered buttons with padding, a background distinct from the status bar, and hover, pressed, focus and disabled states. The pointer changes to a hand over them.
+- **Check for updates** has a refresh icon and **Request feature** a lightbulb. The blue **Install update** button (download icon) stays the primary action, more prominent than the others, including while it reads **Downloading update…**.
+- A vertical line separates the buttons from the readouts. Busy labels (**Checking for updates…**, **Sending request…**, **Downloading update…**) stay disabled buttons and do not shift the readouts. The source badge keeps its full text (**DUMMY MODE**, or the camera name); the numeric readouts shorten first if the window is narrow.
+
 ## 2026-10-30 — Gamma in every view, and how it differs from stretch
 
 ### Previous state
