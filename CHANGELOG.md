@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-31 — Verify updates through download, restart and cleanup
+
+- Added real-worker Qt and CLI integration tests against a local release service, covering automatic and manual checks, download consent, corrupt and interrupted downloads, retries and preservation of recordings and tokens.
+- Added native PyInstaller build-to-build tests for Windows, Linux and macOS, including periodic discovery, restart now or later, `--update`, argument preservation, multiple-engine shutdown and old-build cleanup. They run on pull requests and gate release builds.
+- If an engine cannot stop during shutdown, the app now leaves the running installation untouched and logs that the update was not installed. Previously the shutdown check only prevented relaunch after the files had already been replaced.
+
 ## 2026-10-30 — A restarted camera keeps its exposure, gain and frame rate
 
 ### Previous state

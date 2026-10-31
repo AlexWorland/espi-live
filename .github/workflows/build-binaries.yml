@@ -212,9 +212,13 @@ jobs:
       - name: Require 100% line coverage
         run: python -m coverage report
 
+  update-e2e:
+    name: Native update tests
+    uses: ./.github/workflows/test-updates.yml
+
   build:
     name: Build ${{ matrix.name }}
-    needs: [test, version]
+    needs: [test, version, update-e2e]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

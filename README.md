@@ -20,11 +20,13 @@ scripts/windows/SETUP AND START ESPI.bat
 
 Manually: `PYTHONPATH=src python -m espi_live [--demo]` (on Windows, `set PYTHONPATH=src` first). Run it with an interpreter that has the packages in `requirements.txt` (OpenCV, NumPy, PySide6); the camera runtime also needs PySpin, normally `C:\Python310\PySpin\python.exe`. PySide6 is required; without it the app exits with a message. `python -m espi_live --check` loads everything without opening a window; `python -m unittest discover -s tests` runs the camera-free tests (both with `PYTHONPATH=src`). For line coverage (kept at 100%), `pip install coverage`, then `QT_QPA_PLATFORM=offscreen python -m coverage run -m unittest discover -s tests` and `python -m coverage report`.
 
+The normal suite includes updater integration tests with real Qt widgets, background workers, loopback HTTP and temporary installations. To also test native self-replacement, install `pyinstaller` and `certifi`, then run `PYTHONPATH=src QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests/e2e -v`. This builds two disposable PyInstaller copies and tests startup and periodic discovery, manual checking, deferred restart and `--update`, including a healthy demo stream after restart and old-build cleanup. It uses no camera, SDK, GitHub credentials or external service; the only HTTP traffic is to a local fixture. The test-only launcher scripts supply build metadata, isolate settings and drive the real app; they are never included in release builds. Set `ESPI_TEST_ARTIFACTS` to a folder to retain process events and logs. The **Update end-to-end tests** workflow runs both the updater integration tests and the native tests on Windows, Linux and macOS for pull requests and as a release build gate. These tests cover native update mechanics, not camera-driver behavior or GitHub availability.
+
 ## Project layout
 
 ```
 src/espi_live/        the application: engine (acquisition/processing thread), Qt UI
-tests/                camera-free unit tests
+tests/                camera-free unit and loopback-HTTP integration tests; e2e/ holds native update tests
 scripts/
   windows/            camera-PC setup and launch helpers (.bat, .ps1)
   bash/               Bash equivalents
@@ -69,7 +71,7 @@ A release can also be started by hand: open **Actions > Release > Run workflow**
 | `espi-live-linux-x64.tar.gz` | PySpin 4.4 bundled (Ubuntu 24.04 build) |
 | `espi-live-macos-arm64.zip` | `--demo` only (no macOS PySpin wheel); unsigned, run `xattr -cr "ESPI Live.app"` after unzipping |
 
-Output goes to `output/` next to the executable, inside the `espi-live` folder (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
+Output goes to `output/` next to the executable, inside the `espi-live` folder (next to the `.app` on macOS). Each release binary is checked for startup and module loading (`--help`, `--check`), and separate two-build tests exercise the native updater on all three platforms. The bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
 
 ### Automatic updates
 
