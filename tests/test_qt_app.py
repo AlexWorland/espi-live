@@ -1283,6 +1283,53 @@ class MainWindowBuildTests(WindowTestCase):
         self.dialogs.about.assert_called_once()
         self.assertEqual(self.dialogs.about.call_args.args[2], updater.describe_build())
 
+    def test_guide_action_opens_the_html_file(self):
+        """Help > User Guide hands the bundled HTML file to the browser.
+
+        Args: None.
+        Returns: None.
+        """
+        help_menu = self.window.menuBar().actions()[1].menu()
+        guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
+        path = os.path.join(os.path.dirname(qt_app.__file__), "user_guide.html")
+        with mock.patch.object(qt_app, "guide_path", return_value=path), \
+                mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                                  return_value=True) as open_url:
+            guide.trigger()
+        self.assertEqual(open_url.call_count, 1)
+        self.assertTrue(open_url.call_args.args[0].toLocalFile().endswith(
+            "user_guide.html"))
+
+    def test_guide_action_reports_a_missing_file(self):
+        """Help > User Guide warns when the bundled file is absent.
+
+        Args: None.
+        Returns: None.
+        """
+        help_menu = self.window.menuBar().actions()[1].menu()
+        guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
+        with mock.patch.object(qt_app, "guide_path",
+                               return_value="/no/such/user_guide.html"):
+            guide.trigger()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("could not be found", self.dialogs.warning.call_args.args[2])
+
+    def test_guide_action_reports_an_unopenable_browser(self):
+        """Help > User Guide gives the path when no browser starts.
+
+        Args: None.
+        Returns: None.
+        """
+        help_menu = self.window.menuBar().actions()[1].menu()
+        guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
+        path = os.path.join(os.path.dirname(qt_app.__file__), "user_guide.html")
+        with mock.patch.object(qt_app, "guide_path", return_value=path), \
+                mock.patch.object(qt_app.QDesktopServices, "openUrl",
+                                  return_value=False):
+            guide.trigger()
+        self.dialogs.information.assert_called_once()
+        self.assertIn(path, self.dialogs.information.call_args.args[2])
+
     def test_hover_signal_is_remembered(self):
         """The view's hover signal is stored for the pixel readout.
 

@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
 
 from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, tips, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
+from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
                                   VIEW_MODES, palette_rgb_table)
@@ -2351,10 +2352,34 @@ class MainWindow(QMainWindow):
         logs = help_menu.addAction("Open log folder")
         logs.triggered.connect(self._open_log_folder)
         help_menu.addSeparator()
+        guide = help_menu.addAction("User Guide")
+        guide.setShortcut(QKeySequence.HelpContents)
+        set_tooltip(guide, "Open the illustrated user guide in your browser. "
+                    "Shortcut: F1.")
+        guide.triggered.connect(self.show_guide)
+        help_menu.addSeparator()
         about = help_menu.addAction("About ESPI live")
         set_tooltip(about, "Show the version and build of this copy.")
         about.triggered.connect(lambda: QMessageBox.about(
             self, "About ESPI live", updater.describe_build()))
+
+    def show_guide(self):
+        """Open the bundled HTML user guide in the default browser.
+
+        Args: None.
+        Returns: None; reports the path when the browser cannot be started.
+        """
+        path = guide_path()
+        if not os.path.isfile(path):
+            QMessageBox.warning(
+                self, "User guide missing",
+                f"The user guide could not be found at:\n{path}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            QMessageBox.information(
+                self, "User guide",
+                "The default browser could not be opened. Open this file "
+                f"manually:\n{path}")
 
     # ----- cameras -------------------------------------------------------------
 

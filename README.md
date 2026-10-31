@@ -6,6 +6,8 @@ The connected camera's model is detected automatically (from its GenICam identit
 
 The analog **Sony XC-ST50** works too, through a **Hauppauge USB-Live2** capture stick, alongside a Blackfly or on its own; see [Analog camera](#analog-camera-sony-xc-st50) below.
 
+**Help > User Guide** (also **F1**) opens the illustrated offline [user guide](src/espi_live/user_guide.html) in the default browser.
+
 ## Quick start
 
 ```sh

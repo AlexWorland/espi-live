@@ -10,7 +10,7 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 
 | Path | Contents | Edit? |
 |------|----------|-------|
-| `src/espi_live/` | The application package (see Architecture). `__main__.py` → `cli.py` is the entry point. | Yes: single source of truth |
+| `src/espi_live/` | The application package (see Architecture), including the bundled `user_guide.html`. `__main__.py` → `cli.py` is the entry point. | Yes: single source of truth |
 | `tests/` | Camera-free `unittest` suite with 100% line coverage of `src/espi_live/`: the Qt front end (offscreen), the engine and camera code against an in-memory PySpin (`fake_pyspin.py`), the capture source against a fake `cv2.VideoCapture` and enumerator (`fake_capture.py`), the error reporter against a fake GitHub, and the updater, feature requests and camera reports with mocked network | Yes |
 | `scripts/windows/`, `scripts/bash/` | Camera-PC setup and launch helpers; `scripts/camera_live_control.py` is a standalone camera-control helper | Yes; keep their paths current when files move |
 | `experiments/` | Tentative work and older scripts, including `espi_live_bfs_u3_200s6m.py` (a 20 MP-camera variant of the viewer, not reconciled with the package) | Yes |
@@ -45,6 +45,7 @@ python -m py_compile src/espi_live/*.py            # required check after edits 
 
 | Module | Role |
 |--------|------|
+| `guide.py` | Locates the bundled `user_guide.html` from source or a packaged build and supplies an error page when it cannot be read |
 | `paths.py` | `PROJECT_ROOT`/`OUTPUT_DIR` (frozen-build aware), `timestamp()`, `output_folder()` |
 | `processing.py` | `ESPIProcessor` (difference, averaging), `normalize_min_max`, `apply_palette` (the one definition of display color), `palette_rgb_table` (same colors as a GPU table), `DemoSource`, `watermark_demo` |
 | `camera.py` | PySpin node helpers (`set_enum`/`set_bool`/`set_float`/`try_setting`, `read_string`/`read_int`), `read_identity`, `configure_camera`, `CameraSession(log, serial, exposure_us, gain_db, fps)` (open/grab/set_float/limits/read_values/describe/close; `identity` and `info` after open; `interlaced` False), `list_cameras` → `CameraInfo` (`kind` "spinnaker" or "capture"; capture devices also carry `index`, `backend`, `vid`, `pid`, `path`), `acquire_system`/`release_system` (shared, reference-counted PySpin System) |
