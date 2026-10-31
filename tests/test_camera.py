@@ -6,6 +6,7 @@ Run from the project root:  PYTHONPATH=src python -m unittest discover -s tests
 import importlib
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -13,26 +14,7 @@ import numpy as np
 from espi_live import camera
 from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
-
-
-class ListLog:
-    """Collect log messages in memory."""
-
-    def __init__(self):
-        """Create an empty log.
-
-        Args: None.
-        Returns: None.
-        """
-        self.lines = []
-
-    def write(self, message):
-        """Record one message.
-
-        Args: message is the text to keep.
-        Returns: None.
-        """
-        self.lines.append(message)
+from list_log import ListLog
 
 
 class FakeSpinTestCase(unittest.TestCase):
@@ -228,15 +210,15 @@ class TrySettingTests(FakeSpinTestCase):
         camera.try_setting(self.log, nodemap, camera.set_float, "Gain", 1.0)
         self.assertEqual(self.log.lines, ["Could not set Gain: set failed"])
 
-    def test_silent_on_success(self):
-        """A successful write logs nothing.
+    def test_success_is_logged_at_debug_only(self):
+        """A successful write logs one DEBUG line and no warning.
 
         Args: None.
         Returns: None.
         """
         camera.try_setting(self.log, self.cam.GetNodeMap(), camera.set_float,
                            "Gain", 1.0)
-        self.assertEqual(self.log.lines, [])
+        self.assertEqual(self.log.records, [("DEBUG", "Camera setting Gain = 1.0", None)])
 
 
 class ConfigureCameraTests(FakeSpinTestCase):
@@ -256,7 +238,19 @@ class ConfigureCameraTests(FakeSpinTestCase):
         self.assertEqual(nodemap.nodes["AcquisitionFrameRate"].value, 30.0)
         self.assertEqual(self.cam.stream_nodemap.nodes[
             "StreamBufferHandlingMode"].value, 1)
-        self.assertEqual(self.log.lines, [])
+        self.assertEqual(self.log.at("WARNING"), [])
+
+    def test_writes_given_exposure_gain_and_frame_rate(self):
+        """A caller can start the camera away from the hard-coded defaults.
+
+        Args: None.
+        Returns: None.
+        """
+        nodemap = camera.configure_camera(
+            self.cam, self.log, exposure_us=5000.0, gain_db=2.5, fps=12.0)
+        self.assertEqual(nodemap.nodes["ExposureTime"].value, 5000.0)
+        self.assertEqual(nodemap.nodes["Gain"].value, 2.5)
+        self.assertEqual(nodemap.nodes["AcquisitionFrameRate"].value, 12.0)
 
     def test_logs_each_unsupported_setting(self):
         """A camera without the nodes still configures without raising.
@@ -266,7 +260,7 @@ class ConfigureCameraTests(FakeSpinTestCase):
         """
         self.cam.nodemap.nodes.clear()
         camera.configure_camera(self.cam, self.log)
-        self.assertEqual(len(self.log.lines), 8)
+        self.assertEqual(len(self.log.at("WARNING")), 8)
 
 
 class SessionOpenTests(FakeSpinTestCase):
@@ -501,7 +495,7 @@ class SessionCloseTests(FakeSpinTestCase):
         self.system.camera_list.fail_clear = True
         self.system.fail_release = True
         session.close()
-        self.assertEqual(self.log.lines, [
+        self.assertEqual(self.log.at("WARNING"), [
             "EndAcquisition error: EndAcquisition failed",
             "DeInit error: DeInit failed",
             "Camera-list cleanup error: clear failed",
@@ -755,3 +749,17 @@ class ListCamerasTests(FakeSpinTestCase):
         with self.assertRaises(FakeSpinnakerException):
             camera.list_cameras(self.log)
         self.assertEqual(self.system.releases, 1)
+
+
+class LibraryVersionTests(unittest.TestCase):
+    """Reading the SDK version for the log header and reports."""
+
+    def test_the_version_is_formatted_from_the_system(self):
+        """major.minor.type.build is read from the System.
+
+        Args: None.
+        Returns: None.
+        """
+        version = SimpleNamespace(major=4, minor=2, type=0, build=88)
+        system = SimpleNamespace(GetLibraryVersion=lambda: version)
+        self.assertEqual(camera.read_library_version(system), "4.2.0.88")

@@ -1,5 +1,66 @@
 # Changelog
 
+## 2026-10-30 — Status-bar help tips
+
+### Previous state
+
+- Hovering a control shows what it does, and the shortcuts are listed in the View menu, but nothing in the window points them out. A new user can miss both.
+
+### Current state
+
+- A **Did you know** tip on the left of the status bar rotates about every 12 seconds and starts on a random tip, so it is not the same sentence every launch. Click the tip for the next one. The camera, recording and dummy-mode badges keep their width; the tip uses only the room left after them, and a narrow window shortens it with an ellipsis (or hides it) rather than covering **DUMMY MODE**.
+- Right-click the tip, or uncheck **View > Help tips**, to turn them off. The choice is remembered. The timer runs on the window's thread and does not touch the camera.
+- The tips cover hovering for a description, `S` and `F`, stretch clip and gamma, rolling and block average, Request feature, the dockable panels, switching cameras, and zoom and pan.
+- A first launch opens at 2100×900, wide enough for a whole tip beside the badges. A layout saved by an older version is kept.
+
+## 2026-10-30 — Guidance for the processing controls
+
+### Previous state
+
+- Speckle filter, filter width, Average N, rolling average, reference refresh and noise reduction had tooltips that described the mechanism, or none (Gamma, Stretch to 0–255, Palette, CLAHE). Nothing said when to use a control or what to try first.
+
+### Current state
+
+- Each of those controls now says what it does, when to use it, and a starting value. **Help > Which settings should I use?** repeats that advice, including the processing order: noise reduction → difference → average → speckle filter → stretch → invert → gamma/CLAHE → palette.
+- **Live preview** and **Measurement** in the ESPI measurement section apply those starting points. They do not change exposure (8000 µs), gain (0 dB), frame rate (30 fps) or recording.
+- The remembered window layout resets once, so the taller controls panel is not clipped by an older saved size.
+
+
+## 2026-10-30 — A restarted camera keeps its exposure, gain and frame rate
+
+### Previous state
+
+- Turning a camera off and on again started it at 8000 µs, 0 dB and 30 fps, while the sliders still showed the values saved for that camera. It stayed there until one of those three settings was moved.
+
+### Current state
+
+- A camera that is turned back on starts at the exposure, gain and frame rate its sliders show. A new camera still starts at 8000 µs, 0 dB and 30 fps.
+
+## 2026-10-30 — Leveled logs and automatic error reports
+
+### Previous state
+
+- The log was untyped text: `log.write(...)` lines with no levels, no startup header and no pruning of old log files. Tracebacks reached the log only from the engine's crash path and the front ends; exceptions in Qt slots, the recorder or background workers were lost. Qt warnings and criticals were not logged at all, and a native crash (inside PySpin, OpenCV or the GL driver) left nothing behind. Learning about a failure required someone at the camera PC to send the log file.
+
+### Current state
+
+- Review fixes: scrub every public report field, register camera serials before startup failures, and keep historical crash logs local. Analog camera identities no longer interrupt status polling. Opt-out stops queued delivery and subsequent GitHub writes, expired pending reports are dropped at startup, and held OS locks protect active logs and crash files from retention. Qt aborts retain native diagnostics when no report was saved; tests pin literal v1 fingerprints and restore exception hooks correctly.
+
+- The log is built on the standard `logging` module: `HH:MM:SS LEVEL [thread] message` lines in the per-run file, the GUI log panel and the console, with a startup header (build and commit time, platform, library versions, front end, level). `--log-level {debug,info,warning}` or `ESPI_LOG_LEVEL` raises the detail (`debug` adds camera node writes, settings changes and frame timing), the newest 50 run logs are kept, `Help > Open log folder` opens the folder, warnings from Python and Qt are logged, `faulthandler` writes `espi_<timestamp>.crash` for native crashes (reported by the next start), and a UI stall longer than ~10 s dumps every thread's stack into the log.
+- Unexpected errors — uncaught exceptions on any thread (including Qt slots), engine and recorder failures, Qt critical messages and the previous run's crash file — are reported automatically as GitHub issues labelled `auto-error`. Each error carries a deterministic ID (`ESPI-ERR-v1-…`) from its exception type and code path, so the same bug is reported once across machines, install paths and runs: the existing issue gets one "seen again" comment per build, a regression in a newer build reopens it, wontfix issues stay quiet. Every report is scrubbed of home folders, user and host names, camera serials, saved-file names, e-mail addresses and token-like strings. Release builds report by default; `--no-error-reports`, `ESPI_ERROR_REPORTS=0` or **Help > Send error reports automatically** turns it off, and copies without the token get a **Report in browser…** link instead. The "ESPI stopped" dialog names the issue, and non-fatal errors show a status-bar message with the link. Issues are added to the **ESPI Live roadmap** project by a workflow using the new `PROJECT_PAT` secret.
+
+## 2026-10-30 — Status-bar actions look like buttons
+
+### Previous state
+
+- **Check for updates** and **Request feature** were flat, so they read as status text like the frame-rate readouts. While a check or a request was in progress they were only grey text. The blue **Install update** button was a flat rectangle with no hover or pressed state.
+
+### Current state
+
+- **Check for updates**, **Request feature** and **Open in Codex** are bordered buttons with padding, a background distinct from the status bar, and hover, pressed, focus and disabled states. The pointer changes to a hand over them.
+- **Check for updates** has a refresh icon and **Request feature** a lightbulb. The blue **Install update** button (download icon) stays the primary action, more prominent than the others, including while it reads **Downloading update…**.
+- A vertical line separates the buttons from the readouts. Busy labels (**Checking for updates…**, **Sending request…**, **Downloading update…**) stay disabled buttons and do not shift the readouts. The source badge keeps its full text (**DUMMY MODE**, or the camera name); the numeric readouts shorten first if the window is narrow.
+
 ## 2026-10-30 — Gamma in every view, and how it differs from stretch
 
 ### Previous state
@@ -74,7 +135,6 @@
 
 - While the app is open it checks again about every three hours, a little earlier or later each time. It skips a check that would overlap one already running, a download, a recording or a frame save. `--no-update-check` turns the later checks off too. Running from source still does not update itself.
 - When a newer build is found the button reads **Install update** (the versions are in the tooltip, such as "Build 42 → 45") and the status bar mentions it once. Finding that same build again leaves the button as it is. A check that fails only goes to the log, and an update already found stays on the button. Downloading and restarting work as before: the new build is installed only after the camera is released.
-
 ## 2026-10-29 — Analog camera support (Sony XC-ST50 via USB-Live2)
 
 ### Previous state

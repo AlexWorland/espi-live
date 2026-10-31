@@ -12,9 +12,11 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import logging
 import queue
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -28,19 +30,26 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSlider, QAbstractSpinBo
                                QComboBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QStyle,
                                QTextEdit, QWidget)
 
-from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, updater
+from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, tips, updater
+from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
+from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
 from espi_live.channels import Channel, demo_channels
 from espi_live.engine import Engine, FramePacket
-from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
-from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
+from list_log import ListLog
 
 APP = QApplication.instance() or QApplication(sys.argv)
 
+FINGERPRINT_UI = "ESPI-ERR-v1-" + "b" * 12
 
-class FakeLog:
+
+class FakeLog(ListLog):
     """In-memory stand-in for AppLog."""
+
+    level = logging.INFO
+    path = None
+    crash_path = None
 
     def __init__(self):
         """Create an empty log.
@@ -48,16 +57,17 @@ class FakeLog:
         Args: None.
         Returns: None.
         """
-        self.lines = []
+        super().__init__()
         self.pending = []
+        self.ticks = 0
 
-    def write(self, message):
+    def _add(self, level, message, exc_info=None):
         """Record one message for assertions and for drain().
 
-        Args: message is the text to keep.
+        Args: level, message and exc_info as ListLog takes them.
         Returns: None.
         """
-        self.lines.append(message)
+        super()._add(level, message, exc_info)
         self.pending.append(message + "\n")
 
     def drain(self):
@@ -68,6 +78,30 @@ class FakeLog:
         """
         text, self.pending = "".join(self.pending), []
         return text
+
+    def recent_lines(self):
+        """Return the newest lines, as AppLog does for error reports.
+
+        Args: None.
+        Returns: The last 40 lines.
+        """
+        return self.lines[-40:]
+
+    def uptime(self):
+        """Pretend the run started a minute ago.
+
+        Args: None.
+        Returns: 60.0.
+        """
+        return 60.0
+
+    def watchdog_tick(self):
+        """Count UI ticks instead of arming faulthandler.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ticks += 1
 
     def start(self):
         """Pretend to open a log file.
@@ -980,6 +1014,7 @@ class WindowTestCase(unittest.TestCase):
         """
         self.window.frame_timer.stop()
         self.window.status_timer.stop()
+        self.window.tip_timer.stop()
         self.window.close()
         self.engine.stop()
         self.engine.wait(5.0)
@@ -1034,12 +1069,13 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertIn("Now: 8000 µs", tip)
 
     def test_first_run_uses_default_window_size(self):
-        """Without saved geometry the window opens at 1400x900.
+        """Without saved geometry the window opens at the default size.
 
         Args: None.
         Returns: None.
         """
-        self.assertEqual((self.window.width(), self.window.height()), (1400, 900))
+        self.assertEqual((self.window.width(), self.window.height()),
+                         (qt_app.DEFAULT_WIDTH, qt_app.DEFAULT_HEIGHT))
 
     def test_cpu_view_is_used_when_gl_not_requested(self):
         """use_gl=False builds the CPU fallback view.
@@ -1060,6 +1096,7 @@ class MainWindowBuildTests(WindowTestCase):
         self.addCleanup(window.deleteLater)
         window.frame_timer.stop()
         window.status_timer.stop()
+        window.tip_timer.stop()
         self.assertEqual(window.updates.checks, 1)
         self.assertTrue(window.update_timer.isActive())
         span = abs(window.update_timer.interval() - qt_app.UPDATE_CHECK_INTERVAL_MS)
@@ -1332,6 +1369,97 @@ def _dock_controls_missing_tooltips(dock):
         if not widget.toolTip().strip():
             missing.append(widget)
     return missing
+
+
+class SettingsGuideTests(WindowTestCase):
+    """Tooltips, the settings guide and the two processing presets."""
+
+    def test_processing_controls_explain_use_and_a_starting_value(self):
+        """Each processing control says what it does and where to start.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        expected = {
+            w.noise_reduction: ("sensor noise", "Start at 0"),
+            w.average: ("difference frames", "Start at 8"),
+            w.rolling: ("one image", "frame rate", "lag"),
+            w.ref_refresh: ("drift", "Start at 0"),
+            w.smoothing_combo: ("Gaussian", "Median", "5 px"),
+            w.smoothing: ("fringe spacing", "Start at 3"),
+            w.scale_range: ("0 and 255", "Start on"),
+            w.invert: ("bright and dark", "Start off"),
+            w.clip: ("speckles", "Start at 0"),
+            w.palette_combo: ("Start with Gray",),
+            w.gamma: ("Start at 1.0",),
+            w.clahe: ("color palette", "Gray"),
+        }
+        for widget, phrases in expected.items():
+            tip = " ".join(widget.toolTip().split())
+            for phrase in phrases:
+                self.assertIn(phrase, tip)
+
+    def test_presets_apply_processing_and_leave_the_camera_alone(self):
+        """Live preview and Measurement set processing, not exposure or recording.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.exposure.spin.setValue(1234)
+        w.gain.spin.setValue(2.5)
+        w.fps.spin.setValue(15)
+        w.record_button.setChecked(True)
+        w.single_field.setChecked(False)
+        buttons = {b.text(): b for b in w.controls_dock.findChildren(qt_app.QPushButton)}
+        buttons["Measurement"].click()
+        s = self.engine.settings()
+        self.assertEqual(s.mode, "Reference")
+        self.assertEqual((s.average, s.rolling, s.ref_refresh_s), (8, False, 2.0))
+        self.assertEqual((s.smoothing, s.smoothing_method), (3, "Median"))
+        self.assertEqual((s.noise_reduction, s.clip_percent, s.clahe), (0.0, 0.5, True))
+        self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
+        self.assertFalse(s.single_field)
+        self.assertEqual(w.average.value(), 8)
+        self.assertTrue(w.mode_group.checkedButton().text() == "Reference")
+        buttons["Live preview"].click()
+        s = self.engine.settings()
+        self.assertEqual(qt_app.PROCESSING_PRESETS["Live preview"]["mode"], s.mode)
+        self.assertEqual((s.average, s.smoothing, s.clahe, s.ref_refresh_s), (1, 0, False, 0.0))
+        self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
+        self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
+        self.assertIn("Preset applied: Live preview", self.log.lines)
+        self.assertIn("exposure", buttons["Live preview"].toolTip())
+
+    def test_guide_lists_the_pipeline_and_applies_a_preset(self):
+        """The Help guide matches the README and its buttons apply a preset.
+
+        Args: None.
+        Returns: None.
+        """
+        with open(os.path.join(paths.PROJECT_ROOT, "README.md"), encoding="utf-8") as handle:
+            readme = handle.read()
+        self.assertIn(qt_app.PIPELINE, readme)
+        self.assertIn(qt_app.PIPELINE, qt_app.SETTINGS_GUIDE)
+        self.assertIn("display gamma", qt_app.SETTINGS_GUIDE)
+        self.assertIn("Below 1.0 brightens dark", " ".join(self.window.gamma.toolTip().split()))
+        help_menu = self.window.menuBar().actions()[-1].menu()
+        entry = next(a for a in help_menu.actions()
+                     if a.text() == "Which settings should I use?")
+        with mock.patch.object(qt_app.SettingsGuideDialog, "exec", return_value=0) as shown:
+            entry.trigger()
+        shown.assert_called_once()
+        dialog = qt_app.SettingsGuideDialog(self.window)
+        self.assertEqual(dialog.guide.toPlainText(), qt_app.SETTINGS_GUIDE)
+        buttons = {b.text(): b for b in dialog.findChildren(qt_app.QPushButton)}
+        buttons["Apply Measurement"].click()
+        self.assertEqual(self.engine.settings().mode, "Reference")
+        self.assertEqual(self.engine.settings().average, 8)
+        buttons["Apply Live preview"].click()
+        self.assertEqual(self.engine.settings().mode, "Previous")
+        buttons["Close"].click()
+        self.assertFalse(dialog.isVisible())
 
 
 class TooltipCoverageTests(WindowTestCase):
@@ -1835,7 +1963,7 @@ class PollingTests(WindowTestCase):
         window.show()
         QApplication.processEvents()
         items = (window.update_slot, window.feature_button, window.codex_button,
-                 window.source_badge,
+                 window.status_actions_rule, window.source_badge,
                  window.record_label, window.range_status, window.camera_fps_status,
                  window.speed_status, window.pixel_status)
 
@@ -1859,6 +1987,110 @@ class PollingTests(WindowTestCase):
         window.check_button.setVisible(True)
         window.update_button.setVisible(False)
         self.assertEqual(geometry(), before)
+        window._rotate_tip()  # a longer or shorter tip must not shove the badges
+        self.assertEqual(geometry(), before)
+        window._rotate_tip()  # a longer or shorter tip must not shove the badges
+        self.assertEqual(geometry(), before)
+        window._rotate_tip()  # a longer or shorter tip must not shove the badges
+        self.assertEqual(geometry(), before)
+
+    def test_status_actions_look_like_buttons(self):
+        """Idle, checking, update, sending and disabled states stay buttons.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        for button in (window.check_button, window.feature_button, window.codex_button):
+            self.assert_button_chrome(button, primary=False)
+        self.assertFalse(window.check_button.icon().isNull())
+        self.assertFalse(window.feature_button.icon().isNull())
+        self.assertTrue(window.codex_button.icon().isNull())
+        self.assertEqual(window.check_button.toolTip(),
+                         qt_app.format_tooltip("Check GitHub for a newer build of ESPI live."))
+        self.assertEqual(window.feature_button.toolTip(),
+                         qt_app.format_tooltip(
+                             "Send a feature request to the developers as a GitHub issue."))
+        self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
+        self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
+        self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
+        self.assertGreaterEqual(window.source_badge.width(),
+                                window.source_badge.sizeHint().width())
+        self.assertEqual(window.status_actions_rule.frameShape(), qt_app.QFrame.Shape.VLine)
+        window.check_button.setFocus(Qt.OtherFocusReason)
+        self.assertTrue(window.check_button.hasFocus())
+
+        window.updates.busy = True
+        window._sync_check_button()
+        self.assertFalse(window.check_button.isEnabled())
+        self.assertEqual(window.check_button.text(), "Checking for updates…")
+        self.assert_button_chrome(window.check_button, primary=False)
+        self.assert_has_frame(window.check_button)
+
+        window.updates.busy = False
+        window.update_info = make_info()
+        window.update_button.setText("Install update")
+        window.update_button.setVisible(True)
+        window._sync_check_button()
+        self.assertTrue(window.check_button.isHidden())
+        self.assertFalse(window.update_button.isHidden())
+        self.assert_button_chrome(window.update_button, primary=True)
+        self.assert_has_frame(window.update_button)
+        self.assertLessEqual(window.update_button.sizeHint().width(),
+                             window.update_button.width())
+
+        window.update_button.setEnabled(False)
+        window.update_button.setText("Downloading update… 25%")
+        self.assertFalse(window.update_button.isEnabled())
+        self.assert_button_chrome(window.update_button, primary=True)
+        self.assert_has_frame(window.update_button)
+        self.assertLessEqual(window.update_button.sizeHint().width(),
+                             window.update_button.width())
+
+        window.feature_button.setEnabled(False)
+        window.feature_button.setText("Sending request…")
+        self.assert_button_chrome(window.feature_button, primary=False)
+        self.assert_has_frame(window.feature_button)
+        self.assertLessEqual(window.feature_button.sizeHint().width(),
+                             window.feature_button.width())
+        self.assertEqual(window.feature_button.toolTip(),
+                         qt_app.format_tooltip(
+                             "Send a feature request to the developers as a GitHub issue."))
+
+    def assert_button_chrome(self, button, primary):
+        """Check the border, pointer, focus and state rules of one button.
+
+        Args: button is a QPushButton; primary is True for the blue update button.
+        Returns: None.
+        """
+        sheet = button.styleSheet()
+        self.assertFalse(button.isFlat())
+        self.assertEqual(button.cursor().shape(), Qt.PointingHandCursor)
+        self.assertEqual(button.focusPolicy(), Qt.StrongFocus)
+        for state in (":hover", ":pressed", ":focus", ":disabled"):
+            self.assertIn(state, sheet)
+        self.assertIn("border-radius", sheet)
+        if primary:
+            self.assertIn("#1d4f91", sheet)
+            self.assertIn("font-weight: bold", sheet)
+        else:
+            self.assertNotIn("#1d4f91", sheet)
+            self.assertIn("palette(base)", sheet)
+
+    def assert_has_frame(self, button):
+        """The painted edge differs from the fill, so the control is not flat text.
+
+        Args: button is a visible QPushButton.
+        Returns: None.
+        """
+        image = button.grab().toImage()
+        mid_x = max(1, image.width() // 2)
+        center = image.pixelColor(mid_x, image.height() // 2)
+        edge = image.pixelColor(mid_x, 1)
+        self.assertNotEqual((center.red(), center.green(), center.blue()),
+                            (edge.red(), edge.green(), edge.blue()))
 
     def test_fixed_label_keeps_full_text_but_shows_an_ellipsis(self):
         """A label too narrow for its text shows "…" yet still reports the full string.
@@ -1932,227 +2164,6 @@ class PollingTests(WindowTestCase):
         self.window.pixel_status.setText("stale")
         self.window._poll_status()
         self.assertEqual(self.window.pixel_status.text(), "")
-
-
-class FreezeTests(WindowTestCase):
-    """Freezing the displayed image without saving it (issue #14)."""
-
-    def show(self, packet):
-        """Publish a packet from the engine and let the window draw it.
-
-        Args: packet is the FramePacket to publish.
-        Returns: None.
-        """
-        self.engine._packet = packet
-        self.window._poll_frame()
-
-    def freeze_action(self):
-        """Find View > Freeze display.
-
-        Args: None.
-        Returns: The QAction.
-        """
-        view_menu = self.window.menuBar().actions()[0].menu()
-        return next(a for a in view_menu.actions() if a.text() == "Freeze display")
-
-    def freeze_on_first_frame(self):
-        """Draw frame 1, freeze it, then publish a newer frame 2.
-
-        Args: None.
-        Returns: The frozen FramePacket.
-        """
-        frozen = make_packet(sequence=1)
-        self.show(frozen)
-        self.window.freeze_button.click()
-        self.show(make_packet(sequence=2, palette="Jet"))
-        return frozen
-
-    def test_freeze_holds_the_shown_frame_while_the_engine_continues(self):
-        """Newer engine frames are not drawn while the display is frozen.
-
-        Args: None.
-        Returns: None.
-        """
-        frozen = self.freeze_on_first_frame()
-        self.assertIs(self.window.view.packet, frozen)
-        self.assertIs(self.window.current.frozen, frozen)
-        self.assertEqual(self.window.drawn_frames, 1)
-        self.assertTrue(self.log.lines[-1].startswith("Display frozen"))
-
-    def test_unfreeze_returns_to_the_newest_frame(self):
-        """Resuming draws the engine's current frame on the next poll.
-
-        Args: None.
-        Returns: None.
-        """
-        self.freeze_on_first_frame()
-        self.window.freeze_button.click()
-        self.assertIsNone(self.window.current.frozen)
-        self.window._poll_frame()
-        self.assertEqual(self.window.view.packet.sequence, 2)
-        self.assertEqual(self.log.lines[-1], "Display live again.")
-
-    def test_freeze_without_a_frame_logs_and_stays_live(self):
-        """Freezing before anything was drawn does nothing but explain why.
-
-        Args: None.
-        Returns: None.
-        """
-        self.window.freeze_button.click()
-        self.assertIsNone(self.window.current.frozen)
-        self.assertFalse(self.window.freeze_button.isChecked())
-        self.assertTrue(self.window.frozen_banner.isHidden())
-        self.assertEqual(self.log.lines[-1], "No frame on screen to freeze yet.")
-
-    def test_repeated_freeze_or_resume_changes_nothing(self):
-        """Freezing a frozen view, or resuming a live one, is a no-op.
-
-        Args: None.
-        Returns: None.
-        """
-        frozen = self.freeze_on_first_frame()
-        lines = len(self.log.lines)
-        self.window.set_frozen(True)
-        self.assertIs(self.window.current.frozen, frozen)
-        self.window.set_frozen(False)
-        self.window.set_frozen(False)
-        self.assertEqual(len(self.log.lines), lines + 1)
-
-    def test_frozen_indicators_show_and_hide(self):
-        """Banner, badge, button and menu item all mark a frozen view.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        action = self.freeze_action()
-        for widget in (window.frozen_banner, window.frozen_badge):
-            self.assertTrue(widget.isHidden())
-        self.freeze_on_first_frame()
-        when = window.current.frozen_at.strftime("%H:%M:%S")
-        self.assertFalse(window.frozen_banner.isHidden())
-        self.assertIn(f"FROZEN at {when}", window.frozen_banner.text())
-        self.assertIn("Space", window.frozen_banner.text())
-        self.assertFalse(window.frozen_badge.isHidden())
-        self.assertTrue(window.freeze_button.isChecked())
-        self.assertTrue(action.isChecked())
-        window.set_frozen(False)
-        for widget in (window.frozen_banner, window.frozen_badge):
-            self.assertTrue(widget.isHidden())
-        self.assertFalse(window.freeze_button.isChecked())
-        self.assertFalse(action.isChecked())
-
-    def test_frozen_badge_moves_no_other_status_item(self):
-        """Showing or hiding the FROZEN badge leaves every other item in place.
-
-        The badge takes its room from the hint text, so the window is made wide
-        enough for the hint to have some.
-
-        Args: None.
-        Returns: None.
-        """
-        window = self.window
-        window.resize(2400, 900)
-        window.show()
-        items = (window.update_slot, window.feature_button, window.source_badge,
-                 window.record_label, window.range_status, window.camera_fps_status,
-                 window.speed_status, window.pixel_status)
-
-        def geometry():
-            QApplication.processEvents()
-            return [(w.x(), w.width()) for w in items]
-
-        before = geometry()
-        self.freeze_on_first_frame()
-        self.assertFalse(window.frozen_badge.isHidden())
-        self.assertEqual(geometry(), before)
-        window.set_frozen(False)
-        self.assertEqual(geometry(), before)
-
-    def test_banner_lets_mouse_reach_the_image(self):
-        """The banner over the image does not block zoom, pan or the readout.
-
-        Args: None.
-        Returns: None.
-        """
-        self.assertTrue(self.window.frozen_banner.testAttribute(
-            Qt.WA_TransparentForMouseEvents))
-
-    def test_space_key_toggles_freeze(self):
-        """Space freezes and resumes the display.
-
-        Args: None.
-        Returns: None.
-        """
-        self.show(make_packet(sequence=1))
-        self.assertTrue(self.window.handle_key(Qt.Key_Space))
-        self.assertIsNotNone(self.window.current.frozen)
-        self.assertTrue(self.window.handle_key(Qt.Key_Space))
-        self.assertIsNone(self.window.current.frozen)
-
-    def test_view_menu_item_toggles_freeze(self):
-        """View > Freeze display freezes and resumes.
-
-        Args: None.
-        Returns: None.
-        """
-        self.show(make_packet(sequence=1))
-        action = self.freeze_action()
-        self.assertEqual(action.shortcut().toString(), "Space")
-        action.trigger()
-        self.assertIsNotNone(self.window.current.frozen)
-        action.trigger()
-        self.assertIsNone(self.window.current.frozen)
-
-    def test_save_while_frozen_sends_the_frozen_frame(self):
-        """Save writes the held frame and its freeze time, not the live one.
-
-        Args: None.
-        Returns: None.
-        """
-        frozen = self.freeze_on_first_frame()
-        self.window.frame_title.setText("Held")
-        self.window.save_frame()
-        self.assertEqual(self.queued(), [("save", {
-            "title": "Held", "notes": "", "packet": frozen,
-            "frozen_at": self.window.current.frozen_at})])
-
-    def test_pixel_readout_reads_the_frozen_frame(self):
-        """The hover readout reports the frozen image, not the live one.
-
-        Args: None.
-        Returns: None.
-        """
-        frozen = self.freeze_on_first_frame()
-        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), "Gray",
-                                          1.0, "Raw", True)
-        self.window.hover = (10, 5)
-        self.window._poll_status()
-        self.assertEqual(self.window.pixel_status.text(),
-                         f"x 10, y 5: {int(frozen.image[5, 10])}")
-
-    def test_displayed_rate_reads_frozen(self):
-        """The displayed-frame rate says frozen instead of a number.
-
-        Args: None.
-        Returns: None.
-        """
-        self.freeze_on_first_frame()
-        self.window._poll_status()
-        self.assertIn("Displayed: frozen", self.window.speed_status.text())
-
-    def test_switch_to_live_drops_a_frozen_demo_frame(self):
-        """A held demo frame never outlives the dummy-mode indicators.
-
-        Args: None.
-        Returns: None.
-        """
-        self.freeze_on_first_frame()
-        self.engine.events.put(("switched_live", None))
-        self.window._handle_events()
-        self.assertIsNone(self.window.current.frozen)
-        self.assertTrue(self.window.frozen_banner.isHidden())
-        self.assertFalse(self.window.freeze_button.isChecked())
 
 
 class EngineEventTests(WindowTestCase):
@@ -2256,10 +2267,11 @@ class EngineEventTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        self.engine.events.put(("fatal", "kaboom"))
+        self.engine.events.put(("fatal", ("kaboom", None)))
         with mock.patch.object(self.window, "close") as close:
             self.window._handle_events()
-        self.dialogs.critical.assert_called_once()
+        self.assertEqual(self.dialogs.call_args.args[1:], ("ESPI stopped", "kaboom"))
+        self.dialogs.return_value.exec.assert_called_once()
         close.assert_called_once()
 
     def test_stopped_closes_unless_already_closing(self):
@@ -2304,6 +2316,7 @@ class MultiCameraTests(unittest.TestCase):
         self.window = qt_app.MainWindow(self.channels, self.log, False, False)
         self.window.frame_timer.stop()
         self.window.status_timer.stop()
+        self.window.tip_timer.stop()
         self.addCleanup(self.cleanup_window)
 
     def cleanup_window(self):
@@ -2470,6 +2483,7 @@ class MultiCameraTests(unittest.TestCase):
         self.assertFalse(first.active)
         self.assertIsNone(first.frozen)
 
+
     def test_background_events_do_not_change_the_shown_controls(self):
         """Limits are stored and record_off ignored for a camera not shown.
 
@@ -2533,12 +2547,11 @@ class MultiCameraTests(unittest.TestCase):
         """
         window, second = self.window, self.channels[1]
         window.camera_checks[1].setChecked(True)
-        second.engine.events.put(("fatal", "kaboom"))
+        second.engine.events.put(("fatal", ("kaboom", None)))
         with mock.patch.object(window, "close") as close:
             window._handle_events()
         close.assert_not_called()
-        self.assertIn("Synthetic camera (DEMO2): kaboom",
-                      self.dialogs.critical.call_args.args[2])
+        self.assertIn("Synthetic camera (DEMO2): kaboom", self.dialogs.call_args.args[2])
         self.assertFalse(second.active)
         self.assertFalse(window.camera_checks[1].isChecked())
         self.assertIs(window.current, self.channels[0])
@@ -2890,6 +2903,7 @@ class UpdateFlowTests(WindowTestCase):
             window = demo_window(self.engine, self.log, check_updates=True)
         self.addCleanup(window.frame_timer.stop)
         self.addCleanup(window.status_timer.stop)
+        self.addCleanup(window.tip_timer.stop)
         self.addCleanup(window.update_timer.stop)
         self.addCleanup(window.close)
         self.addCleanup(window.deleteLater)
@@ -2917,6 +2931,7 @@ class UpdateFlowTests(WindowTestCase):
         window = demo_window(self.engine, self.log, check_updates=True)
         self.addCleanup(window.frame_timer.stop)
         self.addCleanup(window.status_timer.stop)
+        self.addCleanup(window.tip_timer.stop)
         self.addCleanup(window.close)
         self.addCleanup(window.deleteLater)
         self.assertFalse(window._periodic_checks)
@@ -3067,8 +3082,9 @@ class CloseTests(WindowTestCase):
         self.addCleanup(window.deleteLater)
         self.addCleanup(window.status_timer.stop)
         self.addCleanup(window.frame_timer.stop)
+        self.addCleanup(window.tip_timer.stop)
         self.addCleanup(window.close)
-        self.assertEqual(window.height(), 700)  # not the 1400x900 default
+        self.assertEqual(window.height(), 700)  # not the default height
 
     def test_running_demo_engine_feeds_the_view(self):
         """A started demo engine publishes frames that the window draws.
@@ -3201,7 +3217,10 @@ class RunTests(unittest.TestCase):
         self.main_window = mock.MagicMock(return_value=self.window)
         self.cleanup = mock.MagicMock()
         self.startup_cleanup = mock.MagicMock(return_value=self.cleanup)
+        self.reporting = mock.MagicMock()
+        self.reporting_class = mock.MagicMock(return_value=self.reporting)
         for patcher in (
+                mock.patch.object(qt_app, "Reporting", self.reporting_class),
                 mock.patch.object(qt_app.updater, "StartupCleanup", self.startup_cleanup),
                 mock.patch.object(qt_app, "request_gl_format"),
                 mock.patch.object(qt_app, "AppLog", return_value=self.log),
@@ -3226,7 +3245,7 @@ class RunTests(unittest.TestCase):
         self.cameras.assert_not_called()
         self.demos.assert_called_once_with(self.log, 2)
         self.assertEqual(self.main_window.call_args.args[0], [self.channel])
-        self.assertEqual(self.main_window.call_args.args[2:], (True, False))
+        self.assertEqual(self.main_window.call_args.args[2:], (True, False, self.reporting))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
         self.finish.assert_called_once_with(self.window, self.log)
@@ -3598,6 +3617,7 @@ class CaptureWindowTests(unittest.TestCase):
         self.window = qt_app.MainWindow(self.channels, self.log, False, False)
         self.window.frame_timer.stop()
         self.window.status_timer.stop()
+        self.window.tip_timer.stop()
         self.addCleanup(self.cleanup_window)
         self.window._handle_events()  # identity and limits queued by the open
 
@@ -3744,6 +3764,746 @@ class DemoCaptureControlsTests(WindowTestCase):
         self.assertIn("Now: 8000 µs", window.exposure.toolTip())
 
 
+class QtMessageHandlerTests(unittest.TestCase):
+    """handle_qt_message: Qt's own messages logged and reported."""
+
+    def setUp(self):
+        """Install a mock reporter for capture_message.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter = mock.MagicMock()
+        patcher = mock.patch.object(qt_app.error_reports, "_reporter", self.reporter)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_info_and_warning_messages_are_only_logged(self):
+        """Warnings land in the log with their category; nothing is reported.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertLogs("espi_live.qt", "WARNING") as captured:
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtWarningMsg,
+                                     SimpleNamespace(category="qt.opengl"), "slow shader")
+        self.assertIn("Qt (qt.opengl): slow shader", captured.output[0])
+        with self.assertLogs("espi_live.qt", "INFO") as captured:
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtInfoMsg, None, "hello")
+        self.assertIn("Qt: hello", captured.output[0])
+        self.reporter.capture_message.assert_not_called()
+
+    def test_critical_and_fatal_messages_are_reported(self):
+        """Criticals report the message with the active Python stack.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtCriticalMsg,
+                                     SimpleNamespace(category="default"), "context lost")
+        call = self.reporter.capture_message.call_args
+        self.assertEqual(call.args[0], "critical")
+        self.assertEqual(call.args[1], "context lost")
+        self.assertIn("handle_qt_message", call.args[3])
+
+    def test_fatal_messages_also_drop_the_crash_handler(self):
+        """A fatal Qt message covers the coming abort, so faulthandler steps aside.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app, "faulthandler") as faulthandler, \
+                self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+        self.assertEqual(self.reporter.capture_message.call_args.args[0], "fatal")
+        faulthandler.disable.assert_called_once()
+
+
+    def test_fatal_keeps_native_diagnostics_without_a_saved_report(self):
+        """Disabled or failed reporting preserves faulthandler for the abort.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reporter.capture_message.return_value = None
+        with mock.patch.object(qt_app, "faulthandler") as handler, \
+                self.assertLogs("espi_live.qt", "ERROR"):
+            qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+            with mock.patch.object(qt_app.error_reports, "_reporter", None):
+                qt_app.handle_qt_message(qt_app.QtMsgType.QtFatalMsg, None, "aborting")
+        handler.disable.assert_not_called()
+
+
+class SettingOnTests(unittest.TestCase):
+    """Reading QSettings flags stored as text."""
+
+    def test_false_spellings(self):
+        """False, 0 and their text forms are off.
+
+        Args: None.
+        Returns: None.
+        """
+        for value in (False, 0, "false", "0", " FALSE "):
+            self.assertFalse(qt_app.setting_on(value), value)
+
+    def test_everything_else_is_on(self):
+        """True, numbers and unknown text are on.
+
+        Args: None.
+        Returns: None.
+        """
+        for value in (True, 1, "yes", None):
+            self.assertTrue(qt_app.setting_on(value), value)
+
+
+class ReportingClassTests(unittest.TestCase):
+    """The run's Reporting: switches, hooks, Qt handler and worker."""
+
+    def setUp(self):
+        """Patch QSettings with the fake store and clear the level environment.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        patcher = mock.patch.object(qt_app, "QSettings", FakeSettings)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        outputs = mock.patch.object(paths, "OUTPUT_DIR", tmp.name)
+        outputs.start()
+        self.addCleanup(outputs.stop)
+        self.log = FakeLog()
+
+    def reporting(self):
+        """Build a Reporting for these tests.
+
+        Args: None.
+        Returns: The Reporting.
+        """
+        reporting = qt_app.Reporting(self.log)
+        self.addCleanup(reporting.stop)
+        return reporting
+
+    def test_init_reads_the_saved_choice(self):
+        """The stored choice decides the reporter's initial state.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}):
+            off = self.reporting()
+            self.assertFalse(off.reporter.enabled)
+            self.assertIn("source checkouts", off.forced)
+        FakeSettings.store[qt_app.error_reports.SETTING_KEY] = "false"
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            self.assertFalse(self.reporting().reporter.enabled)
+            FakeSettings.store.clear()
+            self.assertTrue(self.reporting().reporter.enabled)
+        self.assertEqual(off.reporter.context.get("front_end"), "Qt")
+        self.assertIn(off.worker.kick, off.reporter.listeners)
+
+    def test_start_installs_hooks_and_drains_old_crashes(self):
+        """Starting hooks Python and Qt, logs the state and sends old crashes.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        handler = mock.MagicMock(return_value="PREVIOUS")
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}), \
+                mock.patch.object(qt_app, "qInstallMessageHandler", handler), \
+                mock.patch.object(reporting.reporter, "collect_native_crashes") as collect, \
+                mock.patch.object(reporting.worker, "start") as start:
+            try:
+                reporting.start(self.log)
+                self.assertIn("Error reports: off", self.log.lines[-1])
+                collect.assert_called_once_with(None)
+                start.assert_called_once()
+                handler.assert_called_once_with(qt_app.handle_qt_message)
+                self.assertEqual(reporting.previous_handler, "PREVIOUS")
+                self.assertIsNotNone(reporting.hooks)
+            finally:
+                reporting.stop()
+        handler.assert_called_with("PREVIOUS")
+        self.assertIsNone(reporting.hooks)
+        self.assertIsNone(qt_app.error_reports.current_reporter())
+
+    def test_choose_records_the_choice_and_kicks(self):
+        """The Help-menu choice is saved, applied and kicks the worker.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            reporting = self.reporting()
+            with mock.patch.object(reporting.worker, "kick") as kick:
+                reporting.choose(False, self.log)
+                self.assertFalse(FakeSettings.store[qt_app.error_reports.SETTING_KEY])
+                self.assertFalse(reporting.reporter.enabled)
+                self.assertIn("Error reports: off", self.log.lines[-1])
+                kick.assert_not_called()
+                reporting.choose(True, self.log)
+                self.assertTrue(reporting.reporter.enabled)
+                kick.assert_called_once()
+
+    def test_stop_restores_the_previous_handler(self):
+        """Stopping uninstalls the hooks and the Qt message handler.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        before = (sys.excepthook, threading.excepthook, sys.unraisablehook)
+        with mock.patch.object(reporting.worker, "start"):
+            reporting.start(self.log)
+        self.assertNotEqual(sys.excepthook, before[0])
+        reporting.stop()
+        self.assertEqual((sys.excepthook, threading.excepthook, sys.unraisablehook), before)
+        self.assertIsNone(qt_app.error_reports.current_reporter())
+        with mock.patch.object(reporting.worker, "stop") as stop:
+            reporting.stop()
+        stop.assert_called_once()
+
+
+class SessionDescriptionTests(unittest.TestCase):
+    """describe_session's Spinnaker note."""
+
+    def test_the_sdk_version_is_appended_when_known(self):
+        """A loaded Spinnaker shows up in the session line.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.camera, "spinnaker_version",
+                               return_value="4.2.0.88"):
+            line = qt_app.describe_session(
+                [mock.MagicMock(demo=True, label="Synthetic camera (DEMO1)", active=True)],
+                "GPU")
+        self.assertIn("dummy mode, 1 synthetic camera(s)", line)
+        self.assertIn("display GPU; Spinnaker 4.2.0.88", line)
+
+    def test_mixed_channels_are_listed(self):
+        """A camera channel is named, with its processing state.
+
+        Args: None.
+        Returns: None.
+        """
+        camera = mock.MagicMock(demo=False, label="[12345678] BFS-U3-63S4M", active=True)
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value=None):
+            line = qt_app.describe_session([camera], "CPU")
+        self.assertEqual(line, "Session: 1 camera(s): [12345678] BFS-U3-63S4M (processing)"
+                               "; display CPU")
+
+
+class ErrorReportUITests(WindowTestCase):
+    """The window's error-report menu, status and dialogs."""
+
+    def reporting(self, enabled=True, forced=None):
+        """Build a reporting stand-in with a working event queue.
+
+        Args: enabled and forced describe the reporter state.
+        Returns: A MagicMock reporting.
+        """
+        reporting = mock.MagicMock(reporter=mock.MagicMock(enabled=enabled), forced=forced)
+        reporting.worker = mock.MagicMock(events=queue.Queue())
+        return reporting
+
+    def test_the_action_mirrors_the_reporter(self):
+        """The checkable action shows the state and explains itself.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.reporting = self.reporting()
+        self.window._sync_reports_action()
+        self.assertTrue(self.window.reports_action.isChecked())
+        self.assertTrue(self.window.reports_action.isEnabled())
+        self.assertIn("public GitHub issues", self.window.reports_action.toolTip())
+
+    def test_a_forced_off_shows_the_reason(self):
+        """When a switch forces reporting off, the action is locked.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.reporting = self.reporting(enabled=False,
+                                               forced="turned off with --no-error-reports")
+        self.window._sync_reports_action()
+        self.assertFalse(self.window.reports_action.isChecked())
+        self.assertFalse(self.window.reports_action.isEnabled())
+        self.assertEqual(self.window.reports_action.toolTip(),
+                         "Off: turned off with --no-error-reports")
+
+    def test_the_menu_choice_reaches_reporting(self):
+        """Toggling the action calls Reporting.choose and refreshes the menu.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        self.window._choose_error_reports(True)
+        reporting.choose.assert_called_once_with(True, self.window.log)
+        self.assertTrue(self.window.reports_action.isChecked())
+
+    def test_open_log_folder_opens_the_log_directory(self):
+        """The log's folder opens in the desktop file manager.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = "/x/runs/espi_1.log"
+        with mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = True
+            self.window._open_log_folder()
+        self.assertEqual(desktop.openUrl.call_args.args[0].path(), "/x/runs")
+
+    def test_open_log_folder_without_a_log_file(self):
+        """Without a log file the default logs folder is opened.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = None
+        with mock.patch.object(qt_app.paths, "output_folder", return_value="/fake/logs"), \
+                mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = True
+            self.window._open_log_folder()
+        self.assertEqual(desktop.openUrl.call_args.args[0].path(), "/fake/logs")
+
+    def test_open_log_folder_falls_back_to_a_message(self):
+        """If the desktop refuses, the path is shown in a dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = "/x/runs/espi_1.log"
+        with mock.patch.object(qt_app, "QDesktopServices") as desktop:
+            desktop.openUrl.return_value = False
+            self.window._open_log_folder()
+        self.assertIn("/x/runs", self.dialogs.information.call_args.args[2])
+
+    def test_open_log_folder_survives_an_unavailable_folder(self):
+        """A failing folder lookup becomes a warning dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.log.path = None
+        with mock.patch.object(qt_app.paths, "output_folder",
+                               side_effect=OSError("gone")):
+            self.window._open_log_folder()
+        self.assertIn("unavailable", self.dialogs.warning.call_args.args[2])
+
+    def test_report_context_describes_demo_mode(self):
+        """Demo runs say so and list the demo serials.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value=None):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(call.kwargs["source"], "dummy mode")
+        self.assertEqual(call.kwargs["cameras"], 1)
+        self.assertEqual(call.kwargs["serials"], ["DEMO1"])
+
+    def test_report_context_describes_the_camera(self):
+        """A camera run names the model and scrubs its serials.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        camera = mock.MagicMock(demo=False, identity=None)
+        camera.info = SimpleNamespace(serial="SN-1", model="")
+        original, original_channels = self.window.current, self.window.channels
+        self.addCleanup(setattr, self.window, "current", original)
+        self.addCleanup(setattr, self.window, "channels", original_channels)
+        self.window.current = camera
+        self.window.channels = [camera]
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value="4.2"):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(call.kwargs["source"], "camera (model unknown)")
+        self.assertEqual(call.kwargs["serials"], ["SN-1"])
+        self.assertEqual(call.kwargs["spinnaker"], "4.2")
+
+        camera.identity = SimpleNamespace(short_name=lambda: "BFS-U3-63S4M", serial="SN-1")
+        with mock.patch.object(qt_app.camera, "spinnaker_version", return_value="4.2"):
+            self.window._update_report_context()
+        call = reporting.reporter.update_context.call_args
+        self.assertEqual(
+            call.kwargs["source"], "camera BFS-U3-63S4M")
+        self.assertEqual(call.kwargs["serials"], ["SN-1", "SN-1"])
+
+    def test_report_context_accepts_analog_capture_identity(self):
+        """An analog identity has no hardware serial and must not break polling.
+
+        Args: None.
+        Returns: None.
+        """
+        from espi_live.capture_models import CaptureIdentity
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        channel = SimpleNamespace(demo=False, identity=CaptureIdentity(name="USB-Live2"),
+                                  info=CameraInfo("video 0", "USB-Live2", kind="capture"))
+        with mock.patch.object(self.window, "current", channel), \
+                mock.patch.object(self.window, "channels", [channel]):
+            self.window._update_report_context()
+        context = reporting.reporter.update_context.call_args.kwargs
+        self.assertEqual(context["serials"], ["video 0"])
+        self.assertEqual(context["source"], "camera USB-Live2")
+
+    def test_report_outcomes_reach_the_status_bar(self):
+        """A delivered report shows its outcome with the issue link.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/owner/repo/issues/5")
+        reporting.worker.events.put(("outcome", outcome))
+        with mock.patch.object(self.window.error_report_timer, "start") as timer:
+            self.window._handle_error_report_events()
+        self.assertEqual(self.window.report_outcomes[FINGERPRINT_UI], outcome)
+        self.assertIn("Reported as <a href=", self.window.error_report_label.text())
+        timer.assert_called_once()
+        self.assertIn(FINGERPRINT_UI, self.window.error_report_label.toolTip())
+
+    def test_report_outcomes_fill_an_open_fatal_dialog(self):
+        """While the "ESPI stopped" dialog is open its line is updated in place.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.window.reporting = reporting
+        box = mock.MagicMock()
+        self.window.fatal_boxes[FINGERPRINT_UI] = (box, "kaboom")
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/owner/repo/issues/5")
+        reporting.worker.events.put(("outcome", outcome))
+        self.window._handle_error_report_events()
+        box.setText.assert_called_once()
+        text = box.setText.call_args.args[0]
+        self.assertIn("kaboom", text)
+        self.assertIn("Reported as", text)
+        self.assertIn(FINGERPRINT_UI, text)
+        self.assertFalse(self.window.error_report_label.isVisibleTo(self.window))
+
+    def test_outcome_html_links_the_issue(self):
+        """The outcome line becomes a link when there is an issue.
+
+        Args: None.
+        Returns: None.
+        """
+        html = qt_app.MainWindow._outcome_html
+        self.assertEqual(html(None), "Reporting this error…")
+        plain = qt_app.error_reports.Outcome(FINGERPRINT_UI, "saved")
+        self.assertEqual(html(plain), "Report saved; it will be sent next time")
+        linked = qt_app.error_reports.Outcome(FINGERPRINT_UI, "fixed", url="https://x/y")
+        self.assertEqual(html(linked), "Fixed in a newer build; update to get the fix")
+        browser = qt_app.error_reports.Outcome(FINGERPRINT_UI, "browser",
+                                               url="https://x/y?a=b&c=d")
+        self.assertEqual(html(browser),
+                         'Not sent automatically: <a href="https://x/y?a=b&amp;c=d">'
+                         'Report in browser…</a>')
+        created = qt_app.error_reports.Outcome(FINGERPRINT_UI, "created", 5,
+                                               "https://github.com/o/r/issues/5")
+        self.assertEqual(html(created),
+                         'Reported as <a href="https://github.com/o/r/issues/5">#5</a>')
+
+    def test_fatal_text_gains_the_report_line(self):
+        """The stopped-dialog text carries the report state and the error ID.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.window._fatal_text("kaboom", None), "kaboom")
+        outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, "saved")
+        self.window.report_outcomes[FINGERPRINT_UI] = outcome
+        text = self.window._fatal_text("kaboom", FINGERPRINT_UI)
+        self.assertTrue(text.startswith("kaboom<br><br>Report saved"))
+        self.assertIn(f"Error ID {FINGERPRINT_UI}", text)
+
+    def test_show_fatal_registers_its_dialog(self):
+        """While a fatal dialog is open its fingerprint is tracked, then freed.
+
+        Args: None.
+        Returns: None.
+        """
+        seen = {}
+
+        def fake_exec():
+            """Record what the window tracked while the dialog was open.
+
+            Args: None.
+            Returns: None.
+            """
+            seen.update(self.window.fatal_boxes)
+
+        self.dialogs.return_value.exec.side_effect = fake_exec
+        self.window._show_fatal("kaboom", FINGERPRINT_UI)
+        self.assertEqual(seen[FINGERPRINT_UI][1], "kaboom")
+        self.assertEqual(self.window.fatal_boxes, {})
+        self.assertEqual(self.dialogs.call_args.args[1:],
+                         ("ESPI stopped", self.window._fatal_text("kaboom", FINGERPRINT_UI)))
+
+    def test_report_status_variants(self):
+        """Each outcome kind shows the right status-bar text.
+
+        Args: None.
+        Returns: None.
+        """
+        cases = {
+            "declined": None,
+            "fixed": "Check for updates",
+            "saved": "will be reported next time",
+            "created": "Unexpected error: Reported as"}
+        for kind, needle in cases.items():
+            outcome = qt_app.error_reports.Outcome(FINGERPRINT_UI, kind, 5,
+                                                   "https://github.com/o/r/issues/5")
+            self.window.error_report_label.setVisible(False)
+            with mock.patch.object(self.window.error_report_timer, "start") as timer:
+                self.window._show_report_status(outcome)
+            if needle is None:
+                self.assertFalse(self.window.error_report_label.isVisibleTo(self.window))
+                timer.assert_not_called()
+                continue
+            self.assertIn(needle, self.window.error_report_label.text())
+            timer.assert_called_once()
+
+
+class FreezeTests(WindowTestCase):
+    """Freezing the displayed image without saving it (issue #14)."""
+
+    def show(self, packet):
+        """Publish a packet from the engine and let the window draw it.
+
+        Args: packet is the FramePacket to publish.
+        Returns: None.
+        """
+        self.engine._packet = packet
+        self.window._poll_frame()
+
+    def freeze_action(self):
+        """Find View > Freeze display.
+
+        Args: None.
+        Returns: The QAction.
+        """
+        view_menu = self.window.menuBar().actions()[0].menu()
+        return next(a for a in view_menu.actions() if a.text() == "Freeze display")
+
+    def freeze_on_first_frame(self):
+        """Draw frame 1, freeze it, then publish a newer frame 2.
+
+        Args: None.
+        Returns: The frozen FramePacket.
+        """
+        frozen = make_packet(sequence=1)
+        self.show(frozen)
+        self.window.freeze_button.click()
+        self.show(make_packet(sequence=2, palette="Jet"))
+        return frozen
+
+    def test_freeze_holds_the_shown_frame_while_the_engine_continues(self):
+        """Newer engine frames are not drawn while the display is frozen.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.assertIs(self.window.view.packet, frozen)
+        self.assertIs(self.window.current.frozen, frozen)
+        self.assertEqual(self.window.drawn_frames, 1)
+        self.assertTrue(self.log.lines[-1].startswith("Display frozen"))
+
+    def test_unfreeze_returns_to_the_newest_frame(self):
+        """Resuming draws the engine's current frame on the next poll.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.window.freeze_button.click()
+        self.assertIsNone(self.window.current.frozen)
+        self.window._poll_frame()
+        self.assertEqual(self.window.view.packet.sequence, 2)
+        self.assertEqual(self.log.lines[-1], "Display live again.")
+
+    def test_freeze_without_a_frame_logs_and_stays_live(self):
+        """Freezing before anything was drawn does nothing but explain why.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.freeze_button.click()
+        self.assertIsNone(self.window.current.frozen)
+        self.assertFalse(self.window.freeze_button.isChecked())
+        self.assertTrue(self.window.frozen_banner.isHidden())
+        self.assertEqual(self.log.lines[-1], "No frame on screen to freeze yet.")
+
+    def test_repeated_freeze_or_resume_changes_nothing(self):
+        """Freezing a frozen view, or resuming a live one, is a no-op.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        lines = len(self.log.lines)
+        self.window.set_frozen(True)
+        self.assertIs(self.window.current.frozen, frozen)
+        self.window.set_frozen(False)
+        self.window.set_frozen(False)
+        self.assertEqual(len(self.log.lines), lines + 1)
+
+    def test_frozen_indicators_show_and_hide(self):
+        """Banner, badge, button and menu item all mark a frozen view.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        action = self.freeze_action()
+        for widget in (window.frozen_banner, window.frozen_badge):
+            self.assertTrue(widget.isHidden())
+        self.freeze_on_first_frame()
+        when = window.current.frozen_at.strftime("%H:%M:%S")
+        self.assertFalse(window.frozen_banner.isHidden())
+        self.assertIn(f"FROZEN at {when}", window.frozen_banner.text())
+        self.assertIn("Space", window.frozen_banner.text())
+        self.assertFalse(window.frozen_badge.isHidden())
+        self.assertTrue(window.freeze_button.isChecked())
+        self.assertTrue(action.isChecked())
+        window.set_frozen(False)
+        for widget in (window.frozen_banner, window.frozen_badge):
+            self.assertTrue(widget.isHidden())
+        self.assertFalse(window.freeze_button.isChecked())
+        self.assertFalse(action.isChecked())
+
+    def test_frozen_badge_moves_no_other_status_item(self):
+        """Showing or hiding the FROZEN badge leaves every other item in place.
+
+        The badge takes its room from the hint text, so the window is made wide
+        enough for the hint to have some.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.resize(2400, 900)
+        window.show()
+        items = (window.update_slot, window.feature_button, window.source_badge,
+                 window.record_label, window.range_status, window.camera_fps_status,
+                 window.speed_status, window.pixel_status)
+
+        def geometry():
+            QApplication.processEvents()
+            return [(w.x(), w.width()) for w in items]
+
+        before = geometry()
+        self.freeze_on_first_frame()
+        self.assertFalse(window.frozen_badge.isHidden())
+        self.assertEqual(geometry(), before)
+        window.set_frozen(False)
+        self.assertEqual(geometry(), before)
+
+    def test_banner_lets_mouse_reach_the_image(self):
+        """The banner over the image does not block zoom, pan or the readout.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(self.window.frozen_banner.testAttribute(
+            Qt.WA_TransparentForMouseEvents))
+
+    def test_space_key_toggles_freeze(self):
+        """Space freezes and resumes the display.
+
+        Args: None.
+        Returns: None.
+        """
+        self.show(make_packet(sequence=1))
+        self.assertTrue(self.window.handle_key(Qt.Key_Space))
+        self.assertIsNotNone(self.window.current.frozen)
+        self.assertTrue(self.window.handle_key(Qt.Key_Space))
+        self.assertIsNone(self.window.current.frozen)
+
+    def test_view_menu_item_toggles_freeze(self):
+        """View > Freeze display freezes and resumes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.show(make_packet(sequence=1))
+        action = self.freeze_action()
+        self.assertEqual(action.shortcut().toString(), "Space")
+        action.trigger()
+        self.assertIsNotNone(self.window.current.frozen)
+        action.trigger()
+        self.assertIsNone(self.window.current.frozen)
+
+    def test_save_while_frozen_sends_the_frozen_frame(self):
+        """Save writes the held frame and its freeze time, not the live one.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.window.frame_title.setText("Held")
+        self.window.save_frame()
+        self.assertEqual(self.queued(), [("save", {
+            "title": "Held", "notes": "", "packet": frozen,
+            "frozen_at": self.window.current.frozen_at})])
+
+    def test_pixel_readout_reads_the_frozen_frame(self):
+        """The hover readout reports the frozen image, not the live one.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen = self.freeze_on_first_frame()
+        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), "Gray",
+                                          1.0, "Raw", True)
+        self.window.hover = (10, 5)
+        self.window._poll_status()
+        self.assertEqual(self.window.pixel_status.text(),
+                         f"x 10, y 5: {int(frozen.image[5, 10])}")
+
+    def test_displayed_rate_reads_frozen(self):
+        """The displayed-frame rate says frozen instead of a number.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.window._poll_status()
+        self.assertIn("Displayed: frozen", self.window.speed_status.text())
+
+    def test_switch_to_live_drops_a_frozen_demo_frame(self):
+        """A held demo frame never outlives the dummy-mode indicators.
+
+        Args: None.
+        Returns: None.
+        """
+        self.freeze_on_first_frame()
+        self.engine.events.put(("switched_live", None))
+        self.window._handle_events()
+        self.assertIsNone(self.window.current.frozen)
+        self.assertTrue(self.window.frozen_banner.isHidden())
+        self.assertFalse(self.window.freeze_button.isChecked())
+
+
 class CodexTests(WindowTestCase):
     """Open in Codex: getting the source, the first-use dialog and opening the
     app, with the source worker, settings and dialogs faked."""
@@ -3813,6 +4573,7 @@ class CodexTests(WindowTestCase):
                 window = demo_window(engine, self.log, check_updates=check_updates)
                 window.frame_timer.stop()
                 window.status_timer.stop()
+                window.tip_timer.stop()
                 window.deleteLater()
         worker.start.assert_called_once_with()
 
@@ -3949,6 +4710,130 @@ class CodexTests(WindowTestCase):
             self.assertEqual(open_url.call_count, opened)
             self.assertEqual(self.dialogs.call_args.args[1], "Codex not found")
         self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
+
+
+class HelpTipTests(WindowTestCase):
+    """Rotating status-bar tips (issue #21)."""
+
+    def test_a_tip_is_showing_and_the_timer_is_slow(self):
+        """The window opens on one tip, and the timer is not per-frame.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertIn(window.tip_label.text(), tips.TIPS)
+        self.assertFalse(window.tip_label.isHidden())
+        self.assertTrue(window.tips_action.isChecked())
+        self.assertEqual(window.tip_timer.interval(), tips.ROTATE_MS)
+        self.assertEqual(window.tip_timer.timerType(), Qt.CoarseTimer)
+        self.assertTrue(window.tip_timer.isActive())
+        self.assertIn(window.tip_label.text(), window.tip_label.toolTip())
+        self.assertIn("Right-click to hide.", window.tip_label.toolTip())
+
+    def test_click_and_timer_advance_and_the_last_tip_wraps(self):
+        """A click and a timeout both move to the next tip, and the end wraps.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window._poll_status()
+        hint = window.hint_label.text()
+        self.assertEqual(hint, self.engine.status()["hint"])
+        index = window.tips.index
+        event = mock.MagicMock()
+        event.button.return_value = Qt.LeftButton
+        window.tip_label.mousePressEvent(event)
+        self.assertEqual(window.tips.index, (index + 1) % len(tips.TIPS))
+        self.assertEqual(window.tip_label.text(), tips.TIPS[window.tips.index])
+        self.assertIn("Click for the next tip.", window.tip_label.toolTip())
+        self.assertEqual(window.hint_label.text(), hint)
+        window.tips.index = len(tips.TIPS) - 1
+        window.tip_timer.timeout.emit()
+        self.assertEqual(window.tips.index, 0)
+        self.assertEqual(window.tip_label.text(), tips.TIPS[0])
+        self.assertEqual(window.hint_label.text(), hint)
+
+    def test_narrow_tip_elides_but_keeps_the_full_text(self):
+        """A tip squeezed to a few pixels shows an ellipsis and reports the whole string.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.TipLabel(*tips.TIPS)
+        self.addCleanup(label.close)
+        label.setText(tips.TIPS[0])
+        label.resize(30, 20)
+        label.setText(tips.TIPS[0])
+        self.assertEqual(label.text(), tips.TIPS[0])
+        self.assertTrue(QLabel.text(label).endswith("…"))
+        label.resize(label.sizeHint().width(), 20)
+        label.setText(tips.TIPS[0])
+        self.assertEqual(QLabel.text(label), tips.TIPS[0])
+
+    def test_hiding_persists_and_a_late_timeout_stays_hidden(self):
+        """Hide remembers the choice; the next window stays quiet until View > Help tips.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        index = window.tips.index
+        event = mock.MagicMock()
+        event.button.return_value = Qt.RightButton
+        window.tip_label.mousePressEvent(event)
+        self.assertTrue(window.tip_label.isHidden())
+        self.assertFalse(window.tips_action.isChecked())
+        self.assertFalse(window.tip_timer.isActive())
+        self.assertEqual(window.tip_label.toolTip(), "")
+        self.assertTrue(FakeSettings.store["tips/hidden"])
+        window.tip_timer.timeout.emit()
+        self.assertEqual(window.tips.index, index)
+        window.close()
+
+        engine = Engine(self.log)
+        engine.use_demo()
+        again = demo_window(engine, self.log)
+        self.addCleanup(again.deleteLater)
+        self.addCleanup(again.status_timer.stop)
+        self.addCleanup(again.frame_timer.stop)
+        self.addCleanup(again.tip_timer.stop)
+        self.addCleanup(again.close)
+        self.assertTrue(again.tip_label.isHidden())
+        self.assertFalse(again.tips_action.isChecked())
+        self.assertFalse(again.tip_timer.isActive())
+        self.assertTrue(again.tips.hidden)
+        again.tips_action.trigger()
+        self.assertFalse(again.tip_label.isHidden())
+        self.assertIn(again.tip_label.text(), tips.TIPS)
+        self.assertFalse(FakeSettings.store["tips/hidden"])
+        self.assertTrue(again.tip_timer.isActive())
+
+    def test_view_menu_hides_tips_without_moving_the_dummy_badge(self):
+        """Unchecking Help tips hides them, and the dummy-mode badge stays whole.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
+        for tip in tips.TIPS:
+            window.tip_label.setText(tip)
+            self.assertEqual(QLabel.text(window.tip_label), tip)
+        before = window.source_badge.geometry().getRect()
+        window.resize(1400, 900)  # a saved narrow layout keeps the badge
+        QApplication.processEvents()
+        self.assertIn("DUMMY", QLabel.text(window.source_badge))
+        window.resize(qt_app.DEFAULT_WIDTH, qt_app.DEFAULT_HEIGHT)
+        QApplication.processEvents()
+        window.tips_action.trigger()
+        QApplication.processEvents()
+        self.assertTrue(window.tip_label.isHidden())
+        self.assertTrue(FakeSettings.store["tips/hidden"])
+        self.assertEqual(window.source_badge.geometry().getRect(), before)
 
 
 if __name__ == "__main__":

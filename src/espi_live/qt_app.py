@@ -16,35 +16,40 @@ acquiring, processing and recording in the background. Every control acts on
 the displayed camera's own engine and settings.
 """
 
+import faulthandler
 import html
+import logging
 import math
 import os
+import queue
 import random
 import sys
 import textwrap
 import time
+import traceback
 from datetime import datetime
 
 import cv2
 import numpy as np
-from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QSettings, QSize, Qt, QTimer,
-                           QUrl, Signal)
-from PySide6.QtGui import (QAction, QDesktopServices, QFontMetrics, QImage, QKeySequence, QOffscreenSurface,
-                           QOpenGLContext, QPainter, QSurfaceFormat, QVector4D)
+from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QSettings, QSize,
+                            Qt, QtMsgType, QTimer, QUrl, Signal, qInstallMessageHandler)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFontMetrics, QIcon, QImage,
+                           QKeySequence, QOffscreenSurface, QOpenGLContext, QPainter,
+                           QPainterPath, QPalette, QPen, QPixmap, QSurfaceFormat, QVector4D)
 from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, QButtonGroup,
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QDockWidget, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QMainWindow, QMessageBox, QPlainTextEdit,
-                               QProxyStyle, QPushButton, QSizePolicy, QSlider, QStyle,
-                               QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
+                               QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+                               QPlainTextEdit, QProxyStyle, QPushButton, QSizePolicy, QSlider,
+                               QStyle, QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
 
-from espi_live import camera_reports, codex, feedback, source_code, updater
+from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, tips, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.guide import guide_path
-from espi_live.logs import AppLog
+from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
                                   VIEW_MODES, palette_rgb_table)
 
@@ -105,7 +110,11 @@ MAX_ZOOM = 64.0
 ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
 CODEX_LABEL = "Open in Codex"
 CODEX_BUSY_LABEL = "Getting source…"
-LAYOUT_VERSION = 4  # bump when docks/toolbars change so stale saved layouts are ignored
+LAYOUT_VERSION = 5  # bump when docks/toolbars change so stale saved layouts are ignored
+# Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
+# layout is left alone; a narrower window keeps the badge and elides the tip.
+DEFAULT_WIDTH = 2100
+DEFAULT_HEIGHT = 900
 # A camera PC can stay open for days. Recheck well inside GitHub's rate limit.
 UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
 UPDATE_CHECK_JITTER_MS = 20 * 60 * 1000
@@ -113,8 +122,336 @@ TEXT_INPUTS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox
 # Control ranges before a camera reports its limits (CAMERA_RANGES in camera.py).
 DEFAULT_LIMITS = {"ExposureTime": (0, 50000), "Gain": (0, 30),
                   "AcquisitionFrameRate": (0, 60)}
+REPORT_STATUS_MS = 60000  # how long an error-report message stays in the status bar
+QT_LEVELS = {QtMsgType.QtDebugMsg: logging.DEBUG, QtMsgType.QtInfoMsg: logging.INFO,
+             QtMsgType.QtWarningMsg: logging.WARNING, QtMsgType.QtCriticalMsg: logging.ERROR,
+             QtMsgType.QtFatalMsg: logging.ERROR}
+qt_logger = logging.getLogger("espi_live.qt")
+
+
+def handle_qt_message(kind, context, message):
+    """Log a Qt message; report critical and fatal ones (qInstallMessageHandler).
+
+    Qt calls this from any thread, so it only logs and captures.
+
+    Args: kind is the QtMsgType; context is the QMessageLogContext; message
+        is the text.
+    Returns: None.
+    """
+    category = getattr(context, "category", "") or ""
+    where = f"Qt ({category})" if category not in ("", "default") else "Qt"
+    qt_logger.log(QT_LEVELS.get(kind, logging.WARNING), f"{where}: {message}")
+    if kind not in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+        return
+    fatal = kind == QtMsgType.QtFatalMsg
+    reporter = error_reports.current_reporter()
+    report = None
+    if reporter is not None:
+        stack = traceback.extract_stack()[:-1]
+        report = reporter.capture_message("fatal" if fatal else "critical", message,
+                                 [(frame.filename, frame.name) for frame in stack],
+                                 "".join(traceback.format_list(stack)))
+    if fatal and report is not None:
+        faulthandler.disable()  # Qt aborts next; this report already covers it
+
+
+def setting_on(value):
+    """Read a QSettings flag, which some backends store as text.
+
+    Args: value is what QSettings returned.
+    Returns: False for False, 0, "false" or "0"; otherwise True.
+    """
+    return str(value).strip().lower() not in ("false", "0")
+
+
+class Reporting:
+    """This run's error reporter, Python hooks, Qt message handler and worker."""
+
+    def __init__(self, log, send_reports=True):
+        """Create the reporter from the switches; nothing is hooked until start().
+
+        Args: log is the AppLog; send_reports is False for --no-error-reports.
+        Returns: None.
+        """
+        self.cli_off = not send_reports
+        settings = QSettings("ESPI", "espi_live")
+        self.chosen = setting_on(settings.value(error_reports.SETTING_KEY, True))
+        enabled, self.forced = error_reports.resolve_enabled(self.cli_off, self.chosen)
+        self.reporter = error_reports.ErrorReporter(enabled, log_tail=log.recent_lines,
+                                                    uptime=log.uptime)
+        self.reporter.update_context(front_end="Qt")
+        self.worker = error_reports.ErrorReportWorker(self.reporter)
+        self.reporter.listeners.append(self.worker.kick)
+        self.hooks = None
+        self.previous_handler = None
+
+    def start(self, log):
+        """Install the hooks, report earlier native crashes and start sending.
+
+        Args: log is the AppLog.
+        Returns: None.
+        """
+        self.hooks = error_reports.install_hooks(self.reporter)
+        self.previous_handler = qInstallMessageHandler(handle_qt_message)
+        log.info("Error reports: " + ("on" if self.reporter.enabled else
+                                      f"off ({self.forced or 'turned off in the Help menu'})"))
+        self.reporter.collect_native_crashes(log.crash_path)
+        self.worker.start()
+
+    def choose(self, on, log):
+        """Apply the Help menu choice.
+
+        Args: on is the new choice; log is the AppLog.
+        Returns: None.
+        """
+        self.chosen = on
+        QSettings("ESPI", "espi_live").setValue(error_reports.SETTING_KEY, on)
+        self.reporter.enabled, self.forced = error_reports.resolve_enabled(self.cli_off, on)
+        log.info(f"Error reports: {'on' if self.reporter.enabled else 'off'}")
+        if self.reporter.enabled:
+            self.worker.kick()
+
+    def stop(self):
+        """Restore the hooks and the Qt message handler and stop the worker.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.hooks is not None:
+            qInstallMessageHandler(self.previous_handler)
+            self.hooks.uninstall()
+            self.hooks = None
+        self.worker.stop()
+
+
+def describe_session(channels, display):
+    """Summarize what this run uses, for the log.
+
+    Args: channels is the list of Channel; display describes the image view.
+    Returns: One line.
+    """
+    if all(channel.demo for channel in channels):
+        source = f"dummy mode, {len(channels)} synthetic camera(s)"
+    else:
+        source = f"{len(channels)} camera(s): " + ", ".join(
+            channel.label + (" (processing)" if channel.active else "") for channel in channels)
+    spinnaker = camera.spinnaker_version()
+    return (f"Session: {source}; display {display}"
+            + (f"; Spinnaker {spinnaker}" if spinnaker else ""))
+
+
 # Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
 FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
+# Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
+PIPELINE = ("noise reduction → difference → average → speckle filter → "
+            "stretch → invert → gamma/CLAHE → palette")
+# Opt-in processing setups. Exposure, gain, frame rate and recording stay put.
+PROCESSING_PRESETS = {
+    "Live preview": {
+        "mode": "Previous",
+        "noise_reduction": 0.0,
+        "average": 1,
+        "rolling": False,
+        "ref_refresh_s": 0.0,
+        "smoothing": 0,
+        "smoothing_method": "Gaussian",
+        "scale_range": True,
+        "clip_percent": 0.0,
+        "invert": False,
+        "palette": "Gray",
+        "gamma": 1.0,
+        "clahe": False,
+    },
+    "Measurement": {
+        "mode": "Reference",
+        "noise_reduction": 0.0,
+        "average": 8,
+        "rolling": False,
+        "ref_refresh_s": 2.0,
+        "smoothing": 3,
+        "smoothing_method": "Median",
+        "scale_range": True,
+        "clip_percent": 0.5,
+        "invert": False,
+        "palette": "Gray",
+        "gamma": 1.0,
+        "clahe": True,
+    },
+}
+PRESET_TIPS = {
+    "Live preview": "Watch fringes form while you align the setup: Previous view, "
+                    "no averaging, no noise reduction, speckle filter off. "
+                    "Does not change exposure, gain, frame rate or recording.",
+    "Measurement": "A still object against one reference: Reference view, 8-frame "
+                   "block average, Median filter 3 px, reference refresh 2 s. "
+                   "Does not change exposure, gain, frame rate or recording.",
+}
+SETTINGS_GUIDE = f"""A typical ESPI measurement starts with one of the two presets. Neither changes exposure, gain, frame rate or recording.
+
+Live preview — while you aim the camera and check that fringes form.
+  View: Previous. Average N: 1 (off). Rolling average: off.
+  Noise reduction: 0. Speckle filter: off. Ref. refresh: 0.
+  Stretch to 0–255: on. Palette: Gray. Gamma: 1.0. CLAHE: off.
+  Switch the view to Raw to frame the object. Raw skips difference processing but still applies display gamma.
+
+Measurement — a still object, compared with one reference.
+  View: Reference. Press F (or Set reference) once the object is still.
+  Average N: 8 with Rolling average off: one clean image every 8 frames.
+  Speckle filter: Median, width 3 px, well below the fringe spacing.
+  Ref. refresh: 2 s. That cancels slow drift (air, heat). Motion slower than the refresh disappears; use 0 and press F when you need one fixed before/after.
+  Noise reduction: 0. Raise it only when the camera is noisy and the object is still.
+  Stretch to 0–255: on, clip 0.5% so a few speckles don't flatten the contrast.
+  Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
+
+Processing order (Previous and Reference views):
+  {PIPELINE}
+
+Raw view applies noise reduction and display gamma, without stretch or palette.
+
+Three controls that are easy to mix up:
+  Noise reduction blends camera frames over time, before the difference. It removes sensor noise and keeps the speckle. It trails motion and weakens Previous-view fringes.
+  Average N blends difference frames. It reduces speckle noise in the fringes. Off (block): one image per N frames. On (rolling): the full frame rate, with a lag of about N frames.
+  The speckle filter blurs each difference image in space. Gaussian softens edges at any width. Median keeps fringe edges and stops at 5 px. Keep the width well below the fringe spacing or the fringes disappear.
+
+Hover any control for the same advice: what it does, when to use it, and a starting value.
+"""
+
+# Status-bar actions. palette() follows the light or dark theme at startup.
+# The blue update button stays the primary action, distinct from the red badge.
+STATUS_BUTTON_STYLE = """
+QPushButton {
+    border: 1px solid palette(mid);
+    border-radius: 4px;
+    padding: 2px 8px;
+    background: palette(base);
+    color: palette(button-text);
+}
+QPushButton:hover {
+    border-color: palette(highlight);
+    background: palette(midlight);
+}
+QPushButton:pressed {
+    background: palette(mid);
+    border-color: palette(dark);
+}
+QPushButton:focus {
+    border-color: palette(highlight);
+}
+QPushButton:disabled {
+    color: palette(placeholder-text);
+    background: palette(window);
+    border: 1px solid palette(mid);
+}
+"""
+UPDATE_BUTTON_STYLE = """
+QPushButton {
+    border: 1px solid #163a6b;
+    border-radius: 4px;
+    padding: 2px 8px;
+    background: #1d4f91;
+    color: white;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background: #2a64b0;
+    border-color: #102848;
+}
+QPushButton:pressed {
+    background: #163a6b;
+    border-color: #0c1e36;
+}
+QPushButton:focus {
+    border-color: #8eb4e8;
+}
+QPushButton:disabled {
+    background: #8aa4c4;
+    color: #f4f7fb;
+    border: 1px solid #6d88a8;
+    font-weight: bold;
+}
+"""
+
+
+def _paint_status_icon(kind, color):
+    """Draw a 16px monochrome icon for a status-bar action.
+
+    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Returns: A QPixmap with a transparent background.
+    """
+    pixmap = QPixmap(16, 16)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                   Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if kind == "refresh":
+            painter.drawArc(2, 2, 12, 12, 40 * 16, 280 * 16)
+            painter.setBrush(color)
+            arrow = QPainterPath()
+            arrow.moveTo(7, 1)
+            arrow.lineTo(13, 1)
+            arrow.lineTo(13, 7)
+            painter.drawPath(arrow)
+        elif kind == "download":
+            painter.drawLine(8, 2, 8, 9)
+            painter.drawLine(4, 6, 8, 11)
+            painter.drawLine(12, 6, 8, 11)
+            painter.drawLine(3, 13, 13, 13)
+        elif kind == "idea":
+            painter.drawEllipse(4, 1, 8, 8)
+            painter.drawLine(6, 9, 6, 12)
+            painter.drawLine(10, 9, 10, 12)
+            painter.drawLine(6, 12, 10, 12)
+            painter.drawLine(7, 14, 9, 14)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _status_icon(kind, color):
+    """Build a status-bar icon, with a dimmer copy for the disabled state.
+
+    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Returns: A QIcon.
+    """
+    icon = QIcon()
+    icon.addPixmap(_paint_status_icon(kind, color), QIcon.Mode.Normal, QIcon.State.Off)
+    dimmed = QColor(color)
+    dimmed.setAlpha(150)
+    icon.addPixmap(_paint_status_icon(kind, dimmed), QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
+
+
+def _arm_status_button(button, style, texts, icon=None):
+    """Give a status-bar control button chrome, a pointer and a fixed width.
+
+    The width fits every label the button shows, so a busy label cannot push
+    the readouts sideways.
+
+    Args: button is a QPushButton; style is its style sheet; texts are the
+        labels; icon is a QIcon, or None.
+    Returns: The fixed width in pixels.
+    """
+    button.setFlat(False)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setFocusPolicy(Qt.StrongFocus)
+    button.setStyleSheet(style)
+    if icon is not None:
+        button.setIcon(icon)
+        button.setIconSize(QSize(16, 16))
+    current = button.text()
+    width = 0
+    for text in texts:
+        button.setText(text)
+        width = max(width, button.sizeHint().width())
+    button.setText(current)
+    button.setFixedWidth(width)
+    return width
+
+
 # Long enough that a moving pointer does not flash a tip; short enough to wait for.
 TOOLTIP_DELAY_MS = 600
 TOOLTIP_FALL_ASLEEP_MS = 0  # the next control waits too, so sweeping does not pop tips
@@ -1036,6 +1373,33 @@ class FeatureRequestDialog(QDialog):
         super().accept()
 
 
+class SettingsGuideDialog(QDialog):
+    """Explain the processing controls and offer the two starting presets."""
+
+    def __init__(self, parent):
+        """Build the guide text and the buttons that apply a preset.
+
+        Args: parent is the main window; its apply_preset handles the buttons.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Which settings should I use?")
+        self.resize(680, 640)
+        self.guide = QPlainTextEdit(SETTINGS_GUIDE)
+        self.guide.setReadOnly(True)
+        self.guide.setObjectName("settingsGuide")
+        buttons = QDialogButtonBox()
+        live = buttons.addButton("Apply Live preview", QDialogButtonBox.ActionRole)
+        measure = buttons.addButton("Apply Measurement", QDialogButtonBox.ActionRole)
+        close = buttons.addButton(QDialogButtonBox.Close)
+        live.clicked.connect(lambda: parent.apply_preset("Live preview"))
+        measure.clicked.connect(lambda: parent.apply_preset("Measurement"))
+        close.clicked.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.guide, 1)
+        layout.addWidget(buttons)
+
+
 class FixedLabel(QLabel):
     """A status-bar label whose width never depends on its text.
 
@@ -1053,9 +1417,18 @@ class FixedLabel(QLabel):
         """
         super().__init__()
         self._full = ""
+        self._hold = False  # when True, the bar may not shrink this label
         self._reserved = max(self.fontMetrics().horizontalAdvance(text)
                              for text in samples) + 2
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+    def hold_full_text(self):
+        """Keep the reserved width, so the samples are never shortened.
+
+        Args: None.
+        Returns: None.
+        """
+        self._hold = True
 
     def sizeHint(self):
         """Return the reserved width, whatever the text.
@@ -1068,9 +1441,13 @@ class FixedLabel(QLabel):
     def minimumSizeHint(self):
         """Allow shrinking to nothing when the window is too narrow.
 
+        A label that holds its text keeps the reserved width instead.
+
         Args: None.
         Returns: A QSize.
         """
+        if self._hold:
+            return self.sizeHint()
         return QSize(0, super().minimumSizeHint().height())
 
     def text(self):
@@ -1100,19 +1477,47 @@ class FixedLabel(QLabel):
         self.setText(self._full)
 
 
+class TipLabel(FixedLabel):
+    """The help tip. A left click shows the next one; a right click hides it."""
+
+    clicked = Signal()
+    dismissed = Signal()
+
+    def __init__(self, *samples):
+        """Reserve room for the samples and show that the tip is clickable.
+
+        Args: samples are the widest strings the label should show in full.
+        Returns: None.
+        """
+        super().__init__(*samples)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        """A left click asks for the next tip; a right click hides them.
+
+        Args: event is the Qt mouse event.
+        Returns: None.
+        """
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        elif event.button() == Qt.RightButton:
+            self.dismissed.emit()
+
+
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
 
-    def __init__(self, channels, log, use_gl, check_updates=True):
+    def __init__(self, channels, log, use_gl, check_updates=True, reporting=None):
         """Build the window and start polling the engines.
 
         Args: channels is a list of Channel, at least one of them active
             (opened, not yet started); the first active one is displayed;
             log is the AppLog; use_gl selects the GPU view instead of the CPU
             fallback; check_updates looks for a newer prebuilt binary at
-            startup and again every few hours, and downloads this build's
-            source code if it is missing (otherwise that waits for Open in
-            Codex). False skips every update check, including the later ones.
+            startup and again every few hours; reporting is the run's
+            Reporting, or None; and the window downloads this build's source
+            code if it is missing (otherwise that waits for Open in Codex).
+            False skips every update check, including the later ones.
         Returns: None.
         """
         super().__init__()
@@ -1121,6 +1526,9 @@ class MainWindow(QMainWindow):
         self.channels = list(channels)
         self.current = next(channel for channel in self.channels if channel.active)
         self.log = log
+        self.reporting = reporting
+        self.report_outcomes = {}  # fingerprint -> latest error_reports.Outcome
+        self.fatal_boxes = {}  # fingerprint -> (open "ESPI stopped" box, its message)
         self.closing = False
         self.updates = updater.UpdateWorker()
         self.update_info = None
@@ -1178,7 +1586,7 @@ class MainWindow(QMainWindow):
 
         settings = QSettings("ESPI", "espi_live")
         if not self.restoreGeometry(settings.value("geometry", b"")):
-            self.resize(1400, 900)
+            self.resize(DEFAULT_WIDTH, DEFAULT_HEIGHT)
         self.restoreState(settings.value("windowState", b""), LAYOUT_VERSION)
 
         self.frame_timer = QTimer(self)
@@ -1188,6 +1596,14 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._poll_status)
         self.status_timer.start(200)
+        # Coarse, and only while tips are showing: nothing per frame, and the
+        # slot only changes a label. It never talks to an engine.
+        self.tip_timer = QTimer(self)
+        self.tip_timer.setTimerType(Qt.CoarseTimer)
+        self.tip_timer.setInterval(tips.ROTATE_MS)
+        self.tip_timer.timeout.connect(self._rotate_tip)
+        if not self.tips.hidden:
+            self.tip_timer.start()
         if check_updates and updater.unavailable_reason() is None:
             self._periodic_checks = True
             self.updates.check()
@@ -1504,7 +1920,7 @@ class MainWindow(QMainWindow):
             "control is turned up, not the share of the previous frame kept: "
             "low values already blend several frames, and "
             f"{MAX_DENOISE_PERCENT} trails motion the most, which also softens "
-            "Previous-view fringes.")
+            "Previous-view fringes. Start at 0.")
         self.noise_reduction.valueChanged.connect(
             lambda v: self.engine.update_settings(noise_reduction=v))
         add(self.noise_reduction, "Noise reduction")
@@ -1517,27 +1933,33 @@ class MainWindow(QMainWindow):
         note(self.camera_label)
 
         heading("ESPI measurement")
+        self._add_preset_buttons(add)
         self.average = SliderSpin(1, 60, 1, 0, s.average)
         self.average.set_description(
-            "How many difference frames are averaged to reduce speckle noise. "
-            "1 turns averaging off. A typical start is 1, then raise it when "
-            "speckle hides the fringes.")
+            "How many difference frames are combined to quiet speckle in the "
+            "fringes. Use it in Previous or Reference view when one difference "
+            "is too speckled to read. 1 turns it off and keeps the full frame "
+            "rate. Start at 8 for a measurement; use 1 while aligning.")
         self.average.valueChanged.connect(
             lambda v: self.engine.update_settings(average=int(v)))
         add(self.average, "Average N")
         self.rolling = QCheckBox("Rolling average (updates every frame)")
         set_tooltip(self.rolling,
-                    "Off: one image per N frames. On: a running average that keeps "
-                    "the camera's frame rate. Use it when you want to watch fringes "
-                    "move instead of waiting for each block of N frames.")
+            "Off: a block average, one image every N frames, then a fresh start. "
+            "Use that when each result should stand alone. On: a running average "
+            "that keeps the full frame rate but lags behind motion by about N "
+            "frames. Start off for a measurement; turn it on to watch a slow "
+            "change continuously.")
         self.rolling.setChecked(s.rolling)
         self.rolling.toggled.connect(lambda on: self.engine.update_settings(rolling=on))
         add(self.rolling)
         self.ref_refresh = SliderSpin(0, 10, 0.1, 1, s.ref_refresh_s, " s")
         self.ref_refresh.set_description(
-            "Reference view: recapture the reference this often so slow drift "
-            "(air, heat) cancels out. 0 keeps one reference until you press F. "
-            "A typical value is 0 unless the setup drifts.")
+            "In Reference view, recaptures the baseline this often so slow drift "
+            "(air, heat) cancels out of the fringes. A shorter time hides real "
+            "motion that is slower than the refresh. 0 keeps one reference until "
+            "you press F. Start at 0 for a single before/after; try 2 s when the "
+            "setup drifts and the change you care about is faster than that.")
         self.ref_refresh.valueChanged.connect(
             lambda v: self.engine.update_settings(ref_refresh_s=v))
         add(self.ref_refresh, "Ref. refresh")
@@ -1547,15 +1969,19 @@ class MainWindow(QMainWindow):
         self.smoothing_combo.addItems(SMOOTHING_METHODS)
         self.smoothing_combo.setCurrentText(s.smoothing_method)
         set_tooltip(self.smoothing_combo,
-                    "Gaussian: any width. Median keeps fringe edges sharper and is "
-                    "capped at 5 px so the frame rate holds. Use Median when a wide "
-                    "Gaussian blurs the fringes.")
+            "Blurs each difference image so pixel-scale speckle fades and broader "
+            "fringes stand out. Gaussian softens edges and accepts any width. "
+            "Median keeps fringe edges sharper and is capped at 5 px so the frame "
+            "rate holds. Use Median when the fringe edges matter; Gaussian for a "
+            "softer look. Start with Median.")
         self.smoothing_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(smoothing_method=name))
         self.smoothing = SliderSpin(0, 31, 1, 0, s.smoothing, " px")
         self.smoothing.set_description(
-            "Blur width that removes pixel-scale speckle. Keep it well below the "
-            "fringe spacing. 0 = off. A typical start is 0, then a few pixels.")
+            "Width of the speckle filter, in pixels. Keep it well below the "
+            "fringe spacing or the fringes blur away with the speckle. 0 turns "
+            "the filter off. Start at 3 px and raise it only while the fringes "
+            "stay sharp.")
         self.smoothing.valueChanged.connect(
             lambda v: self.engine.update_settings(smoothing=int(v)))
         add(self.smoothing_combo, "Speckle filter")
@@ -1563,12 +1989,14 @@ class MainWindow(QMainWindow):
         self.scale_range = QCheckBox("Stretch to 0–255")
         set_tooltip(self.scale_range, STRETCH_TIP,
                     "Gamma is a separate curve applied afterwards and does not "
-                    "replace this stretch.")
+                    "replace this stretch. Start on.")
         self.scale_range.setChecked(s.scale_range)
         self.scale_range.toggled.connect(
             lambda on: self.engine.update_settings(scale_range=on))
         self.invert = QCheckBox("Invert")
-        set_tooltip(self.invert, "Swap bright and dark fringes.")
+        set_tooltip(self.invert,
+            "Swaps bright and dark fringes. Use it when the pattern is easier to "
+            "read the other way around. Start off.")
         self.invert.setChecked(s.invert)
         self.invert.toggled.connect(lambda on: self.engine.update_settings(invert=on))
         toggles = QWidget()
@@ -1580,9 +2008,10 @@ class MainWindow(QMainWindow):
         add(toggles)
         self.clip = SliderSpin(0, 10, 0.1, 1, s.clip_percent, " %")
         self.clip.set_description(
-            "Stretch: let this share of the darkest and brightest pixels saturate "
-            "so stray speckles don't flatten the contrast. 0 = exact min/max. A "
-            "typical value is 0, or about 0.5% when a few speckles dominate.")
+            "With Stretch on, lets this share of the darkest and brightest pixels "
+            "saturate so a few stray speckles don't flatten the contrast. 0 uses "
+            "the exact minimum and maximum. Start at 0; try 0.5% when speckles "
+            "wash the image out.")
         self.clip.valueChanged.connect(
             lambda v: self.engine.update_settings(clip_percent=v))
         add(self.clip, "Stretch clip")
@@ -1592,19 +2021,20 @@ class MainWindow(QMainWindow):
         self.palette_combo.addItems(PALETTES)
         self.palette_combo.setCurrentText(s.palette)
         set_tooltip(self.palette_combo,
-                    "Colors for a difference image. Gray shows the measurement; "
-                    "Turbo, Jet, Hot, Viridis, Plasma and Inferno make small "
-                    "brightness steps easier to see. Raw view ignores it.")
+            "Colors the stretched image. Gray shows brightness and is what you "
+            "want for a measurement. A color palette (Turbo, Jet and the others) "
+            "makes small steps easier to see; pair it with CLAHE. Start with Gray.")
         self.palette_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(palette=name))
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
-        self.gamma.set_description(GAMMA_TIP)
+        self.gamma.set_description(GAMMA_TIP + " Start at 1.0.")
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
         self.clahe = QCheckBox("CLAHE (color palettes only)")
         set_tooltip(self.clahe,
-                    "Local contrast for color palettes only; Gray ignores it. Turn "
-                    "it on when a color map looks flat, and off when it exaggerates "
-                    "speckle. On by default.")
+            "Boosts local contrast so faint fringes show up in a color palette. "
+            "It does nothing while the palette is Gray. Turn it on when a color "
+            "palette still looks flat; leave it off when the gray values must "
+            "stay as they are. Start on with a color palette, and off with Gray.")
         self.clahe.setChecked(s.clahe)
         self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
         add(self.palette_combo, "Palette")
@@ -1636,6 +2066,44 @@ class MainWindow(QMainWindow):
         self.controls_dock.setWidget(panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self._tip_dock_buttons(self.controls_dock)
+
+    def _add_preset_buttons(self, add):
+        """Add the Live preview and Measurement buttons to the controls grid.
+
+        Args: add places a widget on the next controls-grid row.
+        Returns: None.
+        """
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        for name, tip in PRESET_TIPS.items():
+            button = QPushButton(name)
+            set_tooltip(button, tip)
+            button.clicked.connect(
+                lambda _checked=False, name=name: self.apply_preset(name))
+            row.addWidget(button)
+        add(row_widget)
+
+    def apply_preset(self, name):
+        """Apply a processing preset to the displayed camera.
+
+        Exposure, gain, frame rate, recording and the single-field option are
+        left as they are. The controls update to match.
+
+        Args: name is a key of PROCESSING_PRESETS.
+        Returns: None.
+        """
+        self.engine.update_settings(**PROCESSING_PRESETS[name])
+        self._load_settings(self.engine.settings(), self.current.limits)
+        self.log.write(f"Preset applied: {name}")
+
+    def _show_settings_guide(self):
+        """Open the guide to the processing controls and the two presets.
+
+        Args: None.
+        Returns: None.
+        """
+        SettingsGuideDialog(self).exec()
 
     def _build_log(self):
         """Create the log dock.
@@ -1677,18 +2145,42 @@ class MainWindow(QMainWindow):
                 set_tooltip(button, tip)
 
     def _build_status_bar(self):
-        """Create the status-bar readouts.
+        """Create the status-bar readouts and action buttons.
 
         Args: None.
         Returns: None.
         """
         bar = self.statusBar()
         bar.setAttribute(Qt.WA_AlwaysShowToolTips, True)
-        self.hint_label = QLabel()  # left side; elides first when space runs out
+        self.error_report_label = QLabel()  # error-report results, with the issue link
+        self.error_report_label.setTextFormat(Qt.RichText)
+        self.error_report_label.setOpenExternalLinks(True)
+        self.error_report_label.setVisible(False)
+        self.error_report_label.setStyleSheet("color:#b00020;")
+        bar.addWidget(self.error_report_label)
+        self.error_report_timer = QTimer(self)
+        self.error_report_timer.setSingleShot(True)
+        self.error_report_timer.timeout.connect(self.error_report_label.hide)
+        settings = QSettings("ESPI", "espi_live")
+        self.tips = tips.TipRotator(
+            hidden=bool(settings.value("tips/hidden", False, bool)))
+        # Ignored, with no minimum, so the badges keep the width they had
+        # before the tip existed. Stretch 20 against the view hint's 1 fills
+        # the sentence first; the cap is the longest tip, and the hint gets
+        # whatever is left. Right-click and View > Help tips dismiss it.
+        self.tip_label = TipLabel(*tips.TIPS)
+        self.tip_label.clicked.connect(self._rotate_tip)
+        self.tip_label.dismissed.connect(lambda: self._set_tips_visible(False))
+        self.tip_label.setMinimumWidth(0)
+        self.tip_label.setMaximumWidth(self.tip_label.sizeHint().width())
+        self.tip_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        bar.addWidget(self.tip_label, 20)
+        self.hint_label = QLabel()  # takes the space the tip does not use
         self.hint_label.setMinimumWidth(0)
         self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         set_tooltip(self.hint_label, "What the current view is showing.")
         bar.addWidget(self.hint_label, 1)
+        self._show_tip()
         # Leftmost permanent item: showing it only narrows the hint, so it moves
         # nothing else.
         self.frozen_badge = QLabel("  FROZEN  ")
@@ -1700,6 +2192,7 @@ class MainWindow(QMainWindow):
         bar.addPermanentWidget(self.frozen_badge)
         # Every readout has a fixed width, so no value can move its neighbours.
         self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
+        self.source_badge.hold_full_text()  # never "DUMM…"; the readouts ellipsize first
         self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
         set_tooltip(self.record_label,
                     "Whether this camera is recording, and the rate the file is "
@@ -1726,22 +2219,26 @@ class MainWindow(QMainWindow):
         set_tooltip(self.pixel_status,
                     "Brightness from 0 to 255 of the image pixel under the pointer.")
         # The two update buttons are never shown together, so they share one
-        # fixed-width slot that stays put whichever is visible.
+        # fixed-width slot that stays put whichever is visible. They are real
+        # buttons (border, icon, pointer), split from the readouts by a rule.
         self.update_button = QPushButton()  # shown when a newer build exists
         self.update_button.setVisible(False)
         set_tooltip(self.update_button, "Download the newer build of ESPI live.")
-        self.update_button.setStyleSheet("background:#1d4f91;color:white;font-weight:bold;")
         self.update_button.clicked.connect(self._update_clicked)
         self.check_button = QPushButton("Check for updates")  # until a newer build is found
-        self.check_button.setFlat(True)
         set_tooltip(self.check_button, "Check GitHub for a newer build of ESPI live.")
         self.check_button.clicked.connect(self._check_updates_now)
-        bold = self.update_button.font()
-        bold.setBold(True)
-        metrics = QFontMetrics(bold)
-        slot_width = max(metrics.horizontalAdvance(text) for text in (
-            "Install update", "Downloading update… 100%",
-            "Restart to update", "Check for updates", "Checking for updates…")) + 24
+        ink = self.check_button.palette().color(QPalette.ColorRole.ButtonText)
+        update_width = _arm_status_button(
+            self.update_button, UPDATE_BUTTON_STYLE,
+            ("Install update", "Downloading update… 100%",
+             "Restart to update"),
+            _status_icon("download", QColor(Qt.white)))
+        check_width = _arm_status_button(
+            self.check_button, STATUS_BUTTON_STYLE,
+            ("Check for updates", "Checking for updates…"),
+            _status_icon("refresh", ink))
+        slot_width = max(update_width, check_width)
         self.update_slot = QWidget()
         slot = QGridLayout(self.update_slot)
         slot.setContentsMargins(0, 0, 0, 0)
@@ -1751,21 +2248,31 @@ class MainWindow(QMainWindow):
         self.update_slot.setFixedWidth(slot_width)
         bar.addPermanentWidget(self.update_slot)
         self.feature_button = QPushButton("Request feature")
-        self.feature_button.setFlat(True)
         set_tooltip(self.feature_button,
                     "Send a feature request to the developers as a GitHub issue.")
         self.feature_button.clicked.connect(lambda: self._request_feature())
+        _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE,
+                           ("Request feature", "Sending request…"),
+                           _status_icon("idea", ink))
         bar.addPermanentWidget(self.feature_button)
         self.codex_button = QPushButton(CODEX_LABEL)
-        self.codex_button.setFlat(True)
         set_tooltip(self.codex_button,
                     "Ask OpenAI's Codex how ESPI live works, using this build's "
                     "real source code.")
-        self.codex_button.setFixedWidth(max(
-            QFontMetrics(self.codex_button.font()).horizontalAdvance(text)
-            for text in (CODEX_LABEL, CODEX_BUSY_LABEL)) + 24)
         self.codex_button.clicked.connect(self._open_codex)
+        _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE,
+                           (CODEX_LABEL, CODEX_BUSY_LABEL))
         bar.addPermanentWidget(self.codex_button)
+        self.status_actions_rule = QFrame()
+        self.status_actions_rule.setFrameShape(QFrame.Shape.VLine)
+        self.status_actions_rule.setFrameShadow(QFrame.Shadow.Sunken)
+        self.status_actions_rule.setFixedWidth(10)
+        bar.addPermanentWidget(self.status_actions_rule)
+        buttons = (self.update_button, self.check_button, self.feature_button,
+                   self.codex_button)
+        height = max(button.sizeHint().height() for button in buttons)
+        for button in buttons:
+            button.setFixedHeight(height)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
             bar.addPermanentWidget(widget)
@@ -1784,6 +2291,12 @@ class MainWindow(QMainWindow):
         menu.addAction(self.controls_dock.toggleViewAction())
         menu.addAction(self.log_dock.toggleViewAction())
         menu.addAction(self.actions_bar.toggleViewAction())
+        self.tips_action = QAction("Help tips", self)
+        self.tips_action.setCheckable(True)
+        self.tips_action.setChecked(not self.tips.hidden)
+        set_tooltip(self.tips_action, "Show rotating help tips in the status bar.")
+        self.tips_action.triggered.connect(self._set_tips_visible)
+        menu.addAction(self.tips_action)
         menu.addSeparator()
         for text, key, tip, handler in (
                 ("Fit to window", "0", "Show the whole image. Shortcut: 0.", self.view.fit),
@@ -1822,6 +2335,10 @@ class MainWindow(QMainWindow):
                     "Shortcut: F1.")
         guide.triggered.connect(self.show_guide)
         help_menu.addSeparator()
+        help_menu.setToolTipsVisible(True)
+        guide = help_menu.addAction("Which settings should I use?")
+        set_tooltip(guide, "Explain the processing controls and apply a starting preset.")
+        guide.triggered.connect(self._show_settings_guide)
         check = help_menu.addAction("Check for updates…")
         set_tooltip(check, "Check GitHub for a newer build of ESPI live.")
         check.triggered.connect(self._check_updates_now)
@@ -1832,6 +2349,14 @@ class MainWindow(QMainWindow):
         set_tooltip(ask, "Ask OpenAI's Codex how ESPI live works, using this build's "
                     "real source code.")
         ask.triggered.connect(self._open_codex)
+        help_menu.addSeparator()
+        self.reports_action = help_menu.addAction("Send error reports automatically")
+        self.reports_action.setCheckable(True)
+        self._sync_reports_action()
+        self.reports_action.toggled.connect(self._choose_error_reports)
+        logs = help_menu.addAction("Open log folder")
+        logs.triggered.connect(self._open_log_folder)
+        help_menu.addSeparator()
         about = help_menu.addAction("About ESPI live")
         set_tooltip(about, "Show the version and build of this copy.")
         about.triggered.connect(lambda: QMessageBox.about(
@@ -2287,6 +2812,55 @@ class MainWindow(QMainWindow):
         self.view.show_packet(packet, self.table, key)
         self.shown_packet = packet
 
+    def _show_tip(self):
+        """Put the current tip in the status bar, or hide it.
+
+        Args: None.
+        Returns: None.
+        """
+        text = self.tips.current()
+        shown = not self.tips.hidden
+        self.tip_label.setText(text)
+        if text:
+            set_tooltip(self.tip_label, text,
+                        "Click for the next tip. Right-click to hide.")
+        else:
+            set_tooltip(self.tip_label)
+        self.tip_label.setVisible(shown)
+        action = getattr(self, "tips_action", None)
+        if action is not None:
+            action.setChecked(shown)
+
+    def _rotate_tip(self):
+        """Show the next tip and wait the full interval again.
+
+        Shared by the timer and a click. A timeout that arrives after the
+        tips were hidden must not bring them back.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.tips.hidden:
+            return
+        self.tips.advance()
+        self._show_tip()
+        self.tip_timer.start()
+
+    def _set_tips_visible(self, visible):
+        """Show or hide the tips and remember the choice.
+
+        Args: visible is True to show tips.
+        Returns: None.
+        """
+        if visible:
+            self.tips.restore()
+            self.tip_timer.start()
+        else:
+            self.tips.dismiss()
+            self.tip_timer.stop()
+        self._show_tip()
+        QSettings("ESPI", "espi_live").setValue("tips/hidden", self.tips.hidden)
+
     def _poll_status(self):
         """Refresh status text, the log, and handle engine events.
 
@@ -2319,11 +2893,169 @@ class MainWindow(QMainWindow):
             self.pixel_status.setText("")
         for channel, state in zip(self.channels, self.camera_states):
             state.setText(self._camera_state(channel))
+        self.log.watchdog_tick()
         self._handle_events()
         self._handle_update_events()
         self._handle_feedback_events()
         self._handle_report_events()
         self._handle_source_events()
+        self._update_report_context()
+        self._handle_error_report_events()
+
+    # ----- error reports -------------------------------------------------------
+
+    def _sync_reports_action(self):
+        """Show the error-report choice and whether a switch forces it off.
+
+        Args: None.
+        Returns: None.
+        """
+        action = self.reports_action
+        action.blockSignals(True)
+        if self.reporting is None:
+            action.setChecked(False)
+            action.setEnabled(False)
+        else:
+            action.setChecked(self.reporting.reporter.enabled)
+            action.setEnabled(self.reporting.forced is None)
+            action.setToolTip(
+                f"Off: {self.reporting.forced}" if self.reporting.forced else
+                "Unexpected errors are filed as public GitHub issues, without your "
+                "user name, folders or camera serial numbers")
+        action.blockSignals(False)
+
+    def _choose_error_reports(self, on):
+        """Turn automatic error reports on or off from the Help menu.
+
+        Args: on is the new state.
+        Returns: None.
+        """
+        self.reporting.choose(on, self.log)
+        self._sync_reports_action()
+
+    def _open_log_folder(self):
+        """Open the folder that holds the run logs.
+
+        Args: None.
+        Returns: None.
+        """
+        try:
+            folder = (os.path.dirname(self.log.path) if self.log.path
+                      else paths.output_folder("logs"))
+        except OSError as exc:
+            QMessageBox.warning(self, "Log folder", f"The log folder is unavailable: {exc}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(folder)):
+            QMessageBox.information(self, "Log folder", f"The logs are in {folder}")
+
+    def _update_report_context(self):
+        """Tell the reporter what this session shows, for later reports.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.reporting is None:
+            return
+        identity = self.current.identity
+        if self.current.demo:
+            source = "dummy mode"
+        else:
+            source = "camera " + (identity.short_name() if identity
+                                  else self.current.info.model or "(model unknown)")
+        serials = [channel.info.serial for channel in self.channels]
+        serials += [getattr(channel.identity, "serial", "") for channel in self.channels
+                    if getattr(channel.identity, "serial", "")]
+        self.reporting.reporter.update_context(
+            source=source, cameras=len(self.channels), serials=serials,
+            spinnaker=camera.spinnaker_version())
+
+    def _handle_error_report_events(self):
+        """Show what happened to error reports: in an open "ESPI stopped"
+        dialog for that error, otherwise in the status bar.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.reporting is None:
+            return
+        while True:
+            try:
+                _, outcome = self.reporting.worker.events.get_nowait()
+            except queue.Empty:
+                return
+            self.report_outcomes[outcome.fingerprint] = outcome
+            if outcome.fingerprint in self.fatal_boxes:
+                box, message = self.fatal_boxes[outcome.fingerprint]
+                box.setText(self._fatal_text(message, outcome.fingerprint))
+            else:
+                self._show_report_status(outcome)
+
+    @staticmethod
+    def _outcome_html(outcome):
+        """Describe an outcome as rich text with the issue link.
+
+        Args: outcome is an error_reports.Outcome, or None while sending.
+        Returns: HTML text.
+        """
+        text = html.escape(error_reports.outcome_text(outcome))
+        if outcome is None or not outcome.url:
+            return text
+        url = html.escape(outcome.url, quote=True)
+        if outcome.kind == "browser":
+            return f'Not sent automatically: <a href="{url}">Report in browser…</a>'
+        if outcome.number:
+            number = f"#{outcome.number}"
+            return text.replace(number, f'<a href="{url}">{number}</a>', 1)
+        return text
+
+    def _fatal_text(self, message, fingerprint):
+        """Build the "ESPI stopped" text, with the report's state when there is one.
+
+        Args: message is the error; fingerprint is its error ID or None.
+        Returns: HTML text.
+        """
+        text = html.escape(message)
+        if fingerprint is None:
+            return text
+        outcome = self.report_outcomes.get(fingerprint)
+        return (f"{text}<br><br>{self._outcome_html(outcome)}"
+                f"<br><small>Error ID {html.escape(fingerprint)}</small>")
+
+    def _show_fatal(self, message, fingerprint):
+        """Show the "ESPI stopped" dialog; its report line updates while it is open.
+
+        Args: message is the error; fingerprint is its error ID or None.
+        Returns: None.
+        """
+        box = QMessageBox(QMessageBox.Critical, "ESPI stopped",
+                          self._fatal_text(message, fingerprint), parent=self)
+        box.setTextFormat(Qt.RichText)
+        box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        if fingerprint is not None:
+            self.fatal_boxes[fingerprint] = (box, message)
+        try:
+            box.exec()
+        finally:
+            self.fatal_boxes.pop(fingerprint, None)
+
+    def _show_report_status(self, outcome):
+        """Put a report outcome in the status bar for a while (no dialog).
+
+        Args: outcome is an error_reports.Outcome.
+        Returns: None.
+        """
+        if outcome.kind == "declined":
+            return  # the developers chose not to fix it; the log has the details
+        if outcome.kind == "fixed":
+            text = "An error occurred that a newer build fixes: use Check for updates"
+        elif outcome.kind == "saved":
+            text = "An unexpected error was saved; it will be reported next time"
+        else:
+            text = f"Unexpected error: {self._outcome_html(outcome)}"
+        self.error_report_label.setText(text)
+        self.error_report_label.setToolTip(f"Error ID {outcome.fingerprint}")
+        self.error_report_label.setVisible(True)
+        self.error_report_timer.start(REPORT_STATUS_MS)
 
     # ----- feature requests --------------------------------------------------
 
@@ -2354,7 +3086,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 kind, (request, payload) = self.feedback.events.get_nowait()
-            except Exception:
+            except queue.Empty:
                 return
             self.feature_button.setEnabled(True)
             self.feature_button.setText("Request feature")
@@ -2364,7 +3096,7 @@ class MainWindow(QMainWindow):
                                   "Your request was submitted.", parent=self)
                 box.exec()
             else:
-                self.log.write(f"Feature request failed: {payload}")
+                self.log.warning(f"Feature request failed: {payload}")
                 box = QMessageBox(QMessageBox.Warning, "Request not sent",
                                   f"The request could not be sent: {payload}.", parent=self)
                 retry = box.addButton("Edit and retry", QMessageBox.AcceptRole)
@@ -2607,7 +3339,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 kind, payload = self.updates.events.get_nowait()
-            except Exception:
+            except queue.Empty:
                 break
             manual, self.update_manual = self.update_manual, False
             if kind == "checked" and payload is None:
@@ -2620,7 +3352,7 @@ class MainWindow(QMainWindow):
                 if manual:
                     self._update_clicked()
             elif kind == "check_failed":
-                self.log.write(f"Update check failed: {payload}")
+                self.log.warning(f"Update check failed: {payload}")
                 if manual:
                     QMessageBox.warning(self, "Updates", f"Update check failed: {payload}")
             elif kind == "downloaded":
@@ -2633,7 +3365,7 @@ class MainWindow(QMainWindow):
                 self.update_button.setEnabled(True)
                 self._offer_restart()
             elif kind == "download_failed":
-                self.log.write(f"Update download failed: {payload}")
+                self.log.warning(f"Update download failed: {payload}")
                 self._show_available_update(self.update_info)
                 QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
         self._sync_check_button()
@@ -2663,7 +3395,7 @@ class MainWindow(QMainWindow):
             while engine is not None and channel.engine is engine:
                 try:
                     kind, payload = engine.events.get_nowait()
-                except Exception:
+                except queue.Empty:
                     break
                 self._handle_event(channel, kind, payload)
 
@@ -2713,7 +3445,8 @@ class MainWindow(QMainWindow):
                                 f"Could not start {channel.label}: {payload}")
             self._channel_ended(channel)
         elif kind == "fatal":
-            QMessageBox.critical(self, "ESPI stopped", f"{name}{payload}")
+            message, fingerprint = payload
+            self._show_fatal(f"{name}{message}", fingerprint)
             self._channel_ended(channel)
         elif kind == "stopped" and not self.closing:
             self._channel_ended(channel)
@@ -2746,6 +3479,7 @@ class MainWindow(QMainWindow):
         """
         if not self.closing:
             self.closing = True
+            self.tip_timer.stop()
             self.update_timer.stop()
             self.statusBar().showMessage("Finishing recordings and releasing the camera…")
             for engine in self._all_engines():
@@ -2783,37 +3517,44 @@ def finish_update(window, log):
             updater.relaunch(sys.argv[1:])
             log.write("Restarting into the new build")
     except (updater.UpdateError, OSError) as exc:
-        log.write(f"Update could not be installed: {exc}")
+        log.warning(f"Update could not be installed: {exc}")
 
 
-def run(force_demo=False, check_updates=True, demo_cameras=1):
+def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
+        send_reports=True):
     """Start the Qt front end.
 
     Args: force_demo skips camera detection and starts synthetic video;
         check_updates looks for a newer prebuilt binary (at startup and
         every few hours) and downloads this build's source code (if missing)
         at startup;
-        demo_cameras is how many synthetic cameras demo mode simulates.
+        demo_cameras is how many synthetic cameras demo mode simulates;
+        log_level is the --log-level name or None; send_reports is False
+        for --no-error-reports.
     Returns: The process exit code.
     """
     request_gl_format()
     QApplication.setApplicationName("ESPI live")
     QApplication.setOrganizationName("ESPI")
     app = QApplication.instance() or QApplication(sys.argv)
-    log = AppLog()
+    log = AppLog(log_level)
     path = log.start()
+    for line in header_lines("Qt", log.level):
+        log.info(line)
+    reporting = Reporting(log, send_reports)
     cleanup = updater.StartupCleanup(log.write)
     window = None
     channels = []
     try:
         if path:
             log.write(f"Log file: {path}")
+        reporting.start(log)
         cleanup.start()
         if not force_demo:
             try:
                 channels = open_camera_channels(log)
             except Exception as exc:
-                log.write(f"Camera startup unavailable: {exc}")
+                error_reports.caught(log, exc, "camera_startup", "Camera startup unavailable")
                 answer = QMessageBox.question(
                     None, "No camera detected",
                     "No FLIR camera or recognised capture adapter is available. "
@@ -2824,14 +3565,19 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
         if not channels:
             channels = demo_channels(log, demo_cameras)
         use_gl, description = opengl_available()
-        log.write(f"Display: GPU ({description})" if use_gl else
-                  f"Display: CPU fallback ({description})")
-        window = MainWindow(channels, log, use_gl, check_updates)
+        display = f"GPU ({description})" if use_gl else f"CPU fallback ({description})"
+        log.write(f"Display: {display}")
+        log.info(describe_session(channels, display))
+        reporting.reporter.update_context(display=display)
+        window = MainWindow(channels, log, use_gl, check_updates, reporting)
         window.show()
         for channel in channels:
             if channel.active:
                 channel.engine.start()
         return app.exec()
+    except Exception as exc:  # the hooks are restored below, before Python's own hook runs
+        error_reports.caught(log, exc, "main_thread", "ESPI live stopped", fatal=True)
+        raise
     finally:
         if window is None:
             for channel in channels:
@@ -2840,4 +3586,5 @@ def run(force_demo=False, check_updates=True, demo_cameras=1):
                     channel.engine.wait(8.0)
         cleanup.stop()
         finish_update(window, log)
+        reporting.stop()
         log.close()

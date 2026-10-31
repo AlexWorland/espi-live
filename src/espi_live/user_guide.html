@@ -737,6 +737,18 @@ python -m espi_live</code></pre>
         <h3>ESPI measurement <a class="anchor" href="#measurement" aria-label="Link to ESPI measurement">#</a></h3>
         <p>These controls apply to <strong>Previous</strong> and
           <strong>Reference</strong> views. <strong>Raw</strong> ignores them.</p>
+        <p>Start with <strong>Live preview</strong> while aligning: Previous view,
+          averaging off, noise reduction 0, speckle filter off and Gray display.
+          For a still-object measurement, <strong>Measurement</strong> selects
+          Reference view, an 8-frame block average, Median at 3 px, reference
+          refresh 2 s and stretch clip 0.5%. Press <kbd>F</kbd> when the object
+          is still. Neither preset changes exposure, gain, frame rate or recording.</p>
+        <p><strong>Help → Which settings should I use?</strong> explains both
+          presets and can apply them to the displayed camera. Reference refresh
+          also hides motion slower than its interval; use 0 for a fixed before/after.</p>
+        <p>Processing order: noise reduction → difference → average → speckle filter →
+          stretch → invert → gamma/CLAHE → palette. Raw skips difference processing
+          and still applies noise reduction and display gamma.</p>
         <ul>
           <li><strong>Average N</strong> — each displayed image becomes the
             mean of N consecutive difference frames. Averaging reduces random
@@ -782,17 +794,17 @@ python -m espi_live</code></pre>
 
       <section id="display">
         <h3>Display <a class="anchor" href="#display" aria-label="Link to Display">#</a></h3>
-        <p>These controls apply to <strong>Previous</strong> and
-          <strong>Reference</strong> views. <strong>Raw</strong> always shows
-          untouched grayscale.</p>
+        <p>Gamma applies in <strong>Raw</strong>, <strong>Previous</strong> and
+          <strong>Reference</strong> views. Raw stays grayscale and ignores
+          the palette and CLAHE.</p>
         <ul>
           <li><strong>Palette</strong> — Gray, Turbo, Jet, Hot, Viridis, Plasma
             or Inferno. Color palettes make small intensity differences easier
             to see. The palette applies to the whole processed frame, and saved
             files and recordings use exactly the same colors as the screen.</li>
           <li><strong>Gamma</strong> — a display curve from 0.1 to 3.0. Values
-            below 1 <strong>darken</strong> midtones and values above 1
-            <strong>brighten</strong> them. Gamma does not change the
+            below 1 <strong>brighten</strong> dark fringes and values above 1
+            <strong>darken</strong> bright ones. Gamma does not change the
             measurement data, only how it is displayed and saved. 1.0 leaves
             the image unchanged.</li>
           <li><strong>CLAHE (color palettes only)</strong> — contrast-limited
@@ -887,11 +899,20 @@ python -m espi_live</code></pre>
         <h3>Status bar <a class="anchor" href="#status-bar" aria-label="Link to Status bar">#</a></h3>
         <p>From left to right:</p>
         <ul>
+          <li><strong>Did you know</strong> — help tips rotate about every 12 seconds.
+            Click for the next tip; right-click to hide, or use <strong>View → Help tips</strong>.
+            The choice is remembered. Narrow windows shorten the tip before it crowds
+            the source badge.</li>
           <li><strong>View hint</strong> — a short reminder for the current
             mode, such as pressing <kbd>F</kbd> for a reference.</li>
           <li><strong>FROZEN</strong> badge and the amber
             <strong>FROZEN at</strong> time over the image — the display is
             held; the camera and recording continue.</li>
+          <li><strong>Update / feature buttons</strong> — <strong>Check for
+            updates</strong> (or the blue <strong>Install update</strong>
+            button), <strong>Request feature</strong> and
+            <strong>Open in Codex</strong>. See
+            <a href="#updates">Updates, features and Codex</a>.</li>
           <li><strong>Source badge</strong> — green <strong>Camera</strong> for
             live acquisition, red <strong>DUMMY MODE</strong> for synthetic
             video.</li>
@@ -919,11 +940,6 @@ python -m espi_live</code></pre>
             0–255 sample used for display: after Stretch clip and scaling, and
             after gamma/CLAHE when CLAHE is on. With scaling off it is the raw
             absolute difference. It is not calibrated in physical units.</li>
-          <li><strong>Update / feature buttons</strong> — <strong>Check for
-            updates</strong> (or the blue <strong>Update available</strong>
-            button), <strong>Request feature</strong> and
-            <strong>Open in Codex</strong>. See
-            <a href="#updates">Updates, features and Codex</a>.</li>
         </ul>
       </section>
 
@@ -940,6 +956,11 @@ python -m espi_live</code></pre>
           <code>output/logs/espi_&lt;YYYYMMDD_HHMMSS_microseconds&gt;.log</code>.
           When reporting a problem, include the relevant lines from this panel
           or that file.</p>
+        <p>Each line includes a level and thread name. <strong>Help → Open log folder</strong>
+          opens the logs directory. The newest 50 run logs are kept, along with active runs.
+          Unexpected errors are reported as public GitHub issues after personal details
+          are scrubbed. <strong>Help → Send error reports automatically</strong> controls
+          delivery; <code>--no-error-reports</code> also disables it.</p>
         <p>The log keeps the most recent 2000 lines in the window; the file
           keeps the full run. Lines from several cameras start with the
           camera's serial number.</p>
@@ -952,6 +973,7 @@ python -m espi_live</code></pre>
       <section id="view-menu">
         <h3>View menu <a class="anchor" href="#view-menu" aria-label="Link to View menu">#</a></h3>
         <ul>
+          <li><strong>Help tips</strong> — show or hide the rotating status-bar tips.</li>
           <li><strong>Controls</strong>, <strong>Log</strong> and the
             <strong>toolbar</strong> — show or hide each.</li>
           <li><strong>Fit to window</strong> (<kbd>0</kbd>) — show the whole
@@ -1087,7 +1109,7 @@ python -m espi_live</code></pre>
             <tr><td>Palette</td><td>Gray</td><td>Gray, Turbo, Jet, Hot,
               Viridis, Plasma, Inferno</td><td>Raw is always grayscale.</td></tr>
             <tr><td>Gamma</td><td>1.0</td><td>0.1–3.0, step 0.1</td>
-              <td>&lt; 1 darkens midtones; &gt; 1 brightens.</td></tr>
+              <td>&lt; 1 brightens dark fringes; &gt; 1 darkens bright ones.</td></tr>
             <tr><td>CLAHE</td><td>On</td><td>On / off</td>
               <td>Only with a color palette.</td></tr>
             <tr><td>Record AVI</td><td>Off</td><td>On / off</td>
@@ -1095,7 +1117,8 @@ python -m espi_live</code></pre>
           </tbody>
         </table>
       </div>
-      <p>Opening the camera writes 8000 µs, 0 dB and 30 fps every time;
+      <p>A new camera starts at 8000 µs, 0 dB and 30 fps. Restarting a camera
+        applies the exposure, gain and frame rate saved in its controls;
         settings made in SpinView are replaced.</p>
     </section>
 
@@ -1318,9 +1341,8 @@ python -m espi_live</code></pre>
           <li>If it succeeds, the red indicators disappear, the view resets to
             <strong>Raw</strong>, and any demo recording is stopped so synthetic
             and live frames never share a file. The switch also configures the
-            camera at <strong>8000 µs, 0 dB and 30 fps</strong>. The sliders
-            keep the demo values, so check the <strong>Applied</strong> readout
-            and re-enter your exposure, gain and FPS before measuring. Capture a
+            camera at the <strong>current exposure, gain and FPS</strong> shown
+            in the controls. Check the <strong>Applied</strong> readout before measuring. Capture a
             new reference before continuing.</li>
           <li>If it fails, a warning gives the reason and demo mode continues.
             Fix the connection and try again; no restart is needed.</li>

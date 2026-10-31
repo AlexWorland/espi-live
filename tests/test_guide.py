@@ -61,10 +61,26 @@ class GuideTest(unittest.TestCase):
                           "Defaults and limits", "Packaged builds",
                           "Waiting for camera frame"):
             self.assertTrue(operation in text, f"missing section: {operation!r}")
-        self.assertTrue("below 1 <strong>darken</strong>" in text)
+        self.assertTrue("below 1 <strong>brighten</strong>" in text)
         self.assertTrue("Other changes do not split the file" in text)
         self.assertTrue("0–50,000 µs" in text)
         self.assertTrue("59 fps" in text)
+
+    def test_guide_matches_the_combined_camera_and_help_features(self):
+        """The guide describes the restart fix, presets and rotating help tips.
+
+        Args: None.
+        Returns: None.
+        """
+        text = guide_html()
+        for phrase in ("Restarting a camera", "current exposure, gain and FPS",
+                       "Live preview", "Measurement", "Which settings should I use?",
+                       "Did you know", "Help tips", "display gamma",
+                       "Send error reports automatically"):
+            self.assertIn(phrase, text)
+        self.assertNotIn("8000 µs, 0 dB and 30 fps every time", text)
+        self.assertNotIn("re-enter your exposure", text)
+        self.assertNotIn("&lt; 1 darkens", text)
 
     def test_internal_links_have_targets(self):
         """Every in-page link points at an id that exists on the page.
