@@ -53,23 +53,27 @@ def auto_open_order(infos):
     return flir + adapters
 
 
-def make_session(log, info):
+def make_session(log, info, exposure_us=8000.0, gain_db=0.0, fps=30.0):
     """Create the session that opens one camera.
 
-    Args: log has a write(message) method; info is the camera's CameraInfo.
+    Args: log has a write(message) method; info is the camera's CameraInfo;
+        exposure_us, gain_db and fps are the starting FLIR settings (ignored
+        for a capture device, which has nothing adjustable).
     Returns: An unopened CaptureSession or CameraSession.
     """
     if info.kind == "capture":
         return capture.CaptureSession(log, info)
-    return camera.CameraSession(log, info.serial)
+    return camera.CameraSession(log, info.serial, exposure_us, gain_db, fps)
 
 
-def open_first_live(log):
+def open_first_live(log, exposure_us=8000.0, gain_db=0.0, fps=30.0):
     """Open the first FLIR camera, else the first recognised capture adapter.
 
     Used to leave demo mode. Unsupported video devices are never tried.
 
-    Args: log has a write(message) method.
+    Args: log has a write(message) method; exposure_us, gain_db and fps are
+        written when the FLIR camera opens, so it starts at the engine's
+        current settings rather than the hard-coded defaults.
     Returns: An opened session. Raises the last failed attempt's error when
         nothing opens, so a capture adapter's actionable message (close
         WinTV / Hauppauge Capture) is the one the user sees; every failed
@@ -79,7 +83,9 @@ def open_first_live(log):
                            if is_supported(info)]
     error = None
     for info in candidates:
-        session = camera.CameraSession(log) if info is None else make_session(log, info)
+        session = (camera.CameraSession(log, None, exposure_us, gain_db, fps)
+                   if info is None else
+                   make_session(log, info, exposure_us, gain_db, fps))
         try:
             session.open()
             return session

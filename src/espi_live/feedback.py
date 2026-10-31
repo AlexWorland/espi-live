@@ -201,7 +201,9 @@ class FeedbackWorker:
 
     The front end polls ``events`` for ("sent", (request, url)) and
     ("failed", (request, message)); the request is returned so a failure can
-    be edited and retried without losing the text.
+    be edited and retried without losing the text. Any exception other
+    than FeedbackError is a bug, so after posting the failure it is re-raised
+    for threading.excepthook to log and report.
     """
 
     def __init__(self):
@@ -231,8 +233,11 @@ class FeedbackWorker:
             """
             try:
                 self.events.put(("sent", (request, submit(request))))
-            except Exception as exc:
+            except FeedbackError as exc:
                 self.events.put(("failed", (request, str(exc))))
+            except Exception as exc:
+                self.events.put(("failed", (request, f"{type(exc).__name__}: {exc}")))
+                raise
             finally:
                 self.busy = False
 

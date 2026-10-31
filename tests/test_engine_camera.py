@@ -20,34 +20,7 @@ from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
                           interlaced_frame, usb_live2, webcam)
 from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
-
-
-class ListLog:
-    """Collect log messages in memory."""
-
-    def __init__(self):
-        """Create an empty log.
-
-        Args: None.
-        Returns: None.
-        """
-        self.lines = []
-
-    def write(self, message):
-        """Record one message.
-
-        Args: message is the text to keep.
-        Returns: None.
-        """
-        self.lines.append(message)
-
-    def has(self, text):
-        """Check whether any logged line contains text.
-
-        Args: text is the substring to look for.
-        Returns: True if some line contains it.
-        """
-        return any(text in line for line in self.lines)
+from list_log import ListLog
 
 
 def wait_until(predicate, timeout=5.0):
@@ -250,6 +223,19 @@ class SetupTests(CameraEngineCase):
         self.assertEqual(kind2, "camera_limits")
         self.assertIn("Gain", limits)
 
+    def test_open_camera_writes_saved_exposure_gain_and_frame_rate(self):
+        """Opening applies the engine's settings, not the hard-coded defaults.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(exposure_us=5000.0, gain_db=1.5, fps=15.0)
+        self.engine.open_camera()
+        nodes = self.cam.nodemap.nodes
+        self.assertEqual(nodes["ExposureTime"].value, 5000.0)
+        self.assertEqual(nodes["Gain"].value, 1.5)
+        self.assertEqual(nodes["AcquisitionFrameRate"].value, 15.0)
+
     def test_open_camera_logs_model_notes(self):
         """An untested colour model is named in the log with its notes.
 
@@ -258,12 +244,11 @@ class SetupTests(CameraEngineCase):
         """
         self.cam.tl_device_nodemap.nodes["DeviceModelName"].value = (
             "Blackfly S BFS-U3-70S7C")
-        with mock.patch.object(self.engine.log, "write") as write:
-            self.engine.open_camera()
-        text = "\n".join(call.args[0] for call in write.call_args_list)
-        self.assertIn("Camera: Blackfly S BFS-U3-70S7C (FLIR)", text)
-        self.assertIn("Camera note: Colour camera", text)
-        self.assertIn("BFS-U3-70S7C has not been tested", text)
+        self.engine.open_camera()
+        self.assertTrue(self.log.has("Camera: Blackfly S BFS-U3-70S7C (FLIR)"))
+        notes = "\n".join(self.log.at("WARNING"))
+        self.assertIn("Camera note: Colour camera", notes)
+        self.assertIn("BFS-U3-70S7C has not been tested", notes)
 
     def test_open_camera_failure_leaves_engine_unchanged(self):
         """No camera raises and the engine may still choose demo.
@@ -395,12 +380,16 @@ class CameraStreamingTests(CameraEngineCase):
         Returns: None.
         """
         self.cam.frame_source = lambda: FakeImage(np.zeros((4, 4), np.uint16))
-        with mock.patch.object(engine.traceback, "print_exc"):
-            self.start_camera()
-            payload = self.wait_event("fatal")
-            self.wait_event("stopped")
-        self.assertIn("Expected a Mono8 image", payload)
+        self.start_camera()
+        message, fingerprint = self.wait_event("fatal")
+        self.wait_event("stopped")
+        self.assertIn("Expected a Mono8 image", message)
+        self.assertIsNone(fingerprint)  # no reporter installed
         self.assertTrue(self.log.has("Stopped: RuntimeError"))
+        level, _, exc_info = self.log.records[[line.startswith("Stopped")
+                                               for line in self.log.lines].index(True)]
+        self.assertEqual(level, "ERROR")
+        self.assertIsInstance(exc_info, RuntimeError)  # logged with its traceback
         self.assertTrue(self.system.released)
         self.assertIsNone(self.engine.camera)
 
@@ -745,6 +734,21 @@ class DirectWorkerTests(CameraEngineCase):
         self.assertEqual(self.engine._retired, [recorder])
         self.assertIsNone(frame)
         self.assertIsNone(self.engine.latest_packet())
+        self.assertFalse(self.engine.demo)
+
+    def test_switch_live_opens_at_the_engine_settings(self):
+        """Leaving demo mode starts the camera at the current slider values.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.use_demo()
+        self.engine.update_settings(exposure_us=5000.0, gain_db=1.5, fps=15.0)
+        self.engine._switch_live(None, None)
+        nodes = self.cam.nodemap.nodes
+        self.assertEqual(nodes["ExposureTime"].value, 5000.0)
+        self.assertEqual(nodes["Gain"].value, 1.5)
+        self.assertEqual(nodes["AcquisitionFrameRate"].value, 15.0)
         self.assertFalse(self.engine.demo)
 
     def test_run_waits_for_recorders_and_reports_unfinished(self):
