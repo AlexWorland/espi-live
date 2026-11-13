@@ -1094,7 +1094,10 @@ python -m espi_live</code></pre>
           opens the logs directory. The newest 50 run logs are kept, along with active runs.
           Unexpected errors are reported as public GitHub issues after personal details
           are scrubbed. <strong>Help → Send error reports automatically</strong> controls
-          delivery; <code>--no-error-reports</code> also disables it.</p>
+          delivery; <code>--no-error-reports</code> also disables it. Run logs are also
+          sent to the developer, scrubbed the same way, so problems can be looked into
+          without anyone having to send logs by hand; they go to a private repository,
+          not a public page.</p>
         <p>The log keeps the most recent 2000 lines in the window; the file
           keeps the full run. Lines from several cameras start with the
           camera's serial number.</p>

@@ -3306,6 +3306,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.main_window.call_args.args[2:], (True, False, self.reporting))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
+        self.reporting.start_uploads.assert_called_once_with()
         self.finish.assert_called_once_with(self.window, self.log)
         self.assertIn("closed", self.log.lines)
         self.assertIn("Display: GPU (OpenGL 4.1 on X)", self.log.lines)
@@ -3981,7 +3982,7 @@ class ReportingClassTests(unittest.TestCase):
                 mock.patch.object(reporting.worker, "start") as start:
             try:
                 reporting.start(self.log)
-                self.assertIn("Error reports: off", self.log.lines[-1])
+                self.assertIn("Error reports: off", self.log.lines[-2])
                 collect.assert_called_once_with(None)
                 start.assert_called_once()
                 handler.assert_called_once_with(qt_app.handle_qt_message)
@@ -4028,6 +4029,53 @@ class ReportingClassTests(unittest.TestCase):
         with mock.patch.object(reporting.worker, "stop") as stop:
             reporting.stop()
         stop.assert_called_once()
+
+
+    def test_reporting_starts_and_stops_log_uploads(self):
+        """Starting logs the upload state and starts the uploader; stopping stops it.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.assertEqual(reporting.uploads.uploader.folder,
+                         os.path.join(paths.OUTPUT_DIR, "logs"))
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}), \
+                mock.patch.object(reporting.worker, "start"), \
+                mock.patch.object(reporting.uploads, "start") as start:
+            reporting.start(self.log)
+            start.assert_not_called()  # not before the cameras are open
+            reporting.start_uploads()
+        start.assert_called_once()
+        reporting.stop()
+        self.assertTrue(reporting.uploads.stopping.is_set())
+        # Error reports turned off (or on) never changes log uploads: only the token does.
+        for reports, token, expected in (("0", "t", "Log uploads: on"),
+                                         ("1", "", "Log uploads: off (no logs token in this copy)")):
+            with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: reports}), \
+                    mock.patch.object(qt_app.log_uploads, "logs_token", return_value=token):
+                reporting = self.reporting()
+                with mock.patch.object(reporting.worker, "start"), \
+                        mock.patch.object(reporting.uploads, "start"):
+                    reporting.start(self.log)
+                reporting.stop()
+            self.assertIn(expected, self.log.lines)
+
+    def test_menu_switch_leaves_log_uploads_alone(self):
+        """The Help-menu switch is for error reports only; log uploads have no switch.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            reporting = self.reporting()
+            self.assertIs(reporting.uploads.uploader.serials.__self__, reporting.reporter)
+            self.assertFalse(hasattr(reporting.uploads.uploader, "enabled"))
+            with mock.patch.object(reporting.worker, "kick"), \
+                    mock.patch.object(reporting.uploads, "kick") as kick:
+                reporting.choose(False, self.log)
+                reporting.choose(True, self.log)
+            kick.assert_not_called()
 
 
 class SessionDescriptionTests(unittest.TestCase):
@@ -4084,6 +4132,8 @@ class ErrorReportUITests(WindowTestCase):
         self.assertTrue(self.window.reports_action.isChecked())
         self.assertTrue(self.window.reports_action.isEnabled())
         self.assertIn("public GitHub issues", self.window.reports_action.toolTip())
+        self.assertNotIn("logs", self.window.reports_action.toolTip())
+        self.assertEqual(self.window.reports_action.text(), "Send error reports automatically")
 
     def test_a_forced_off_shows_the_reason(self):
         """When a switch forces reporting off, the action is locked.
