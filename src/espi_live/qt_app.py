@@ -43,8 +43,9 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QProxyStyle, QPushButton, QSizePolicy, QSlider,
-                               QStyle, QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
+                               QSizePolicy, QSlider, QStyle, QTextEdit, QToolBar, QToolTip,
+                               QVBoxLayout, QWidget)
 
 from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, tips, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
@@ -54,7 +55,8 @@ from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHO
                                   VIEW_MODES, palette_rgb_table)
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
-# layout is left alone; a narrower window keeps the badge and elides the tip.
+# layout is kept; a narrower window keeps the badge and elides the tip. Either
+# size shrinks to the screen when shown (MainWindow.fit_to_screen).
 DEFAULT_WIDTH = 2100
 DEFAULT_HEIGHT = 900
 
@@ -567,6 +569,20 @@ def _screen_rect(widget, screen):
     if widget_screen is None:
         return QRect(0, 0, 4096, 4096)
     return widget_screen.availableGeometry()
+
+
+def fit_rect(rect, available):
+    """Shrink and move a window rectangle so it lies inside the available area.
+
+    Args: rect is the window's outer rectangle (title bar and borders
+        included); available is the screen's usable area (no taskbar or dock).
+    Returns: A QRect inside available, or rect itself when it already fits.
+    """
+    width = min(rect.width(), available.width())
+    height = min(rect.height(), available.height())
+    x = min(max(rect.x(), available.left()), available.right() + 1 - width)
+    y = min(max(rect.y(), available.top()), available.bottom() + 1 - height)
+    return QRect(x, y, width, height)
 
 
 def _candidate_points(origin, widget_size, tip_size, blocked):
@@ -1586,6 +1602,8 @@ class MainWindow(QMainWindow):
         app.installEventFilter(self.shortcut_filter)
         app.installEventFilter(self.tooltip_filter)
 
+        self._following_screens = False
+        self._watched_screen = None
         settings = QSettings("ESPI", "espi_live")
         if not self.restoreGeometry(settings.value("geometry", b"")):
             self.resize(DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -1612,6 +1630,58 @@ class MainWindow(QMainWindow):
             self._schedule_update_check()
         if check_updates:
             self.source.start()  # downloads this build's source if it is missing
+
+    def showEvent(self, event):
+        """Fit the window to its screen and follow that screen from now on.
+
+        Args: event is the QShowEvent.
+        Returns: None.
+        """
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if not self._following_screens:
+            self._following_screens = True
+            handle.screenChanged.connect(self._watch_screen)
+        self._watch_screen(handle.screen())
+
+    def _watch_screen(self, screen):
+        """Refit when the window moves to a screen or that screen's area changes.
+
+        A resolution or scaling change, a moved taskbar or a different monitor
+        all change the usable area.
+
+        Args: screen is the QScreen the window is now on.
+        Returns: None.
+        """
+        if self._watched_screen is not None:
+            self._watched_screen.availableGeometryChanged.disconnect(self.fit_to_screen)
+        self._watched_screen = screen
+        screen.availableGeometryChanged.connect(self.fit_to_screen)
+        self.fit_to_screen()
+
+    def fit_to_screen(self, *_):
+        """Shrink and move the window so all of it is on its screen.
+
+        A saved size from a larger monitor, or a resolution change while the
+        program runs, would otherwise leave the image and controls partly off
+        screen or under the taskbar. A maximized or full-screen window already
+        fits and is left alone.
+
+        Args: _ ignores the new area that availableGeometryChanged passes.
+        Returns: None.
+        """
+        if self.isMaximized() or self.isFullScreen():
+            return
+        frame = self.frameGeometry()
+        inner = self.geometry()
+        fitted = fit_rect(frame, self.screen().availableGeometry())
+        if fitted == frame:
+            return
+        # The title bar and borders keep their size; only the inside shrinks.
+        self.setGeometry(fitted.x() + inner.x() - frame.x(),
+                         fitted.y() + inner.y() - frame.y(),
+                         fitted.width() - (frame.width() - inner.width()),
+                         fitted.height() - (frame.height() - inner.height()))
 
     @property
     def camera_identity(self):
@@ -2070,12 +2140,23 @@ class MainWindow(QMainWindow):
 
         column.addStretch(1)
 
-        # No scroll area: every control is always on screen, and the window's
-        # minimum height grows to fit the panel instead.
+        # The panel scrolls vertically when the screen is too short for it, so
+        # it never makes the window taller than the screen. The scroll area
+        # also gives wrapped notes their full height, which a dock alone does
+        # not. Its width leaves room for the scroll bar, so nothing is cut off
+        # sideways.
         panel.setMinimumWidth(320)
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setWidget(panel)
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.controls_scroll.setMinimumWidth(
+            panel.minimumSizeHint().expandedTo(panel.minimumSize()).width()
+            + self.controls_scroll.verticalScrollBar().sizeHint().width())
         self.controls_dock = QDockWidget("Controls", self)
         self.controls_dock.setObjectName("controls")
-        self.controls_dock.setWidget(panel)
+        self.controls_dock.setWidget(self.controls_scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self._tip_dock_buttons(self.controls_dock)
 

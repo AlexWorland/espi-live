@@ -25,10 +25,10 @@ from unittest import mock
 
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QHelpEvent, QKeyEvent, QSurfaceFormat
-from PySide6.QtWidgets import (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QApplication,
-                               QComboBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QStyle,
-                               QTextEdit, QWidget)
+from PySide6.QtGui import QHelpEvent, QKeyEvent, QScreen, QSurfaceFormat
+from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSlider,
+                               QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
+                               QPlainTextEdit, QPushButton, QStyle, QTextEdit, QWidget)
 
 from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, tips, updater
 from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
@@ -1345,8 +1345,8 @@ class MainWindowBuildTests(WindowTestCase):
 def _dock_controls_missing_tooltips(dock):
     """List interactive controls in a dock that have no tooltip.
 
-    The spin box's internal editor is part of the spin box, so it is not
-    listed on its own. A new slider, button, combo or text field with no
+    The spin box's internal editor is part of the spin box, and a scroll
+    area's scroll bars are part of that area, so neither is listed on its own. A new slider, button, combo or text field with no
     tooltip fails the suite.
 
     Args: dock is the controls QDockWidget.
@@ -1354,7 +1354,7 @@ def _dock_controls_missing_tooltips(dock):
     """
     kinds = (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
              QLineEdit, QPlainTextEdit, QTextEdit)
-    containers = (QAbstractSpinBox, QComboBox, QPlainTextEdit, QTextEdit)
+    containers = (QAbstractSpinBox, QComboBox, QAbstractScrollArea)
     missing = []
     for widget in dock.findChildren(QWidget):
         if not isinstance(widget, kinds):
@@ -4432,8 +4432,8 @@ class FreezeTests(WindowTestCase):
         Returns: None.
         """
         window = self.window
+        window.show()  # showing fits the window to the screen; widen it after
         window.resize(2400, 900)
-        window.show()
         items = (window.update_slot, window.feature_button, window.source_badge,
                  window.record_label, window.range_status, window.camera_fps_status,
                  window.speed_status, window.pixel_status)
@@ -4848,7 +4848,8 @@ class HelpTipTests(WindowTestCase):
         Returns: None.
         """
         window = self.window
-        window.show()
+        window.show()  # showing fits the window to the screen; widen it after
+        window.resize(qt_app.DEFAULT_WIDTH, qt_app.DEFAULT_HEIGHT)
         QApplication.processEvents()
         self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
         for tip in tips.TIPS:
@@ -4865,6 +4866,155 @@ class HelpTipTests(WindowTestCase):
         self.assertTrue(window.tip_label.isHidden())
         self.assertTrue(FakeSettings.store["tips/hidden"])
         self.assertEqual(window.source_badge.geometry().getRect(), before)
+
+
+class FitRectTests(unittest.TestCase):
+    """A window rectangle is shrunk and moved onto the usable screen area."""
+
+    def test_a_window_that_fits_is_unchanged(self):
+        """A rectangle already inside the area comes back the same.
+
+        Args: None.
+        Returns: None.
+        """
+        rect = QRect(10, 50, 600, 400)
+        self.assertEqual(qt_app.fit_rect(rect, QRect(0, 40, 1280, 672)), rect)
+
+    def test_an_oversized_window_fills_the_area(self):
+        """A window larger than the screen shrinks to the area, taskbar excluded.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.fit_rect(QRect(500, -20, 2100, 900), QRect(0, 40, 1280, 672)),
+                         QRect(0, 40, 1280, 672))
+
+    def test_a_window_hanging_off_the_corner_moves_back(self):
+        """A window that fits but sticks out past the bottom right moves in.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.fit_rect(QRect(1000, 500, 400, 300), QRect(0, 40, 1280, 672)),
+                         QRect(880, 412, 400, 300))
+
+
+class ScreenFitTests(unittest.TestCase):
+    """The window fits whatever screen and resolution it is shown on."""
+
+    def setUp(self):
+        """Build a demo window with no saved layout (default size 2100x900).
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        engine = Engine(self.log)
+        engine.use_demo()
+        self.window = demo_window(engine, self.log)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.window.tip_timer.stop()
+        self.addCleanup(self.window.deleteLater)
+        self.addCleanup(self.window.close)
+
+    def assert_on_screen(self, area):
+        """Check that the whole window, frame included, lies inside an area.
+
+        Args: area is the usable screen QRect.
+        Returns: None.
+        """
+        QApplication.processEvents()
+        frame = self.window.frameGeometry()
+        self.assertTrue(area.contains(frame), f"{frame} is not inside {area}")
+
+    def test_showing_fits_the_default_size_to_a_small_screen(self):
+        """The 2100-pixel default shrinks to a screen narrower than that.
+
+        Args: None.
+        Returns: None.
+        """
+        area = self.window.screen().availableGeometry()
+        self.assertGreater(qt_app.DEFAULT_WIDTH, area.width())
+        self.window.show()
+        self.assert_on_screen(area)
+
+    def test_a_resolution_change_while_running_refits_the_window(self):
+        """A smaller usable area (resolution, scaling or taskbar) shrinks the window.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        screen = self.window.screen()
+        smaller = QRect(0, 30, 700, 500)
+        with mock.patch.object(QScreen, "availableGeometry", return_value=smaller):
+            screen.availableGeometryChanged.emit(smaller)
+            self.assert_on_screen(smaller)
+
+    def test_showing_again_watches_the_screen_once(self):
+        """Hiding and showing again neither loses nor doubles the screen watch.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        self.window.hide()
+        self.window.show()
+        screen = self.window.screen()
+        self.assertIs(self.window._watched_screen, screen)
+        smaller = QRect(0, 0, 680, 480)
+        with mock.patch.object(QScreen, "availableGeometry", return_value=smaller), \
+                mock.patch.object(self.window, "setGeometry",
+                                  wraps=self.window.setGeometry) as set_geometry:
+            screen.availableGeometryChanged.emit(smaller)
+        self.assertEqual(set_geometry.call_count, 1)
+
+    def test_a_maximized_window_is_left_alone(self):
+        """Maximized already fits the screen, so its size is not touched.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        self.window.resize(3000, 2000)
+        with mock.patch.object(self.window, "isMaximized", return_value=True):
+            self.window.fit_to_screen()
+        self.assertEqual((self.window.width(), self.window.height()), (3000, 2000))
+
+    def test_controls_scroll_instead_of_stretching_the_window(self):
+        """The window can be shorter than the controls, which then scroll.
+
+        Args: None.
+        Returns: None.
+        """
+        panel = self.window.controls_scroll.widget()
+        self.assertLess(self.window.minimumSizeHint().height(), panel.sizeHint().height())
+        self.window.show()
+        QApplication.processEvents()
+        self.assertTrue(self.window.controls_scroll.verticalScrollBar().isVisible())
+
+    def test_wrapped_notes_get_their_full_height(self):
+        """A wrapped note gets every line it needs, so no text is clipped.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        QApplication.processEvents()
+        note = self.window.noise_note
+        self.assertGreaterEqual(note.height(), note.heightForWidth(note.width()))
 
 
 if __name__ == "__main__":

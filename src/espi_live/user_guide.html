@@ -591,7 +591,11 @@ python -m espi_live</code></pre>
       </div>
       <p>Both panels can be dragged to another edge, floated as separate
         windows, or hidden from the <a href="#view-menu">View menu</a>. The
-        window size and layout are remembered between runs.</p>
+        window size and layout are remembered between runs. The window always
+        fits the screen it is on, at any resolution or display scaling, and
+        refits when the resolution changes or it moves to another monitor;
+        when the screen is too short for every control, the Controls panel
+        scrolls.</p>
     </section>
 
     <section id="controls">
@@ -1328,7 +1332,9 @@ python -m espi_live</code></pre>
           <li>Use <strong>View → Controls</strong> or
             <strong>View → Log</strong> to hide or show a panel.</li>
           <li>Resize the window; the layout and size are restored the next time
-            the app starts.</li>
+            the app starts, shrunk to fit if the screen is now smaller.</li>
+          <li>On a short screen, scroll the <strong>Controls</strong> panel to
+            reach the controls below the fold.</li>
           <li>On a small screen, hide the log while measuring and show it when
             you need to check a saved path or an error.</li>
         </ul>

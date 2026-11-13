@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-13 — The window fits the screen
+
+- The window now fits the screen it is on, whatever its resolution or display scaling: on a laptop the whole image and the controls are visible instead of running under the taskbar and off the right edge. It refits when the resolution, scaling or taskbar changes and when it moves to another monitor; a saved size from a larger monitor shrinks to fit. A maximized window is left alone.
+- The Controls panel scrolls when the screen is too short for every control, rather than making the window taller than the screen.
+- Wrapped notes in the Controls panel (such as the Noise reduction note) show every line; before, they could be cut off and overlap the controls above them.
+
 ## 2026-11-13 — Flip horizontally
 
 - New **Flip horizontally** button in the Display section mirrors the image left to right (a flip across the vertical axis) in every view. Saved frames and recordings are flipped the same way; the dummy-mode watermark stays readable. Off by default, so existing output is unchanged. It is a per-camera setting.
