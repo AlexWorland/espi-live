@@ -19,6 +19,10 @@
     --note-soft: #eef6ff;
     --code-bg: #f0f3f6;
     --shadow: 0 8px 30px rgba(20, 35, 55, 0.08);
+    --hit-bg: #ffe58a;
+    --hit-fg: #1b1f24;
+    --hit-current-bg: #ff9b3d;
+    --hit-current-ring: #b4530a;
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -34,6 +38,10 @@
     --note-soft: #142638;
     --code-bg: #1b232c;
     --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+    --hit-bg: #6e5a12;
+    --hit-fg: #fff7d6;
+    --hit-current-bg: #c2610c;
+    --hit-current-ring: #ffb26b;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -50,6 +58,10 @@
       --note-soft: #142638;
       --code-bg: #1b232c;
       --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+      --hit-bg: #6e5a12;
+      --hit-fg: #fff7d6;
+      --hit-current-bg: #c2610c;
+      --hit-current-ring: #ffb26b;
     }
   }
   * { box-sizing: border-box; }
@@ -164,7 +176,109 @@
     font-size: 0.78rem;
     font-weight: 600;
   }
-  section { scroll-margin-top: 18px; }
+  /* Anchored targets land below the sticky search bar. */
+  main [id] { scroll-margin-top: 100px; }
+  /* ---------- search ---------- */
+  .search-bar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: -42px -56px 28px;
+    padding: 12px 56px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    box-shadow: var(--shadow);
+  }
+  .search-field { position: relative; flex: 1 1 180px; min-width: 0; }
+  .search-field::before {
+    content: "";
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    width: 10px;
+    height: 10px;
+    margin-top: -7px;
+    border: 2px solid var(--muted);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+  .search-field::after {
+    content: "";
+    position: absolute;
+    left: 23px;
+    top: 50%;
+    width: 2px;
+    height: 7px;
+    margin-top: 2px;
+    background: var(--muted);
+    transform: rotate(-45deg);
+    pointer-events: none;
+  }
+  .search-bar input {
+    width: 100%;
+    padding: 8px 12px 8px 36px;
+    border: 1px solid var(--muted);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.95rem;
+  }
+  .search-bar input[aria-invalid="true"] { border-color: var(--warn); }
+  .search-status {
+    min-width: 6.5em;
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .search-status.none { color: var(--warn); font-weight: 600; }
+  .search-bar button {
+    min-width: 2.4em;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.9rem;
+    line-height: 1.2;
+    cursor: pointer;
+  }
+  .search-bar button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .search-bar button:disabled { opacity: 0.45; cursor: default; }
+  .search-bar input:focus-visible,
+  .search-bar button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .search-hint { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 0.78rem; }
+  mark.search-hit {
+    padding: 0 1px;
+    border-radius: 3px;
+    background: var(--hit-bg);
+    color: var(--hit-fg);
+  }
+  mark.search-hit.current {
+    background: var(--hit-current-bg);
+    color: #000;
+    box-shadow: 0 0 0 2px var(--hit-current-ring);
+  }
+  .toc-count {
+    float: right;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: var(--hit-bg);
+    color: var(--hit-fg);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.6;
+  }
   main section { margin-top: 44px; }
   main section section { margin-top: 30px; }
   h2 {
@@ -301,6 +415,7 @@
     }
     #toc { max-height: 42vh; overflow-y: auto; }
     main { padding: 28px 22px 80px; }
+    .search-bar { margin: -28px -22px 22px; padding: 10px 22px; }
     h1 { font-size: 1.9rem; }
     .to-top { right: 14px; bottom: 14px; }
   }
@@ -324,7 +439,8 @@
       --shadow: none;
     }
     .layout { display: block; max-width: none; }
-    .sidebar, .to-top, .anchor { display: none !important; }
+    .sidebar, .to-top, .anchor, .search-bar { display: none !important; }
+    mark.search-hit, mark.search-hit.current { background: none; color: inherit; box-shadow: none; }
     main { max-width: none; padding: 0; }
     a { color: #000; text-decoration: none; }
     a[href^="#"] { text-decoration: underline; }
@@ -343,7 +459,7 @@
     } catch (error) { /* file:// or private mode may block storage */ }
   })();
 </script>
-<noscript><style>.sidebar-tools { display: none; }</style></noscript>
+<noscript><style>.sidebar-tools, .search-bar { display: none; }</style></noscript>
 </head>
 <body id="top">
 <a class="skip" href="#main">Skip to contents</a>
@@ -354,8 +470,6 @@
       <span>User Guide</span>
     </div>
     <div class="sidebar-tools">
-      <input id="toc-filter" type="search" placeholder="Filter sections…"
-             autocomplete="off" aria-label="Filter the contents list">
       <button id="theme-toggle" type="button">Theme: Auto</button>
       <button id="print-button" type="button">Print / Save as PDF</button>
     </div>
@@ -431,6 +545,19 @@
   </aside>
 
   <main id="main" tabindex="-1">
+    <div class="search-bar" role="search">
+      <div class="search-field">
+        <label class="sr-only" for="guide-search">Search this guide</label>
+        <input id="guide-search" type="search" placeholder="Search this guide  (press /)"
+               autocomplete="off" spellcheck="false" aria-describedby="search-hint"
+               aria-controls="main" aria-keyshortcuts="/">
+      </div>
+      <span class="search-status" id="search-status" role="status" aria-live="polite"></span>
+      <button id="search-prev" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" disabled>↑</button>
+      <button id="search-next" type="button" aria-label="Next match" title="Next match (Enter)" disabled>↓</button>
+      <p class="search-hint" id="search-hint"><kbd>Enter</kbd> next ·
+        <kbd>Shift</kbd>+<kbd>Enter</kbd> previous · <kbd>Esc</kbd> clear</p>
+    </div>
     <header class="hero">
       <h1>ESPI live — User Guide</h1>
       <p class="lede">ESPI live shows a live image from a FLIR Blackfly
@@ -999,8 +1126,9 @@ python -m espi_live</code></pre>
         <ul>
           <li><strong>User Guide</strong> (<kbd>F1</kbd>) — opens this page in
             your default browser. Every section link and cross-reference works
-            offline; the filter, theme and print controls are in the
-            sidebar.</li>
+            offline. The search box at the top of the page finds words
+            anywhere in the guide (press <kbd>/</kbd> to jump to it); the
+            theme and print controls are in the sidebar.</li>
           <li><strong>Check for updates…</strong> — check GitHub for a newer
             build and report the result in a dialog.</li>
           <li><strong>Request a feature…</strong> — file a GitHub issue with a
@@ -1664,33 +1792,251 @@ python -m espi_live</code></pre>
       window.print();
     });
 
-    /* Filter the contents list as you type. */
-    var filter = document.getElementById("toc-filter");
+    /* Search the whole guide: highlight every match, step through them and
+       show only the matching sections in the contents list. */
+    var searchInput = document.getElementById("guide-search");
+    var searchStatus = document.getElementById("search-status");
+    var prevButton = document.getElementById("search-prev");
+    var nextButton = document.getElementById("search-next");
     var emptyMessage = document.getElementById("toc-empty");
-    function applyFilter() {
-      var query = filter.value.trim().toLowerCase();
-      var links = Array.prototype.slice.call(document.querySelectorAll("#toc a"));
+    var mainArea = document.getElementById("main");
+    var MIN_QUERY = 2;
+    /* Text that is never searched: the search bar itself, code that is not
+       shown, heading "#" links and text only screen readers get. */
+    var SKIP = "script, style, noscript, .search-bar, .anchor, .sr-only, [hidden], [aria-hidden='true']";
+    /* Elements that end a run of text, so a match never spans two of them. */
+    var BLOCKS = /^(P|LI|TD|TH|TR|H1|H2|H3|H4|H5|H6|PRE|SUMMARY|DETAILS|DIV|SECTION|HEADER|FOOTER|CAPTION|DT|DD|BLOCKQUOTE|FIGCAPTION|TABLE|UL|OL|MAIN)$/;
+    var BREAK = "\u0000";
+    var hits = [];          /* hits[n] = the <mark> elements of match n */
+    var current = -1;
+    var openedBySearch = [];
+    var searchTimer = null;
+    var lastQuery = "";
+
+    function normalizeQuery(text) {
+      return text.replace(/\u0000/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+    }
+
+    function blockOf(node) {
+      var element = node.parentNode;
+      while (element && element !== mainArea && !BLOCKS.test(element.nodeName)) {
+        element = element.parentNode;
+      }
+      return element;
+    }
+
+    /* Collect the visible text of the guide as one lower-case string with
+       whitespace collapsed, plus where each character came from. */
+    function readText() {
+      var walker = document.createTreeWalker(mainArea, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (node) {
+          return node.parentNode.closest(SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+        }
+      });
+      var chars = [];
+      var nodes = [];
+      var offsets = [];
+      var lastBlock = null;
+      var node;
+      while ((node = walker.nextNode())) {
+        var block = blockOf(node);
+        if (block !== lastBlock) {
+          chars.push(BREAK); nodes.push(null); offsets.push(0);
+          lastBlock = block;
+        }
+        var data = node.data.toLowerCase();
+        for (var i = 0; i < data.length; i += 1) {
+          var ch = data.charAt(i);
+          if (/\s/.test(ch)) {
+            var previous = chars[chars.length - 1];
+            if (previous === " " || previous === BREAK) { continue; }
+            ch = " ";
+          }
+          chars.push(ch); nodes.push(node); offsets.push(i);
+        }
+      }
+      return { text: chars.join(""), nodes: nodes, offsets: offsets };
+    }
+
+    /* Wrap characters [start, end) of a text node in a highlight mark. */
+    function wrap(node, start, end, index) {
+      var tail = node.splitText(start);
+      tail.splitText(end - start);
+      var mark = document.createElement("mark");
+      mark.className = "search-hit";
+      mark.setAttribute("data-hit", String(index));
+      tail.parentNode.replaceChild(mark, tail);
+      mark.appendChild(tail);
+      return mark;
+    }
+
+    /* Remove every highlight and merge the text back as it was. */
+    function clearHighlights() {
+      var parents = [];
+      Array.prototype.forEach.call(mainArea.querySelectorAll("mark.search-hit"), function (mark) {
+        var parent = mark.parentNode;
+        while (mark.firstChild) { parent.insertBefore(mark.firstChild, mark); }
+        parent.removeChild(mark);
+        if (parents.indexOf(parent) === -1) { parents.push(parent); }
+      });
+      parents.forEach(function (parent) { parent.normalize(); });
+      openedBySearch.forEach(function (panel) { panel.open = false; });
+      openedBySearch = [];
+      hits = [];
+      current = -1;
+    }
+
+    function highlight(query) {
+      var source = readText();
+      var found = [];
+      var from = 0;
+      var at;
+      while ((at = source.text.indexOf(query, from)) !== -1) {
+        found.push(at);
+        from = at + query.length;
+      }
+      hits = found.map(function () { return []; });
+      /* Wrap from the last match backwards: splitting a text node keeps its
+         start in the original node, so earlier offsets stay valid. */
+      for (var n = found.length - 1; n >= 0; n -= 1) {
+        var last = found[n] + query.length - 1;
+        var i = last;
+        while (i >= found[n]) {
+          var node = source.nodes[i];
+          var j = i;
+          while (j - 1 >= found[n] && source.nodes[j - 1] === node) { j -= 1; }
+          hits[n].unshift(wrap(node, source.offsets[j], source.offsets[i] + 1, n));
+          i = j - 1;
+        }
+      }
+    }
+
+    /* Show only the contents entries whose section matches, with a count. */
+    function filterContents(query) {
       var items = Array.prototype.slice.call(document.querySelectorAll("#toc li"));
-      items.forEach(function (item) { item.hidden = false; });
+      Array.prototype.forEach.call(document.querySelectorAll("#toc .toc-count"), function (badge) {
+        badge.parentNode.removeChild(badge);
+      });
       if (!query) {
+        items.forEach(function (item) { item.hidden = false; });
         emptyMessage.hidden = true;
         return;
       }
-      var matches = links.filter(function (link) {
-        return link.textContent.toLowerCase().indexOf(query) !== -1;
-      });
       var visible = 0;
       items.forEach(function (item) {
-        var any = Array.prototype.some.call(item.querySelectorAll("a"), function (link) {
-          return matches.indexOf(link) !== -1;
-        });
-        item.hidden = !any;
-        if (any) { visible += 1; }
+        var link = item.querySelector("a");
+        var section = document.getElementById(link.getAttribute("href").slice(1));
+        var count = 0;
+        if (section) {
+          var seen = {};
+          Array.prototype.forEach.call(section.querySelectorAll("mark.search-hit"), function (mark) {
+            seen[mark.getAttribute("data-hit")] = true;
+          });
+          count = Object.keys(seen).length;
+        }
+        var titleMatches = normalizeQuery(link.textContent).indexOf(query) !== -1;
+        item.hidden = count === 0 && !titleMatches;
+        if (count > 0) {
+          var badge = document.createElement("span");
+          badge.className = "toc-count";
+          badge.textContent = String(count);
+          badge.setAttribute("aria-label", count === 1 ? "1 match" : count + " matches");
+          link.insertBefore(badge, link.firstChild);
+        }
+        if (!item.hidden) { visible += 1; }
       });
       emptyMessage.hidden = visible > 0;
     }
-    filter.addEventListener("input", applyFilter);
-    window.addEventListener("pageshow", applyFilter);
+
+    function showStatus() {
+      var query = normalizeQuery(searchInput.value);
+      searchStatus.classList.remove("none");
+      searchInput.removeAttribute("aria-invalid");
+      if (!query) {
+        searchStatus.textContent = "";
+      } else if (query.length < MIN_QUERY) {
+        searchStatus.textContent = "Keep typing…";
+      } else if (!hits.length) {
+        searchStatus.textContent = "No matches";
+        searchStatus.classList.add("none");
+        searchInput.setAttribute("aria-invalid", "true");
+      } else {
+        searchStatus.textContent = (current + 1) + " of " + hits.length;
+      }
+      prevButton.disabled = hits.length < 1;
+      nextButton.disabled = hits.length < 1;
+    }
+
+    /* Make match n the current one: mark it, open its FAQ and scroll to it. */
+    function select(n) {
+      if (!hits.length) { return; }
+      if (current >= 0) {
+        hits[current].forEach(function (mark) { mark.classList.remove("current"); });
+      }
+      current = (n + hits.length) % hits.length;
+      hits[current].forEach(function (mark) { mark.classList.add("current"); });
+      var panel = hits[current][0].closest("details");
+      while (panel) {
+        if (!panel.open) {
+          panel.open = true;
+          openedBySearch.push(panel);
+        }
+        panel = panel.parentNode.closest("details");
+      }
+      hits[current][0].scrollIntoView({ block: "center" });
+      showStatus();
+    }
+
+    function runSearch() {
+      window.clearTimeout(searchTimer);
+      searchTimer = null;
+      var query = normalizeQuery(searchInput.value);
+      if (query === lastQuery) { return; }
+      lastQuery = query;
+      clearHighlights();
+      var active = query.length >= MIN_QUERY ? query : "";
+      if (active) { highlight(active); }
+      filterContents(active);
+      if (hits.length) { select(0); } else { showStatus(); }
+    }
+
+    searchInput.addEventListener("input", function () {
+      window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(runSearch, 150);
+    });
+    searchInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (searchTimer !== null) { runSearch(); return; }
+        select(current + (event.shiftKey ? -1 : 1));
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        if (searchInput.value) {
+          searchInput.value = "";
+          runSearch();
+        } else {
+          searchInput.blur();
+        }
+      }
+    });
+    prevButton.addEventListener("click", function () { select(current - 1); });
+    nextButton.addEventListener("click", function () { select(current + 1); });
+
+    /* "/" jumps to the search box unless you are typing somewhere else;
+       the browser's own Ctrl+F / Cmd+F is left alone. */
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) { return; }
+      var target = event.target;
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.nodeName))) { return; }
+      event.preventDefault();
+      searchInput.focus();
+      searchInput.select();
+    });
+    /* A query restored by the browser (Back, reload) is searched again. */
+    window.addEventListener("pageshow", function () {
+      lastQuery = "";
+      runSearch();
+    });
 
     /* Open a collapsible FAQ when a contents link points inside it. */
     function revealTarget() {
