@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-13 — Log evidence for intermittent blur and lost detail
+
+- The log now records what is behind a few seconds of blurred or reduced-resolution video. `Frame gap` and `Incomplete-frame burst` lines show late or incomplete frames from the camera link, `Camera stream counters rose` shows frames the camera reported lost (where the model exposes those counters), and `Sharpness drop` / `Sharpness recovered` lines give the start, duration and depth of each drop for both the camera frame and the displayed frame. Every line carries the mode, noise reduction, averaging, smoothing, exposure, gain, frame rate and measured camera rate in force.
+- `--log-level debug` adds a `Display:` line whenever the view size, zoom or image size changes, and update checks, source-copy downloads and error-report sends log when they start and finish, so they can be matched to an episode.
+- Nothing about acquisition, processing or display changed; the sharpness check measures a shrunk copy a few times per second.
+
 ## 2026-10-31 — Verify updates through download, restart and cleanup
 
 - Added real-worker Qt and CLI integration tests against a local release service, covering automatic and manual checks, download consent, corrupt and interrupted downloads, retries and preservation of recordings and tokens.

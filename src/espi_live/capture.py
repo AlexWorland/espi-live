@@ -208,6 +208,14 @@ class CaptureSession:
         """
         return {}
 
+    def read_stream_counters(self):
+        """Report no transport counters: OpenCV capture exposes none.
+
+        Args: None.
+        Returns: An empty dict.
+        """
+        return {}
+
     def read_values(self):
         """Measure the capture rate since the previous call.
 

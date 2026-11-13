@@ -306,6 +306,15 @@ class SessionStreamTests(CaptureTestCase):
         self.assertEqual((values["exposure"], values["gain"], values["requested"]),
                          (None, None, None))
 
+    def test_read_stream_counters_is_empty(self):
+        """OpenCV capture exposes no transport counters.
+
+        Args: None.
+        Returns: None.
+        """
+        session, _, _ = self.open_session()
+        self.assertEqual(session.read_stream_counters(), {})
+
     def test_describe(self):
         """The status line names the capture, its size and measured rate.
 

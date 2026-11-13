@@ -613,6 +613,21 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.run_worker(side_effect=source_code.SourceError("offline")),
                          ("failed", "offline"))
 
+    def test_job_is_logged_with_its_start_and_duration(self):
+        """The check writes a start line and a finish line, for time correlation.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertLogs("espi_live.source_code", "INFO") as logs:
+            self.run_worker(return_value=("/f", ""))
+            deadline = time.monotonic() + 5
+            while len(logs.records) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        messages = [record.getMessage() for record in logs.records]
+        self.assertEqual(messages[0], "Source copy check started")
+        self.assertRegex(messages[1], r"^Source copy check finished in \d+\.\d s$")
+
     def test_busy_worker_refuses_a_second_start(self):
         """start() returns False while a job runs.
 

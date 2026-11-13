@@ -1368,9 +1368,13 @@ class DeliveryTests(ReporterBase):
                 mock.patch.object(error_reports.feedback, "feedback_token",
                                   return_value="secret"), \
                 mock.patch.object(error_reports.feedback, "repository",
-                                  return_value="owner/repo"):
+                                  return_value="owner/repo"), \
+                self.assertLogs("espi_live.error_reports", "INFO") as logs:
             self.reporter.send_pending(posted.append)
         self.assertEqual([outcome.kind for _, outcome in posted], ["created", "commented"])
+        messages = [record.getMessage() for record in logs.records]
+        self.assertIn("Error reports: sending 2 pending report(s)", messages)
+        self.assertRegex(messages[-1], r"^Error reports: delivery finished in \d+\.\d s$")
         self.assertEqual(os.listdir(self.reporter.pending_folder()), [])
         ledger = self.reporter.load_ledger()
         self.assertEqual(ledger["reports"][first.fingerprint]["issue"], 77)

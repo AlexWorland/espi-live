@@ -1938,6 +1938,32 @@ class PollingTests(WindowTestCase):
         self.window._poll_frame()
         self.assertIsNot(self.window.table, first_table)
 
+    def test_view_state_is_logged_once_per_change(self):
+        """The drawn size is logged at DEBUG when the view or image changes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._log_view_state()  # nothing drawn yet
+        self.assertFalse(self.log.has("Display:"))
+        self.engine._packet = make_packet(sequence=1)
+        self.window._poll_frame()
+        self.window._log_view_state()
+        self.window._log_view_state()
+        lines = [line for line in self.log.lines if line.startswith("Display: view")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("image 64x48", lines[0])
+        self.window.view.zoom = 2.0
+        self.window._log_view_state()
+        lines = [line for line in self.log.lines if line.startswith("Display: view")]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("zoom 2", lines[1])
+        self.window.view.image_size = None  # no drawing rectangle
+        self.window.view.zoom = 3.0
+        self.window._log_view_state()
+        self.assertEqual(len([line for line in self.log.lines
+                              if line.startswith("Display: view")]), 2)
+
     def test_poll_status_shows_log_text_and_engine_status(self):
         """Status polling appends log text and mirrors engine status strings.
 

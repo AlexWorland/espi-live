@@ -27,6 +27,12 @@ CAMERA_RANGES = {
     "AcquisitionFrameRate": (0.0, 60.0),
 }
 
+# Transport-layer stream counters read for diagnostics. Not every model or
+# SDK version offers every one; unreadable ones are skipped.
+STREAM_COUNTERS = ("StreamDeliveredFrameCount", "StreamLostFrameCount",
+                   "StreamDroppedFrameCount", "StreamIncompleteFrameCount",
+                   "StreamFailedBufferCount", "StreamBufferUnderrunCount")
+
 
 _system_lock = threading.Lock()
 _system = None
@@ -450,6 +456,27 @@ class CameraSession:
             except PySpin.SpinnakerException:
                 values[key] = None
         return values
+
+    def read_stream_counters(self):
+        """Read the transport layer's frame counters, for diagnostics.
+
+        Args: None.
+        Returns: {counter name: total} for every STREAM_COUNTERS node this
+            camera exposes and can read; empty when it offers none.
+        """
+        counters = {}
+        try:
+            nodemap = self.cam.GetTLStreamNodeMap()
+        except PySpin.SpinnakerException:
+            return counters
+        for name in STREAM_COUNTERS:
+            try:
+                node = PySpin.CIntegerPtr(nodemap.GetNode(name))
+                if PySpin.IsReadable(node):
+                    counters[name] = int(node.GetValue())
+            except PySpin.SpinnakerException:
+                continue
+        return counters
 
     def describe(self, values):
         """Format a read_values() result for the status line.

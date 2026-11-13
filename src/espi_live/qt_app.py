@@ -1550,6 +1550,7 @@ class MainWindow(QMainWindow):
         self.retired_channels = []  # demo channels replaced by real cameras
         self.drawn_sequence = 0
         self.shown_packet = None  # the packet on screen; Freeze holds this one
+        self.view_state = None  # last logged (view size, zoom, image size)
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
         self.display_fps = 0.0
@@ -2813,6 +2814,33 @@ class MainWindow(QMainWindow):
         self.view.show_packet(packet, self.table, key)
         self.shown_packet = packet
 
+    def _log_view_state(self):
+        """Log, at DEBUG, each change of what size the image is drawn at.
+
+        A frame shown smaller than its sensor size is filtered down by the
+        display, which can look like lost resolution; this records when the
+        view size, zoom or image size changed so that can be ruled in or out.
+
+        Args: None.
+        Returns: None.
+        """
+        packet = self.shown_packet
+        if packet is None:
+            return
+        rect = self.view.display_rect()
+        if rect is None:
+            return
+        height, width = packet.image.shape[:2]
+        key = (self.view.width(), self.view.height(), round(self.view.zoom, 3),
+               width, height)
+        if key == self.view_state:
+            return
+        self.view_state = key
+        self.log.debug(
+            f"Display: view {key[0]}x{key[1]} px, zoom {key[2]:g}, image "
+            f"{width}x{height}, drawn at {rect[4]:.2f}x "
+            f"({type(self.view).__name__})")
+
     def _show_tip(self):
         """Put the current tip in the status bar, or hide it.
 
@@ -2876,6 +2904,7 @@ class MainWindow(QMainWindow):
             self.display_fps = self.drawn_frames / (now - self.fps_window_start)
             self.drawn_frames = 0
             self.fps_window_start = now
+        self._log_view_state()
         status = self.engine.status()
         self.camera_label.setText(status["camera"])
         self.hint_label.setText(status["hint"])
