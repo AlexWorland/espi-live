@@ -1,7 +1,10 @@
 name: Release
 
-# Builds self-contained PyInstaller binaries for Windows, Linux and macOS and
-# attaches them to a GitHub release. It runs in one of three ways:
+# Builds the self-contained PyInstaller binary for Windows (the camera PC) and
+# attaches it to a GitHub release. The Linux and macOS builds are disabled
+# because those platforms are not functional yet and the only user is on
+# Windows: restore their matrix entries and steps from git history when they
+# are. It runs in one of three ways:
 #
 # 1. Every merge (push) into main (the normal way): the "version" job rewrites
 #    the draft release with release-drafter, which proposes the next version
@@ -232,20 +235,6 @@ jobs:
             pip_deps: numpy opencv-python PySide6 cv2_enumerate_cameras==1.4.0 certifi pyinstaller
             asset: espi-live-windows-x64.zip
             sdk_files: flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
-          # Linux: ubuntu-24.04 is "noble", the distro the Spinnaker 4.4 packages target.
-          - name: linux-x64
-            os: ubuntu-24.04
-            python: "3.12"
-            pip_deps: -r requirements.txt certifi pyinstaller
-            asset: espi-live-linux-x64.tar.gz
-            sdk_files: spinnaker-4.4/spinnaker_python-4.4.0.246-cp312-cp312-linux_x86_64.tar.gz,spinnaker-4.4/spinnaker-4.4.0.246-noble-amd64-pkg.tar.gz
-          # macOS has no PySpin wheel, so this build runs --demo only.
-          - name: macos-arm64
-            os: macos-latest
-            python: "3.12"
-            pip_deps: -r requirements.txt certifi pyinstaller
-            asset: espi-live-macos-arm64.zip
-            sdk_files: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -255,8 +244,7 @@ jobs:
       # The FLIR Spinnaker SDK is not in this public repository: it lives in the
       # private AlexWorland/espi-live-sdk, checked out into third_party/ (where
       # the paths below and the scripts expect it) with a read-only deploy key,
-      # the SDK_DEPLOY_KEY secret. Without that secret only the macOS (demo)
-      # build works.
+      # the SDK_DEPLOY_KEY secret.
       - name: Check out the FLIR SDK
         if: matrix.sdk_files != ''
         uses: actions/checkout@v4
@@ -303,52 +291,13 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      - name: Install Linux system packages
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          # libgl1: OpenCV; libegl1/libxkbcommon*/libfontconfig1/libdbus-1-3: Qt (PySide6) runtime;
-          # libav*/libswscale7: FFmpeg, which libSpinVideo links against but its package does not declare.
-          sudo apt-get update
-          sudo apt-get install -y libgl1 libegl1 libxkbcommon0 \
-            libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 \
-            libavcodec60 libavformat60 libavutil58 libswscale7
-          # Spinnaker runtime libraries that PySpin links against (_PySpin needs
-          # libSpinUpdate from spinupdate too); apt resolves their dependencies.
-          mkdir -p "$RUNNER_TEMP/spinnaker"
-          tar xzf third_party/spinnaker-4.4/spinnaker-4.4.0.246-noble-amd64-pkg.tar.gz \
-            -C "$RUNNER_TEMP/spinnaker" --strip-components=1
-          cd "$RUNNER_TEMP/spinnaker"
-          # libgentl's preinst shows the FLIR EULA through debconf and exits 2 when it
-          # can't (no terminal here); a preseeded acceptance makes it skip the dialog.
-          echo "libspinnaker libspinnaker/accepted-flir-eula boolean true" | sudo debconf-set-selections
-          # It then asks for analytics consent for the installing user (logname, else
-          # $SUDO_USER) under set -e, and db_input exits 30 when nothing can be shown;
-          # the answer can't be preseeded because the script resets it first. Without
-          # SUDO_USER (logname finds no user here) libgentl skips the question and
-          # libspinnaker's postinst skips its analytics ping.
-          sudo env -u SUDO_USER DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            ./libgentl_*.deb ./libspinnaker_*.deb ./libspinvideo_*.deb \
-            ./libspinnaker-c_*.deb ./libspinvideo-c_*.deb ./spinupdate_*.deb
-          sudo ldconfig
-
       - name: Install Python dependencies
         shell: bash
         run: python -m pip install --upgrade pip && python -m pip install ${{ matrix.pip_deps }}
 
-      - name: Install PySpin (Windows)
-        if: runner.os == 'Windows'
+      - name: Install PySpin
         shell: bash
         run: python -m pip install third_party/flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
-
-      - name: Install PySpin (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/pyspin"
-          tar xzf third_party/spinnaker-4.4/spinnaker_python-4.4.0.246-cp312-cp312-linux_x86_64.tar.gz \
-            -C "$RUNNER_TEMP/pyspin" --wildcards '*.whl'
-          python -m pip install "$RUNNER_TEMP"/pyspin/*.whl
 
       # Fail here, not in the field, if the SDK did not install correctly.
       - name: Check PySpin imports
@@ -407,32 +356,19 @@ jobs:
         run: |
           args=(--noconfirm --clean --paths src --distpath dist --workpath build)
           # The Help menu opens the bundled HTML user guide; ship it as data.
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            args+=(--add-data "src/espi_live/user_guide.html;espi_live")
-          else
-            args+=(--add-data "src/espi_live/user_guide.html:espi_live")
-          fi
+          args+=(--add-data "src/espi_live/user_guide.html;espi_live")
           # camera.py imports PySpin lazily through importlib, so PyInstaller cannot see it.
-          if [ -n "${{ matrix.sdk_files }}" ]; then
-            args+=(--hidden-import PySpin --collect-all PySpin)
-          fi
-          # Lists video devices (the analog-camera capture adapter); not used on macOS.
-          if [ "$RUNNER_OS" != "macOS" ]; then
-            args+=(--hidden-import cv2_enumerate_cameras --collect-all cv2_enumerate_cameras)
-          fi
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # A .app bundle (onedir) is the supported macOS GUI form.
-            args+=(--name "ESPI Live" --windowed --onedir --osx-bundle-identifier io.github.alexworland.espi-live)
-          else
-            # A folder (onedir) starts at once, where a single self-extracting
-            # file unpacks everything to a temporary folder on every start. Each
-            # build keeps its libraries in its own _internal-N (N = build number)
-            # beside the executable: Windows cannot overwrite or delete the DLLs a
-            # running copy has loaded, so an update moves the new folder in beside
-            # the old one and swaps only the executable (see updater.py).
-            # Keep the console: the app mirrors its log there and Windows users start it from a shortcut or terminal.
-            args+=(--name espi-live --console --onedir --contents-directory "_internal-$BUILD_NUMBER")
-          fi
+          args+=(--hidden-import PySpin --collect-all PySpin)
+          # Lists video devices (the analog-camera capture adapter).
+          args+=(--hidden-import cv2_enumerate_cameras --collect-all cv2_enumerate_cameras)
+          # A folder (onedir) starts at once, where a single self-extracting
+          # file unpacks everything to a temporary folder on every start. Each
+          # build keeps its libraries in its own _internal-N (N = build number)
+          # beside the executable: Windows cannot overwrite or delete the DLLs a
+          # running copy has loaded, so an update moves the new folder in beside
+          # the old one and swaps only the executable (see updater.py).
+          # Keep the console: the app mirrors its log there and users start it from a shortcut or terminal.
+          args+=(--name espi-live --console --onedir --contents-directory "_internal-$BUILD_NUMBER")
           python -m PyInstaller "${args[@]}" src/espi_live/__main__.py
 
       # --help exercises the launcher; --check also imports the Qt front end, the
@@ -445,11 +381,7 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          case "$RUNNER_OS" in
-            Windows) exe=dist/espi-live/espi-live.exe ;;
-            macOS)   exe="dist/ESPI Live.app/Contents/MacOS/ESPI Live" ;;
-            *)       exe=dist/espi-live/espi-live ;;
-          esac
+          exe=dist/espi-live/espi-live.exe
           "$exe" --help
           "$exe" --version
           # The token is inside the frozen program (not an env var or a sidecar
@@ -461,26 +393,20 @@ jobs:
             *"feedback token: present"*) ;;
             *) echo "::error::the binary has no feedback token"; exit 1 ;;
           esac
-          if [ "$RUNNER_OS" != "macOS" ]; then
-            shopt -s dotglob
-            entries=(dist/espi-live/*)
-            if [ "${#entries[@]}" -ne 2 ] || [ ! -f "$exe" ] || [ ! -d "dist/espi-live/_internal-$BUILD_NUMBER" ]; then
-              echo "::error::dist/espi-live must hold only $(basename "$exe") and _internal-$BUILD_NUMBER, not: ${entries[*]##*/}"
-              exit 1
-            fi
+          shopt -s dotglob
+          entries=(dist/espi-live/*)
+          if [ "${#entries[@]}" -ne 2 ] || [ ! -f "$exe" ] || [ ! -d "dist/espi-live/_internal-$BUILD_NUMBER" ]; then
+            echo "::error::dist/espi-live must hold only $(basename "$exe") and _internal-$BUILD_NUMBER, not: ${entries[*]##*/}"
+            exit 1
           fi
 
-      # Each archive holds one entry, which the updater unpacks: the espi-live
-      # program folder (Windows, Linux) or the .app bundle (macOS).
+      # The archive holds one entry, which the updater unpacks: the espi-live
+      # program folder.
       - name: Package
         shell: bash
         run: |
           mkdir release
-          case "$RUNNER_OS" in
-            Windows) (cd dist && 7z a -tzip "../release/${{ matrix.asset }}" espi-live) ;;
-            macOS)   ditto -c -k --keepParent "dist/ESPI Live.app" "release/${{ matrix.asset }}" ;;
-            *)       tar czf "release/${{ matrix.asset }}" -C dist espi-live ;;
-          esac
+          (cd dist && 7z a -tzip "../release/${{ matrix.asset }}" espi-live)
           ls -lh release
 
       - uses: actions/upload-artifact@v4
@@ -570,10 +496,9 @@ jobs:
             cat <<EOF
           $kind from $source, commit \`${SHA:0:7}\`, build $BUILD_NUMBER. Build log: $RUN_URL
 
-          - **Windows** (\`espi-live-windows-x64.zip\`) and **Linux** (\`espi-live-linux-x64.tar.gz\`) include PySpin, so they can open a real camera. Each unpacks to an \`espi-live\` folder: run \`espi-live.exe\` (\`espi-live\` on Linux) inside it, and keep the folder together, since the program loads its libraries from the \`_internal-$BUILD_NUMBER\` folder beside it. Add \`--demo\` for synthetic video without a camera.
-          - **macOS** (\`espi-live-macos-arm64.zip\`) is demo-only: there is no macOS PySpin wheel. The app is unsigned; after unzipping run \`xattr -cr "ESPI Live.app"\` or right-click > Open.
+          - **Windows** (\`espi-live-windows-x64.zip\`) includes PySpin, so it can open a real camera. It unpacks to an \`espi-live\` folder: run \`espi-live.exe\` inside it, and keep the folder together, since the program loads its libraries from the \`_internal-$BUILD_NUMBER\` folder beside it. Add \`--demo\` for synthetic video without a camera. Linux and macOS builds are not published yet.
           - Installed copies update themselves to the newest full release (Help > Check for updates, or \`espi-live --update\`). Copies that are a single \`espi-live.exe\` file (build 6 and earlier) cannot update to the folder layout: download this release once by hand.
-          - Output (\`output/logs\`, \`output/frames\`, \`output/recordings\`) is written in the \`espi-live\` folder, next to the executable (next to the .app on macOS).
+          - Output (\`output/logs\`, \`output/frames\`, \`output/recordings\`) is written in the \`espi-live\` folder, next to the executable.
           EOF
           } > notes.md
 
