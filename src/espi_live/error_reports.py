@@ -72,7 +72,7 @@ BUG_LABEL = "bug"
 AREA_LABELS = {"camera": "area: camera", "camera_models": "area: camera",
                "qt_app": "area: ui", "app": "area: ui", "updater": "area: updates"}
 ENABLE_ENV = "ESPI_ERROR_REPORTS"
-SETTING_KEY = "errorReports"  # QSettings key behind Help > Send error reports automatically
+SETTING_KEY = "errorReports"  # QSettings key behind Help > Send error reports and logs automatically
 PENDING_FOLDER = "pending_reports"
 LEDGER_NAME = "error_reports.json"
 MAX_PENDING = 20

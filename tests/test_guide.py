@@ -76,7 +76,7 @@ class GuideTest(unittest.TestCase):
         for phrase in ("Restarting a camera", "current exposure, gain and FPS",
                        "Live preview", "Measurement", "Which settings should I use?",
                        "Did you know", "Help tips", "display gamma",
-                       "Send error reports automatically"):
+                       "Send error reports and logs automatically"):
             self.assertIn(phrase, text)
         self.assertNotIn("8000 µs, 0 dB and 30 fps every time", text)
         self.assertNotIn("re-enter your exposure", text)
