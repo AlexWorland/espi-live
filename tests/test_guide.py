@@ -5,6 +5,8 @@ Run from the project root:  PYTHONPATH=src python -m unittest discover -s tests
 
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -117,6 +119,68 @@ class GuideTest(unittest.TestCase):
         self.assertIn("color-scheme: light", block)
         self.assertIn("--fg: #000", block)
         self.assertIn("--bg: #fff", block)
+
+    def test_guide_has_a_search_box(self):
+        """A sticky search bar finds text anywhere and steps through matches.
+
+        Args: None.
+        Returns: None.
+        """
+        text = guide_html()
+        bar = text[text.index('<div class="search-bar"'):text.index('<header class="hero">')]
+        self.assertIn('role="search"', bar)
+        self.assertIn('<input id="guide-search" type="search"', bar)
+        self.assertIn('<label class="sr-only" for="guide-search">', bar)
+        self.assertIn('id="search-status" role="status" aria-live="polite"', bar)
+        self.assertIn('id="search-prev"', bar)
+        self.assertIn('id="search-next"', bar)
+        self.assertIn('aria-keyshortcuts="/"', bar)
+        self.assertIn("position: sticky;", text[text.index(".search-bar {"):])
+        self.assertNotIn("toc-filter", text)
+        script = text[text.rindex("<script>"):]
+        for phrase in ('getElementById("guide-search")', "function runSearch",
+                       "function highlight", "function clearHighlights",
+                       "function filterContents", 'createElement("mark")',
+                       '"No matches"', 'event.key === "Enter"',
+                       "event.shiftKey", 'event.key === "Escape"',
+                       'event.key !== "/"', "parent.normalize()",
+                       "toLowerCase()", "scrollIntoView"):
+            self.assertIn(phrase, script, f"missing in search script: {phrase!r}")
+
+    def test_search_highlights_follow_every_theme(self):
+        """Highlight colors are set for light, dark and auto-dark, not print.
+
+        Args: None.
+        Returns: None.
+        """
+        text = guide_html()
+        styles = text[:text.index("@media print")]
+        for token in ("--hit-bg:", "--hit-fg:", "--hit-current-bg:",
+                      "--hit-current-ring:"):
+            self.assertEqual(styles.count(token), 3, token)
+        printing = text[text.index("@media print"):text.index("</style>")]
+        self.assertIn(".search-bar", printing)
+        self.assertIn("mark.search-hit", printing)
+        self.assertIn(".sidebar-tools, .search-bar { display: none; }", text)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_guide_scripts_are_valid_javascript(self):
+        """Every inline script parses (node --check), so the page never breaks.
+
+        Args: None.
+        Returns: None.
+        """
+        scripts = re.findall(r"<script>(.*?)</script>", guide_html(), re.S)
+        self.assertGreaterEqual(len(scripts), 2)
+        with tempfile.TemporaryDirectory() as folder:
+            for number, script in enumerate(scripts):
+                path = os.path.join(folder, f"guide_{number}.js")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(script)
+                result = subprocess.run(["node", "--check", path],
+                                        capture_output=True, text=True,
+                                        check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_frozen_guide_path(self):
         """A PyInstaller-style _MEIPASS folder is searched for the guide.
