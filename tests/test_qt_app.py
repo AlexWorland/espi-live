@@ -1985,6 +1985,10 @@ class PollingTests(WindowTestCase):
     def test_status_bar_items_keep_their_positions(self):
         """No readout value, however long, moves another status-bar item.
 
+        Checking for updates and the update button's own states move nothing
+        either. Only finding a newer build does, once, when the labelled blue
+        button replaces the icon-only check button.
+
         Args: None.
         Returns: None.
         """
@@ -2008,11 +2012,21 @@ class PollingTests(WindowTestCase):
         window.range_status.setText("")
         window.pixel_status.setText("x 123456, y 123456: 255")
         self.assertEqual(geometry(), before)
-        window.update_button.setText("Update available: build 9999 (abcdef0)")
+        window.updates.busy = True
+        window._sync_check_button()  # checking: the icon button only greys out
+        self.assertEqual(geometry(), before)
+        window.updates.busy = False
+        window._sync_check_button()
+        self.assertEqual(geometry(), before)
+        window.update_button.setText("Install update")
         window.check_button.setVisible(False)
         window.update_button.setVisible(True)
-        self.assertEqual(geometry(), before)
-        window.check_button.setText("Checking for updates…")
+        found = geometry()
+        self.assertNotEqual(found, before)  # the labelled button needs room once
+        for text in ("Downloading update… 7%", "Downloading update… 100%",
+                     "Restart to update"):
+            window.update_button.setText(text)
+            self.assertEqual(geometry(), found)
         window.check_button.setVisible(True)
         window.update_button.setVisible(False)
         self.assertEqual(geometry(), before)
@@ -2032,16 +2046,24 @@ class PollingTests(WindowTestCase):
         window = self.window
         window.show()
         QApplication.processEvents()
-        for button in (window.check_button, window.feature_button, window.codex_button):
+        names = {window.check_button: "Check for updates",
+                 window.feature_button: "Request feature",
+                 window.codex_button: "Open in Codex"}
+        for button, name in names.items():
             self.assert_button_chrome(button, primary=False)
-        self.assertFalse(window.check_button.icon().isNull())
-        self.assertFalse(window.feature_button.icon().isNull())
-        self.assertTrue(window.codex_button.icon().isNull())
+            # Icon-only and compact, but still named for tooltips and screen readers.
+            self.assertFalse(button.icon().isNull(), name)
+            self.assertEqual(button.text(), "", name)
+            self.assertLessEqual(button.width(), 2 * button.height(), name)
+            self.assertEqual(button.accessibleName(), name)
+            self.assertTrue(button.toolTip().startswith(name + ":"), name)
         self.assertEqual(window.check_button.toolTip(),
-                         qt_app.format_tooltip("Check GitHub for a newer build of ESPI live."))
+                         qt_app.format_tooltip(
+                             "Check for updates: Check GitHub for a newer build of ESPI live."))
         self.assertEqual(window.feature_button.toolTip(),
                          qt_app.format_tooltip(
-                             "Send a feature request to the developers as a GitHub issue."))
+                             "Request feature: Send a feature request to the developers "
+                             "as a GitHub issue."))
         self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
         self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
         self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
@@ -2054,7 +2076,7 @@ class PollingTests(WindowTestCase):
         window.updates.busy = True
         window._sync_check_button()
         self.assertFalse(window.check_button.isEnabled())
-        self.assertEqual(window.check_button.text(), "Checking for updates…")
+        self.assertEqual(window.check_button.accessibleName(), "Checking for updates…")
         self.assert_button_chrome(window.check_button, primary=False)
         self.assert_has_frame(window.check_button)
 
@@ -2079,14 +2101,16 @@ class PollingTests(WindowTestCase):
                              window.update_button.width())
 
         window.feature_button.setEnabled(False)
-        window.feature_button.setText("Sending request…")
+        qt_app._set_icon_action(window.feature_button, qt_app.FEATURE_BUSY_LABEL,
+                                qt_app.FEATURE_TIP)
         self.assert_button_chrome(window.feature_button, primary=False)
         self.assert_has_frame(window.feature_button)
         self.assertLessEqual(window.feature_button.sizeHint().width(),
                              window.feature_button.width())
         self.assertEqual(window.feature_button.toolTip(),
                          qt_app.format_tooltip(
-                             "Send a feature request to the developers as a GitHub issue."))
+                             "Sending request…: Send a feature request to the developers "
+                             "as a GitHub issue."))
 
     def assert_button_chrome(self, button, primary):
         """Check the border, pointer, focus and state rules of one button.
@@ -2902,11 +2926,13 @@ class UpdateFlowTests(WindowTestCase):
                 self.window.updates.busy = True
                 self.window._handle_update_events()
                 self.assertFalse(self.window.check_button.isEnabled())
-                self.assertIn("Checking", self.window.check_button.text())
+                self.assertEqual(self.window.check_button.accessibleName(),
+                                 "Checking for updates…")
+                self.assertIn("Checking for updates…", self.window.check_button.toolTip())
                 self.window.updates.busy = False
                 self.post(kind, payload)
                 self.assertTrue(self.window.check_button.isEnabled())
-                self.assertEqual(self.window.check_button.text(), "Check for updates")
+                self.assertEqual(self.window.check_button.accessibleName(), "Check for updates")
 
     def test_check_button_gives_way_to_a_found_build(self):
         """Once a newer build is known only the blue button shows, through its download.
@@ -3501,7 +3527,10 @@ class FeatureRequestTests(WindowTestCase):
         self.run_request(qt_app.QDialog.Accepted)
         self.window.feedback.submit.assert_called_once_with(self.REQUEST)
         self.assertFalse(self.window.feature_button.isEnabled())
-        self.assertEqual(self.window.feature_button.text(), "Sending request…")
+        self.assertEqual(self.window.feature_button.accessibleName(), "Sending request…")
+        self.assertIn("Sending request…", self.window.feature_button.toolTip())
+        self.assertEqual(self.window.statusBar().currentMessage(),
+                         "Sending the feature request…")
         self.assertIn("Sending feature request: Export reference", self.log.lines)
 
     def test_cancel_sends_nothing(self):
@@ -3546,7 +3575,7 @@ class FeatureRequestTests(WindowTestCase):
         self.window.feedback.events.put(("sent", (self.REQUEST, url)))
         self.window._handle_feedback_events()
         self.assertTrue(self.window.feature_button.isEnabled())
-        self.assertEqual(self.window.feature_button.text(), "Request feature")
+        self.assertEqual(self.window.feature_button.accessibleName(), "Request feature")
         self.assertIn(f"Feature request filed: {url}", self.log.lines)
         self.assertEqual(self.dialogs.call_args.args[2], "Your request was submitted.")
         self.dialogs.return_value.exec.assert_called_once()
@@ -4588,7 +4617,7 @@ class CodexTests(WindowTestCase):
             entry.trigger()
             self.window.codex_button.click()
         self.assertEqual(open_codex.call_count, 2)
-        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+        self.assertEqual(self.window.codex_button.accessibleName(), "Open in Codex")
 
     def test_startup_gets_the_source_only_with_update_checks(self):
         """The startup check runs unless GitHub is off limits at startup.
@@ -4616,14 +4645,17 @@ class CodexTests(WindowTestCase):
         """
         self.window._open_codex()
         self.assertFalse(self.window.codex_button.isEnabled())
-        self.assertEqual(self.window.codex_button.text(), "Getting source…")
+        self.assertEqual(self.window.codex_button.accessibleName(), "Getting source…")
+        self.assertIn("Getting source…", self.window.codex_button.toolTip())
+        self.assertEqual(self.window.statusBar().currentMessage(),
+                         "Getting the source code for Codex…")
         self.window.source.start.assert_called_once_with()
         FakeSettings.store["codex/intro_shown"] = True
         with mock.patch.object(qt_app.QDesktopServices, "openUrl",
                                return_value=True) as open_url:
             self.ready("Downloaded the source code")
         self.assertTrue(self.window.codex_button.isEnabled())
-        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+        self.assertEqual(self.window.codex_button.accessibleName(), "Open in Codex")
         self.assertIn("Downloaded the source code", self.log.lines)
         self.write_guide.assert_called_once_with(self.FOLDER)
         url = open_url.call_args.args[0]

@@ -117,6 +117,15 @@ MAX_ZOOM = 64.0
 ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
 CODEX_LABEL = "Open in Codex"
 CODEX_BUSY_LABEL = "Getting source…"
+# Icon-only status-bar actions: the label is the accessible name and leads the
+# tooltip, and the busy label replaces it while the action runs.
+CHECK_LABEL = "Check for updates"
+CHECK_BUSY_LABEL = "Checking for updates…"
+FEATURE_LABEL = "Request feature"
+FEATURE_BUSY_LABEL = "Sending request…"
+CHECK_TIP = "Check GitHub for a newer build of ESPI live."
+FEATURE_TIP = "Send a feature request to the developers as a GitHub issue."
+CODEX_TIP = "Ask OpenAI's Codex how ESPI live works, using this build's real source code."
 LAYOUT_VERSION = 5  # bump when docks/toolbars change so stale saved layouts are ignored
 # A camera PC can stay open for days. Recheck well inside GitHub's rate limit.
 UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
@@ -378,7 +387,7 @@ QPushButton:disabled {
 def _paint_status_icon(kind, color):
     """Draw a 16px monochrome icon for a status-bar action.
 
-    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor.
     Returns: A QPixmap with a transparent background.
     """
     pixmap = QPixmap(16, 16)
@@ -409,6 +418,10 @@ def _paint_status_icon(kind, color):
             painter.drawLine(10, 9, 10, 12)
             painter.drawLine(6, 12, 10, 12)
             painter.drawLine(7, 14, 9, 14)
+        elif kind == "code":  # </>
+            painter.drawPolyline([QPointF(5, 4), QPointF(1.5, 8), QPointF(5, 12)])
+            painter.drawPolyline([QPointF(11, 4), QPointF(14.5, 8), QPointF(11, 12)])
+            painter.drawLine(QPointF(9.5, 2.5), QPointF(6.5, 13.5))
     finally:
         painter.end()
     return pixmap
@@ -417,7 +430,7 @@ def _paint_status_icon(kind, color):
 def _status_icon(kind, color):
     """Build a status-bar icon, with a dimmer copy for the disabled state.
 
-    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor.
     Returns: A QIcon.
     """
     icon = QIcon()
@@ -453,6 +466,20 @@ def _arm_status_button(button, style, texts, icon=None):
     button.setText(current)
     button.setFixedWidth(width)
     return width
+
+
+def _set_icon_action(button, label, tip):
+    """Name an icon-only status-bar button and explain it.
+
+    The label is the button's accessible name and the tooltip's first line,
+    so the action is still named in words although the button shows none.
+
+    Args: button is a QPushButton; label names what it does now (an action,
+        or what is running); tip is the explanation.
+    Returns: None.
+    """
+    button.setAccessibleName(label)
+    set_tooltip(button, f"{label}: {tip}")
 
 
 # Long enough that a moving pointer does not flash a tip; short enough to wait for.
@@ -2311,50 +2338,44 @@ class MainWindow(QMainWindow):
         self.pixel_status = FixedLabel("x 3088, y 2064: 255")
         set_tooltip(self.pixel_status,
                     "Brightness from 0 to 255 of the image pixel under the pointer.")
-        # The two update buttons are never shown together, so they share one
-        # fixed-width slot that stays put whichever is visible. They are real
-        # buttons (border, icon, pointer), split from the readouts by a rule.
+        # Check for updates, Request feature and Open in Codex are icon-only,
+        # so the readouts keep their room on a laptop screen; each is named in
+        # its tooltip and accessible name. They are real buttons (border, icon,
+        # pointer), split from the readouts by a rule. The blue update button
+        # keeps its words: it is the one action to act on, and it replaces
+        # the check button in the same slot once a newer build is found.
         self.update_button = QPushButton()  # shown when a newer build exists
         self.update_button.setVisible(False)
         set_tooltip(self.update_button, "Download the newer build of ESPI live.")
         self.update_button.clicked.connect(self._update_clicked)
-        self.check_button = QPushButton("Check for updates")  # until a newer build is found
-        set_tooltip(self.check_button, "Check GitHub for a newer build of ESPI live.")
+        self.check_button = QPushButton()  # until a newer build is found
+        _set_icon_action(self.check_button, CHECK_LABEL, CHECK_TIP)
         self.check_button.clicked.connect(self._check_updates_now)
         ink = self.check_button.palette().color(QPalette.ColorRole.ButtonText)
-        update_width = _arm_status_button(
+        _arm_status_button(
             self.update_button, UPDATE_BUTTON_STYLE,
             ("Install update", "Downloading update… 100%",
              "Restart to update"),
             _status_icon("download", QColor(Qt.white)))
-        check_width = _arm_status_button(
-            self.check_button, STATUS_BUTTON_STYLE,
-            ("Check for updates", "Checking for updates…"),
-            _status_icon("refresh", ink))
-        slot_width = max(update_width, check_width)
+        _arm_status_button(self.check_button, STATUS_BUTTON_STYLE, ("",),
+                           _status_icon("refresh", ink))
         self.update_slot = QWidget()
         slot = QGridLayout(self.update_slot)
         slot.setContentsMargins(0, 0, 0, 0)
         for button in (self.update_button, self.check_button):
-            button.setFixedWidth(slot_width)
-            slot.addWidget(button, 0, 0)  # same cell: they overlap
-        self.update_slot.setFixedWidth(slot_width)
+            slot.addWidget(button, 0, 0)  # same cell; the slot fits the visible one
         bar.addPermanentWidget(self.update_slot)
-        self.feature_button = QPushButton("Request feature")
-        set_tooltip(self.feature_button,
-                    "Send a feature request to the developers as a GitHub issue.")
+        self.feature_button = QPushButton()
+        _set_icon_action(self.feature_button, FEATURE_LABEL, FEATURE_TIP)
         self.feature_button.clicked.connect(lambda: self._request_feature())
-        _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE,
-                           ("Request feature", "Sending request…"),
+        _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE, ("",),
                            _status_icon("idea", ink))
         bar.addPermanentWidget(self.feature_button)
-        self.codex_button = QPushButton(CODEX_LABEL)
-        set_tooltip(self.codex_button,
-                    "Ask OpenAI's Codex how ESPI live works, using this build's "
-                    "real source code.")
+        self.codex_button = QPushButton()
+        _set_icon_action(self.codex_button, CODEX_LABEL, CODEX_TIP)
         self.codex_button.clicked.connect(self._open_codex)
-        _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE,
-                           (CODEX_LABEL, CODEX_BUSY_LABEL))
+        _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE, ("",),
+                           _status_icon("code", ink))
         bar.addPermanentWidget(self.codex_button)
         self.status_actions_rule = QFrame()
         self.status_actions_rule.setFrameShape(QFrame.Shape.VLine)
@@ -3196,7 +3217,8 @@ class MainWindow(QMainWindow):
         request = dialog.request("dummy mode" if self.engine.demo else "camera")
         self.feedback.submit(request)
         self.feature_button.setEnabled(False)
-        self.feature_button.setText("Sending request…")
+        _set_icon_action(self.feature_button, FEATURE_BUSY_LABEL, FEATURE_TIP)
+        self.statusBar().showMessage("Sending the feature request…", 5000)
         self.log.write(f"Sending feature request: {request.title.strip()}")
 
     def _handle_feedback_events(self):
@@ -3211,7 +3233,7 @@ class MainWindow(QMainWindow):
             except queue.Empty:
                 return
             self.feature_button.setEnabled(True)
-            self.feature_button.setText("Request feature")
+            _set_icon_action(self.feature_button, FEATURE_LABEL, FEATURE_TIP)
             if kind == "sent":
                 self.log.write(f"Feature request filed: {payload}")
                 box = QMessageBox(QMessageBox.Information, "Request submitted",
@@ -3241,8 +3263,10 @@ class MainWindow(QMainWindow):
         if self.source_folder is None:
             self.codex_when_ready = True
             self.codex_button.setEnabled(False)
-            self.codex_button.setText(CODEX_BUSY_LABEL)
-            if not self.source.start():
+            _set_icon_action(self.codex_button, CODEX_BUSY_LABEL, CODEX_TIP)
+            if self.source.start():
+                self.statusBar().showMessage("Getting the source code for Codex…", 5000)
+            else:
                 self.statusBar().showMessage("Still downloading the source code…", 3000)
             return
         settings = QSettings("ESPI", "espi_live")
@@ -3310,7 +3334,7 @@ class MainWindow(QMainWindow):
                 return
             wanted, self.codex_when_ready = self.codex_when_ready, False
             self.codex_button.setEnabled(True)
-            self.codex_button.setText(CODEX_LABEL)
+            _set_icon_action(self.codex_button, CODEX_LABEL, CODEX_TIP)
             if kind == "ready":
                 self.source_folder, note = payload
                 if note:
@@ -3503,8 +3527,10 @@ class MainWindow(QMainWindow):
         found = self.update_info is not None or bool(self.pending_update)
         checking = self.updates.busy and not found  # downloads use the same worker
         self.check_button.setVisible(not found)  # the blue update button takes over
-        self.check_button.setEnabled(not checking)
-        self.check_button.setText("Checking for updates…" if checking else "Check for updates")
+        if self.check_button.isEnabled() == checking:  # only on a change: this runs every poll
+            self.check_button.setEnabled(not checking)
+            _set_icon_action(self.check_button,
+                             CHECK_BUSY_LABEL if checking else CHECK_LABEL, CHECK_TIP)
 
     def _handle_events(self):
         """React to every camera's engine events.
