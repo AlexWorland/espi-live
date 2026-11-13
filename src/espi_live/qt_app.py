@@ -43,8 +43,9 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QProxyStyle, QPushButton, QSizePolicy, QSlider,
-                               QStyle, QTextEdit, QToolBar, QToolTip, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
+                               QSizePolicy, QSlider, QStyle, QTextEdit, QToolBar, QToolTip,
+                               QVBoxLayout, QWidget)
 
 from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, tips, updater
 from espi_live.channels import Channel, demo_channels, open_camera_channels
@@ -54,7 +55,8 @@ from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHO
                                   VIEW_MODES, palette_rgb_table)
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
-# layout is left alone; a narrower window keeps the badge and elides the tip.
+# layout is kept; a narrower window keeps the badge and elides the tip. Either
+# size shrinks to the screen when shown (MainWindow.fit_to_screen).
 DEFAULT_WIDTH = 2100
 DEFAULT_HEIGHT = 900
 
@@ -115,6 +117,15 @@ MAX_ZOOM = 64.0
 ZOOM_TICKS = 1000  # zoom slider resolution; position maps logarithmically to 1..MAX_ZOOM
 CODEX_LABEL = "Open in Codex"
 CODEX_BUSY_LABEL = "Getting source…"
+# Icon-only status-bar actions: the label is the accessible name and leads the
+# tooltip, and the busy label replaces it while the action runs.
+CHECK_LABEL = "Check for updates"
+CHECK_BUSY_LABEL = "Checking for updates…"
+FEATURE_LABEL = "Request feature"
+FEATURE_BUSY_LABEL = "Sending request…"
+CHECK_TIP = "Check GitHub for a newer build of ESPI live."
+FEATURE_TIP = "Send a feature request to the developers as a GitHub issue."
+CODEX_TIP = "Ask OpenAI's Codex how ESPI live works, using this build's real source code."
 LAYOUT_VERSION = 5  # bump when docks/toolbars change so stale saved layouts are ignored
 # A camera PC can stay open for days. Recheck well inside GitHub's rate limit.
 UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
@@ -376,7 +387,7 @@ QPushButton:disabled {
 def _paint_status_icon(kind, color):
     """Draw a 16px monochrome icon for a status-bar action.
 
-    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor.
     Returns: A QPixmap with a transparent background.
     """
     pixmap = QPixmap(16, 16)
@@ -407,6 +418,10 @@ def _paint_status_icon(kind, color):
             painter.drawLine(10, 9, 10, 12)
             painter.drawLine(6, 12, 10, 12)
             painter.drawLine(7, 14, 9, 14)
+        elif kind == "code":  # </>
+            painter.drawPolyline([QPointF(5, 4), QPointF(1.5, 8), QPointF(5, 12)])
+            painter.drawPolyline([QPointF(11, 4), QPointF(14.5, 8), QPointF(11, 12)])
+            painter.drawLine(QPointF(9.5, 2.5), QPointF(6.5, 13.5))
     finally:
         painter.end()
     return pixmap
@@ -415,7 +430,7 @@ def _paint_status_icon(kind, color):
 def _status_icon(kind, color):
     """Build a status-bar icon, with a dimmer copy for the disabled state.
 
-    Args: kind is "refresh", "download" or "idea"; color is a QColor.
+    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor.
     Returns: A QIcon.
     """
     icon = QIcon()
@@ -451,6 +466,20 @@ def _arm_status_button(button, style, texts, icon=None):
     button.setText(current)
     button.setFixedWidth(width)
     return width
+
+
+def _set_icon_action(button, label, tip):
+    """Name an icon-only status-bar button and explain it.
+
+    The label is the button's accessible name and the tooltip's first line,
+    so the action is still named in words although the button shows none.
+
+    Args: button is a QPushButton; label names what it does now (an action,
+        or what is running); tip is the explanation.
+    Returns: None.
+    """
+    button.setAccessibleName(label)
+    set_tooltip(button, f"{label}: {tip}")
 
 
 # Long enough that a moving pointer does not flash a tip; short enough to wait for.
@@ -567,6 +596,20 @@ def _screen_rect(widget, screen):
     if widget_screen is None:
         return QRect(0, 0, 4096, 4096)
     return widget_screen.availableGeometry()
+
+
+def fit_rect(rect, available):
+    """Shrink and move a window rectangle so it lies inside the available area.
+
+    Args: rect is the window's outer rectangle (title bar and borders
+        included); available is the screen's usable area (no taskbar or dock).
+    Returns: A QRect inside available, or rect itself when it already fits.
+    """
+    width = min(rect.width(), available.width())
+    height = min(rect.height(), available.height())
+    x = min(max(rect.x(), available.left()), available.right() + 1 - width)
+    y = min(max(rect.y(), available.top()), available.bottom() + 1 - height)
+    return QRect(x, y, width, height)
 
 
 def _candidate_points(origin, widget_size, tip_size, blocked):
@@ -1586,6 +1629,8 @@ class MainWindow(QMainWindow):
         app.installEventFilter(self.shortcut_filter)
         app.installEventFilter(self.tooltip_filter)
 
+        self._following_screens = False
+        self._watched_screen = None
         settings = QSettings("ESPI", "espi_live")
         if not self.restoreGeometry(settings.value("geometry", b"")):
             self.resize(DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -1612,6 +1657,58 @@ class MainWindow(QMainWindow):
             self._schedule_update_check()
         if check_updates:
             self.source.start()  # downloads this build's source if it is missing
+
+    def showEvent(self, event):
+        """Fit the window to its screen and follow that screen from now on.
+
+        Args: event is the QShowEvent.
+        Returns: None.
+        """
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if not self._following_screens:
+            self._following_screens = True
+            handle.screenChanged.connect(self._watch_screen)
+        self._watch_screen(handle.screen())
+
+    def _watch_screen(self, screen):
+        """Refit when the window moves to a screen or that screen's area changes.
+
+        A resolution or scaling change, a moved taskbar or a different monitor
+        all change the usable area.
+
+        Args: screen is the QScreen the window is now on.
+        Returns: None.
+        """
+        if self._watched_screen is not None:
+            self._watched_screen.availableGeometryChanged.disconnect(self.fit_to_screen)
+        self._watched_screen = screen
+        screen.availableGeometryChanged.connect(self.fit_to_screen)
+        self.fit_to_screen()
+
+    def fit_to_screen(self, *_):
+        """Shrink and move the window so all of it is on its screen.
+
+        A saved size from a larger monitor, or a resolution change while the
+        program runs, would otherwise leave the image and controls partly off
+        screen or under the taskbar. A maximized or full-screen window already
+        fits and is left alone.
+
+        Args: _ ignores the new area that availableGeometryChanged passes.
+        Returns: None.
+        """
+        if self.isMaximized() or self.isFullScreen():
+            return
+        frame = self.frameGeometry()
+        inner = self.geometry()
+        fitted = fit_rect(frame, self.screen().availableGeometry())
+        if fitted == frame:
+            return
+        # The title bar and borders keep their size; only the inside shrinks.
+        self.setGeometry(fitted.x() + inner.x() - frame.x(),
+                         fitted.y() + inner.y() - frame.y(),
+                         fitted.width() - (frame.width() - inner.width()),
+                         fitted.height() - (frame.height() - inner.height()))
 
     @property
     def camera_identity(self):
@@ -2070,12 +2167,23 @@ class MainWindow(QMainWindow):
 
         column.addStretch(1)
 
-        # No scroll area: every control is always on screen, and the window's
-        # minimum height grows to fit the panel instead.
+        # The panel scrolls vertically when the screen is too short for it, so
+        # it never makes the window taller than the screen. The scroll area
+        # also gives wrapped notes their full height, which a dock alone does
+        # not. Its width leaves room for the scroll bar, so nothing is cut off
+        # sideways.
         panel.setMinimumWidth(320)
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setWidget(panel)
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.controls_scroll.setMinimumWidth(
+            panel.minimumSizeHint().expandedTo(panel.minimumSize()).width()
+            + self.controls_scroll.verticalScrollBar().sizeHint().width())
         self.controls_dock = QDockWidget("Controls", self)
         self.controls_dock.setObjectName("controls")
-        self.controls_dock.setWidget(panel)
+        self.controls_dock.setWidget(self.controls_scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self._tip_dock_buttons(self.controls_dock)
 
@@ -2230,50 +2338,44 @@ class MainWindow(QMainWindow):
         self.pixel_status = FixedLabel("x 3088, y 2064: 255")
         set_tooltip(self.pixel_status,
                     "Brightness from 0 to 255 of the image pixel under the pointer.")
-        # The two update buttons are never shown together, so they share one
-        # fixed-width slot that stays put whichever is visible. They are real
-        # buttons (border, icon, pointer), split from the readouts by a rule.
+        # Check for updates, Request feature and Open in Codex are icon-only,
+        # so the readouts keep their room on a laptop screen; each is named in
+        # its tooltip and accessible name. They are real buttons (border, icon,
+        # pointer), split from the readouts by a rule. The blue update button
+        # keeps its words: it is the one action to act on, and it replaces
+        # the check button in the same slot once a newer build is found.
         self.update_button = QPushButton()  # shown when a newer build exists
         self.update_button.setVisible(False)
         set_tooltip(self.update_button, "Download the newer build of ESPI live.")
         self.update_button.clicked.connect(self._update_clicked)
-        self.check_button = QPushButton("Check for updates")  # until a newer build is found
-        set_tooltip(self.check_button, "Check GitHub for a newer build of ESPI live.")
+        self.check_button = QPushButton()  # until a newer build is found
+        _set_icon_action(self.check_button, CHECK_LABEL, CHECK_TIP)
         self.check_button.clicked.connect(self._check_updates_now)
         ink = self.check_button.palette().color(QPalette.ColorRole.ButtonText)
-        update_width = _arm_status_button(
+        _arm_status_button(
             self.update_button, UPDATE_BUTTON_STYLE,
             ("Install update", "Downloading update… 100%",
              "Restart to update"),
             _status_icon("download", QColor(Qt.white)))
-        check_width = _arm_status_button(
-            self.check_button, STATUS_BUTTON_STYLE,
-            ("Check for updates", "Checking for updates…"),
-            _status_icon("refresh", ink))
-        slot_width = max(update_width, check_width)
+        _arm_status_button(self.check_button, STATUS_BUTTON_STYLE, ("",),
+                           _status_icon("refresh", ink))
         self.update_slot = QWidget()
         slot = QGridLayout(self.update_slot)
         slot.setContentsMargins(0, 0, 0, 0)
         for button in (self.update_button, self.check_button):
-            button.setFixedWidth(slot_width)
-            slot.addWidget(button, 0, 0)  # same cell: they overlap
-        self.update_slot.setFixedWidth(slot_width)
+            slot.addWidget(button, 0, 0)  # same cell; the slot fits the visible one
         bar.addPermanentWidget(self.update_slot)
-        self.feature_button = QPushButton("Request feature")
-        set_tooltip(self.feature_button,
-                    "Send a feature request to the developers as a GitHub issue.")
+        self.feature_button = QPushButton()
+        _set_icon_action(self.feature_button, FEATURE_LABEL, FEATURE_TIP)
         self.feature_button.clicked.connect(lambda: self._request_feature())
-        _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE,
-                           ("Request feature", "Sending request…"),
+        _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE, ("",),
                            _status_icon("idea", ink))
         bar.addPermanentWidget(self.feature_button)
-        self.codex_button = QPushButton(CODEX_LABEL)
-        set_tooltip(self.codex_button,
-                    "Ask OpenAI's Codex how ESPI live works, using this build's "
-                    "real source code.")
+        self.codex_button = QPushButton()
+        _set_icon_action(self.codex_button, CODEX_LABEL, CODEX_TIP)
         self.codex_button.clicked.connect(self._open_codex)
-        _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE,
-                           (CODEX_LABEL, CODEX_BUSY_LABEL))
+        _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE, ("",),
+                           _status_icon("code", ink))
         bar.addPermanentWidget(self.codex_button)
         self.status_actions_rule = QFrame()
         self.status_actions_rule.setFrameShape(QFrame.Shape.VLine)
@@ -3115,7 +3217,8 @@ class MainWindow(QMainWindow):
         request = dialog.request("dummy mode" if self.engine.demo else "camera")
         self.feedback.submit(request)
         self.feature_button.setEnabled(False)
-        self.feature_button.setText("Sending request…")
+        _set_icon_action(self.feature_button, FEATURE_BUSY_LABEL, FEATURE_TIP)
+        self.statusBar().showMessage("Sending the feature request…", 5000)
         self.log.write(f"Sending feature request: {request.title.strip()}")
 
     def _handle_feedback_events(self):
@@ -3130,7 +3233,7 @@ class MainWindow(QMainWindow):
             except queue.Empty:
                 return
             self.feature_button.setEnabled(True)
-            self.feature_button.setText("Request feature")
+            _set_icon_action(self.feature_button, FEATURE_LABEL, FEATURE_TIP)
             if kind == "sent":
                 self.log.write(f"Feature request filed: {payload}")
                 box = QMessageBox(QMessageBox.Information, "Request submitted",
@@ -3160,8 +3263,10 @@ class MainWindow(QMainWindow):
         if self.source_folder is None:
             self.codex_when_ready = True
             self.codex_button.setEnabled(False)
-            self.codex_button.setText(CODEX_BUSY_LABEL)
-            if not self.source.start():
+            _set_icon_action(self.codex_button, CODEX_BUSY_LABEL, CODEX_TIP)
+            if self.source.start():
+                self.statusBar().showMessage("Getting the source code for Codex…", 5000)
+            else:
                 self.statusBar().showMessage("Still downloading the source code…", 3000)
             return
         settings = QSettings("ESPI", "espi_live")
@@ -3229,7 +3334,7 @@ class MainWindow(QMainWindow):
                 return
             wanted, self.codex_when_ready = self.codex_when_ready, False
             self.codex_button.setEnabled(True)
-            self.codex_button.setText(CODEX_LABEL)
+            _set_icon_action(self.codex_button, CODEX_LABEL, CODEX_TIP)
             if kind == "ready":
                 self.source_folder, note = payload
                 if note:
@@ -3422,8 +3527,10 @@ class MainWindow(QMainWindow):
         found = self.update_info is not None or bool(self.pending_update)
         checking = self.updates.busy and not found  # downloads use the same worker
         self.check_button.setVisible(not found)  # the blue update button takes over
-        self.check_button.setEnabled(not checking)
-        self.check_button.setText("Checking for updates…" if checking else "Check for updates")
+        if self.check_button.isEnabled() == checking:  # only on a change: this runs every poll
+            self.check_button.setEnabled(not checking)
+            _set_icon_action(self.check_button,
+                             CHECK_BUSY_LABEL if checking else CHECK_LABEL, CHECK_TIP)
 
     def _handle_events(self):
         """React to every camera's engine events.

@@ -591,7 +591,11 @@ python -m espi_live</code></pre>
       </div>
       <p>Both panels can be dragged to another edge, floated as separate
         windows, or hidden from the <a href="#view-menu">View menu</a>. The
-        window size and layout are remembered between runs.</p>
+        window size and layout are remembered between runs. The window always
+        fits the screen it is on, at any resolution or display scaling, and
+        refits when the resolution changes or it moves to another monitor;
+        when the screen is too short for every control, the Controls panel
+        scrolls.</p>
     </section>
 
     <section id="controls">
@@ -908,10 +912,13 @@ python -m espi_live</code></pre>
           <li><strong>FROZEN</strong> badge and the amber
             <strong>FROZEN at</strong> time over the image — the display is
             held; the camera and recording continue.</li>
-          <li><strong>Update / feature buttons</strong> — <strong>Check for
-            updates</strong> (or the blue <strong>Install update</strong>
-            button), <strong>Request feature</strong> and
-            <strong>Open in Codex</strong>. See
+          <li><strong>Update / feature buttons</strong> — three small icon
+            buttons, so the readouts keep their room: <strong>Check for
+            updates</strong> (circular arrow; the blue, labelled
+            <strong>Install update</strong> button takes its place when a newer
+            build exists), <strong>Request feature</strong> (light bulb) and
+            <strong>Open in Codex</strong> (<code>&lt;/&gt;</code>). Hover one
+            for its name, or for what it is doing while it is greyed out. See
             <a href="#updates">Updates, features and Codex</a>.</li>
           <li><strong>Source badge</strong> — green <strong>Camera</strong> for
             live acquisition, red <strong>DUMMY MODE</strong> for synthetic
@@ -1328,7 +1335,9 @@ python -m espi_live</code></pre>
           <li>Use <strong>View → Controls</strong> or
             <strong>View → Log</strong> to hide or show a panel.</li>
           <li>Resize the window; the layout and size are restored the next time
-            the app starts.</li>
+            the app starts, shrunk to fit if the screen is now smaller.</li>
+          <li>On a short screen, scroll the <strong>Controls</strong> panel to
+            reach the controls below the fold.</li>
           <li>On a small screen, hide the log while measuring and show it when
             you need to check a saved path or an error.</li>
         </ul>
@@ -1569,7 +1578,7 @@ python -m espi_live</code></pre>
         the new build and starts it with the same options. Choosing not to
         restart installs the update when you close the app.</p>
       <ul>
-        <li><strong>Check for updates</strong> in the status bar or
+        <li><strong>Check for updates</strong> (the circular-arrow icon) in the status bar or
           <strong>Help → Check for updates…</strong> checks on demand; it is
           greyed out while a check runs. While the app stays open it also
           checks on its own every few hours.</li>
@@ -1586,7 +1595,7 @@ python -m espi_live</code></pre>
       </ul>
 
       <h3>Request a feature</h3>
-      <p><strong>Request feature</strong> in the status bar or
+      <p><strong>Request feature</strong> (the light-bulb icon) in the status bar or
         <strong>Help → Request a feature…</strong> asks for a title, optional
         description and optional name, then files a GitHub issue labelled
         <code>feature-request</code> and <code>enrich</code>. The issue includes
@@ -1598,10 +1607,11 @@ python -m espi_live</code></pre>
       <h3>Open in Codex</h3>
       <p>Packaged copies keep the source they were built from in
         <code>espi-live-source/</code> next to the program. <strong>Open in
-        Codex</strong> in the status bar or
+        Codex</strong> (the <code>&lt;/&gt;</code> icon) in the status bar or
         <strong>Help → Ask Codex about the source code…</strong> opens OpenAI
-        Codex on that folder, so you can ask how the program works. It reads
-        <strong>Getting source…</strong> while the source downloads first. A
+        Codex on that folder, so you can ask how the program works. The
+        button is greyed out (its tooltip reads <strong>Getting
+        source…</strong>) while the source downloads first. A
         change approved in Codex is sent as a GitHub issue with
         <code>--send-changes</code>; it is not pushed with git from the app.
         Running from source opens the checkout itself.</p>

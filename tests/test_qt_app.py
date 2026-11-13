@@ -25,10 +25,10 @@ from unittest import mock
 
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QHelpEvent, QKeyEvent, QSurfaceFormat
-from PySide6.QtWidgets import (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QApplication,
-                               QComboBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QStyle,
-                               QTextEdit, QWidget)
+from PySide6.QtGui import QHelpEvent, QKeyEvent, QScreen, QSurfaceFormat
+from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSlider,
+                               QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
+                               QPlainTextEdit, QPushButton, QStyle, QTextEdit, QWidget)
 
 from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, tips, updater
 from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
@@ -1345,8 +1345,8 @@ class MainWindowBuildTests(WindowTestCase):
 def _dock_controls_missing_tooltips(dock):
     """List interactive controls in a dock that have no tooltip.
 
-    The spin box's internal editor is part of the spin box, so it is not
-    listed on its own. A new slider, button, combo or text field with no
+    The spin box's internal editor is part of the spin box, and a scroll
+    area's scroll bars are part of that area, so neither is listed on its own. A new slider, button, combo or text field with no
     tooltip fails the suite.
 
     Args: dock is the controls QDockWidget.
@@ -1354,7 +1354,7 @@ def _dock_controls_missing_tooltips(dock):
     """
     kinds = (QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
              QLineEdit, QPlainTextEdit, QTextEdit)
-    containers = (QAbstractSpinBox, QComboBox, QPlainTextEdit, QTextEdit)
+    containers = (QAbstractSpinBox, QComboBox, QAbstractScrollArea)
     missing = []
     for widget in dock.findChildren(QWidget):
         if not isinstance(widget, kinds):
@@ -1985,6 +1985,10 @@ class PollingTests(WindowTestCase):
     def test_status_bar_items_keep_their_positions(self):
         """No readout value, however long, moves another status-bar item.
 
+        Checking for updates and the update button's own states move nothing
+        either. Only finding a newer build does, once, when the labelled blue
+        button replaces the icon-only check button.
+
         Args: None.
         Returns: None.
         """
@@ -2008,11 +2012,21 @@ class PollingTests(WindowTestCase):
         window.range_status.setText("")
         window.pixel_status.setText("x 123456, y 123456: 255")
         self.assertEqual(geometry(), before)
-        window.update_button.setText("Update available: build 9999 (abcdef0)")
+        window.updates.busy = True
+        window._sync_check_button()  # checking: the icon button only greys out
+        self.assertEqual(geometry(), before)
+        window.updates.busy = False
+        window._sync_check_button()
+        self.assertEqual(geometry(), before)
+        window.update_button.setText("Install update")
         window.check_button.setVisible(False)
         window.update_button.setVisible(True)
-        self.assertEqual(geometry(), before)
-        window.check_button.setText("Checking for updates…")
+        found = geometry()
+        self.assertNotEqual(found, before)  # the labelled button needs room once
+        for text in ("Downloading update… 7%", "Downloading update… 100%",
+                     "Restart to update"):
+            window.update_button.setText(text)
+            self.assertEqual(geometry(), found)
         window.check_button.setVisible(True)
         window.update_button.setVisible(False)
         self.assertEqual(geometry(), before)
@@ -2032,16 +2046,24 @@ class PollingTests(WindowTestCase):
         window = self.window
         window.show()
         QApplication.processEvents()
-        for button in (window.check_button, window.feature_button, window.codex_button):
+        names = {window.check_button: "Check for updates",
+                 window.feature_button: "Request feature",
+                 window.codex_button: "Open in Codex"}
+        for button, name in names.items():
             self.assert_button_chrome(button, primary=False)
-        self.assertFalse(window.check_button.icon().isNull())
-        self.assertFalse(window.feature_button.icon().isNull())
-        self.assertTrue(window.codex_button.icon().isNull())
+            # Icon-only and compact, but still named for tooltips and screen readers.
+            self.assertFalse(button.icon().isNull(), name)
+            self.assertEqual(button.text(), "", name)
+            self.assertLessEqual(button.width(), 2 * button.height(), name)
+            self.assertEqual(button.accessibleName(), name)
+            self.assertTrue(button.toolTip().startswith(name + ":"), name)
         self.assertEqual(window.check_button.toolTip(),
-                         qt_app.format_tooltip("Check GitHub for a newer build of ESPI live."))
+                         qt_app.format_tooltip(
+                             "Check for updates: Check GitHub for a newer build of ESPI live."))
         self.assertEqual(window.feature_button.toolTip(),
                          qt_app.format_tooltip(
-                             "Send a feature request to the developers as a GitHub issue."))
+                             "Request feature: Send a feature request to the developers "
+                             "as a GitHub issue."))
         self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
         self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
         self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
@@ -2054,7 +2076,7 @@ class PollingTests(WindowTestCase):
         window.updates.busy = True
         window._sync_check_button()
         self.assertFalse(window.check_button.isEnabled())
-        self.assertEqual(window.check_button.text(), "Checking for updates…")
+        self.assertEqual(window.check_button.accessibleName(), "Checking for updates…")
         self.assert_button_chrome(window.check_button, primary=False)
         self.assert_has_frame(window.check_button)
 
@@ -2079,14 +2101,16 @@ class PollingTests(WindowTestCase):
                              window.update_button.width())
 
         window.feature_button.setEnabled(False)
-        window.feature_button.setText("Sending request…")
+        qt_app._set_icon_action(window.feature_button, qt_app.FEATURE_BUSY_LABEL,
+                                qt_app.FEATURE_TIP)
         self.assert_button_chrome(window.feature_button, primary=False)
         self.assert_has_frame(window.feature_button)
         self.assertLessEqual(window.feature_button.sizeHint().width(),
                              window.feature_button.width())
         self.assertEqual(window.feature_button.toolTip(),
                          qt_app.format_tooltip(
-                             "Send a feature request to the developers as a GitHub issue."))
+                             "Sending request…: Send a feature request to the developers "
+                             "as a GitHub issue."))
 
     def assert_button_chrome(self, button, primary):
         """Check the border, pointer, focus and state rules of one button.
@@ -2902,11 +2926,13 @@ class UpdateFlowTests(WindowTestCase):
                 self.window.updates.busy = True
                 self.window._handle_update_events()
                 self.assertFalse(self.window.check_button.isEnabled())
-                self.assertIn("Checking", self.window.check_button.text())
+                self.assertEqual(self.window.check_button.accessibleName(),
+                                 "Checking for updates…")
+                self.assertIn("Checking for updates…", self.window.check_button.toolTip())
                 self.window.updates.busy = False
                 self.post(kind, payload)
                 self.assertTrue(self.window.check_button.isEnabled())
-                self.assertEqual(self.window.check_button.text(), "Check for updates")
+                self.assertEqual(self.window.check_button.accessibleName(), "Check for updates")
 
     def test_check_button_gives_way_to_a_found_build(self):
         """Once a newer build is known only the blue button shows, through its download.
@@ -3501,7 +3527,10 @@ class FeatureRequestTests(WindowTestCase):
         self.run_request(qt_app.QDialog.Accepted)
         self.window.feedback.submit.assert_called_once_with(self.REQUEST)
         self.assertFalse(self.window.feature_button.isEnabled())
-        self.assertEqual(self.window.feature_button.text(), "Sending request…")
+        self.assertEqual(self.window.feature_button.accessibleName(), "Sending request…")
+        self.assertIn("Sending request…", self.window.feature_button.toolTip())
+        self.assertEqual(self.window.statusBar().currentMessage(),
+                         "Sending the feature request…")
         self.assertIn("Sending feature request: Export reference", self.log.lines)
 
     def test_cancel_sends_nothing(self):
@@ -3546,7 +3575,7 @@ class FeatureRequestTests(WindowTestCase):
         self.window.feedback.events.put(("sent", (self.REQUEST, url)))
         self.window._handle_feedback_events()
         self.assertTrue(self.window.feature_button.isEnabled())
-        self.assertEqual(self.window.feature_button.text(), "Request feature")
+        self.assertEqual(self.window.feature_button.accessibleName(), "Request feature")
         self.assertIn(f"Feature request filed: {url}", self.log.lines)
         self.assertEqual(self.dialogs.call_args.args[2], "Your request was submitted.")
         self.dialogs.return_value.exec.assert_called_once()
@@ -4432,8 +4461,8 @@ class FreezeTests(WindowTestCase):
         Returns: None.
         """
         window = self.window
+        window.show()  # showing fits the window to the screen; widen it after
         window.resize(2400, 900)
-        window.show()
         items = (window.update_slot, window.feature_button, window.source_badge,
                  window.record_label, window.range_status, window.camera_fps_status,
                  window.speed_status, window.pixel_status)
@@ -4588,7 +4617,7 @@ class CodexTests(WindowTestCase):
             entry.trigger()
             self.window.codex_button.click()
         self.assertEqual(open_codex.call_count, 2)
-        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+        self.assertEqual(self.window.codex_button.accessibleName(), "Open in Codex")
 
     def test_startup_gets_the_source_only_with_update_checks(self):
         """The startup check runs unless GitHub is off limits at startup.
@@ -4616,14 +4645,17 @@ class CodexTests(WindowTestCase):
         """
         self.window._open_codex()
         self.assertFalse(self.window.codex_button.isEnabled())
-        self.assertEqual(self.window.codex_button.text(), "Getting source…")
+        self.assertEqual(self.window.codex_button.accessibleName(), "Getting source…")
+        self.assertIn("Getting source…", self.window.codex_button.toolTip())
+        self.assertEqual(self.window.statusBar().currentMessage(),
+                         "Getting the source code for Codex…")
         self.window.source.start.assert_called_once_with()
         FakeSettings.store["codex/intro_shown"] = True
         with mock.patch.object(qt_app.QDesktopServices, "openUrl",
                                return_value=True) as open_url:
             self.ready("Downloaded the source code")
         self.assertTrue(self.window.codex_button.isEnabled())
-        self.assertEqual(self.window.codex_button.text(), "Open in Codex")
+        self.assertEqual(self.window.codex_button.accessibleName(), "Open in Codex")
         self.assertIn("Downloaded the source code", self.log.lines)
         self.write_guide.assert_called_once_with(self.FOLDER)
         url = open_url.call_args.args[0]
@@ -4848,7 +4880,8 @@ class HelpTipTests(WindowTestCase):
         Returns: None.
         """
         window = self.window
-        window.show()
+        window.show()  # showing fits the window to the screen; widen it after
+        window.resize(qt_app.DEFAULT_WIDTH, qt_app.DEFAULT_HEIGHT)
         QApplication.processEvents()
         self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
         for tip in tips.TIPS:
@@ -4865,6 +4898,155 @@ class HelpTipTests(WindowTestCase):
         self.assertTrue(window.tip_label.isHidden())
         self.assertTrue(FakeSettings.store["tips/hidden"])
         self.assertEqual(window.source_badge.geometry().getRect(), before)
+
+
+class FitRectTests(unittest.TestCase):
+    """A window rectangle is shrunk and moved onto the usable screen area."""
+
+    def test_a_window_that_fits_is_unchanged(self):
+        """A rectangle already inside the area comes back the same.
+
+        Args: None.
+        Returns: None.
+        """
+        rect = QRect(10, 50, 600, 400)
+        self.assertEqual(qt_app.fit_rect(rect, QRect(0, 40, 1280, 672)), rect)
+
+    def test_an_oversized_window_fills_the_area(self):
+        """A window larger than the screen shrinks to the area, taskbar excluded.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.fit_rect(QRect(500, -20, 2100, 900), QRect(0, 40, 1280, 672)),
+                         QRect(0, 40, 1280, 672))
+
+    def test_a_window_hanging_off_the_corner_moves_back(self):
+        """A window that fits but sticks out past the bottom right moves in.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.fit_rect(QRect(1000, 500, 400, 300), QRect(0, 40, 1280, 672)),
+                         QRect(880, 412, 400, 300))
+
+
+class ScreenFitTests(unittest.TestCase):
+    """The window fits whatever screen and resolution it is shown on."""
+
+    def setUp(self):
+        """Build a demo window with no saved layout (default size 2100x900).
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        engine = Engine(self.log)
+        engine.use_demo()
+        self.window = demo_window(engine, self.log)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.window.tip_timer.stop()
+        self.addCleanup(self.window.deleteLater)
+        self.addCleanup(self.window.close)
+
+    def assert_on_screen(self, area):
+        """Check that the whole window, frame included, lies inside an area.
+
+        Args: area is the usable screen QRect.
+        Returns: None.
+        """
+        QApplication.processEvents()
+        frame = self.window.frameGeometry()
+        self.assertTrue(area.contains(frame), f"{frame} is not inside {area}")
+
+    def test_showing_fits_the_default_size_to_a_small_screen(self):
+        """The 2100-pixel default shrinks to a screen narrower than that.
+
+        Args: None.
+        Returns: None.
+        """
+        area = self.window.screen().availableGeometry()
+        self.assertGreater(qt_app.DEFAULT_WIDTH, area.width())
+        self.window.show()
+        self.assert_on_screen(area)
+
+    def test_a_resolution_change_while_running_refits_the_window(self):
+        """A smaller usable area (resolution, scaling or taskbar) shrinks the window.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        screen = self.window.screen()
+        smaller = QRect(0, 30, 700, 500)
+        with mock.patch.object(QScreen, "availableGeometry", return_value=smaller):
+            screen.availableGeometryChanged.emit(smaller)
+            self.assert_on_screen(smaller)
+
+    def test_showing_again_watches_the_screen_once(self):
+        """Hiding and showing again neither loses nor doubles the screen watch.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        self.window.hide()
+        self.window.show()
+        screen = self.window.screen()
+        self.assertIs(self.window._watched_screen, screen)
+        smaller = QRect(0, 0, 680, 480)
+        with mock.patch.object(QScreen, "availableGeometry", return_value=smaller), \
+                mock.patch.object(self.window, "setGeometry",
+                                  wraps=self.window.setGeometry) as set_geometry:
+            screen.availableGeometryChanged.emit(smaller)
+        self.assertEqual(set_geometry.call_count, 1)
+
+    def test_a_maximized_window_is_left_alone(self):
+        """Maximized already fits the screen, so its size is not touched.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        self.window.resize(3000, 2000)
+        with mock.patch.object(self.window, "isMaximized", return_value=True):
+            self.window.fit_to_screen()
+        self.assertEqual((self.window.width(), self.window.height()), (3000, 2000))
+
+    def test_controls_scroll_instead_of_stretching_the_window(self):
+        """The window can be shorter than the controls, which then scroll.
+
+        Args: None.
+        Returns: None.
+        """
+        panel = self.window.controls_scroll.widget()
+        self.assertLess(self.window.minimumSizeHint().height(), panel.sizeHint().height())
+        self.window.show()
+        QApplication.processEvents()
+        self.assertTrue(self.window.controls_scroll.verticalScrollBar().isVisible())
+
+    def test_wrapped_notes_get_their_full_height(self):
+        """A wrapped note gets every line it needs, so no text is clipped.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.show()
+        QApplication.processEvents()
+        note = self.window.noise_note
+        self.assertGreaterEqual(note.height(), note.heightForWidth(note.width()))
 
 
 if __name__ == "__main__":
