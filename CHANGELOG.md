@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-13 — Release builds are Windows-only
+
+### Previous state
+
+- The **Release** workflow built and published Windows, Linux and macOS binaries, and the **Update end-to-end tests** workflow ran the native update tests on all three.
+
+### Current state
+
+- Only the Windows binary is built and published, and the native update tests run on Windows only. The Linux and macOS jobs are removed from `build-binaries.yml` and `test-updates.yml` because those platforms are not functional yet and the only user is on Windows. The camera-free test suite that gates a release still runs on Linux; it builds nothing. Restore the Linux and macOS matrix entries and steps from git history to bring them back.
+
 ## 2026-11-13 — The laptop's built-in camera is left out
 
 - A laptop's built-in camera is no longer listed. Before, the Dell laptop's **Integrated Webcam** (USB `0c45:674c`) appeared as "not yet supported", and switching it on filed a camera report (#44). Built-in cameras are never ESPI sources, so they are now left out of the camera list: they are not shown, opened or reported, and the log says which were skipped (`Ignoring the built-in camera …`).
