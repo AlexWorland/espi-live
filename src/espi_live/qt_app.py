@@ -197,7 +197,7 @@ class Reporting:
         self.reporter.listeners.append(self.worker.kick)
         # Log uploads follow the same switches as error reports.
         self.uploads = log_uploads.LogUploadWorker(log_uploads.LogUploader(
-            paths.output_folder("logs"), self.reporter.scrubber,
+            paths.output_folder("logs"), self.reporter.serials,
             lambda: self.reporter.enabled))
         self.hooks = None
         self.previous_handler = None
@@ -219,6 +219,13 @@ class Reporting:
         log.info(f"Log uploads: {uploads}")
         self.reporter.collect_native_crashes(log.crash_path)
         self.worker.start()
+
+    def start_uploads(self):
+        """Start the log uploads, once the cameras are open and their serials known.
+
+        Args: None.
+        Returns: None.
+        """
         self.uploads.start()
 
     def choose(self, on, log):
@@ -3738,6 +3745,7 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
         for channel in channels:
             if channel.active:
                 channel.engine.start()
+        reporting.start_uploads()  # after the cameras opened, so their serials are scrubbed
         return app.exec()
     except Exception as exc:  # the hooks are restored below, before Python's own hook runs
         error_reports.caught(log, exc, "main_thread", "ESPI live stopped", fatal=True)

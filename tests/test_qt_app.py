@@ -3306,6 +3306,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.main_window.call_args.args[2:], (True, False, self.reporting))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
+        self.reporting.start_uploads.assert_called_once_with()
         self.finish.assert_called_once_with(self.window, self.log)
         self.assertIn("closed", self.log.lines)
         self.assertIn("Display: GPU (OpenGL 4.1 on X)", self.log.lines)
@@ -4043,6 +4044,8 @@ class ReportingClassTests(unittest.TestCase):
                 mock.patch.object(reporting.worker, "start"), \
                 mock.patch.object(reporting.uploads, "start") as start:
             reporting.start(self.log)
+            start.assert_not_called()  # not before the cameras are open
+            reporting.start_uploads()
         start.assert_called_once()
         self.assertTrue(any(line.startswith("Log uploads: off") for line in self.log.lines))
         reporting.stop()
@@ -4067,7 +4070,7 @@ class ReportingClassTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
             reporting = self.reporting()
             self.assertTrue(reporting.uploads.uploader.enabled())
-            self.assertIs(reporting.uploads.uploader.scrubber.__self__, reporting.reporter)
+            self.assertIs(reporting.uploads.uploader.serials.__self__, reporting.reporter)
             with mock.patch.object(reporting.worker, "kick"), \
                     mock.patch.object(reporting.uploads, "kick") as kick:
                 reporting.choose(False, self.log)

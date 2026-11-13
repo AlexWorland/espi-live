@@ -41,9 +41,14 @@ class FakeContents:
         if method == "GET":
             if self.fail_get:
                 raise self.fail_get
-            if file_path not in self.remote:
+            if file_path.endswith(".log"):
+                raise FeedbackError("too_large", 403)  # GitHub refuses big files here
+            entries = [{"name": name.rsplit("/", 1)[1], "type": "file", "sha": sha}
+                       for name, sha in self.remote.items()
+                       if name.rsplit("/", 1)[0] == file_path]
+            if not entries:
                 raise FeedbackError("not found", 404)
-            return {"sha": self.remote[file_path]}
+            return entries + [{"name": "other.log", "type": "file", "sha": "zzz"}]
         if self.fail_put:
             raise self.fail_put
         self.remote[file_path] = f"sha-{len(self.calls)}"
@@ -58,13 +63,16 @@ class FakeContents:
         return [(path, payload) for method, path, _, payload in self.calls if method == "PUT"]
 
 
-def scrubber():
-    """Stand in for ErrorReporter.scrubber.
+SERIAL = "21234567"
+
+
+def serials():
+    """Stand in for ErrorReporter.serials.
 
     Args: None.
-    Returns: A function hiding the word "secret".
+    Returns: This run's camera serial numbers.
     """
-    return lambda text: text.replace("secret", "<x>")
+    return (SERIAL,)
 
 
 class LogUploadTest(unittest.TestCase):
@@ -95,7 +103,7 @@ class LogUploadTest(unittest.TestCase):
         Args: fake is the FakeContents; enabled the switch; token the token.
         Returns: A LogUploader.
         """
-        return log_uploads.LogUploader(self.folder, scrubber, enabled,
+        return log_uploads.LogUploader(self.folder, serials, enabled,
                                        request=fake, token=token)
 
     def machine(self):
@@ -134,17 +142,17 @@ class LogUploadTest(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        self.write_log(LOG_A, "hello secret\n")
+        self.write_log(LOG_A, f"hello {SERIAL}\n")
         fake = FakeContents()
         self.assertEqual(self.uploader(fake).send_pending(), 1)
         [(path, payload)] = fake.puts()
         self.assertTrue(path.endswith(f"/contents/logs/2026-11-13/142530-{self.machine()}.log"))
         self.assertIn("/repos/AlexWorland/espi-live-logs/", path)
-        self.assertEqual(base64.b64decode(payload["content"]).decode(), "hello <x>\n")
+        self.assertEqual(base64.b64decode(payload["content"]).decode(), "hello <serial>\n")
         self.assertEqual(payload["branch"], "main")
         self.assertNotIn("sha", payload)
         with open(os.path.join(self.folder, log_uploads.RECORD_NAME), encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle)[LOG_A]["size"], len("hello secret\n"))
+            self.assertEqual(json.load(handle)[LOG_A]["size"], len(f"hello {SERIAL}\n"))
 
     def test_unchanged_log_is_not_sent_again(self):
         """A second pass with nothing new makes no calls.
@@ -265,6 +273,63 @@ class LogUploadTest(unittest.TestCase):
             self.assertEqual(self.uploader(fake).send_pending(), 0)
         self.assertEqual(fake.calls, [])
 
+    def test_serials_seen_before_are_scrubbed_later(self):
+        """A serial seen in an earlier run is hidden even when that camera is absent.
+
+        Args: None.
+        Returns: None.
+        """
+        self.write_log(LOG_A, "one\n")
+        self.uploader(FakeContents()).send_pending()
+        self.write_log(LOG_B, f"Serial {SERIAL} and bare {SERIAL}\n")
+        fake = FakeContents()
+        log_uploads.LogUploader(self.folder, lambda: (), lambda: True,
+                                request=fake, token="t").send_pending()
+        text = base64.b64decode(fake.puts()[0][1]["content"]).decode()
+        self.assertNotIn(SERIAL, text)
+        with open(os.path.join(self.folder, log_uploads.SERIALS_NAME), "w") as handle:
+            handle.write("{broken")
+        self.assertEqual(log_uploads.known_serials(self.folder), [])
+        with mock.patch.object(log_uploads, "write_json", side_effect=OSError("read-only")):
+            self.assertEqual(log_uploads.remember_serials(self.folder, ["123", ""]), ["123"])
+
+    def test_camera_labels_and_prefixes_are_scrubbed_without_knowing_the_serial(self):
+        """Labels "Model (serial)" and "[serial] " line prefixes never leave the PC.
+
+        Args: None.
+        Returns: None.
+        """
+        scrub = log_uploads.make_log_scrubber(())
+        text = scrub("10:00:00 INFO [MainThread] [99887766] Displaying Blackfly S (99887766)\n"
+                     "exposure 8000 at 10:00:01 (frame 1234)\n")
+        self.assertNotIn("99887766", text)
+        self.assertIn("Blackfly S (<serial>)", text)
+        self.assertIn("[MainThread] [<serial>] Displaying", text)
+        self.assertIn("exposure 8000 at 10:00:01 (frame 1234)", text)
+
+    def test_scrubbing_runs_in_line_chunks(self):
+        """Large text is scrubbed a chunk of whole lines at a time, giving other threads the GIL.
+
+        Args: None.
+        Returns: None.
+        """
+        calls = []
+
+        def scrub(text):
+            """Record each chunk.
+
+            Args: text is one chunk.
+            Returns: The chunk upper-cased.
+            """
+            calls.append(text)
+            return text.upper()
+
+        text = "".join(f"line {index}\n" for index in range(3000))
+        self.assertEqual(log_uploads.scrub_in_chunks(text, scrub, chunk_chars=1000), text.upper())
+        self.assertGreater(len(calls), 10)
+        self.assertTrue(all(chunk.endswith("\n") for chunk in calls))
+        self.assertEqual(log_uploads.scrub_in_chunks("", scrub), "")
+
     def test_cap_keeps_head_and_tail_and_survives_bad_bytes(self):
         """A long log keeps its start and its end; bad bytes never raise.
 
@@ -295,7 +360,7 @@ class LogUploadTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {log_uploads.REPO_ENV: ""}):
             self.assertEqual(log_uploads.repository(), log_uploads.DEFAULT_REPO)
         with mock.patch.object(log_uploads, "logs_token", return_value="baked"):
-            uploader = log_uploads.LogUploader(self.folder, scrubber, lambda: True)
+            uploader = log_uploads.LogUploader(self.folder, serials, lambda: True)
             self.assertEqual(uploader.token(), "baked")
 
 

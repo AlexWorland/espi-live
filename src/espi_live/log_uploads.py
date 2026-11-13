@@ -12,9 +12,14 @@ same file in place. Nothing runs at shutdown; the next start sends the rest.
 Builds embed ``LOGS_TOKEN``, a fine-grained token with only Contents: read &
 write on that one repository. Tokens in the public binaries are extractable,
 so whoever extracts it could read the uploaded logs, though never touch the
-code; that is why every log goes through the error reporter's scrubber
-first, and why each upload is capped at MAX_BYTES (the start, with the
-startup header, plus the newest part).
+code; that is why every log is scrubbed first (make_log_scrubber: the error
+reporter's rules, every camera serial this install has seen, kept in
+``known-serials.json``, and camera labels and line prefixes that carry a
+serial), and why each upload is capped at MAX_BYTES (the start, with the
+startup header, plus the newest part). Scrubbing runs a chunk of lines at a
+time so the camera and UI threads get the interpreter between chunks. The
+remote file's ``sha`` comes from its folder's listing, which works for files
+of any size (the file endpoint refuses files over 1 MB in JSON).
 
 Uploads are silent: failures are logged at DEBUG and never reported, and the
 worker never blocks another thread. They follow the error-report switches
@@ -31,7 +36,7 @@ import secrets
 import threading
 
 from espi_live import feedback, updater
-from espi_live.error_reports import write_json
+from espi_live.error_reports import make_scrubber, write_json
 from espi_live.feedback import FeedbackError
 from espi_live.logs import run_logs
 
@@ -44,12 +49,18 @@ TOKEN_FILE = "logs-token.txt"
 BRANCH = "main"
 RECORD_NAME = "log_uploads.json"
 MACHINE_FILE = "machine-id.txt"
+SERIALS_NAME = "known-serials.json"
+CHUNK_CHARS = 64 * 1024
 INTERVAL_S = 15 * 60
 MAX_BYTES = 5 * 1024 * 1024
 HEAD_BYTES = 256 * 1024
 MAX_PER_PASS = 10
 WORKER_THREAD = "log-uploads"
 RUN_NAME = re.compile(r"^espi_(\d{4})(\d{2})(\d{2})_(\d{6})_\d+\.log$")
+# CameraInfo.label "Model (21234567)" and the "[21234567] " prefix of
+# several-camera log lines, for serials this install has not recorded yet.
+LABEL_SERIAL = re.compile(r"\(\d{6,10}\)")
+PREFIX_SERIAL = re.compile(r"(\] )\[\d{6,10}\](?= )")
 
 
 def logs_token():
@@ -94,6 +105,79 @@ def machine_id(folder):
     return value
 
 
+def known_serials(folder):
+    """Read the camera serial numbers this install has seen.
+
+    Args: folder is the logs folder.
+    Returns: A sorted list; empty when the file is missing or unreadable.
+    """
+    try:
+        with open(os.path.join(folder, SERIALS_NAME), encoding="utf-8") as handle:
+            values = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    return sorted({str(value) for value in values if value}) if isinstance(values, list) else []
+
+
+def remember_serials(folder, serials):
+    """Add this run's camera serial numbers to the ones seen before.
+
+    Args: folder is the logs folder; serials are this run's serial numbers.
+    Returns: Every serial known, sorted (also when the file cannot be written).
+    """
+    known = known_serials(folder)
+    merged = sorted(set(known) | {str(serial) for serial in serials if serial})
+    if merged != known:
+        try:
+            write_json(os.path.join(folder, SERIALS_NAME), merged)
+        except OSError:
+            pass
+    return merged
+
+
+def make_log_scrubber(serials):
+    """Build the scrubbing function for run logs.
+
+    Args: serials are every camera serial number to hide.
+    Returns: A function taking text and returning it with the error
+        reporter's personal details and every camera serial replaced.
+    """
+    scrub = make_scrubber(serials)
+
+    def scrub_log(text):
+        """Apply the rules.
+
+        Args: text is log text.
+        Returns: The scrubbed text.
+        """
+        text = LABEL_SERIAL.sub("(<serial>)", scrub(text))
+        return PREFIX_SERIAL.sub(r"\1[<serial>]", text)
+
+    return scrub_log
+
+
+def scrub_in_chunks(text, scrub, chunk_chars=CHUNK_CHARS):
+    """Scrub a large text a chunk of whole lines at a time.
+
+    One regular-expression pass over megabytes holds the interpreter lock
+    for most of a second; chunks let the camera and UI threads run between them.
+
+    Args: text is the log text; scrub is the scrubbing function; chunk_chars
+        is the rough chunk size.
+    Returns: The scrubbed text.
+    """
+    parts, chunk, size = [], [], 0
+    for line in text.splitlines(keepends=True):
+        chunk.append(line)
+        size += len(line)
+        if size >= chunk_chars:
+            parts.append(scrub("".join(chunk)))
+            chunk, size = [], 0
+    if chunk:
+        parts.append(scrub("".join(chunk)))
+    return "".join(parts)
+
+
 def remote_path(log_name, machine):
     """Place a run log in the logs repository.
 
@@ -129,17 +213,17 @@ def read_for_upload(path, max_bytes=MAX_BYTES, head_bytes=HEAD_BYTES):
 class LogUploader:
     """Send the logs folder's new or grown run logs, remembering what was sent."""
 
-    def __init__(self, folder, scrubber, enabled, request=feedback.github_request, token=None):
+    def __init__(self, folder, serials, enabled, request=feedback.github_request, token=None):
         """Create the uploader.
 
-        Args: folder is the logs folder; scrubber returns the current
-            scrubbing function (ErrorReporter.scrubber); enabled returns
-            whether uploads are on; request is the GitHub call; token
-            overrides logs_token() (tests).
+        Args: folder is the logs folder; serials returns this run's camera
+            serial numbers (ErrorReporter.serials); enabled returns whether
+            uploads are on; request is the GitHub call; token overrides
+            logs_token() (tests).
         Returns: None.
         """
         self.folder = folder
-        self.scrubber = scrubber
+        self.serials = serials
         self.enabled = enabled
         self.request = request
         self._token = token
@@ -185,6 +269,7 @@ class LogUploader:
             return 0
         record = self._read_record()
         machine = machine_id(self.folder)
+        scrub = make_log_scrubber(remember_serials(self.folder, self.serials()))
         sent = 0
         for name in run_logs(self.folder):
             if sent >= MAX_PER_PASS:
@@ -200,7 +285,7 @@ class LogUploader:
             if not self.enabled():
                 break
             try:
-                size = self._upload(local, path, token)
+                size = self._upload(local, path, token, scrub)
                 record[name] = {"size": size, "path": path}
                 write_json(self._record_path(), record)
             except (FeedbackError, OSError) as exc:
@@ -210,11 +295,34 @@ class LogUploader:
             logger.debug("Uploaded %s as %s", name, path)
         return sent
 
-    def _upload(self, local, path, token):
+    def _remote_sha(self, path, token):
+        """Find the sha of a file already in the logs repository.
+
+        Lists the file's folder: the listing names every file's sha whatever
+        its size, where the file endpoint refuses files over 1 MB.
+
+        Args: path is the file's place in the repository; token the logs token.
+        Returns: The sha, or None when the file (or its folder) is not there.
+            Raises FeedbackError on other failures.
+        """
+        folder, name = path.rsplit("/", 1)
+        try:
+            entries = self.request(
+                "GET", f"/repos/{repository()}/contents/{folder}?ref={BRANCH}", token)
+        except FeedbackError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        for entry in entries:
+            if entry.get("name") == name:
+                return entry.get("sha")
+        return None
+
+    def _upload(self, local, path, token, scrub):
         """Create or update one log in the logs repository.
 
         Args: local is the log file; path its place in the repository; token
-            the logs token.
+            the logs token; scrub the scrubbing function.
         Returns: How many bytes of the file were sent. Raises FeedbackError
             or OSError on failure.
         """
@@ -222,12 +330,10 @@ class LogUploader:
         url = f"/repos/{repository()}/contents/{path}"
         payload = {"message": f"Log {path}", "branch": BRANCH,
                    "content": base64.b64encode(
-                       self.scrubber()(text).encode("utf-8")).decode("ascii")}
-        try:
-            payload["sha"] = self.request("GET", f"{url}?ref={BRANCH}", token)["sha"]
-        except FeedbackError as exc:
-            if exc.status != 404:
-                raise
+                       scrub_in_chunks(text, scrub).encode("utf-8")).decode("ascii")}
+        sha = self._remote_sha(path, token)
+        if sha:
+            payload["sha"] = sha
         self.request("PUT", url, token, payload)
         return size
 
