@@ -338,6 +338,38 @@ class EngineDemoTests(unittest.TestCase):
         self.assertEqual((packet.palette, packet.gamma), ("Gray", 2.0))
         self.assertEqual(self.engine.status()["demo"], True)
 
+    def test_flip_horizontal_mirrors_the_published_frame(self):
+        """Flip horizontally mirrors columns and leaves rows in place.
+
+        The source is a left-to-right ramp, so the first column is the
+        darkest unflipped and the brightest flipped.
+
+        Args: None.
+        Returns: None.
+        """
+        ramp = np.tile(np.arange(0, 240, 4, dtype=np.uint8), (80, 1))
+        self.engine.demo_source.next_frame = lambda exposure_us, gain_db, now: ramp.copy()
+        self.engine.update_settings(
+            fps=120, mode="Raw", gamma=1.0, noise_reduction=0,
+            flip_horizontal=False)
+
+        def row(flipped):
+            """Return the ramp row (below the banner) once the setting is live.
+
+            Args: flipped is the expected state of the first column.
+            Returns: The row, or None until a matching frame is published.
+            """
+            packet = self.engine.latest_packet()
+            if packet is None:
+                return None
+            got = packet.image[60]
+            return got if (got[0] > got[-1]) == flipped else None
+
+        self.assertTrue(wait_until(lambda: row(False) is not None))
+        self.engine.update_settings(flip_horizontal=True)
+        self.assertTrue(wait_until(lambda: row(True) is not None))
+        self.assertTrue(np.array_equal(row(True)[::-1], ramp[60]))
+
     def test_fringe_tools_and_reference_refresh(self):
         """Rolling average, filters, clip, invert and auto-refresh run together.
 

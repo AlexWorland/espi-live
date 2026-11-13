@@ -1215,6 +1215,7 @@ class MainWindowBuildTests(WindowTestCase):
         w.rolling.setChecked(not before.rolling)
         w.scale_range.setChecked(not before.scale_range)
         w.invert.setChecked(not before.invert)
+        w.flip_button.setChecked(not before.flip_horizontal)
         w.clahe.setChecked(not before.clahe)
         w.smoothing_combo.setCurrentIndex(w.smoothing_combo.count() - 1)
         w.palette_combo.setCurrentIndex(w.palette_combo.count() - 1)
@@ -1222,6 +1223,7 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertEqual(after.rolling, not before.rolling)
         self.assertEqual(after.scale_range, not before.scale_range)
         self.assertEqual(after.invert, not before.invert)
+        self.assertEqual(after.flip_horizontal, not before.flip_horizontal)
         self.assertEqual(after.clahe, not before.clahe)
         self.assertEqual(after.smoothing_method, w.smoothing_combo.currentText())
         self.assertEqual(after.palette, w.palette_combo.currentText())
@@ -1390,6 +1392,7 @@ class SettingsGuideTests(WindowTestCase):
             w.smoothing: ("fringe spacing", "Start at 3"),
             w.scale_range: ("0 and 255", "Start on"),
             w.invert: ("bright and dark", "Start off"),
+            w.flip_button: ("left to right", "Start off"),
             w.clip: ("speckles", "Start at 0"),
             w.palette_combo: ("Start with Gray",),
             w.gamma: ("Start at 1.0",),
