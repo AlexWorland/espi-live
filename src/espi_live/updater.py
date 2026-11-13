@@ -25,6 +25,7 @@ imports: the front ends drive this module.
 import glob
 import hashlib
 import json
+import logging
 import os
 import queue
 import re
@@ -45,6 +46,8 @@ try:
     from espi_live import _build_info
 except ImportError:  # source checkout: CI generates this module
     _build_info = None
+
+logger = logging.getLogger(__name__)
 
 API_ROOT = "https://api.github.com"
 MANIFEST_NAME = "build-info.json"
@@ -786,6 +789,9 @@ class UpdateWorker:
             Args: None.
             Returns: None.
             """
+            started = time.monotonic()
+            what = "download" if downloading else "check"
+            logger.info(f"Update {what} started")
             try:
                 self.events.put((ok_kind, job()))
             except UpdateError as exc:
@@ -794,6 +800,8 @@ class UpdateWorker:
                 self.events.put((fail_kind, f"{type(exc).__name__}: {exc}"))
                 raise
             finally:
+                logger.info(f"Update {what} finished in "
+                            f"{time.monotonic() - started:.1f} s")
                 self.downloading = False
                 self.busy = False
 

@@ -16,6 +16,7 @@ import difflib
 import glob
 import hashlib
 import json
+import logging
 import os
 import queue
 import shutil
@@ -25,6 +26,8 @@ import urllib.error
 import zipfile
 
 from espi_live import paths, updater
+
+logger = logging.getLogger(__name__)
 
 SOURCE_DIR = "espi-live-source"
 STATE_DIR = ".espi"  # bookkeeping inside the copy; never part of a change
@@ -531,11 +534,15 @@ class SourceWorker:
             Args: None.
             Returns: None.
             """
+            started = time.monotonic()
+            logger.info("Source copy check started")
             try:
                 self.events.put(("ready", prepare()))
             except Exception as exc:
                 self.events.put(("failed", str(exc)))
             finally:
+                logger.info(f"Source copy check finished in "
+                            f"{time.monotonic() - started:.1f} s")
                 self.busy = False
 
         threading.Thread(target=work, name="espi-source", daemon=True).start()

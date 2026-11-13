@@ -28,6 +28,8 @@ import cv2
 import numpy as np
 
 from espi_live import error_reports, sources
+from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
+                                   StreamCounterMonitor, settings_summary)
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
@@ -479,6 +481,20 @@ class Engine:
         sequence = 0
         frame = None
         demo_next = time.monotonic()
+        gaps = FrameGapMonitor(self.log)
+        counters = StreamCounterMonitor(self.log)
+        camera_sharpness = SharpnessMonitor(self.log, "camera frame")
+        shown_sharpness = SharpnessMonitor(self.log, "displayed frame")
+        s = applied
+
+        def context():
+            """Describe the settings and rates in force, for diagnostic lines.
+
+            Args: None.
+            Returns: One line of text.
+            """
+            rate = "n/a" if resulting_fps is None else f"{resulting_fps:.1f}"
+            return f"{settings_summary(s)} camera_fps={rate}"
         self.log.write("Streaming. Raw shows camera pixels with gamma only; "
                        "Previous and Reference show ESPI differences.")
 
@@ -536,6 +552,7 @@ class Engine:
                 if state != "ok":
                     if state == "incomplete":
                         incomplete += 1
+                        gaps.incomplete(time.monotonic())
                         if incomplete % 30 == 1:
                             self.log.warning(f"Incomplete frames: {incomplete}")
                     elif time.monotonic() - last_error_log >= 5.0:
@@ -552,6 +569,9 @@ class Engine:
             if s.single_field and self.camera is not None and self.camera.interlaced:
                 frame = single_field(frame)
 
+            now = time.monotonic()
+            gaps.frame_ok(now, 1.0 / max(1.0, resulting_fps or s.fps), context)
+            camera_sharpness.observe(frame, now, context)
             frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
             now = time.monotonic()
             last_valid = now
@@ -559,6 +579,7 @@ class Engine:
                 if now - last_readback >= READBACK_INTERVAL_S:
                     values = self.camera.read_values()
                     resulting_fps = values["resulting"]
+                    counters.update(self.camera.read_stream_counters(), context)
                     self._set_status(
                         camera=self.camera.describe(values),
                         camera_fps=("Camera: n/a" if resulting_fps is None else
@@ -625,6 +646,7 @@ class Engine:
                         gamma = 1.0
 
             if image is not None:
+                shown_sharpness.observe(image, now, context)
                 if s.flip_horizontal:  # every view; before the watermark so its text reads normally
                     image = cv2.flip(image, 1)
                 if self.demo:

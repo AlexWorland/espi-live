@@ -12,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import types
 import unittest
 import urllib.error
@@ -1374,6 +1375,40 @@ class UpdateWorkerTests(unittest.TestCase):
         with mock.patch.object(updater, "check_for_update", return_value="info"):
             self.assertTrue(worker.check())
             self.assertEqual(worker.events.get(timeout=5), ("checked", "info"))
+
+    def test_jobs_are_logged_with_their_start_and_duration(self):
+        """A check writes a start line and a finish line, for time correlation.
+
+        Args: None.
+        Returns: None.
+        """
+        worker = updater.UpdateWorker()
+        with mock.patch.object(updater, "check_for_update", return_value=None), \
+                self.assertLogs("espi_live.updater", "INFO") as logs:
+            worker.check()
+            worker.events.get(timeout=5)
+            deadline = time.monotonic() + 5
+            while worker.busy and time.monotonic() < deadline:
+                time.sleep(0.01)
+        messages = [record.getMessage() for record in logs.records]
+        self.assertEqual(messages[0], "Update check started")
+        self.assertRegex(messages[-1], r"^Update check finished in \d+\.\d s$")
+
+    def test_download_jobs_are_named_downloads_in_the_log(self):
+        """A download is logged as a download, not a check.
+
+        Args: None.
+        Returns: None.
+        """
+        worker = updater.UpdateWorker()
+        with mock.patch.object(updater, "download_update", return_value="staged"), \
+                self.assertLogs("espi_live.updater", "INFO") as logs:
+            worker.download(mock.Mock(size=10))
+            worker.events.get(timeout=5)
+            deadline = time.monotonic() + 5
+            while worker.busy and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(logs.records[0].getMessage(), "Update download started")
 
     def test_check_failure_posts_message_and_clears_busy(self):
         """A failing check posts ("check_failed", text) and frees the worker.

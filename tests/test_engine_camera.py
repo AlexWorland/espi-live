@@ -11,14 +11,15 @@ import types
 import unittest
 from unittest import mock
 
+import cv2
 import numpy as np
 
-from espi_live import camera, capture, engine, paths
+from espi_live import camera, capture, diagnostics, engine, paths
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine, WindowsPreviewTimer
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
                           interlaced_frame, usb_live2, webcam)
-from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
+from fake_pyspin import (FakeCamera, FakeImage, FakeNode, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
 from list_log import ListLog
 
@@ -360,6 +361,48 @@ class CameraStreamingTests(CameraEngineCase):
         self.assertTrue(self.log.has("Camera timeout or acquisition error: timeout"))
         self.assertTrue(wait_until(
             lambda: "Camera: 29.5 fps" == self.engine.status()["camera_fps"], 3))
+
+    def test_link_trouble_and_blur_are_logged(self):
+        """Gaps, incomplete bursts, lost-frame counters and blur reach the log.
+
+        Args: None.
+        Returns: None.
+        """
+        begin = time.monotonic()
+        lost = FakeNode(0, writable=False)
+        self.cam.stream_nodemap.nodes["StreamLostFrameCount"] = lost
+        sharp = np.random.default_rng(3).integers(0, 256, (48, 64), dtype=np.uint8)
+        soft = cv2.GaussianBlur(sharp, (0, 0), 4)
+        calls = [0]
+
+        def source():
+            """Deliver sharp frames, then a bad link, then blur, then sharp again.
+
+            Args: None.
+            Returns: An image, or raises FakeSpinnakerException on a timeout.
+            """
+            elapsed = time.monotonic() - begin
+            if 0.5 <= elapsed < 1.0:
+                lost.value += 1
+                calls[0] += 1
+                if calls[0] % 2:
+                    return FakeImage(np.zeros((4, 4), np.uint8), incomplete=True)
+                raise FakeSpinnakerException("timeout")
+            if 1.3 <= elapsed < 1.8:
+                return FakeImage(soft)
+            return FakeImage(sharp)
+        self.cam.frame_source = source
+        with mock.patch.object(engine, "READBACK_INTERVAL_S", 0.05), \
+                mock.patch.object(diagnostics, "SHARPNESS_INTERVAL_S", 0.0), \
+                mock.patch.object(diagnostics, "SHARPNESS_MIN_SAMPLES", 3):
+            self.start_camera()
+            self.assertTrue(wait_until(
+                lambda: self.log.has("Sharpness recovered (displayed frame)"), 8))
+        for text in ("Frame gap:", "Incomplete-frame burst:",
+                     "Camera stream counters rose: StreamLostFrameCount",
+                     "Sharpness drop (camera frame)", "Sharpness drop (displayed frame)",
+                     "Sharpness recovered (camera frame)", "mode=Raw noise_reduction=0"):
+            self.assertTrue(self.log.has(text), text)
 
     def test_readback_reports_na_when_resulting_rate_unreadable(self):
         """An unreadable resulting rate shows "Camera: n/a".

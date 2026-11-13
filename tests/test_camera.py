@@ -12,7 +12,7 @@ from unittest import mock
 import numpy as np
 
 from espi_live import camera
-from fake_pyspin import (FakeCamera, FakeImage, FakeSpinnakerException,
+from fake_pyspin import (FakeCamera, FakeImage, FakeNode, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
 from list_log import ListLog
 
@@ -442,6 +442,35 @@ class SessionSettingsTests(FakeSpinTestCase):
         self.assertIsNone(values["gain"])
         self.assertEqual(values["requested"], 30.0)
         self.assertEqual(values["resulting"], 29.5)
+
+    def test_read_stream_counters_reports_readable_integer_nodes(self):
+        """Only the counters this camera exposes and can read are returned.
+
+        Args: None.
+        Returns: None.
+        """
+        nodes = self.cam.stream_nodemap.nodes
+        nodes["StreamLostFrameCount"] = FakeNode(4, writable=False)
+        nodes["StreamDeliveredFrameCount"] = FakeNode(900, writable=False)
+        nodes["StreamDroppedFrameCount"] = FakeNode(1, readable=False)
+        self.assertEqual(self.session.read_stream_counters(),
+                         {"StreamDeliveredFrameCount": 900, "StreamLostFrameCount": 4})
+
+    def test_read_stream_counters_tolerates_errors(self):
+        """A failing node, node lookup or stream map yields fewer counters.
+
+        Args: None.
+        Returns: None.
+        """
+        nodes = self.cam.stream_nodemap.nodes
+        nodes["StreamLostFrameCount"] = FakeNode(4, writable=False)
+        nodes["StreamLostFrameCount"].fail_get = True
+        nodes["StreamDeliveredFrameCount"] = FakeNode(9, writable=False)
+        self.cam.stream_nodemap.raising.add("StreamDeliveredFrameCount")
+        self.assertEqual(self.session.read_stream_counters(), {})
+        with mock.patch.object(self.cam, "GetTLStreamNodeMap",
+                               side_effect=FakeSpinnakerException("gone")):
+            self.assertEqual(self.session.read_stream_counters(), {})
 
     def test_read_values_tolerates_read_errors(self):
         """A GetValue failure yields None for that reading.

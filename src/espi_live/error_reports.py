@@ -1094,6 +1094,22 @@ class ErrorReporter:
         token = feedback.feedback_token()
         github = GitHub(feedback.repository(), token, allowed=lambda: self.enabled)
         ledger = self.load_ledger()
+        started = time.monotonic()
+        logger.info(f"Error reports: sending {len(pending)} pending report(s)")
+        try:
+            self._send_each(pending, github, ledger, post)
+        finally:
+            logger.info(f"Error reports: delivery finished in "
+                        f"{time.monotonic() - started:.1f} s")
+
+    def _send_each(self, pending, github, ledger, post):
+        """Deliver each pending report in turn, within the per-run limits.
+
+        Args: pending is a list of (path, report); github and ledger are the
+            client and the delivery ledger; post is called with
+            ("outcome", Outcome) for each report handled.
+        Returns: None.
+        """
         for path, report in pending:
             if not self.enabled:
                 break
