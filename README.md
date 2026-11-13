@@ -33,7 +33,7 @@ docs/
   camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition research notes
   notes/              development notes and reports
 third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
-.github/workflows/    build-binaries.yml: manual PyInstaller releases for Windows, Linux and macOS;
+.github/workflows/    build-binaries.yml: manual PyInstaller release for Windows;
                       enrich-feature-request.yml: Copilot enrichment of feature-request issues
 research/             physics background: talks, notebooks, papers, earlier code (local only, git-ignored)
 archive/              superseded app versions and old scripts, kept for history
@@ -49,15 +49,15 @@ The FLIR Spinnaker SDK (installers, PySpin wheels, docs and official Examples) i
 
 Download the newest build from **https://github.com/AlexWorland/espi-live/releases/latest**; no GitHub account is needed.
 
-Releases are made by hand: in GitHub, open **Actions > Build release > Run workflow**, pick the branch (normally `main`), optionally type release notes, and run it. `.github/workflows/build-binaries.yml` builds self-contained PyInstaller binaries and publishes them as release **Build N** (tag `build-N`, where N is the workflow run number). Merging into `main` does not build anything. The run first executes the test suite on Linux; if any test fails or line coverage of `src/espi_live/` is below 100%, nothing is built or released. Tick **Pre-release** to publish a test build that installed copies are not offered; runs from any branch other than `main` are always pre-releases.
+Releases are made by hand: in GitHub, open **Actions > Build release > Run workflow**, pick the branch (normally `main`), optionally type release notes, and run it. `.github/workflows/build-binaries.yml` builds the self-contained PyInstaller binary and publishes it as release **Build N** (tag `build-N`, where N is the workflow run number). Merging into `main` does not build anything. The run first executes the test suite on Linux; if any test fails or line coverage of `src/espi_live/` is below 100%, nothing is built or released. Tick **Pre-release** to publish a test build that installed copies are not offered; runs from any branch other than `main` are always pre-releases.
 
 | File | Camera support |
 |------|----------------|
 | `espi-live-windows-x64.zip` | PySpin 4.2 bundled (Python 3.10 build) |
-| `espi-live-linux-x64.tar.gz` | PySpin 4.4 bundled (Ubuntu 24.04 build) |
-| `espi-live-macos-arm64.zip` | `--demo` only (no macOS PySpin wheel); unsigned, run `xattr -cr "ESPI Live.app"` after unzipping |
 
-Output goes to `output/` next to the executable (next to the `.app` on macOS). The CI builds only check that each binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, only the macOS (demo) build succeeds.
+Only the Windows build is published: the Linux and macOS builds are disabled because those platforms are not functional yet.
+
+Output goes to `output/` next to the executable. The CI build only checks that the binary starts and loads its modules (`--help`, `--check`); the bundled camera path has not been exercised against a real camera. The release workflow checks out the private SDK repository with a read-only deploy key (the `SDK_DEPLOY_KEY` secret); without it, the build fails.
 
 ### Automatic updates
 

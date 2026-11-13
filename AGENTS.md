@@ -17,7 +17,7 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 | `docs/camera/` | Curated PySpin, BFS-U3-63S4M-C, other-model and acquisition notes | Yes |
 | `docs/notes/` | Development notes and reports | Yes |
 | `third_party/` | Not in this repository (git-ignored): a clone of the private `AlexWorland/espi-live-sdk` with FLIR Spinnaker 4.2 (camera-PC SDK, wheel, docs, Examples) and 4.4 installers, large files in Git LFS. CI checks it out here with the `SDK_DEPLOY_KEY` deploy key | Never; never commit it here |
-| `.github/workflows/`, `.github/prompts/` | `build-binaries.yml` ("Build release"): manual-only; a `test` job (full suite, 100% line coverage) gates the PyInstaller builds for Windows/Linux/macOS, published as release `build-N`. `enrich-feature-request.yml`: GitHub Copilot appends a structured spec to issues labelled `enrich` (system prompt in `.github/prompts/`) | Yes |
+| `.github/workflows/`, `.github/prompts/` | `build-binaries.yml` ("Build release"): manual-only; a `test` job (full suite, 100% line coverage) gates the Windows PyInstaller build (Linux and macOS builds are disabled until those platforms work), published as release `build-N`. `enrich-feature-request.yml`: GitHub Copilot appends a structured spec to issues labelled `enrich` (system prompt in `.github/prompts/`) | Yes |
 | `research/` | Physics talks, notebooks, papers, earlier code (not source to build). Local only: git-ignored because it holds third-party and personal documents | No |
 | `archive/` | Superseded app versions, old scripts, a scratch-project zip | No |
 | `output/` | Run-time logs, frames, recordings (git-ignored) | Never commit |

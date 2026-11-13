@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-13 — Release builds are Windows-only
+
+### Previous state
+
+- The **Build release** workflow built and published Windows, Linux and macOS binaries.
+
+### Current state
+
+- Only the Windows build is made and published. The Linux and macOS builds are removed from `build-binaries.yml` because those platforms are not functional yet and the only user is on Windows. The test job (which still runs on Linux) gates the release as before. Restore the Linux/macOS matrix entries and steps from git history to bring them back.
+
 ## 2026-10-29 — Public source, private SDK
 
 ### Previous state
