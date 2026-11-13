@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-13 — Flip horizontally
+
+- New **Flip horizontally** button in the Display section mirrors the image left to right (a flip across the vertical axis) in every view. Saved frames and recordings are flipped the same way; the dummy-mode watermark stays readable. Off by default, so existing output is unchanged. It is a per-camera setting.
+
 ## 2026-10-31 — Verify updates through download, restart and cleanup
 
 - Added real-worker Qt and CLI integration tests against a local release service, covering automatic and manual checks, download consent, corrupt and interrupted downloads, retries and preservation of recordings and tokens.
