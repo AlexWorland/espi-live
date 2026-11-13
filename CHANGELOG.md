@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-13 — The laptop's built-in camera is left out
+
+- A laptop's built-in camera is no longer listed. Before, the Dell laptop's **Integrated Webcam** (USB `0c45:674c`) appeared as "not yet supported", and switching it on filed a camera report (#44). Built-in cameras are never ESPI sources, so they are now left out of the camera list: they are not shown, opened or reported, and the log says which were skipped (`Ignoring the built-in camera …`).
+- A camera counts as built-in when its USB ID is a known laptop module (so far the Dell/Microdia `0c45:674c`, including its IR camera) or its name says so: "Integrated Webcam", "Integrated Camera", "Integrated IR …", "IR Webcam", "IR Camera" or "FaceTime". USB webcams, other capture sticks and the Hauppauge USB-Live2 are listed as before.
+- Video devices are numbered (`video 1`, `video 2`, …) without the skipped cameras, so on a laptop the capture stick may now be `video 1` where it used to be `video 2`.
+
 ## 2026-11-13 — The window fits the screen, and the status bar has room for its readouts
 
 - The window now fits the screen it is on, whatever its resolution or display scaling: on a laptop the whole image and the controls are visible instead of running under the taskbar and off the right edge. It refits when the resolution, scaling or taskbar changes and when it moves to another monitor; a saved size from a larger monitor shrinks to fit. A maximized window is left alone.

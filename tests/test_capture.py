@@ -11,7 +11,7 @@ import numpy as np
 from espi_live import capture
 from espi_live.camera import CameraInfo
 from fake_capture import (DSHOW_BASE, FakeCaptureFactory, FakeEnumerator, ListLog,
-                          bgr_frame, device, usb_live2, webcam)
+                          bgr_frame, device, integrated_webcam, usb_live2, webcam)
 
 YUY2 = float(cv2.VideoWriter_fourcc(*"YUY2"))
 
@@ -88,6 +88,27 @@ class ListCaptureDevicesTests(unittest.TestCase):
         self.assertNotEqual(infos[0].path, infos[1].path)
         self.assertEqual((infos[2].path, infos[2].vid), ("", None))
         self.assertEqual(infos[2].label, "OBS Virtual Camera (video 3)")
+
+    def test_built_in_cameras_are_left_out(self):
+        """A laptop's own cameras are not listed; the log says which were skipped.
+
+        Args: None.
+        Returns: None.
+        """
+        enumerator = FakeEnumerator([
+            integrated_webcam(0), usb_live2(1),
+            integrated_webcam(2, "Integrated IR Webcam"),
+            device(DSHOW_BASE + 3, "FaceTime HD Camera"), webcam(4)])
+        infos, log = self.list_with(enumerator)
+        self.assertEqual([info.label for info in infos],
+                         ["Hauppauge USB-Live2 (video 1)", "Webcam C270 (video 2)"])
+        self.assertEqual(log.lines, [
+            "Ignoring the built-in camera Integrated Webcam (USB 0c45:674c).",
+            "Ignoring the built-in camera Integrated IR Webcam (USB 0c45:674c).",
+            "Ignoring the built-in camera FaceTime HD Camera."])
+        _, log = self.list_with(FakeEnumerator([integrated_webcam(0, None)]))
+        self.assertEqual(log.lines,
+                         ["Ignoring the built-in camera video device (USB 0c45:674c)."])
 
     def test_list_without_enumerator(self):
         """A missing cv2_enumerate_cameras lists nothing and says why.

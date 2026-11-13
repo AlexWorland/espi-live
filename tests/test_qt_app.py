@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSl
                                QPlainTextEdit, QPushButton, QStyle, QTextEdit, QWidget)
 
 from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, tips, updater
-from fake_capture import FakeCaptureFactory, FakeEnumerator, interlaced_frame, usb_live2, webcam
+from fake_capture import (FakeCaptureFactory, FakeEnumerator, integrated_webcam,
+                          interlaced_frame, usb_live2, webcam)
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
@@ -3665,7 +3666,8 @@ class CaptureWindowTests(unittest.TestCase):
                 mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
                 mock.patch.object(camera, "PySpin", make_pyspin(system)),
                 mock.patch.object(capture, "load_enumerator",
-                                  return_value=FakeEnumerator([usb_live2(0), webcam(1)])),
+                                  return_value=FakeEnumerator(
+                                      [usb_live2(0), integrated_webcam(1), webcam(2)])),
                 mock.patch.object(capture.cv2, "VideoCapture",
                                   FakeCaptureFactory(frames=[interlaced_frame()]))):
             patcher.start()
@@ -3746,7 +3748,7 @@ class CaptureWindowTests(unittest.TestCase):
         self.assertTrue(self.usb.engine.settings().single_field)
 
     def test_unsupported_marker_in_camera_list(self):
-        """Only the unrecognised webcam is marked in the camera list.
+        """Only the unrecognised webcam is marked; the laptop's own camera is absent.
 
         Args: None.
         Returns: None.

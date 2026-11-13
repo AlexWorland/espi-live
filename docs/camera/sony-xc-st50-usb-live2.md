@@ -82,7 +82,8 @@ fields, or use single-field mode.
 
 ## Unrecognised video devices
 
-Every video device is listed. A device that is not a recognised adapter
+Every video device except a laptop's built-in camera is listed (see
+`supported-models.md`). A device that is not a recognised adapter
 (a webcam, a different capture stick) is marked "not yet supported" and is
 never opened automatically. When someone switches one on, it works as
 delivered. The viewer files a GitHub issue labelled `camera-support` with

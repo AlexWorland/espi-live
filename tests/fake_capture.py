@@ -231,6 +231,18 @@ def webcam(position=0):
                   vid=0x046D, pid=0x0825)
 
 
+def integrated_webcam(position=0, name="Integrated Webcam"):
+    """Describe the Dell laptop camera reported in issue #44 (built in).
+
+    Args: position is its place in the device list; name is the reported
+        name ("Integrated IR Webcam" for the module's IR camera).
+    Returns: A device namespace with the Microdia/Sonix USB ID 0c45:674c.
+    """
+    return device(DSHOW_BASE + position, name,
+                  path=f"\\\\?\\usb#vid_0c45&pid_674c&mi_00#{position}",
+                  vid=0x0C45, pid=0x674C)
+
+
 class FakeEnumerator:
     """Stand-in for the cv2_enumerate_cameras module."""
 

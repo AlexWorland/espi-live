@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 from .camera import CameraInfo
-from .capture_models import CaptureIdentity, adapter_for, fourcc_text
+from .capture_models import CaptureIdentity, adapter_for, fourcc_text, is_built_in
 
 # OpenCV properties copied into camera reports: (label, cv2 attribute name).
 DETAIL_PROPERTIES = (
@@ -74,9 +74,13 @@ def load_enumerator():
 def list_capture_devices(log):
     """Enumerate the video devices without opening them.
 
+    A laptop's built-in camera is left out (and logged), so it is never
+    listed, opened or reported.
+
     Args: log has a write(message) method.
     Returns: A list of capture CameraInfo, with serials "video 1", "video
-        2", ... in enumeration order; empty when listing is unavailable.
+        2", ... in enumeration order of the devices kept; empty when listing
+        is unavailable.
     """
     enumerator = load_enumerator()
     if enumerator is None:
@@ -87,10 +91,18 @@ def list_capture_devices(log):
     except Exception as exc:
         log.write(f"Could not list video devices: {exc}")
         return []
+    kept = []
+    for device in devices:
+        if is_built_in(device.vid, device.pid, device.name):
+            usb = (f" (USB {device.vid:04x}:{device.pid:04x})"
+                   if device.vid is not None and device.pid is not None else "")
+            log.write(f"Ignoring the built-in camera {device.name or 'video device'}{usb}.")
+        else:
+            kept.append(device)
     return [CameraInfo(f"video {position}", device.name or "", kind="capture",
                        index=device.index, backend=device.backend, vid=device.vid,
                        pid=device.pid, path=device.path or "")
-            for position, device in enumerate(devices, start=1)]
+            for position, device in enumerate(kept, start=1)]
 
 
 def to_mono8(frame):

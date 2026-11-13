@@ -5,7 +5,7 @@ import unittest
 import cv2
 
 from espi_live.capture_models import (ADAPTERS, CaptureIdentity, adapter_for,
-                                      fourcc_text)
+                                      fourcc_text, is_built_in)
 
 USB_LIVE2 = ADAPTERS[(0x2040, 0xC200)]
 
@@ -47,6 +47,23 @@ class AdapterTests(unittest.TestCase):
         """
         self.assertIsNone(adapter_for(None, None, "OBS Virtual Camera"))
         self.assertIsNone(adapter_for(0x046D, 0x0825, "Webcam C270"))
+
+    def test_built_in_cameras(self):
+        """Laptop cameras are built in, by USB ID or by name; others are not.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(is_built_in(0x0C45, 0x674C, "Integrated Webcam"))
+        self.assertTrue(is_built_in(0x0C45, 0x674C, ""))  # the module's other interfaces
+        self.assertTrue(is_built_in(None, None, "Integrated Webcam"))
+        self.assertTrue(is_built_in(0x04F2, 0xB6DD, "Integrated Camera"))
+        self.assertTrue(is_built_in(None, None, "Integrated IR Webcam"))
+        self.assertTrue(is_built_in(None, None, "FaceTime HD Camera"))
+        self.assertFalse(is_built_in(0x046D, 0x0825, "Webcam C270"))
+        self.assertFalse(is_built_in(None, None, "OBS Virtual Camera"))
+        self.assertFalse(is_built_in(None, None, None))
+        self.assertFalse(is_built_in(0x2040, 0xC200, "Integrated Webcam"))  # an adapter
 
     def test_fourcc_text(self):
         """FOURCC codes decode to text; 0 and junk decode to nothing.

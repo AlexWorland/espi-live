@@ -157,6 +157,8 @@ Several 6.3 MP cameras streaming at once can exceed one USB 3 controller's bandw
 
 The XC-ST50's composite video goes through a Hauppauge USB-Live2 into the PC, and the stick appears in the camera list as **Hauppauge USB-Live2 (video N)**. Close WinTV and Hauppauge Capture first: the stick serves one program at a time. Exposure, gain and frame rate are set by the camera's own switches, so those controls are disabled for it, and the status line shows the measured capture rate. **Single field (interlaced camera)**, on by default, shows only one of the two interlaced fields (repeated to full height), which keeps the 1/60 s between fields from blurring the fringes at the cost of half the vertical detail. Images look about 12 % wide because NTSC pixels are not square; they are not resampled. Expect coarser fringes than with the Blackfly. Wiring, driver settings and details: `docs/camera/sony-xc-st50-usb-live2.md`.
 
+A laptop's built-in camera (USB IDs in `capture_models.BUILT_IN_CAMERAS`, or names such as "Integrated Webcam", "Integrated Camera", "IR Camera" or "FaceTime") is left out of the list entirely: it is never shown, opened or reported, and the log notes it as `Ignoring the built-in camera …`.
+
 Other video devices (webcams, other capture sticks) are listed as **not yet supported** and are never opened unless you choose one. When you switch one on, it runs as delivered, and the viewer files a GitHub issue (label `camera-support`) with what the device reports, once per device type. A copy without a feedback token saves the report to `output/logs/camera-report-*.md` and shows a **Report this camera** button instead.
 
 ### Demo mode
