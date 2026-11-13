@@ -7,6 +7,12 @@
 - There is no switch for log uploads; the error-report switches (**Help > Send error reports automatically**, `--no-error-reports`, `ESPI_ERROR_REPORTS=0`) affect error reports only. The user guide mentions that logs are sent. `--check` now says whether the build has a logs token.
 - Builds embed a new `LOGS_TOKEN` secret that can only write to the logs repository. A build without it still succeeds, with a warning, and does not upload.
 
+## 2026-11-13 — Search the user guide
+
+- The user guide (**Help → User Guide**, **F1**) has a search box at the top of the page that stays in view while you scroll. Press `/` to jump to it; the browser's own Ctrl+F / Cmd+F still works as before.
+- Matches are highlighted as you type (two or more characters, upper and lower case alike, including phrases that run across a line break or bold text). The counter shows "3 of 17"; **Enter** and **Shift+Enter** (or the ↑ ↓ buttons) step to the next and previous match and scroll it into view, opening a collapsed troubleshooting answer when the match is inside one. **Esc** clears the search and restores the page exactly as it was. A search with no results says **No matches**.
+- The contents list shows only the sections that contain the search, each with its number of matches. This replaces the sidebar's "Filter sections…" box, which only looked at section titles.
+
 ## 2026-11-13 — Release builds are Windows-only
 
 ### Previous state
