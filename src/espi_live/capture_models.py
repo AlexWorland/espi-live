@@ -4,7 +4,9 @@ Pure data and text: no OpenCV capture, PySpin or GUI imports, so both the
 capture source and the tests share it. An analog camera such as the Sony
 XC-ST50 cannot identify itself; what the viewer can recognise is the
 adapter that digitizes its composite video (for example a Hauppauge
-USB-Live2), by USB vendor/product ID or, failing that, by name.
+USB-Live2), by USB vendor/product ID or, failing that, by name. A laptop's
+built-in camera is never an ESPI source, so it is recognised only to be left
+out of the device list.
 """
 
 from dataclasses import dataclass
@@ -31,6 +33,18 @@ ADAPTER_NAMES = (
     ("usb live2", (0x2040, 0xC200)),
     ("usb live 2", (0x2040, 0xC200)),
 )
+# Laptops' built-in camera modules, by USB (vendor ID, product ID). They are
+# left out of the device list: not listed, opened or reported.
+BUILT_IN_CAMERAS = {
+    # Issue #44: a Dell laptop's module by Microdia/Sonix. One USB ID carries
+    # the colour "Integrated Webcam" (640 x 480 YUY2), the "Integrated IR
+    # Webcam" for Windows Hello and a firmware-update interface.
+    (0x0C45, 0x674C): "Dell Integrated Webcam (Microdia/Sonix)",
+}
+# Lower-case name fragments laptop makers give built-in cameras (Dell, Lenovo,
+# Windows Hello IR cameras, Apple), for modules not in BUILT_IN_CAMERAS.
+BUILT_IN_NAMES = ("integrated webcam", "integrated camera", "integrated ir",
+                  "ir webcam", "ir camera", "facetime")
 # Pixel formats whose compression destroys speckle detail.
 COMPRESSED_FOURCCS = frozenset({"MJPG", "H264", "H265", "HEVC", "AVC1", "X264",
                                 "MP4V"})
@@ -50,6 +64,22 @@ def adapter_for(vid, pid, name):
         if fragment in lowered:
             return ADAPTERS[usb_id]
     return None
+
+
+def is_built_in(vid, pid, name):
+    """Recognise a laptop's built-in camera, which the viewer leaves out.
+
+    Args: vid and pid are the USB vendor and product IDs, or None when the
+        driver does not report them; name is the device name.
+    Returns: True for a known built-in module or a built-in camera name; a
+        recognised capture adapter is never built in.
+    """
+    if adapter_for(vid, pid, name) is not None:
+        return False
+    if vid is not None and pid is not None and (vid, pid) in BUILT_IN_CAMERAS:
+        return True
+    lowered = (name or "").lower()
+    return any(fragment in lowered for fragment in BUILT_IN_NAMES)
 
 
 def fourcc_text(code):

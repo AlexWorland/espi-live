@@ -82,6 +82,22 @@ through OpenCV. The first is the Sony XC-ST50 on a Hauppauge USB-Live2; see
 supported", opened only when someone switches them on, and then reported to
 GitHub as `camera-support` issues.
 
+## Built-in laptop cameras
+
+A laptop's own camera is never an ESPI source, so `capture.list_capture_devices`
+leaves it out: it is not listed, opened or reported, and the log notes
+`Ignoring the built-in camera …`. `capture_models.is_built_in` matches known
+modules by USB ID (`BUILT_IN_CAMERAS`), then names laptop makers use
+(`BUILT_IN_NAMES`: "integrated webcam", "integrated camera", "integrated ir",
+"ir webcam", "ir camera", "facetime"). A recognised capture adapter is never
+treated as built in.
+
+| USB ID | Device | Source |
+|--------|--------|--------|
+| `0c45:674c` | Dell laptop camera module by Microdia/Sonix: colour "Integrated Webcam" (interface `MI_00`, 640 × 480 YUY2 over DirectShow), "Integrated IR Webcam" (Windows Hello) and a firmware-update (DFU) interface under one USB ID | Issue #44; [WSL #11901](https://github.com/microsoft/WSL/issues/11901) lists the three interfaces next to a Dell ControlVault reader; a Dell camera driver package lists `VID_0C45&PID_674C&MI_00` |
+
+Add a module here when a built-in camera's name does not give it away.
+
 ## Sources
 
 - Teledyne, "Understanding Teledyne FLIR machine vision part numbers": <https://www.teledynevisionsolutions.com/support/support-center/article/iis/understanding-product-part-numbers/>
