@@ -4047,12 +4047,12 @@ class ReportingClassTests(unittest.TestCase):
             start.assert_not_called()  # not before the cameras are open
             reporting.start_uploads()
         start.assert_called_once()
-        self.assertTrue(any(line.startswith("Log uploads: off") for line in self.log.lines))
         reporting.stop()
         self.assertTrue(reporting.uploads.stopping.is_set())
-        for token, expected in (("t", "Log uploads: on"),
-                                ("", "Log uploads: off (no logs token in this copy)")):
-            with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}), \
+        # Error reports turned off (or on) never changes log uploads: only the token does.
+        for reports, token, expected in (("0", "t", "Log uploads: on"),
+                                         ("1", "", "Log uploads: off (no logs token in this copy)")):
+            with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: reports}), \
                     mock.patch.object(qt_app.log_uploads, "logs_token", return_value=token):
                 reporting = self.reporting()
                 with mock.patch.object(reporting.worker, "start"), \
@@ -4061,24 +4061,21 @@ class ReportingClassTests(unittest.TestCase):
                 reporting.stop()
             self.assertIn(expected, self.log.lines)
 
-    def test_menu_switch_turns_uploads_off(self):
-        """The Help-menu switch turns log uploads off and on with error reports.
+    def test_menu_switch_leaves_log_uploads_alone(self):
+        """The Help-menu switch is for error reports only; log uploads have no switch.
 
         Args: None.
         Returns: None.
         """
         with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
             reporting = self.reporting()
-            self.assertTrue(reporting.uploads.uploader.enabled())
             self.assertIs(reporting.uploads.uploader.serials.__self__, reporting.reporter)
+            self.assertFalse(hasattr(reporting.uploads.uploader, "enabled"))
             with mock.patch.object(reporting.worker, "kick"), \
                     mock.patch.object(reporting.uploads, "kick") as kick:
                 reporting.choose(False, self.log)
-                self.assertFalse(reporting.uploads.uploader.enabled())
-                kick.assert_not_called()
                 reporting.choose(True, self.log)
-                self.assertTrue(reporting.uploads.uploader.enabled())
-                kick.assert_called_once()
+            kick.assert_not_called()
 
 
 class SessionDescriptionTests(unittest.TestCase):
@@ -4135,9 +4132,8 @@ class ErrorReportUITests(WindowTestCase):
         self.assertTrue(self.window.reports_action.isChecked())
         self.assertTrue(self.window.reports_action.isEnabled())
         self.assertIn("public GitHub issues", self.window.reports_action.toolTip())
-        self.assertIn("run logs", self.window.reports_action.toolTip())
-        self.assertEqual(self.window.reports_action.text(),
-                         "Send error reports and logs automatically")
+        self.assertNotIn("logs", self.window.reports_action.toolTip())
+        self.assertEqual(self.window.reports_action.text(), "Send error reports automatically")
 
     def test_a_forced_off_shows_the_reason(self):
         """When a switch forces reporting off, the action is locked.

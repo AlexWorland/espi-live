@@ -195,10 +195,9 @@ class Reporting:
         self.reporter.update_context(front_end="Qt")
         self.worker = error_reports.ErrorReportWorker(self.reporter)
         self.reporter.listeners.append(self.worker.kick)
-        # Log uploads follow the same switches as error reports.
+        # Log uploads have no switch: every copy with the logs token sends them.
         self.uploads = log_uploads.LogUploadWorker(log_uploads.LogUploader(
-            paths.output_folder("logs"), self.reporter.serials,
-            lambda: self.reporter.enabled))
+            paths.output_folder("logs"), self.reporter.serials))
         self.hooks = None
         self.previous_handler = None
 
@@ -212,11 +211,8 @@ class Reporting:
         self.previous_handler = qInstallMessageHandler(handle_qt_message)
         log.info("Error reports: " + ("on" if self.reporter.enabled else
                                       f"off ({self.forced or 'turned off in the Help menu'})"))
-        if not self.reporter.enabled:
-            uploads = f"off ({self.forced or 'turned off in the Help menu'})"
-        else:
-            uploads = "on" if log_uploads.logs_token() else "off (no logs token in this copy)"
-        log.info(f"Log uploads: {uploads}")
+        log.info("Log uploads: " + ("on" if log_uploads.logs_token()
+                                    else "off (no logs token in this copy)"))
         self.reporter.collect_native_crashes(log.crash_path)
         self.worker.start()
 
@@ -240,7 +236,6 @@ class Reporting:
         log.info(f"Error reports: {'on' if self.reporter.enabled else 'off'}")
         if self.reporter.enabled:
             self.worker.kick()
-            self.uploads.kick()
 
     def stop(self):
         """Restore the hooks and the Qt message handler and stop the worker.
@@ -2478,7 +2473,7 @@ class MainWindow(QMainWindow):
                     "real source code.")
         ask.triggered.connect(self._open_codex)
         help_menu.addSeparator()
-        self.reports_action = help_menu.addAction("Send error reports and logs automatically")
+        self.reports_action = help_menu.addAction("Send error reports automatically")
         self.reports_action.setCheckable(True)
         self._sync_reports_action()
         self.reports_action.toggled.connect(self._choose_error_reports)
@@ -3083,9 +3078,8 @@ class MainWindow(QMainWindow):
             action.setEnabled(self.reporting.forced is None)
             action.setToolTip(
                 f"Off: {self.reporting.forced}" if self.reporting.forced else
-                "Unexpected errors are filed as public GitHub issues, and run logs are "
-                "sent to the developer, without your user name, folders or camera "
-                "serial numbers")
+                "Unexpected errors are filed as public GitHub issues, without your "
+                "user name, folders or camera serial numbers")
         action.blockSignals(False)
 
     def _choose_error_reports(self, on):

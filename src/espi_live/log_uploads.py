@@ -21,10 +21,10 @@ time so the camera and UI threads get the interpreter between chunks. The
 remote file's ``sha`` comes from its folder's listing, which works for files
 of any size (the file endpoint refuses files over 1 MB in JSON).
 
-Uploads are silent: failures are logged at DEBUG and never reported, and the
-worker never blocks another thread. They follow the error-report switches
-(``--no-error-reports``, ``ESPI_ERROR_REPORTS`` and the Help menu). No GUI
-imports: the front end drives this module.
+Uploads are silent and have no switch: every copy with the token uploads
+(source checkouts have none). Failures are logged at DEBUG and never
+reported, and the worker never blocks another thread. No GUI imports: the
+front end drives this module.
 """
 
 import base64
@@ -213,18 +213,16 @@ def read_for_upload(path, max_bytes=MAX_BYTES, head_bytes=HEAD_BYTES):
 class LogUploader:
     """Send the logs folder's new or grown run logs, remembering what was sent."""
 
-    def __init__(self, folder, serials, enabled, request=feedback.github_request, token=None):
+    def __init__(self, folder, serials, request=feedback.github_request, token=None):
         """Create the uploader.
 
         Args: folder is the logs folder; serials returns this run's camera
-            serial numbers (ErrorReporter.serials); enabled returns whether
-            uploads are on; request is the GitHub call; token overrides
-            logs_token() (tests).
+            serial numbers (ErrorReporter.serials); request is the GitHub
+            call; token overrides logs_token() (tests).
         Returns: None.
         """
         self.folder = folder
         self.serials = serials
-        self.enabled = enabled
         self.request = request
         self._token = token
 
@@ -265,7 +263,7 @@ class LogUploader:
         Returns: How many logs were uploaded. Stops quietly at the first failure.
         """
         token = self.token()
-        if not self.enabled() or not token:
+        if not token:
             return 0
         record = self._read_record()
         machine = machine_id(self.folder)
@@ -282,8 +280,6 @@ class LogUploader:
                 continue
             if path is None or record.get(name, {}).get("size") == size:
                 continue
-            if not self.enabled():
-                break
             try:
                 size = self._upload(local, path, token, scrub)
                 record[name] = {"size": size, "path": path}

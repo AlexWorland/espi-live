@@ -97,14 +97,13 @@ class LogUploadTest(unittest.TestCase):
         with open(os.path.join(self.folder, name), mode, encoding="utf-8") as handle:
             handle.write(text)
 
-    def uploader(self, fake, enabled=lambda: True, token="t"):
+    def uploader(self, fake, token="t"):
         """Build an uploader for the temporary folder.
 
-        Args: fake is the FakeContents; enabled the switch; token the token.
+        Args: fake is the FakeContents; token the token.
         Returns: A LogUploader.
         """
-        return log_uploads.LogUploader(self.folder, serials, enabled,
-                                       request=fake, token=token)
+        return log_uploads.LogUploader(self.folder, serials, request=fake, token=token)
 
     def machine(self):
         """Read this folder's machine ID.
@@ -211,30 +210,16 @@ class LogUploadTest(unittest.TestCase):
         with mock.patch.object(log_uploads, "read_for_upload", side_effect=OSError("locked")):
             self.assertEqual(self.uploader(FakeContents()).send_pending(), 0)
 
-    def test_off_or_tokenless_sends_nothing(self):
-        """Switched off, or without a token, nothing is called.
+    def test_tokenless_sends_nothing(self):
+        """Without a token (source checkouts), nothing is called.
 
         Args: None.
         Returns: None.
         """
         self.write_log(LOG_A, "one\n")
         fake = FakeContents()
-        self.assertEqual(self.uploader(fake, enabled=lambda: False).send_pending(), 0)
         self.assertEqual(self.uploader(fake, token="").send_pending(), 0)
         self.assertEqual(fake.calls, [])
-
-    def test_switch_off_mid_pass(self):
-        """Turning uploads off stops the pass before the next file.
-
-        Args: None.
-        Returns: None.
-        """
-        self.write_log(LOG_A, "one\n")
-        self.write_log(LOG_B, "two\n")
-        answers = iter([True, True, False])
-        fake = FakeContents()
-        self.assertEqual(self.uploader(fake, enabled=lambda: next(answers)).send_pending(), 1)
-        self.assertEqual(len(fake.puts()), 1)
 
     def test_at_most_ten_per_pass(self):
         """A large backlog is sent a few files per pass.
@@ -283,8 +268,7 @@ class LogUploadTest(unittest.TestCase):
         self.uploader(FakeContents()).send_pending()
         self.write_log(LOG_B, f"Serial {SERIAL} and bare {SERIAL}\n")
         fake = FakeContents()
-        log_uploads.LogUploader(self.folder, lambda: (), lambda: True,
-                                request=fake, token="t").send_pending()
+        log_uploads.LogUploader(self.folder, lambda: (), request=fake, token="t").send_pending()
         text = base64.b64decode(fake.puts()[0][1]["content"]).decode()
         self.assertNotIn(SERIAL, text)
         with open(os.path.join(self.folder, log_uploads.SERIALS_NAME), "w") as handle:
@@ -360,7 +344,7 @@ class LogUploadTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {log_uploads.REPO_ENV: ""}):
             self.assertEqual(log_uploads.repository(), log_uploads.DEFAULT_REPO)
         with mock.patch.object(log_uploads, "logs_token", return_value="baked"):
-            uploader = log_uploads.LogUploader(self.folder, serials, lambda: True)
+            uploader = log_uploads.LogUploader(self.folder, serials)
             self.assertEqual(uploader.token(), "baked")
 
 
