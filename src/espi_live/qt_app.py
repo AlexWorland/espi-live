@@ -2018,6 +2018,16 @@ class MainWindow(QMainWindow):
         add(self.clip, "Stretch clip")
 
         heading("Display")
+        self.flip_button = QPushButton("Flip horizontally")
+        self.flip_button.setCheckable(True)
+        set_tooltip(self.flip_button,
+            "Mirrors the image left to right (a flip across the vertical axis) in "
+            "every view. Saved frames and recordings are flipped the same way. Use it "
+            "when the optics reverse the scene. Start off.")
+        self.flip_button.setChecked(s.flip_horizontal)
+        self.flip_button.toggled.connect(
+            lambda on: self.engine.update_settings(flip_horizontal=on))
+        add(self.flip_button)
         self.palette_combo = QComboBox()
         self.palette_combo.addItems(PALETTES)
         self.palette_combo.setCurrentText(s.palette)
@@ -2500,7 +2510,8 @@ class MainWindow(QMainWindow):
                               (self.gamma, s.gamma)):
             widget.set_value(value)
         toggles = ((self.rolling, s.rolling), (self.scale_range, s.scale_range),
-                   (self.invert, s.invert), (self.clahe, s.clahe),
+                   (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
+                   (self.clahe, s.clahe),
                    (self.record_button, s.record), (self.single_field, s.single_field))
         combos = ((self.smoothing_combo, s.smoothing_method),
                   (self.palette_combo, s.palette))

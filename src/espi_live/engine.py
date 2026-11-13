@@ -62,6 +62,7 @@ class Settings:
     scale_range: bool = True
     clip_percent: float = 0.0     # stretch ignores this % of pixels at each end
     invert: bool = False
+    flip_horizontal: bool = False  # mirror left-right (flip across the vertical axis)
     palette: str = "Gray"
     gamma: float = 1.0
     clahe: bool = True
@@ -624,6 +625,8 @@ class Engine:
                         gamma = 1.0
 
             if image is not None:
+                if s.flip_horizontal:  # every view; before the watermark so its text reads normally
+                    image = cv2.flip(image, 1)
                 if self.demo:
                     image = watermark_demo(image)
                 sequence += 1
