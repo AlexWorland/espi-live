@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-14 — The status bar wraps instead of crowding
+
+### Previous state
+
+- Every status-bar item shared one row. On a laptop-width window the readouts squeezed the "Did you know" tip down to "Did yo…", cut the camera name to "Hauppauge USB…" and left no room for the view hint.
+
+### Current state
+
+- The status bar adapts to the window width. When everything fits it is one row, as before. When it does not, the readouts and buttons wrap onto further rows beneath the tip and hint, so none is shortened or hidden. Each row is only as tall as it needs to be: at 1280 × 720 the bar is two compact rows (44 px, against 27 px for one), and a 1920-pixel-wide window still fits it all on one row.
+- The view hint ("Raw view: camera pixels, …") always shows its whole sentence. The tip takes the rest of its row and is shortened with an ellipsis only when little is left.
+- The source badge widens to fit a long camera name ("Hauppauge USB-Live2 …") instead of cutting it.
+- Temporary messages (for example "Checking GitHub for a newer build…") still replace the tip and hint while the readouts stay visible.
+
 ## 2026-11-14 — The window title shows the version
 
 - The main window's title now starts with the release version, for example `ESPI live v0.10.0 — BFS-U3-63S4M` or `ESPI live v0.10.0 — DUMMY MODE`. The version is the release's tag: the Release workflow bakes the tag chosen by its `version` job (`vX.Y.Z`, or `vX.Y.Z-pre.N` for a pre-release) into the build as `VERSION`.
