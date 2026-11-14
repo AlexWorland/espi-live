@@ -246,6 +246,32 @@ class SessionStreamTests(CaptureTestCase):
         self.assertEqual(state, "error")
         self.assertIsInstance(error, RuntimeError)
 
+    def test_grab_keeps_the_delivered_colour_frame(self):
+        """The BGR frame behind each grab is kept for the colour check.
+
+        A monochrome camera decodes to grey; colour in it is reported at open
+        and in the details. Mono8 devices have no colour frame.
+
+        Args: None.
+        Returns: None.
+        """
+        tinted = bgr_frame(value=90)
+        tinted[..., 0] = 96  # blue
+        session, _, _ = self.open_session(frames=[tinted, tinted])
+        self.assertEqual(session.first_colour, (6.0, 0.0))
+        self.assertEqual(dict(session.read_details())["First frame colour (B−G / R−G)"],
+                         "6.00 / 0.00")
+        self.assertIsNone(session.last_colour)
+        session.grab(100)
+        self.assertIs(session.last_colour, tinted)
+        mono = np.full((480, 720), 50, dtype=np.uint8)
+        grey, _, _ = self.open_session(frames=[mono, mono])
+        grey.grab(100)
+        self.assertIsNone(grey.first_colour)
+        self.assertIsNone(grey.last_colour)
+        self.assertNotIn("First frame colour (B−G / R−G)", dict(grey.read_details()))
+        self.assertIn("Sharpness", dict(grey.read_details()))
+
     def test_failed_read_waits_like_a_timeout(self):
         """A failed read waits out the timeout, so an unplugged device cannot spin the loop.
 

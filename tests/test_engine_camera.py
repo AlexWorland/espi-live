@@ -1011,6 +1011,53 @@ class CaptureEngineTests(CaptureEngineCase):
         self.assertTrue(engine_.status()["camera"].startswith("Analog capture 720 × 480"))
         self.assertEqual(engine_.camera_info.kind, "capture")
 
+    def test_capture_details_and_frame_checks_are_logged(self):
+        """The device's details are logged at open; frame checks follow.
+
+        The check sees the raw frame before single-field mode (so both fields
+        and the delivered colour frame) and the view's difference range.
+
+        Args: None.
+        Returns: None.
+        """
+        def quick(log):
+            """Build a frame-check monitor with a short interval.
+
+            Args: log is the engine's log.
+            Returns: A FrameCheckMonitor.
+            """
+            return diagnostics.FrameCheckMonitor(log, interval=0.05)
+
+        with mock.patch.object(engine, "FrameCheckMonitor", quick):
+            engine_ = self.capture_engine()
+            self.assertTrue(self.log.has("Capture device: Device name Hauppauge USB-Live2"))
+            engine_.update_settings(mode="Previous")
+            engine_.start()
+            self.assertTrue(wait_until(lambda: self.log.has("view Previous input")))
+        line = next(text for text in self.log.lines if "view Previous input" in text)
+        self.assertIn("colour B−G 0.00 R−G 0.00", line)
+        self.assertIn("field mismatch", line)
+        self.assertIn("mode=Previous", line)
+
+    def test_raw_view_is_named_in_frame_checks(self):
+        """In Raw view the frame check names the view without a range.
+
+        Args: None.
+        Returns: None.
+        """
+        def quick(log):
+            """Build a frame-check monitor with a short interval.
+
+            Args: log is the engine's log.
+            Returns: A FrameCheckMonitor.
+            """
+            return diagnostics.FrameCheckMonitor(log, interval=0.05)
+
+        with mock.patch.object(engine, "FrameCheckMonitor", quick):
+            engine_ = self.capture_engine()
+            engine_.start()
+            self.assertTrue(wait_until(lambda: self.log.has("view Raw;")))
+
     def test_unplugged_device_keeps_engine_running(self):
         """A device that stops sending frames leaves the engine waiting, not dead.
 
@@ -1061,6 +1108,69 @@ class CaptureEngineTests(CaptureEngineCase):
         engine_.update_settings(single_field=True)
         self.assertTrue(wait_until(
             lambda: self.log.has("Fields: single field (even rows, line-doubled)")))
+
+
+class DiagnosticBurstTests(CaptureEngineCase):
+    """A diagnostic capture collects raw frames on the worker thread."""
+
+    def test_capture_burst_holds_raw_frames_colour_and_details(self):
+        """Raw frames come before single-field mode; settings stay as they were.
+
+        Args: None.
+        Returns: None.
+        """
+        self.factory.frames = [interlaced_frame()]
+        engine_ = self.capture_engine()
+        engine_.start()
+        self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
+        before = engine_.settings()
+        engine_.request("diagnostics", count=3)
+        burst = self.wait_event("diagnostic_burst")
+        self.assertEqual(len(burst.frames), 3)
+        self.assertEqual(int(burst.frames[0][1].max()), 255)  # odd rows kept
+        self.assertEqual(len(burst.colours), diagnostics.BURST_COLOURS)
+        self.assertTrue(burst.interlaced)
+        self.assertFalse(burst.demo)
+        self.assertEqual(burst.camera[0], "Hauppauge USB-Live2 (analog capture)")
+        self.assertEqual(dict(burst.details)["Device name"], "Hauppauge USB-Live2")
+        self.assertEqual(burst.settings, before)
+        self.assertEqual(engine_.settings(), before)
+        self.assertIsNotNone(burst.screen)
+        self.assertTrue(self.log.has("Diagnostic capture: collecting 3 raw frames"))
+        self.assertTrue(wait_until(
+            lambda: self.log.has("Diagnostic capture: 3 raw frames collected")))
+
+    def test_burst_survives_unreadable_details(self):
+        """A device whose details cannot be read still gives its frames.
+
+        Args: None.
+        Returns: None.
+        """
+        engine_ = self.capture_engine()
+        engine_.start()
+        with mock.patch.object(capture.CaptureSession, "read_details",
+                               side_effect=RuntimeError("driver")):
+            engine_.request("diagnostics", count=2)
+            burst = self.wait_event("diagnostic_burst")
+        self.assertEqual(burst.details, ())
+        self.assertTrue(self.log.has("Could not read the device details: driver"))
+
+    def test_demo_burst_is_marked_and_takes_at_least_two_frames(self):
+        """Dummy mode says its frames are synthetic; one frame is not enough.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine = Engine(self.log)
+        self.engine.use_demo()
+        self.engine.start()
+        self.engine.request("diagnostics", count=1)
+        burst = self.wait_event("diagnostic_burst")
+        self.assertEqual(len(burst.frames), 2)
+        self.assertTrue(burst.demo)
+        self.assertEqual(burst.colours, ())
+        self.assertEqual(burst.details, ())
+        self.assertIn("synthetic", burst.camera[0])
 
 
 class SingleFieldFlirTests(CameraEngineCase):

@@ -45,12 +45,13 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
                                QMessageBox,
-                               QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
+                               QPlainTextEdit, QProgressBar, QProxyStyle, QPushButton,
+                               QScrollArea,
                                QSizePolicy, QSlider, QStyle, QTextBrowser, QTextEdit, QToolBar, QToolTip,
                                QVBoxLayout, QWidget)
 
-from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
-                       source_code, tips, ui_scale, updater)
+from espi_live import (camera, camera_reports, codex, diagnostic_capture, error_reports,
+                       feedback, log_uploads, paths, source_code, tips, ui_scale, updater)
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
@@ -1578,6 +1579,142 @@ class FeatureRequestDialog(QDialog):
         super().accept()
 
 
+DIAGNOSTICS_TITLE = "Send diagnostic capture"
+DIAGNOSTICS_TIMEOUT_MS = 15000  # the camera must deliver the burst within this
+DIAGNOSTICS_POLL_MS = 100
+
+
+class DiagnosticCaptureDialog(QDialog):
+    """Explain a diagnostic capture, then show its progress and result.
+
+    The dialog starts on the explanation with Go back and Continue at the
+    bottom; Continue emits ``continued`` and the window drives the capture,
+    calling show_working() and show_result().
+    """
+
+    continued = Signal()
+
+    def __init__(self, parent, camera_name):
+        """Build the explanation page.
+
+        Args: parent is the main window; camera_name names the displayed camera.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle(DIAGNOSTICS_TITLE)
+        self.setModal(True)
+        self.resize(ui_scale.px(560), ui_scale.px(360))
+        self.folder = ""
+        self.message = QLabel(
+            f"<p>ESPI live will take a short diagnostic capture from <b>{camera_name}</b> "
+            "and send it to the developer for analysis.</p>"
+            f"<p>It records {diagnostic_capture.BURST_FRAMES} raw camera frames in a row "
+            "(about a second), then temporarily makes images from them at several "
+            "different settings: Raw, Previous and Reference views, stretch on and off, "
+            "averaging, the speckle filter and, for an analog camera, single field. "
+            "Those settings are applied only to copies of the frames, so when it is "
+            "done your own settings are exactly as you left them, and the live view "
+            "keeps running throughout.</p>"
+            "<p>Keep the setup as it is (the plate lit, and driven or still as you want "
+            "it analysed) until the capture finishes.</p>"
+            "<p>The images, the settings and this session's log, with serial numbers "
+            "and personal details removed, go to the developer's private logs "
+            "repository. A copy is kept in the log folder under "
+            f"<code>{diagnostic_capture.LOCAL_FOLDER}</code>.</p>")
+        self.message.setWordWrap(True)
+        self.message.setTextFormat(Qt.RichText)
+        self.message.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.busy = QProgressBar()
+        self.busy.setRange(0, 0)  # busy: no known end
+        self.busy.setTextVisible(False)
+        self.busy.setVisible(False)
+        # Laid out by hand, not with QDialogButtonBox, so Go back is always on
+        # the left and Continue on the right, whatever the platform's order.
+        self.back_button = QPushButton("Go back")
+        set_tooltip(self.back_button, "Close without capturing anything.")
+        self.continue_button = QPushButton("Continue")
+        set_tooltip(self.continue_button, "Capture the frames and send them for analysis.")
+        self.continue_button.setDefault(True)
+        self.folder_button = QPushButton("Open folder")
+        set_tooltip(self.folder_button, "Show the saved copy of the capture.")
+        self.folder_button.setVisible(False)
+        self.close_button = QPushButton("Close")
+        self.close_button.setVisible(False)
+        self.back_button.clicked.connect(self.reject)
+        self.close_button.clicked.connect(self.reject)
+        self.continue_button.clicked.connect(self._continue)
+        self.folder_button.clicked.connect(self._open_folder)
+        self.buttons = QHBoxLayout()
+        self.buttons.addWidget(self.back_button)
+        self.buttons.addStretch(1)
+        for button in (self.folder_button, self.close_button, self.continue_button):
+            self.buttons.addWidget(button)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.message, 1)
+        layout.addWidget(self.busy)
+        layout.addLayout(self.buttons)
+
+    def _continue(self):
+        """Start the capture.
+
+        Args: None.
+        Returns: None.
+        """
+        self.show_working("Capturing frames from the camera…")
+        self.continued.emit()
+
+    def show_working(self, text):
+        """Show that the capture is under way; no button can be pressed.
+
+        Args: text says what is happening.
+        Returns: None.
+        """
+        self.message.setText(f"<p><b>{text}</b></p><p>Keep the setup as it is until "
+                             "this finishes. Your settings and the live view are not "
+                             "changed.</p>")
+        for button in (self.back_button, self.continue_button):
+            button.setVisible(False)
+        self.busy.setVisible(True)
+
+    def show_result(self, result):
+        """Show what became of the capture, with Close (and Open folder).
+
+        Args: result is a diagnostic_capture.Result.
+        Returns: None.
+        """
+        saved = (f"A copy is saved at <code>{result.local}</code>." if result.local
+                 else "It could not be saved on this computer either.")
+        if result.outcome == "sent":
+            text = ("<p><b>Sent.</b> Thank you: the developer can now look at the "
+                    f"capture (<code>{result.remote}</code>).</p><p>{saved}</p>")
+        elif result.outcome == "no_token":
+            text = ("<p><b>Saved, not sent.</b> This copy of ESPI live cannot send "
+                    "captures (only release builds can).</p>"
+                    f"<p>{saved} Please send that file to the developer.</p>")
+        else:
+            text = (f"<p><b>Not sent:</b> {result.error}.</p>"
+                    f"<p>{saved}" + (" Please send that file to the developer, or "
+                                    "try again later." if result.local else "") + "</p>")
+        if result.outcome == "no_token" and result.error:
+            text += f"<p>{result.error}.</p>"
+        self.message.setText(text)
+        self.folder = os.path.dirname(result.local) if result.local else ""
+        self.busy.setVisible(False)
+        self.folder_button.setVisible(bool(self.folder))
+        self.close_button.setVisible(True)
+        self.close_button.setDefault(True)
+
+    def _open_folder(self):
+        """Open the folder that holds the saved capture.
+
+        Args: None.
+        Returns: None.
+        """
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(self.folder)):
+            QMessageBox.information(self, DIAGNOSTICS_TITLE,
+                                    f"The capture is in {self.folder}")
+
+
 class SettingsGuideDialog(QDialog):
     """Explain the processing controls and offer the two starting presets."""
 
@@ -2052,6 +2189,15 @@ class MainWindow(QMainWindow):
         self.update_timer = QTimer(self)
         self.update_timer.setSingleShot(True)
         self.update_timer.timeout.connect(self._periodic_update_check)
+        self.diagnostic_dialog = None  # the open DiagnosticCaptureDialog
+        self.diagnostic_channel = None  # the Channel whose burst is awaited
+        self.diagnostic_worker = None  # packages and sends a capture
+        self.diagnostic_timeout = QTimer(self)
+        self.diagnostic_timeout.setSingleShot(True)
+        self.diagnostic_timeout.timeout.connect(self._diagnostics_timed_out)
+        self.diagnostic_poll = QTimer(self)
+        self.diagnostic_poll.setInterval(DIAGNOSTICS_POLL_MS)
+        self.diagnostic_poll.timeout.connect(self._poll_diagnostics)
         self.relaunch_after_exit = False
         self.feedback = feedback.FeedbackWorker()
         self.reports = camera_reports.CameraReportWorker()
@@ -3179,6 +3325,8 @@ class MainWindow(QMainWindow):
         self.reports_action.toggled.connect(self._choose_error_reports)
         logs = help_menu.addAction("Open log folder")
         logs.triggered.connect(self._open_log_folder)
+        self.diagnostics_action = help_menu.addAction(f"{DIAGNOSTICS_TITLE}…")
+        self.diagnostics_action.triggered.connect(self._send_diagnostics)
         help_menu.addSeparator()
         guide = help_menu.addAction("User Guide")
         guide.setShortcut(QKeySequence.HelpContents)
@@ -3433,6 +3581,12 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"{app} — {self.current.label}" if several else app)
         self.demo_banner.setVisible(demo)
         self.switch_live_button.setVisible(demo)
+        self.diagnostics_action.setEnabled(not demo)
+        set_tooltip(self.diagnostics_action, (
+            "Needs a live camera: dummy mode has no camera data to analyse." if demo else
+            "Capture a second of raw frames from the displayed camera, make images "
+            "from them at several settings, and send them with this session's log "
+            "to the developer for analysis. Your settings are not changed."))
         self.camera_label.setVisible(not demo)
         self.model_label.setVisible(bool(lines))
         self.model_label.setText("\n".join(
@@ -3805,6 +3959,100 @@ class MainWindow(QMainWindow):
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(folder)):
             QMessageBox.information(self, "Log folder", f"The logs are in {folder}")
+
+    def _send_diagnostics(self):
+        """Explain a diagnostic capture and run it if the user continues.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.diagnostic_dialog is not None:
+            self.diagnostic_dialog.raise_()
+            return
+        channel = self.current
+        dialog = DiagnosticCaptureDialog(self, channel.label)
+        dialog.continued.connect(lambda: self._start_diagnostics(channel))
+        dialog.finished.connect(self._diagnostics_closed)
+        self.diagnostic_dialog = dialog
+        dialog.show()
+
+    def _start_diagnostics(self, channel):
+        """Ask the camera's engine for a burst of raw frames.
+
+        Args: channel is the Channel shown when the dialog opened.
+        Returns: None.
+        """
+        if channel.engine is None:
+            self._finish_diagnostics(diagnostic_capture.Result(
+                "failed", error="the camera is not running"))
+            return
+        self.log.write(f"Diagnostic capture started: {channel.label}")
+        self.diagnostic_channel = channel
+        channel.engine.request("diagnostics", count=diagnostic_capture.BURST_FRAMES)
+        self.diagnostic_timeout.start(DIAGNOSTICS_TIMEOUT_MS)
+
+    def _diagnostic_burst(self, channel, burst):
+        """Package and send the frames an engine collected.
+
+        Args: channel is the Channel whose engine sent them; burst is the
+            diagnostics.Burst.
+        Returns: None.
+        """
+        if channel is not self.diagnostic_channel or self.diagnostic_dialog is None:
+            return  # the dialog was closed or another capture is awaited
+        self.diagnostic_channel = None
+        self.diagnostic_timeout.stop()
+        self.diagnostic_dialog.show_working("Packaging and sending the capture…")
+        serials = (self.reporting.reporter.serials if self.reporting is not None
+                   else list)
+        self.diagnostic_worker = diagnostic_capture.DiagnosticWorker(
+            paths.output_folder("logs"), self.log.path, serials)
+        self.diagnostic_worker.start(burst)
+        self.diagnostic_poll.start()
+
+    def _poll_diagnostics(self):
+        """Show the result once the worker has sent (or saved) the capture.
+
+        Args: None.
+        Returns: None.
+        """
+        try:
+            _, result = self.diagnostic_worker.events.get_nowait()
+        except queue.Empty:
+            return
+        self.diagnostic_poll.stop()
+        self._finish_diagnostics(result)
+
+    def _diagnostics_timed_out(self):
+        """Give up when the camera delivered no burst in time.
+
+        Args: None.
+        Returns: None.
+        """
+        self.diagnostic_channel = None
+        self._finish_diagnostics(diagnostic_capture.Result(
+            "failed", error="the camera sent no frames for the capture"))
+
+    def _finish_diagnostics(self, result):
+        """Log a capture's result and show it in the dialog.
+
+        Args: result is a diagnostic_capture.Result.
+        Returns: None.
+        """
+        detail = result.remote or result.local or result.error
+        self.log.write(f"Diagnostic capture {result.outcome}: {detail}")
+        if self.diagnostic_dialog is not None:
+            self.diagnostic_dialog.show_result(result)
+
+    def _diagnostics_closed(self):
+        """Forget the dialog; a burst still on its way is ignored.
+
+        Args: None.
+        Returns: None.
+        """
+        self.diagnostic_dialog = None
+        self.diagnostic_channel = None
+        self.diagnostic_timeout.stop()
 
     def _update_report_context(self):
         """Tell the reporter what this session shows, for later reports.
@@ -4317,6 +4565,8 @@ class MainWindow(QMainWindow):
             self.record_button.setChecked(False)
             self.record_button.blockSignals(False)
             self._set_demo(False)
+        elif kind == "diagnostic_burst":
+            self._diagnostic_burst(channel, payload)
         elif kind == "switch_failed":
             QMessageBox.warning(self, "Camera unavailable",
                                 f"Could not start live capture: {payload}\n\n"

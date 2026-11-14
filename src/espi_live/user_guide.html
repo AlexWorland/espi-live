@@ -1098,6 +1098,18 @@ python -m espi_live</code></pre>
           sent to the developer, scrubbed the same way, so problems can be looked into
           without anyone having to send logs by hand; they go to a private repository,
           not a public page.</p>
+        <p><strong>Help → Send diagnostic capture…</strong> helps the developer find out
+          why fringes are weak or missing. A window explains what will happen;
+          <strong>Go back</strong> closes it, <strong>Continue</strong> starts the capture.
+          It records eight raw frames in a row from the displayed camera (about a second),
+          makes images from copies of them at several settings (Raw, Previous and
+          Reference, stretch on and off, averaging, the speckle filter and, for the
+          analog camera, single field), and sends them with the settings and this
+          session's log, scrubbed as above, to the developer's private repository. Your
+          settings and the live view are not changed. Keep the setup as it is until it
+          finishes. A copy is kept in <code>output/logs/diagnostics/</code>; if the
+          capture cannot be sent, the window says so and you can send that file by hand.
+          The item is unavailable in dummy mode.</p>
         <p>The log keeps the most recent 2000 lines in the window; the file
           keeps the full run. Lines from several cameras start with the
           camera's serial number.</p>
