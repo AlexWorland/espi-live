@@ -773,15 +773,22 @@ class ErrorReporter:
 
         return self._capture(describe, "native_crash", True, log_lines)
 
+    def serials(self):
+        """List the camera serial numbers this session has seen.
+
+        Args: None.
+        Returns: A tuple of serial numbers.
+        """
+        with self.lock:
+            return tuple(self.context.get("serials", ()))
+
     def scrubber(self):
         """Build the scrubbing function for the current session.
 
         Args: None.
         Returns: A make_scrubber function hiding the session's camera serials.
         """
-        with self.lock:
-            serials = tuple(self.context.get("serials", ()))
-        return make_scrubber(serials)
+        return make_scrubber(self.serials())
 
     def _capture(self, describe, where, fatal, log_lines=None):
         """Build, save and announce a report once per fingerprint and run.
