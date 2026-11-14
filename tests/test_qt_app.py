@@ -5006,6 +5006,9 @@ class CodexTests(WindowTestCase):
         patcher = mock.patch.object(qt_app.codex, "write_guide", return_value=None)
         self.write_guide = patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(qt_app.codex, "open_cli", return_value="/bin/codex")
+        self.open_cli = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def ready(self, note=""):
         """Deliver a "source ready" event.
@@ -5075,15 +5078,12 @@ class CodexTests(WindowTestCase):
                          "Getting the source code for Codex…")
         self.window.source.start.assert_called_once_with()
         FakeSettings.store["codex/intro_shown"] = True
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                               return_value=True) as open_url:
-            self.ready("Downloaded the source code")
+        self.ready("Downloaded the source code")
         self.assertTrue(self.window.codex_button.isEnabled())
         self.assertEqual(self.window.codex_button.accessibleName(), "Open in Codex")
         self.assertIn("Downloaded the source code", self.log.lines)
         self.write_guide.assert_called_once_with(self.FOLDER)
-        url = open_url.call_args.args[0]
-        self.assertEqual(url.toEncoded().data().decode(), qt_app.codex.deep_link(self.FOLDER))
+        self.open_cli.assert_called_once_with(self.FOLDER)
         self.assertIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
         self.assertIn("Opening Codex", self.window.statusBar().currentMessage())
 
@@ -5094,10 +5094,9 @@ class CodexTests(WindowTestCase):
         Returns: None.
         """
         before = list(self.log.lines)
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
-            self.ready()
+        self.ready()
         self.assertEqual(self.window.source_folder, self.FOLDER)
-        open_url.assert_not_called()
+        self.open_cli.assert_not_called()
         self.assertEqual(self.log.lines, before)
 
     def test_click_while_downloading_waits(self):
@@ -5137,21 +5136,19 @@ class CodexTests(WindowTestCase):
         Returns: None.
         """
         self.ready()
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                               return_value=True) as open_url:
-            with mock.patch.object(self.window, "_codex_intro", return_value=False):
-                self.window._open_codex()
-            open_url.assert_not_called()
-            self.assertNotIn("codex/intro_shown", FakeSettings.store)
-            with mock.patch.object(self.window, "_codex_intro", return_value=True) as intro:
-                self.window._open_codex()
-                self.window._open_codex()
+        with mock.patch.object(self.window, "_codex_intro", return_value=False):
+            self.window._open_codex()
+        self.open_cli.assert_not_called()
+        self.assertNotIn("codex/intro_shown", FakeSettings.store)
+        with mock.patch.object(self.window, "_codex_intro", return_value=True) as intro:
+            self.window._open_codex()
+            self.window._open_codex()
         intro.assert_called_once_with()
         self.assertTrue(FakeSettings.store["codex/intro_shown"])
-        self.assertEqual(open_url.call_count, 2)
+        self.assertEqual(self.open_cli.call_count, 2)
 
     def test_intro_buttons(self):
-        """Open Codex goes on; Get Codex opens the download page; Cancel stops.
+        """Open Codex goes on; How to install opens the install page; Cancel stops.
 
         Args: None.
         Returns: None.
@@ -5176,27 +5173,41 @@ class CodexTests(WindowTestCase):
         self.ready()
         FakeSettings.store["codex/intro_shown"] = True
         self.write_guide.side_effect = PermissionError("read-only")
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
-            self.window._open_codex()
-        open_url.assert_not_called()
+        self.window._open_codex()
+        self.open_cli.assert_not_called()
         self.assertIn("read-only", self.dialogs.warning.call_args.args[2])
 
-    def test_missing_codex_offers_the_download(self):
-        """When no app takes the link, a dialog offers the download page.
+    def test_missing_codex_offers_the_install_page(self):
+        """When Codex is not installed, a dialog says so and links the install page.
 
         Args: None.
         Returns: None.
         """
         self.ready()
         FakeSettings.store["codex/intro_shown"] = True
-        for choice, opened in ((1, 1), (0, 2)):
+        self.open_cli.return_value = None
+        for choice, opened in ((1, 0), (0, 1)):
             self.buttons(choice, 2)
-            with mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                                   return_value=False) as open_url:
+            with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
                 self.window._open_codex()
             self.assertEqual(open_url.call_count, opened)
             self.assertEqual(self.dialogs.call_args.args[1], "Codex not found")
         self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
+        self.assertNotIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
+
+    def test_terminal_that_cannot_start_warns(self):
+        """A terminal that fails to start is reported, not mistaken for a missing Codex.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        FakeSettings.store["codex/intro_shown"] = True
+        self.open_cli.side_effect = OSError("no terminal program was found")
+        self.window._open_codex()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("no terminal program", self.dialogs.warning.call_args.args[2])
+        self.assertNotIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
 
 
 class HelpTipTests(WindowTestCase):

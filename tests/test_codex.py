@@ -1,4 +1,4 @@
-"""Checks for the Codex deep link and the guide written for Codex.
+"""Checks for finding and starting Codex and for the guide written for it.
 
 Run from the project root:  PYTHONPATH=src python -m unittest discover -s tests
 """
@@ -8,29 +8,155 @@ import shutil
 import sys
 import tempfile
 import unittest
-import urllib.parse
 from unittest import mock
 
 from espi_live import codex, updater
 from source_fixtures import make_copy, prebuilt
 
 
-class LinkTests(unittest.TestCase):
-    """deep_link and send_command."""
+class FindTests(unittest.TestCase):
+    """find_cli."""
 
-    def test_link_opens_a_new_chat_in_the_folder(self):
-        """The absolute folder path is percent-encoded into the link.
+    def test_command_on_the_path_is_found(self):
+        """The command found on PATH is returned as it is.
 
         Args: None.
         Returns: None.
         """
-        folder = os.path.join(tempfile.gettempdir(), "My Programs", "espi-live-source")
-        link = codex.deep_link(folder)
-        prefix = "codex://threads/new?path="
-        self.assertTrue(link.startswith(prefix))
-        self.assertNotIn(" ", link)
-        self.assertNotIn("/", link[len(prefix):])
-        self.assertEqual(urllib.parse.unquote(link[len(prefix):]), os.path.abspath(folder))
+        with mock.patch.object(codex.shutil, "which", return_value="/usr/bin/codex") as which:
+            self.assertEqual(codex.find_cli("linux"), "/usr/bin/codex")
+        which.assert_called_once_with("codex")
+
+    def test_usual_install_folders_are_searched_off_windows(self):
+        """A program started from the desktop still finds a Homebrew or npm install.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(codex.shutil, "which",
+                               side_effect=[None, "/opt/homebrew/bin/codex"]) as which:
+            self.assertEqual(codex.find_cli("darwin"), "/opt/homebrew/bin/codex")
+        searched = which.call_args.kwargs["path"].split(os.pathsep)
+        self.assertIn("/opt/homebrew/bin", searched)
+        self.assertIn(os.path.expanduser("~/.npm-global/bin"), searched)
+
+    def test_missing_command_gives_none(self):
+        """No command anywhere means Codex is not installed; Windows has no extra search.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(codex.shutil, "which", return_value=None) as which:
+            self.assertIsNone(codex.find_cli("linux"))
+            self.assertEqual(which.call_count, 2)
+            which.reset_mock()
+            self.assertIsNone(codex.find_cli("win32"))
+            self.assertEqual(which.call_count, 1)
+
+
+class TerminalTests(unittest.TestCase):
+    """terminal_command and open_cli."""
+
+    FOLDER = os.path.join(tempfile.gettempdir(), "My Programs", "espi-live-source")
+
+    def test_windows_opens_a_console_that_stays(self):
+        """A new console runs cmd /k so an early Codex error can be read.
+
+        Args: None.
+        Returns: None.
+        """
+        command, options = codex.terminal_command(r"C:\npm\codex.cmd", self.FOLDER, "win32")
+        self.assertEqual(command, ["cmd.exe", "/k", r"C:\npm\codex.cmd"])
+        self.assertEqual(options["cwd"], self.FOLDER)
+        self.assertTrue(options["creationflags"])
+
+    def test_windows_console_flag_comes_from_subprocess_when_it_exists(self):
+        """On Windows the real CREATE_NEW_CONSOLE value is used.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(codex.subprocess, "CREATE_NEW_CONSOLE", 0x10, create=True):
+            _, options = codex.terminal_command("codex.cmd", self.FOLDER, "win32")
+        self.assertEqual(options["creationflags"], 0x10)
+
+    def test_macos_runs_it_in_terminal_app(self):
+        """Terminal.app is told to cd to the folder and run Codex, quoting both.
+
+        Args: None.
+        Returns: None.
+        """
+        command, options = codex.terminal_command("/opt/homebrew/bin/codex",
+                                                  "/Users/Al's \"Lab\"/source", "darwin")
+        self.assertEqual(command[:2], ["osascript", "-e"])
+        script = command[2]
+        self.assertTrue(script.startswith('tell application "Terminal" to do script "'))
+        self.assertIn("/opt/homebrew/bin/codex", script)
+        self.assertNotIn('"Lab"', script)  # the quotes in the folder name are escaped
+        self.assertIn("activate", command[-1])
+        self.assertEqual(options, {})
+
+    def test_apple_script_quote(self):
+        """Backslashes and double quotes are escaped.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(codex.apple_script_quote('a"b\\c'), '"a\\"b\\\\c"')
+
+    def test_linux_uses_the_first_terminal_it_finds(self):
+        """Each terminal gets its own flag, and the folder is entered by a shell.
+
+        Args: None.
+        Returns: None.
+        """
+        found = {"gnome-terminal": "/usr/bin/gnome-terminal", "xterm": "/usr/bin/xterm"}
+        command, options = codex.terminal_command("/usr/bin/codex", self.FOLDER, "linux",
+                                                  which=found.get)
+        self.assertEqual(command[:2], ["/usr/bin/gnome-terminal", "--"])
+        self.assertEqual(command[-2:], [self.FOLDER, "/usr/bin/codex"])
+        self.assertEqual(options, {})
+        command, _ = codex.terminal_command("/usr/bin/codex", self.FOLDER, "linux",
+                                            which={"xterm": "/usr/bin/xterm"}.get)
+        self.assertEqual(command[:2], ["/usr/bin/xterm", "-e"])
+
+    def test_linux_without_a_terminal_raises(self):
+        """Having no terminal program is an error the window can report.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaises(OSError):
+            codex.terminal_command("/usr/bin/codex", self.FOLDER, "linux", which=lambda name: None)
+
+    def test_open_cli_starts_the_terminal(self):
+        """The terminal is started and the command's path returned.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(codex, "find_cli", return_value="/bin/codex"), \
+                mock.patch.object(codex, "terminal_command",
+                                  return_value=(["term"], {"cwd": "x"})) as build, \
+                mock.patch.object(codex.subprocess, "Popen") as popen:
+            self.assertEqual(codex.open_cli(self.FOLDER), "/bin/codex")
+        build.assert_called_once_with("/bin/codex", self.FOLDER)
+        popen.assert_called_once_with(["term"], cwd="x")
+
+    def test_open_cli_without_codex_starts_nothing(self):
+        """A missing Codex returns None and opens no window.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(codex, "find_cli", return_value=None), \
+                mock.patch.object(codex.subprocess, "Popen") as popen:
+            self.assertIsNone(codex.open_cli(self.FOLDER))
+        popen.assert_not_called()
+
+
+class LinkTests(unittest.TestCase):
+    """send_command."""
 
     def test_send_command_suits_the_shell(self):
         """PowerShell needs the call operator; POSIX shells need quoting.

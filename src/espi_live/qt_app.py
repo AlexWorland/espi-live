@@ -3996,16 +3996,23 @@ class MainWindow(QMainWindow):
                                 "Could not prepare the source code for Codex in "
                                 f"{self.source_folder}: {exc.strerror or exc}.")
             return
-        if QDesktopServices.openUrl(QUrl.fromEncoded(
-                codex.deep_link(self.source_folder).encode("ascii"))):
+        try:
+            started = codex.open_cli(self.source_folder)
+        except OSError as exc:
+            QMessageBox.warning(self, "Open in Codex",
+                                "Could not start Codex in "
+                                f"{self.source_folder}: {exc.strerror or exc}.")
+            return
+        if started:
             self.log.write(f"Opened Codex on {self.source_folder}")
             self.statusBar().showMessage("Opening Codex with ESPI live's source code…", 5000)
             return
         box = QMessageBox(QMessageBox.Warning, "Codex not found",
-                          "Codex did not open. Install the Codex app (or the ChatGPT "
-                          "desktop app, which includes it), sign in, then press "
-                          "Open in Codex again.", parent=self)
-        get = box.addButton("Get Codex…", QMessageBox.ActionRole)
+                          "Codex is not installed on this computer (the program looks for "
+                          f"the \"{codex.CLI_NAME}\" command). Install the Codex command-line "
+                          "tool, open a new terminal and run \"codex\" once to sign in with "
+                          "your ChatGPT account, then press Open in Codex again.", parent=self)
+        get = box.addButton("How to install Codex…", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Close)
         box.exec()
         if box.clickedButton() is get:
@@ -4018,18 +4025,19 @@ class MainWindow(QMainWindow):
         Returns: True to go on and open Codex, False to stop.
         """
         box = QMessageBox(QMessageBox.Information, "Open in Codex",
-                          "Codex, OpenAI's coding assistant, opens with the source code of "
-                          "this copy of ESPI live, so you can ask it how the program works."
+                          "Codex, OpenAI's coding assistant, opens in a terminal window with "
+                          "the source code of this copy of ESPI live, so you can ask it how "
+                          "the program works."
                           "<br><br>If you ask it to change something, it shows you the "
                           "change and asks whether you are happy with it. If you are, it "
                           "sends the change to the ESPI live developers to review. Your "
                           "installed program stays as it is.<br><br>You need the Codex "
-                          "app (or the ChatGPT desktop app) and a ChatGPT account."
+                          "command-line tool (the \"codex\" command) and a ChatGPT account."
                           f"<br><br>Source code: {html.escape(self.source_folder)}",
                           parent=self)
         box.setTextFormat(Qt.RichText)
         go = box.addButton("Open Codex", QMessageBox.AcceptRole)
-        get = box.addButton("Get Codex…", QMessageBox.ActionRole)
+        get = box.addButton("How to install Codex…", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Cancel)
         box.exec()
         if box.clickedButton() is get:
