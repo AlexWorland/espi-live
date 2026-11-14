@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-14 — The window title shows the version
+
+- The main window's title now starts with the release version, for example `ESPI live v0.10.0 — BFS-U3-63S4M` or `ESPI live v0.10.0 — DUMMY MODE`. The version is the release's tag: the Release workflow bakes the tag chosen by its `version` job (`vX.Y.Z`, or `vX.Y.Z-pre.N` for a pre-release) into the build as `VERSION`.
+- **Help > About**, `--version`, the log header and error reports name the version before the build number. A source checkout, and a build made before this change, shows `dev` in the title and leaves the version out of the description. Updates are still ordered by build number only.
+
 ## 2026-11-13 — Search the user guide
 
 - The user guide (**Help → User Guide**, **F1**) has a search box at the top of the page that stays in view while you scroll. Press `/` to jump to it; the browser's own Ctrl+F / Cmd+F still works as before.
