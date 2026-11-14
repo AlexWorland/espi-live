@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
                                QMessageBox,
                                QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
-                               QSizePolicy, QSlider, QStyle, QTextBrowser, QTextEdit, QToolBar, QToolTip,
+                               QSizePolicy, QSlider, QStackedWidget, QStyle, QTextBrowser, QTextEdit, QToolBar, QToolTip,
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
@@ -54,8 +54,8 @@ from espi_live import (camera, camera_reports, codex, error_reports, feedback, l
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
-from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
-                                  VIEW_MODES, palette_rgb_table)
+from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_REFERENCE_FRAMES, PALETTES,
+                                  SMOOTHING_METHODS, VIEW_MODES, palette_rgb_table)
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
 # layout is kept; a narrower window keeps the badge and elides the tip. Either
@@ -333,8 +333,9 @@ Measurement — a still object, compared with one reference.
   View: Reference. Press F (or Set reference) once the object is still.
   Average N: 8 with Rolling average off: one clean image every 8 frames.
   Speckle filter: Median, width 3 px, well below the fringe spacing.
+  Ref. frames: 1 for a quiet camera; 8–30 for a noisy or analog one, so the reference's own noise is not frozen into every difference. Press C to see the reference beside the current frame and the difference.
   Ref. refresh: 2 s. That cancels slow drift (air, heat). Motion slower than the refresh disappears; use 0 and press F when you need one fixed before/after.
-  Noise reduction: 0. Raise it only when the camera is noisy and the object is still.
+  Noise reduction: 0. Raise it only when the camera is noisy and the object is still, and set it before pressing F: the reference keeps the setting it was taken at, and a change afterwards leaves a frozen grain until you press F again.
   Stretch to 0–255: on, clip 0.5% so a few speckles don't flatten the contrast.
   Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
 
@@ -530,8 +531,9 @@ MODE_TIPS = {
     "Previous": ("Previous: the difference from the last frame, so fringes show "
                  "what just changed. Shortcut: R restarts that difference."),
     "Reference": ("Reference: the difference from a stored frame. Shortcut: F "
-                  "stores the live frame. Ref. refresh can recapture it on a "
-                  "timer so slow drift cancels."),
+                  "stores the live frame (or the average of Ref. frames frames). "
+                  "Ref. refresh can recapture it on a timer so slow drift "
+                  "cancels. C shows it beside the current frame."),
 }
 
 
@@ -1605,6 +1607,214 @@ class SettingsGuideDialog(QDialog):
         layout.addWidget(buttons)
 
 
+# The three images of the reference comparison window: packet attribute,
+# heading and tooltip.
+COMPARE_PANELS = (
+    ("reference", "Reference",
+     "The stored reference frame, as Raw view would show it: gamma only, no "
+     "stretch or palette. F or Set reference retakes it; Ref. frames averages "
+     "several frames into it."),
+    ("current", "Current frame",
+     "The camera frame being compared, after single field and noise reduction, "
+     "the same point the reference is taken at. Gamma only."),
+    ("difference", "Difference",
+     "The processed difference between the two. In Reference view it is exactly "
+     "the main window's image, averaging included; in other views it is one "
+     "difference from the reference with the same filters, without averaging."),
+)
+NO_REFERENCE_TEXT = ("No reference yet.\n\nPress Set reference (F) to capture one; "
+                     "Ref. frames sets how many frames it averages.")
+COMPARE_POLL_MS = 50
+
+
+class ReferenceCompareDialog(QDialog):
+    """Show the displayed camera's reference, current frame and difference live.
+
+    The images come from the engine's ComparePacket, so all three belong to
+    the same moment. The engine builds them only while this window is open.
+    """
+
+    def __init__(self, window):
+        """Build the three panels and the buttons.
+
+        Args: window is the MainWindow; its engine (the displayed camera) is
+            the source, and its frame title and notes go with a save.
+        Returns: None.
+        """
+        super().__init__(window)
+        self.window = window
+        self.engine = None  # the engine currently asked for comparisons
+        self.shown = None  # the ComparePacket on screen (Freeze keeps it)
+        self.tables = {}
+        self.setWindowTitle("Reference comparison")
+        self.resize(ui_scale.px(1200), ui_scale.px(480))
+        grid = QGridLayout()
+        self.views, self.stacks, self.messages, self.captions = {}, {}, {}, {}
+        for column, (name, heading, tip) in enumerate(COMPARE_PANELS):
+            title = QLabel(heading)
+            font = title.font()
+            font.setBold(True)
+            title.setFont(font)
+            set_tooltip(title, tip)
+            view = CpuImageView()
+            view.setMinimumSize(ui_scale.px(200), ui_scale.px(150))
+            message = QLabel(NO_REFERENCE_TEXT)
+            message.setWordWrap(True)
+            message.setAlignment(Qt.AlignCenter)
+            message.setFrameShape(QFrame.StyledPanel)
+            stack = QStackedWidget()
+            stack.addWidget(view)
+            stack.addWidget(message)
+            caption = QLabel()
+            caption.setWordWrap(True)
+            grid.addWidget(title, 0, column)
+            grid.addWidget(stack, 1, column)
+            grid.addWidget(caption, 2, column, Qt.AlignTop)
+            grid.setColumnStretch(column, 1)
+            self.views[name], self.stacks[name] = view, stack
+            self.messages[name], self.captions[name] = message, caption
+        grid.setRowStretch(1, 1)
+        self.demo_label = QLabel("DUMMY MODE — synthetic video, not camera data")
+        self.demo_label.setAlignment(Qt.AlignCenter)
+        self.demo_label.setStyleSheet(
+            f"background:#8b0000;color:white;font-weight:bold;"
+            f"padding:{ui_scale.px(4)}px;border-radius:{ui_scale.px(4)}px;")
+        self.demo_label.setVisible(False)
+        buttons = QDialogButtonBox()
+        self.reference_button = buttons.addButton("Set reference (F)",
+                                                  QDialogButtonBox.ActionRole)
+        set_tooltip(self.reference_button,
+                    "Retake the displayed camera's reference, averaging Ref. frames "
+                    "frames.")
+        self.freeze_button = buttons.addButton("Freeze", QDialogButtonBox.ActionRole)
+        self.freeze_button.setCheckable(True)
+        self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
+        set_tooltip(self.freeze_button,
+                    "Hold these three images still to compare them. The camera "
+                    "keeps running; the main window stays live.")
+        self.save_button = buttons.addButton("Save all three", QDialogButtonBox.ActionRole)
+        set_tooltip(self.save_button,
+                    "Save the three images as shown (PNG) plus one notes file with "
+                    "the main window's title and notes and how the reference was "
+                    "taken.")
+        close = buttons.addButton(QDialogButtonBox.Close)
+        for button in buttons.buttons():
+            button.setAutoDefault(False)  # Enter must not press Save or Close
+        self.reference_button.clicked.connect(
+            lambda: self.window.engine.request("reference"))
+        self.freeze_button.toggled.connect(self.set_frozen)
+        self.save_button.clicked.connect(self.save)
+        close.clicked.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.demo_label)
+        layout.addLayout(grid, 1)
+        layout.addWidget(buttons)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+
+    def showEvent(self, event):
+        """Ask the displayed camera for comparisons while the window is open.
+
+        Args: event is the Qt show event.
+        Returns: None.
+        """
+        super().showEvent(event)
+        self._follow(self.window.engine)
+        self.timer.start(COMPARE_POLL_MS)
+
+    def hideEvent(self, event):
+        """Stop the comparisons, so a closed window costs the camera nothing.
+
+        Args: event is the Qt hide event.
+        Returns: None.
+        """
+        super().hideEvent(event)
+        self.timer.stop()
+        self._follow(None)
+        self.freeze_button.setChecked(False)
+
+    def _follow(self, engine):
+        """Move the comparison request to another engine.
+
+        Args: engine is the Engine to compare from, or None for none.
+        Returns: None.
+        """
+        if engine is self.engine:
+            return
+        if self.engine is not None:
+            self.engine.set_compare(False)
+        self.engine = engine
+        self.shown = None
+        if engine is not None:
+            engine.set_compare(True)
+
+    def poll(self):
+        """Show the newest comparison of the displayed camera.
+
+        Follows the main window to another camera; does nothing while frozen.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.window.engine is not self.engine:
+            self.freeze_button.setChecked(False)
+            self._follow(self.window.engine)
+        if self.freeze_button.isChecked():
+            return
+        packet = self.engine.latest_compare()
+        if packet is None or (self.shown is not None and
+                              packet.sequence == self.shown.sequence):
+            return
+        self.show_compare(packet)
+
+    def show_compare(self, packet):
+        """Put a ComparePacket's three images and captions on screen.
+
+        Args: packet is the ComparePacket.
+        Returns: None.
+        """
+        self.shown = packet
+        self.demo_label.setVisible(packet.demo)
+        self.setWindowTitle("Reference comparison — DUMMY MODE" if packet.demo
+                            else "Reference comparison")
+        captions = {"reference": packet.reference_info,
+                    "current": "live, after single field and noise reduction",
+                    "difference": packet.difference_info}
+        for name, _, _ in COMPARE_PANELS:
+            part = getattr(packet, name)
+            self.captions[name].setText(captions[name])
+            if part is None:
+                self.stacks[name].setCurrentWidget(self.messages[name])
+                continue
+            key = (part.palette, round(part.gamma, 4))
+            if key not in self.tables:
+                self.tables[key] = palette_rgb_table(part.palette, part.gamma)
+            self.views[name].show_packet(part, self.tables[key], key)
+            self.stacks[name].setCurrentWidget(self.views[name])
+
+    def set_frozen(self, on):
+        """Hold the shown images still, or follow the camera again.
+
+        Args: on is the Freeze button state.
+        Returns: None.
+        """
+        self.window.log.write("Reference comparison frozen." if on else
+                              "Reference comparison live again.")
+
+    def save(self):
+        """Save the three shown images through the engine.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.shown is None:
+            self.window.log.write("No comparison on screen to save yet.")
+            return
+        self.engine.request("save_compare", packet=self.shown,
+                            title=self.window.frame_title.text(),
+                            notes=self.window.frame_notes.toPlainText())
+
+
 class StatusLayout(QLayout):
     """Lay out the status bar in one row when it fits, and in more when not.
 
@@ -2062,6 +2272,7 @@ class MainWindow(QMainWindow):
         self.retired_channels = []  # demo channels replaced by real cameras
         self.drawn_sequence = 0
         self.shown_packet = None  # the packet on screen; Freeze holds this one
+        self.compare_dialog = None  # ReferenceCompareDialog, built on first use
         self.view_state = None  # last logged (view size, zoom, image size)
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
@@ -2414,8 +2625,14 @@ class MainWindow(QMainWindow):
                  "or notes box is filled in. Shortcut: S.",
                  self.save_frame),
                 ("Set reference (F)",
-                 "Use the current live frame as the Reference view's base. Shortcut: F.",
+                 "Use the current live frame as the Reference view's base, or the "
+                 "average of the next Ref. frames frames. Shortcut: F.",
                  lambda: self.engine.request("reference")),
+                ("Compare (C)",
+                 "Open a window with the stored reference, the current frame and "
+                 "their processed difference side by side, live, to check the "
+                 "reference. It has its own Freeze and saves all three. Shortcut: C.",
+                 self.show_compare),
                 ("Reset last (R)",
                  "Restart the Previous view's difference from the next frame. Shortcut: R.",
                  lambda: self.engine.request("reset_previous")),
@@ -2675,6 +2892,18 @@ class MainWindow(QMainWindow):
         self.rolling.setChecked(s.rolling)
         self.rolling.toggled.connect(lambda on: self.engine.update_settings(rolling=on))
         add(self.rolling)
+        self.ref_frames = SliderSpin(1, MAX_REFERENCE_FRAMES, 1, 0, s.ref_frames)
+        self.ref_frames.set_description(
+            "How many camera frames F (Set reference) averages into the reference. "
+            "One frame keeps its sensor noise, which then shows in every Reference "
+            "difference as a frozen grain that Average N cannot remove; averaging "
+            "several frames quiets it. The old reference stays in use until the new "
+            "one is complete, and the status bar counts the frames. Use 1 for a fast "
+            "camera with little noise; try 8–30 for a noisy or analog camera, with "
+            "the object still. Start at 1.")
+        self.ref_frames.valueChanged.connect(
+            lambda v: self.engine.update_settings(ref_frames=int(v)))
+        add(self.ref_frames, "Ref. frames")
         self.ref_refresh = SliderSpin(0, 10, 0.1, 1, s.ref_refresh_s, " s")
         self.ref_refresh.set_description(
             "In Reference view, recaptures the baseline this often so slow drift "
@@ -3154,7 +3383,8 @@ class MainWindow(QMainWindow):
         hint.setEnabled(False)  # a reminder, not a command
         set_tooltip(hint,
                     "Wheel: zoom. Drag: pan. 0: fit. 1: actual size. Space: freeze. "
-                    "S: save. F: set reference. R: reset last. A: reset average. "
+                    "S: save. F: set reference. C: compare with the reference. "
+                    "R: reset last. A: reset average. "
                     "Q or Esc: quit.")
 
         help_menu = self.menuBar().addMenu("&Help")
@@ -3323,6 +3553,7 @@ class MainWindow(QMainWindow):
         for widget, value in ((self.exposure, s.exposure_us), (self.gain, s.gain_db),
                               (self.fps, s.fps), (self.noise_reduction, s.noise_reduction),
                               (self.average, s.average),
+                              (self.ref_frames, s.ref_frames),
                               (self.ref_refresh, s.ref_refresh_s),
                               (self.smoothing, s.smoothing), (self.clip, s.clip_percent),
                               (self.gamma, s.gamma)):
@@ -3525,6 +3756,7 @@ class MainWindow(QMainWindow):
             Qt.Key_Space: lambda: self.set_frozen(self.current.frozen is None),
             Qt.Key_S: self.save_frame,
             Qt.Key_F: lambda: self.engine.request("reference"),
+            Qt.Key_C: self.show_compare,
             Qt.Key_R: lambda: self.engine.request("reset_previous"),
             Qt.Key_A: lambda: self.engine.request("reset_average"),
             Qt.Key_Q: self.close,
@@ -3559,6 +3791,22 @@ class MainWindow(QMainWindow):
             channel.frozen = channel.frozen_at = None
             self.log.write("Display live again.")
         self._show_frozen()
+
+    def show_compare(self):
+        """Open (or raise) the reference comparison window for the displayed camera.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.compare_dialog is None:
+            self.compare_dialog = ReferenceCompareDialog(self)
+            self.compare_dialog.finished.connect(
+                lambda _: self.log.write("Reference comparison closed."))
+        if not self.compare_dialog.isVisible():
+            self.log.write(f"Reference comparison opened for {self.current.label}.")
+        self.compare_dialog.show()
+        self.compare_dialog.raise_()
+        self.compare_dialog.activateWindow()
 
     def _show_frozen(self):
         """Show or hide every frozen-display indicator for the displayed camera.

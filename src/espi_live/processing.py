@@ -174,6 +174,56 @@ def palette_rgb_table(palette, gamma):
     return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB).reshape(256, 3)
 
 
+# The Reference frames control runs from 1 (one frame, as before) to this.
+MAX_REFERENCE_FRAMES = 60
+
+
+class ReferenceCapture:
+    """Average several camera frames into one reference baseline.
+
+    The sum is kept as float32, so the mean is exact before it is rounded
+    to the uint8 reference the difference step uses.
+    """
+
+    def __init__(self, target, noise_reduction, started, manual):
+        """Start an empty capture.
+
+        Args: target is how many frames to average (2 or more);
+            noise_reduction is the slider value the frames are taken at;
+            started is the monotonic time the capture began (the reference's
+            age is counted from it); manual is True for F / Set reference
+            and False for an automatic refresh.
+        Returns: None.
+        """
+        self.target = int(target)
+        self.noise_reduction = noise_reduction
+        self.started = started
+        self.manual = manual
+        self.count = 0
+        self.accum = None
+
+    def add(self, frame):
+        """Add one frame to the sum.
+
+        A frame of a different size than the ones before it starts the sum
+        over, so frames of two sizes are never mixed.
+
+        Args: frame is a Mono8 array taken after single-field and noise
+            reduction.
+        Returns: The rounded uint8 mean once target frames are summed,
+            otherwise None.
+        """
+        if self.accum is None or self.accum.shape != frame.shape:
+            self.accum = frame.astype(np.float32)
+            self.count = 1
+        else:
+            cv2.accumulate(frame, self.accum)
+            self.count += 1
+        if self.count < self.target:
+            return None
+        return cv2.convertScaleAbs(self.accum, alpha=1.0 / self.count)
+
+
 class ESPIProcessor:
     """Keep the previous/reference frame and temporal averaging state."""
 
@@ -186,6 +236,9 @@ class ESPIProcessor:
         self.prev = None
         self.ref = None
         self.ref_time = None
+        self.ref_frames = 0            # frames averaged into ref
+        self.ref_noise = None          # noise reduction ref was taken at
+        self.ref_capture = None        # ReferenceCapture in progress, or None
         self.avg_accum = None
         self.avg_count = 0
         self.avg_target = None
@@ -227,15 +280,61 @@ class ESPIProcessor:
         cv2.accumulateWeighted(frame, self.denoised, weight)
         return cv2.convertScaleAbs(self.denoised)
 
-    def set_reference(self, frame, now):
+    def set_reference(self, frame, now, noise_reduction=0.0, frames=1):
         """Store a copy of a frame as the Reference baseline.
 
         Args: frame is the Mono8 array to keep; now is the monotonic time,
-            used to schedule automatic refreshes.
+            used to schedule automatic refreshes; noise_reduction is the
+            slider value it was taken at; frames is how many camera frames
+            were averaged into it.
         Returns: None.
         """
         self.ref = frame.copy()
         self.ref_time = now
+        self.ref_noise = noise_reduction
+        self.ref_frames = frames
+
+    def start_reference(self, count, noise_reduction, now, manual=True):
+        """Begin averaging the next frames into a new reference.
+
+        The stored reference stays in use until the new one is complete.
+
+        Args: count is the number of frames to average (2 or more);
+            noise_reduction is the current slider value; now is the
+            monotonic time; manual is False for an automatic refresh.
+        Returns: None; a capture already running is replaced.
+        """
+        self.ref_capture = ReferenceCapture(count, noise_reduction, now, manual)
+
+    def add_reference_frame(self, frame):
+        """Feed one frame to the capture in progress.
+
+        Args: frame is the Mono8 array, after single-field and noise reduction.
+        Returns: The finished ReferenceCapture when this frame completed it
+            (the reference is then stored, its age counted from the start of
+            the capture), otherwise None. Does nothing without a capture.
+        """
+        capture = self.ref_capture
+        if capture is None:
+            return None
+        mean = capture.add(frame)
+        if mean is None:
+            return None
+        self.ref_capture = None
+        self.ref = mean
+        self.ref_time = capture.started
+        self.ref_noise = capture.noise_reduction
+        self.ref_frames = capture.count
+        return capture
+
+    def clear_reference(self):
+        """Forget the stored reference and any capture in progress.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ref = self.ref_time = self.ref_noise = self.ref_capture = None
+        self.ref_frames = 0
 
     def difference(self, frame, mode):
         """Subtract the previous frame or the captured reference.

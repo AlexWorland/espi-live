@@ -191,3 +191,55 @@ def save_frame(display, title, notes, demo, log, tag="", frozen_at=None):
         except OSError as exc:
             log.warning(f"Frame saved, but could not save info: {exc}")
     return path
+
+
+def save_frame_set(images, title, notes, demo, log, tag="", details=()):
+    """Save several images that belong together, with one shared time stamp.
+
+    Used by the reference comparison: the files are named
+    frame_<time>_<name>[_<title>].png, and one notes file lists them.
+
+    Args: images is a list of (name, image) pairs, each image grayscale or
+        BGR exactly as shown; title and notes are optional user text; demo
+        marks synthetic video; log is an AppLog or PrefixedLog; tag names the
+        camera when several are used; details are extra lines for the notes
+        file (for example how the reference was taken).
+    Returns: The list of saved PNG paths (empty when the folder is unusable;
+        the reason is logged).
+    """
+    title = title.strip()
+    notes = notes.strip()
+    safe_title = safe_name(title)
+    suffix = f"_{safe_title}" if safe_title else ""
+    prefix = "dummy_" if demo else ""
+    camera = f"{safe_name(tag)}_" if safe_name(tag) else ""
+    stamp = timestamp()
+    saved = []
+    try:
+        folder = output_folder("frames")
+        for name, image in images:
+            path = os.path.join(folder, f"{prefix}frame_{camera}{stamp}_{name}{suffix}.png")
+            if cv2.imwrite(path, image):
+                log.write(f"Saved: {path}")
+                saved.append(path)
+            else:
+                log.warning(f"Could not save: {path}")
+    except (OSError, cv2.error) as exc:
+        error_reports.caught(log, exc, "save", "Could not save frame")
+        return saved
+    if saved:
+        info_path = os.path.join(folder, f"{prefix}frame_{camera}{stamp}{suffix}.txt")
+        files = "".join(f"Frame: {os.path.basename(path)}\n" for path in saved)
+        extra = "".join(f"{line}\n" for line in details)
+        try:
+            with open(info_path, "w", encoding="utf-8") as info:
+                info.write(
+                    f"{files}"
+                    f"Source: {'Demo' if demo else 'Camera'}"
+                    f"{f' {tag}' if tag else ''}\n"
+                    f"{extra}"
+                    f"Title: {title}\n\nNotes:\n{notes}\n")
+            log.write(f"Saved frame info: {info_path}")
+        except OSError as exc:
+            log.warning(f"Frames saved, but could not save info: {exc}")
+    return saved
