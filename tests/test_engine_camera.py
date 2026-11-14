@@ -599,6 +599,7 @@ class SwitchLiveTests(CameraEngineCase):
             self.engine.latest_packet() is not None and
             not self.engine.latest_packet().demo)))
         self.assertTrue(self.log.has("LIVE CAPTURE ACTIVE"))
+        self.assertTrue(self.log.has("Settings at live start: mode=Raw"))
         self.assertTrue(wait_until(lambda: self.log.has("Saved AVI")))
 
     def test_switch_without_camera_keeps_demo_running(self):

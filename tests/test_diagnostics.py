@@ -47,6 +47,92 @@ class ThrottleTests(unittest.TestCase):
         self.assertEqual(throttle.note(), "")
 
 
+class SettingsChangeLogTests(unittest.TestCase):
+    """One line per setting, written once its value has settled."""
+
+    def test_a_slider_drag_writes_only_the_settled_value(self):
+        """Every step of a drag is held back; the final value is written once.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        changes = diagnostics.SettingsChangeLog(log, Settings(), settle_s=0.5)
+        now = 0.0
+        for refresh in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+            changes.observe(Settings(ref_refresh_s=refresh), now)
+            now += 0.1
+        changes.observe(Settings(ref_refresh_s=3.0), now)
+        self.assertEqual(log.lines, [])
+        changes.observe(Settings(ref_refresh_s=3.0), now + 0.5)
+        self.assertEqual(log.lines, ["Reference auto-refresh: every 3.0 s"])
+        changes.observe(Settings(ref_refresh_s=3.0), now + 5.0)
+        self.assertEqual(len(log.lines), 1)  # unchanged: nothing more
+        changes.observe(Settings(), now + 6.0)
+        changes.observe(Settings(), now + 7.0)
+        self.assertEqual(log.lines[-1], "Reference auto-refresh: off")
+
+    def test_a_value_moved_and_put_back_writes_nothing(self):
+        """Returning to the logged value before it settles drops the change.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        changes = diagnostics.SettingsChangeLog(log, Settings(), settle_s=0.5)
+        changes.observe(Settings(gamma=1.4), 0.0)
+        changes.observe(Settings(gamma=1.0), 0.2)
+        changes.observe(Settings(gamma=1.0), 5.0)
+        self.assertEqual(log.lines, [])
+
+    def test_every_display_setting_has_a_line(self):
+        """Each followed setting is written with its own label and units.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        changes = diagnostics.SettingsChangeLog(log, Settings(), settle_s=0.5)
+        busy = Settings(
+            mode="Reference", exposure_us=12000, gain_db=3.5, fps=15,
+            noise_reduction=95, average=15, rolling=True, ref_refresh_s=2.0,
+            smoothing=3, smoothing_method="Median", scale_range=False,
+            clip_percent=3.5, invert=True, flip_horizontal=True,
+            palette="Turbo", gamma=2.1, clahe=False, single_field=False)
+        changes.observe(busy, 0.0)
+        changes.observe(busy, 1.0)
+        self.assertEqual(sorted(log.lines), sorted([
+            "Exposure: 12000 us", "Gain: 3.5 dB", "Frame rate: 15 fps",
+            "Noise reduction: 95", "Averaging: 15 frames, rolling",
+            "Reference auto-refresh: every 2.0 s", "Speckle filter: Median 3 px",
+            "Stretch: off", "Stretch clip: 3.5%", "Invert: on",
+            "Flip horizontal: on", "Palette: Turbo", "Gamma: 2.1", "CLAHE: off"]))
+        changes.observe(Settings(average=4), 2.0)
+        changes.flush()
+        self.assertIn("Averaging: 4 frames, block", log.lines)
+        self.assertIn("Noise reduction: off", log.lines)
+        self.assertIn("Speckle filter: off", log.lines)
+
+    def test_flush_writes_waiting_changes_and_mark_logged_drops_them(self):
+        """flush() writes an unsettled change; mark_logged() forgets them.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        changes = diagnostics.SettingsChangeLog(log, Settings(), settle_s=0.5)
+        changes.observe(Settings(palette="Turbo"), 0.0)
+        changes.flush()
+        self.assertEqual(log.lines, ["Palette: Turbo"])
+        changes.flush()
+        self.assertEqual(len(log.lines), 1)
+        changes.observe(Settings(palette="Turbo", invert=True), 1.0)
+        changes.mark_logged(Settings(palette="Turbo", invert=True))
+        changes.observe(Settings(palette="Turbo", invert=True), 9.0)
+        changes.flush()
+        self.assertEqual(log.lines, ["Palette: Turbo"])
+
+
 class SummaryTests(unittest.TestCase):
     """Settings text and the sharpness measure."""
 
@@ -69,6 +155,29 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("average=8 rolling", busy)
         self.assertIn("smoothing=Median 5", busy)
         self.assertIn("clahe=off", busy)
+
+    def test_settings_summary_appends_every_display_setting(self):
+        """Refresh, stretch, gamma, palette, invert and flip follow the old fields.
+
+        Args: None.
+        Returns: None.
+        """
+        plain = diagnostics.settings_summary(Settings())
+        self.assertEqual(plain, (
+            "mode=Raw noise_reduction=0 average=1 block smoothing=off "
+            "exposure=8000us gain=0dB fps=30 clahe=on ref_refresh=0s stretch=on "
+            "clip=0% gamma=1 palette=Gray invert=off flip=off"))
+        busy = diagnostics.settings_summary(Settings(
+            ref_refresh_s=2.0, scale_range=False, clip_percent=3.5, gamma=2.1,
+            palette="Turbo", invert=True, flip_horizontal=True,
+            single_field=True), interlaced=True)
+        self.assertTrue(busy.endswith(
+            "clahe=on ref_refresh=2s stretch=off clip=3.5% gamma=2.1 "
+            "palette=Turbo invert=on single_field=on flip=on"))
+        self.assertNotIn("single_field", diagnostics.settings_summary(
+            Settings(single_field=True)))  # progressive sources: no meaning
+        self.assertIn("single_field=off", diagnostics.settings_summary(
+            Settings(single_field=False), interlaced=True))
 
     def test_sharpness_falls_with_blur_for_large_and_small_frames(self):
         """Blur lowers the value; small frames are measured without resizing.

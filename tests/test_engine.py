@@ -10,7 +10,7 @@ import unittest
 
 import numpy as np
 
-from espi_live import paths
+from espi_live import diagnostics, paths
 from espi_live.engine import Engine
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
                                   apply_palette, normalize_min_max,
@@ -317,6 +317,59 @@ class EngineDemoTests(unittest.TestCase):
         engine._handle_actions(ESPIProcessor(), None)
         self.assertFalse(engine.save_pending())
         self.assertTrue(any("No current display frame" in line for line in self.log.lines))
+
+    def test_settings_are_logged_in_full_at_start_and_on_request(self):
+        """Streaming starts with every setting; a preset's line replaces its changes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(wait_until(lambda: self.log.has(
+            "Settings at start: mode=Raw noise_reduction=0")))
+        start = next(line for line in self.log.lines
+                     if line.startswith("Settings at start: "))
+        self.assertIn("ref_refresh=0s stretch=on clip=0% gamma=1", start)
+        self.assertNotIn("single_field", start)  # the demo source is progressive
+        self.engine.update_settings(gamma=2.2, palette="Turbo", ref_refresh_s=2.0)
+        self.engine.request("log_settings", label="Settings after preset Test")
+        self.assertTrue(wait_until(lambda: self.log.has(
+            "Settings after preset Test: ")))
+        line = next(line for line in self.log.lines
+                    if line.startswith("Settings after preset Test: "))
+        self.assertIn("ref_refresh=2s", line)
+        self.assertIn("gamma=2.2 palette=Turbo", line)
+        time.sleep(diagnostics.SETTLE_S + 0.4)
+        self.assertFalse(self.log.has("Gamma: "))  # already in the full line
+        self.assertFalse(self.log.has("Reference auto-refresh: "))
+
+    def test_a_slider_drag_is_logged_once_it_settles(self):
+        """Many quick changes write one line, with the final value.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(wait_until(lambda: self.log.has("Settings at start: ")))
+        for step in range(1, 11):
+            self.engine.update_settings(clip_percent=step * 0.5)
+            time.sleep(0.03)
+        self.assertTrue(wait_until(lambda: self.log.has("Stretch clip: 5%")))
+        clips = [line for line in self.log.lines if line.startswith("Stretch clip:")]
+        self.assertEqual(clips, ["Stretch clip: 5%"])
+
+    def test_a_save_writes_changes_that_have_not_settled(self):
+        """The log names the settings a saved frame was made with.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        engine = Engine(log)
+        engine.update_settings(gamma=3.0)
+        engine._changes.observe(engine.settings(), 0.0)  # waiting to settle
+        engine.request("save", title="", notes="")
+        engine._handle_actions(ESPIProcessor(), None)
+        self.assertEqual(log.lines[-2:], ["Gamma: 3", "No current display frame "
+                                          "is ready to save."])
 
     def test_reference_mode_and_actions(self):
         """Reference capture and resets run on the worker without errors.

@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-14 — The log records every display setting
+
+### Previous state
+
+- Diagnostic lines (blur, frame gaps, lost frames) ended with the settings in force, but only mode, noise reduction, averaging, speckle filter, exposure, gain, frame rate and CLAHE. Reference auto-refresh, stretch and its clip, gamma, palette, invert, flip and the single-field option were missing, so a log could not say whether the reference was being retaken while the plate vibrated.
+- Nothing recorded the settings a session started with, and stretch, clip, gamma, palette, invert, flip, CLAHE, noise reduction, averaging and the speckle filter were logged only at DEBUG level when they changed.
+- Dragging the Ref. refresh slider wrote a `Reference auto-refresh:` line for every step, twenty or more per drag.
+
+### Current state
+
+- The settings suffix on diagnostic lines lists every setting that changes the displayed image. The existing fields keep their names and order; the new ones follow them: `... clahe=on ref_refresh=0s stretch=on clip=3.5% gamma=2.1 palette=Gray invert=off flip=off`. `single_field=on|off` appears before `flip` only for an interlaced source (the analog camera through the USB-Live2), the only case in which it changes the image.
+- One `Settings at start:` line with every setting is written when a camera or the demo starts streaming, `Settings at live start:` after switching from demo to a camera, and `Settings after preset <name>:` after **Live preview** or **Measurement** is applied.
+- A changed setting gets one INFO line (`Gamma: 2.1`, `Stretch clip: 3.5%`, `Reference auto-refresh: every 2.0 s`, `Palette: Turbo`, `Exposure: 12000 us`, ...) once its value has stayed the same for 0.75 s, so a slider drag writes its final value only. A change still settling is written at once when a frame is saved or a recording starts, so the log always shows what they were made with. `View:` and `Fields:` lines are written immediately as before.
+- Processing and defaults are unchanged; only the log is.
+
 ## 2026-11-14 — Interface size slider
 
 ### Previous state
