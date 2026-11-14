@@ -24,7 +24,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QHelpEvent, QKeyEvent, QScreen, QSurfaceFormat
 from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSlider,
                                QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
@@ -2003,7 +2003,7 @@ class PollingTests(WindowTestCase):
 
         def geometry():
             QApplication.processEvents()
-            return [(w.x(), w.width()) for w in items]
+            return [w.geometry().getRect() for w in items]
 
         before = geometry()
         window.camera_fps_status.setText("Camera: 1000000000.0 fps (simulated)")
@@ -2065,8 +2065,14 @@ class PollingTests(WindowTestCase):
                          qt_app.format_tooltip(
                              "Request feature: Send a feature request to the developers "
                              "as a GitHub issue."))
-        self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
-        self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
+        # Reading order (row, then left to right): the buttons, the rule, then the source.
+        def reading_order(widget):
+            return (widget.y(), widget.x())
+
+        self.assertLess(reading_order(window.codex_button),
+                        reading_order(window.status_actions_rule))
+        self.assertLess(reading_order(window.status_actions_rule),
+                        reading_order(window.source_badge))
         self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
         self.assertGreaterEqual(window.source_badge.width(),
                                 window.source_badge.sizeHint().width())
@@ -2343,6 +2349,309 @@ class EngineEventTests(WindowTestCase):
             self.engine.events.put(("stopped", None))
             self.window._handle_events()
         close.assert_called_once()
+
+
+def box(width, height):
+    """Make a widget of a fixed size, to stand in for a status-bar item.
+
+    Args: width and height are its size in pixels.
+    Returns: A QWidget.
+    """
+    widget = QWidget()
+    widget.setFixedSize(width, height)
+    return widget
+
+
+class StatusLayoutTests(unittest.TestCase):
+    """StatusLayout: one row when everything fits, more rows when it does not."""
+
+    def build(self, sizes, message_min=100):
+        """Make a host with a 50x10 message area and items of the given sizes.
+
+        Args: sizes lists (width, height) of the items after the message;
+            message_min is the layout's least message width.
+        Returns: The StatusLayout; self.host, self.message and self.items
+            hold the widgets.
+        """
+        self.host = QWidget()
+        self.addCleanup(self.host.deleteLater)
+        flow = qt_app.StatusLayout(self.host, message_min)
+        self.message = QWidget()  # at least 50x10, and free to grow
+        self.message.setMinimumSize(50, 10)
+        flow.addWidget(self.message)
+        self.items = [box(*size) for size in sizes]
+        for item in self.items:
+            flow.addWidget(item)
+        return flow
+
+    def test_items_share_one_row_when_they_fit(self):
+        """The message area takes what the items leave; the items sit at the right.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.assertEqual(flow.heightForWidth(400), 20)
+        flow.setGeometry(QRect(0, 0, 400, 20))
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 202, 20))
+        self.assertEqual([item.geometry().getRect() for item in self.items],
+                         [(208, 0, 60, 20), (274, 0, 60, 20), (340, 0, 60, 20)])
+        self.assertEqual(self.host.height(), 20)
+
+    def test_items_centre_vertically_in_their_row(self):
+        """A shorter item sits in the middle of its row.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20), (60, 10)])
+        flow.setGeometry(QRect(0, 0, 400, 20))
+        self.assertEqual(self.items[1].geometry().y(), 5)
+
+    def test_items_that_do_not_fit_move_to_more_rows(self):
+        """Too narrow: the message keeps the first row, the items wrap beneath it.
+
+        Each row is as tall as its tallest item, and the rows are right-aligned.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.assertEqual(flow.heightForWidth(150), 10 + 2 + 20 + 2 + 20)
+        flow.setGeometry(QRect(0, 0, 150, 54))
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 150, 10))
+        self.assertEqual([item.geometry().getRect() for item in self.items],
+                         [(24, 12, 60, 20), (90, 12, 60, 20), (90, 34, 60, 20)])
+        self.assertEqual(self.host.height(), 54)
+        flow.setGeometry(QRect(0, 0, 400, 54))  # wider again: back to one row
+        self.assertEqual(self.host.height(), 20)
+
+    def test_the_first_row_is_shared_when_the_message_keeps_its_minimum(self):
+        """Items that fit beside the message's minimum stay on its row.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3, message_min=100)
+        flow.setGeometry(QRect(0, 0, 290, 0))  # two items fit beside the 100 px minimum
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 158, 20))
+        self.assertEqual([item.geometry().y() for item in self.items], [0, 0, 22])
+
+    def test_hidden_items_take_no_room(self):
+        """A hidden item leaves no gap, and showing it again restores its room.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.items[1].hide()
+        flow.setGeometry(QRect(0, 0, 400, 0))
+        self.assertEqual([item.geometry().x() for item in (self.items[0], self.items[2])],
+                         [274, 340])
+        self.assertEqual(flow.sizeHint().width(), 50 + 2 * 60 + 2 * 6)
+        self.items[1].show()
+        self.assertEqual(flow.sizeHint().width(), 50 + 3 * 60 + 3 * 6)
+
+    def test_the_separator_is_dropped_at_the_edge_of_a_row(self):
+        """The rule never begins or ends a row; it is parked past the right edge.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20), (60, 20), (10, 20), (60, 20)])
+        flow.separator = self.items[2]
+        flow.setGeometry(QRect(0, 0, 140, 0))  # a and b fill the row, then the rule
+        self.assertGreaterEqual(self.items[2].x(), 140)
+        self.assertEqual(self.items[3].x(), 80)  # c wrapped, right-aligned alone
+        self.assertEqual(self.items[3].y(), self.items[0].y() + 22)
+        flow.setGeometry(QRect(0, 0, 400, 0))  # roomy: the rule sits between b and c
+        self.assertLess(self.items[2].x(), 400)
+        self.assertEqual(self.items[2].width(), 10)
+
+    def test_the_separator_is_dropped_first_and_last(self):
+        """A rule with nothing before it, or nothing after it, is not shown.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(10, 20), (60, 20)])
+        flow.separator = self.items[0]
+        flow.setGeometry(QRect(0, 0, 300, 0))
+        self.assertGreaterEqual(self.items[0].x(), 300)
+        flow = self.build([(60, 20), (10, 20)])
+        flow.separator = self.items[1]
+        flow.setGeometry(QRect(0, 0, 300, 0))
+        self.assertGreaterEqual(self.items[1].x(), 300)
+
+    def test_a_lone_message_gets_every_row_width(self):
+        """With no other items the message area fills the strip.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([])
+        flow.setGeometry(QRect(0, 0, 300, 0))
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 300, 10))
+        self.assertEqual(self.host.height(), 10)
+
+    def test_size_hints_and_item_access(self):
+        """The one-row size, the any-width minimum and the QLayout item protocol.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.assertEqual(flow.sizeHint(), QSize(50 + 3 * 60 + 3 * 6, 20))
+        self.assertEqual(flow.minimumSize(), QSize(0, 20))
+        self.assertTrue(flow.hasHeightForWidth())
+        self.assertEqual(flow.expandingDirections(), Qt.Orientation(0))
+        self.assertEqual(flow.count(), 4)
+        self.assertIs(flow.itemAt(1).widget(), self.items[0])
+        self.assertIsNone(flow.itemAt(9))
+        self.assertIsNone(flow.itemAt(-1))
+        self.assertIsNone(flow.takeAt(9))
+        self.assertIs(flow.takeAt(1).widget(), self.items[0])
+        self.assertEqual(flow.count(), 3)
+
+
+class StatusBarLayoutTests(WindowTestCase):
+    """The window's status bar wraps its readouts instead of cutting them short."""
+
+    WIDEST = {
+        "camera_fps_status": "Camera: 999.9 fps (simulated)",
+        "speed_status": "Processed: 999.9 fps    Work: 99.9 ms/frame    Displayed: 999.9 fps",
+        "record_label": "Recording: 999.9 fps",
+        "range_status": "Input: 255–255    Scaled: 255–255",
+        "pixel_status": "x 3088, y 2064: 255",
+        "source_badge": "  BFS-U3-200S6M-C  ",
+    }
+
+    def settle(self, width):
+        """Resize the window and let the layout, and the bar's height, settle.
+
+        Args: width is the window width in pixels.
+        Returns: None.
+        """
+        self.window.resize(width, 700)
+        for _ in range(3):
+            QApplication.processEvents()
+
+    def readouts(self):
+        """List the widgets the strip lays out after its message area.
+
+        Args: None.
+        Returns: The visible items, in layout order.
+        """
+        flow = self.window.status_strip.flow
+        items = [flow.itemAt(i).widget() for i in range(1, flow.count())]
+        return [item for item in items if not item.isHidden()]
+
+    def test_every_readout_shows_in_full_at_any_width(self):
+        """Wide or narrow, nothing is shortened, clipped or drawn over another item.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        for name, text in self.WIDEST.items():
+            getattr(window, name).setText(text)
+        window.hint_label.setText(qt_app.LONGEST_HINT)
+        for width in (2400, 1600, 1280, 900, 700):
+            self.settle(width)
+            strip = window.status_strip
+            seen = []
+            for item in self.readouts():
+                rect = item.geometry()
+                if item is window.status_actions_rule and rect.x() >= strip.width():
+                    continue  # dropped at a row's edge
+                self.assertGreaterEqual(rect.left(), 0, (width, item))
+                self.assertLessEqual(rect.right(), strip.width() - 1, (width, item))
+                self.assertFalse(any(rect.intersects(other) for other in seen), (width, item))
+                seen.append(rect)
+            for name in self.WIDEST:
+                label = getattr(window, name)
+                self.assertEqual(QLabel.text(label), label.text(), (width, name))
+            self.assertGreaterEqual(window.hint_label.width(),
+                                    window.hint_label.sizeHint().width(), width)
+
+    def test_the_bar_is_one_row_when_wide_and_taller_when_narrow(self):
+        """Extra rows cost height only when the window is too narrow for one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        heights = {}
+        for width in (700, 900, 1280, 2400):
+            self.settle(width)
+            strip = window.status_strip
+            heights[width] = strip.height()
+            self.assertGreaterEqual(window.statusBar().height(), strip.height())
+            self.assertEqual(strip.height(), strip.flow.heightForWidth(strip.width()))
+        self.assertEqual(heights[2400], window.status_strip.flow.sizeHint().height())
+        self.assertLessEqual(heights[1280], heights[900])
+        self.assertLessEqual(heights[900], heights[700])
+        self.assertLess(heights[2400], heights[1280])
+
+    def test_the_hint_and_readouts_do_not_crowd_each_other_when_narrow(self):
+        """A narrow window moves the readouts below the message instead of squeezing it.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        window.hint_label.setText(qt_app.LONGEST_HINT)
+        self.settle(900)
+        strip = window.status_strip
+        self.assertGreater(strip.height(), strip.flow.sizeHint().height())
+        self.assertGreaterEqual(window.hint_label.width(),
+                                window.hint_label.fontMetrics().horizontalAdvance(
+                                    qt_app.LONGEST_HINT))
+        hint_top = window.hint_label.mapTo(strip, QPoint(0, 0)).y()
+        self.assertGreater(window.pixel_status.y(), hint_top)  # a row below the hint
+
+    def test_a_temporary_message_replaces_the_notices_but_not_the_readouts(self):
+        """showMessage shows its text in the strip; the readouts stay on screen.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        strip = window.status_strip
+        self.assertTrue(window.hint_label.isVisible())
+        self.assertFalse(strip.message_label.isVisible())
+        window.statusBar().showMessage("Checking GitHub for a newer build…")
+        QApplication.processEvents()
+        self.assertTrue(strip.message_label.isVisible())
+        self.assertEqual(strip.message_label.text(), "Checking GitHub for a newer build…")
+        self.assertFalse(window.hint_label.isVisible())
+        self.assertTrue(window.source_badge.isVisible())
+        window.statusBar().clearMessage()
+        QApplication.processEvents()
+        self.assertFalse(strip.message_label.isVisible())
+        self.assertTrue(window.hint_label.isVisible())
+
+    def test_a_long_camera_name_widens_the_source_badge(self):
+        """The badge shows the whole name, and goes back to its usual width after.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        usual = window.source_badge.sizeHint().width()
+        window.source_badge.setText("  Hauppauge USB-Live2 capture stick  ")
+        QApplication.processEvents()
+        self.assertGreater(window.source_badge.sizeHint().width(), usual)
+        self.assertEqual(QLabel.text(window.source_badge),
+                         "  Hauppauge USB-Live2 capture stick  ")
+        window.source_badge.setText("  DUMMY MODE  ")
+        self.assertEqual(window.source_badge.sizeHint().width(), usual)
 
 
 class MultiCameraTests(unittest.TestCase):

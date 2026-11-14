@@ -42,7 +42,8 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, QButtonGroup,
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+                               QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
+                               QMessageBox,
                                QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
                                QSizePolicy, QSlider, QStyle, QTextEdit, QToolBar, QToolTip,
                                QVBoxLayout, QWidget)
@@ -254,6 +255,11 @@ def describe_session(channels, display):
 
 # Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
 FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
+# The longest view hint the engine reports (the status bar measures it), and the
+# least width the tip keeps beside it. The hint is information and gets its whole
+# sentence; the tip takes what is left and is shortened with an ellipsis.
+LONGEST_HINT = "ESPI difference view; min/max range is before gamma and palette"
+MESSAGE_TIP_WIDTH = 120
 # Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
 PIPELINE = ("noise reduction → difference → average → speckle filter → "
             "stretch → invert → gamma/CLAHE → palette")
@@ -1444,6 +1450,245 @@ class SettingsGuideDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class StatusLayout(QLayout):
+    """Lay out the status bar in one row when it fits, and in more when not.
+
+    The first item is the message area (tip, view hint, notices). It always
+    keeps at least ``message_min`` of the first row and takes whatever the
+    other items leave. The other items follow in order, as many as fit on that
+    row beside it; the rest flow onto further rows, each as tall as its own
+    tallest item. Rows are right-aligned. Nothing is ever cut short to make
+    everything fit on one row, and a row only costs the height it needs. The
+    ``separator`` is dropped when it would begin or end a row.
+    """
+
+    GAP = 6  # between items on a row
+    ROW_GAP = 2  # between rows
+
+    def __init__(self, parent=None, message_min=0):
+        """Start an empty layout.
+
+        Args: parent is the widget that owns it; message_min is the least
+            width the message area may have on a shared row.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self._items = []
+        self.message_min = message_min
+        self.separator = None  # a widget dropped at the edge of a row
+
+    def addItem(self, item):
+        """Append a layout item (QLayout calls this from addWidget).
+
+        Args: item is the QLayoutItem.
+        Returns: None.
+        """
+        self._items.append(item)
+
+    def count(self):
+        """Count the items, hidden ones included.
+
+        Args: None.
+        Returns: The number of items.
+        """
+        return len(self._items)
+
+    def itemAt(self, index):
+        """Return one item.
+
+        Args: index is its position.
+        Returns: The QLayoutItem, or None past the end.
+        """
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        """Remove and return one item.
+
+        Args: index is its position.
+        Returns: The QLayoutItem, or None past the end.
+        """
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def hasHeightForWidth(self):
+        """Say that the height depends on the width (the number of rows does).
+
+        Args: None.
+        Returns: True.
+        """
+        return True
+
+    def heightForWidth(self, width):
+        """Return the height the items need at a width.
+
+        Args: width is the available width in pixels.
+        Returns: The total height in pixels.
+        """
+        return self._plan(width)[1]
+
+    def expandingDirections(self):
+        """Say that the layout takes no more room than it is given.
+
+        Args: None.
+        Returns: No orientations.
+        """
+        return Qt.Orientation(0)
+
+    def sizeHint(self):
+        """Return the size that puts every item on one row.
+
+        Args: None.
+        Returns: A QSize.
+        """
+        items = [item for item in self._items if not item.isEmpty()]
+        width = sum(item.sizeHint().width() for item in items) + self.GAP * (len(items) - 1)
+        return QSize(width, self._row_height(items))
+
+    def minimumSize(self):
+        """Return the least size: any width, because rows can multiply.
+
+        Args: None.
+        Returns: A QSize one row tall.
+        """
+        return QSize(0, self._row_height([item for item in self._items
+                                          if not item.isEmpty()]))
+
+    def setGeometry(self, rect):
+        """Place the items and make the host exactly as tall as the rows.
+
+        The status bar sizes itself from its widgets' fixed heights, not from
+        heightForWidth, so the host's height is set here.
+
+        Args: rect is the area given to the layout.
+        Returns: None.
+        """
+        super().setGeometry(rect)
+        placed, height = self._plan(rect.width())
+        for item, cell in placed:
+            item.setGeometry(cell.translated(rect.topLeft()))
+        host = self.parentWidget()
+        if host.minimumHeight() != height or host.maximumHeight() != height:
+            host.setFixedHeight(height)
+
+    @staticmethod
+    def _row_height(items):
+        """Return the tallest item's height.
+
+        Args: items are the visible QLayoutItems.
+        Returns: The height in pixels (0 for no items).
+        """
+        return max((item.sizeHint().height() for item in items), default=0)
+
+    def _plan(self, width):
+        """Decide where every visible item goes at a width.
+
+        Args: width is the available width in pixels.
+        Returns: A list of (QLayoutItem, QRect relative to the layout), and
+            the total height.
+        """
+        message = self._items[0]
+        rest = [item for item in self._items[1:] if not item.isEmpty()]
+        widths = [min(item.sizeHint().width(), width) for item in rest]
+        heights = [item.sizeHint().height() for item in rest]
+        # Fill rows left to right. The first row starts with the message area's
+        # least width already used, so readouts only share it when they fit.
+        rows, used = [[]], self.message_min
+        for index in range(len(rest)):
+            gap = self.GAP if used else 0
+            wide = widths[index]
+            if rest[index].widget() is self.separator:
+                after = widths[index + 1] if index + 1 < len(rest) else None
+                if not rows[-1] or after is None or \
+                        used + gap + wide + self.GAP + after > width:
+                    rows[-1].append((index, 0))  # would sit at a row's edge: no room
+                    continue
+            elif used + gap + wide > width and (rows[-1] or len(rows) == 1):
+                rows.append([])
+                used, gap = 0, 0
+            rows[-1].append((index, wide))
+            used += gap + wide
+        placed, y = [], 0
+        for number, row in enumerate(rows):
+            shown = [(index, wide) for index, wide in row if wide]
+            high = max((heights[index] for index, _ in shown), default=0)
+            if number == 0:
+                high = max(high, message.sizeHint().height())
+            right = width - (sum(wide for _, wide in shown) + self.GAP * max(len(shown) - 1, 0))
+            if number == 0:  # the message area takes what the readouts leave
+                taken = right - self.GAP if shown else width
+                placed.append((message, QRect(0, 0, taken, high)))
+            x = right
+            for index, wide in row:
+                # A dropped item (width 0) is parked past the right edge, where
+                # the host clips it: widgets with a fixed width cannot be squeezed to 0.
+                left = x if wide else width
+                placed.append((rest[index], QRect(left, y + (high - heights[index]) // 2,
+                                                  wide, heights[index])))
+                x += wide + (self.GAP if wide else 0)
+            y += high + self.ROW_GAP
+        return placed, y - self.ROW_GAP
+
+
+class StatusStrip(QWidget):
+    """The status bar's whole content: messages on the left, readouts and buttons.
+
+    It sits in the QStatusBar as one permanent widget and wraps onto more rows
+    when the window is too narrow for everything on one row (see StatusLayout).
+    It also shows the status bar's temporary messages (QStatusBar.showMessage),
+    which the bar itself would otherwise draw under this widget.
+    """
+
+    def __init__(self, message_min):
+        """Create the strip with its message area.
+
+        Args: message_min is the least width the message area may have beside
+            the readouts; below that the readouts move to their own rows.
+        Returns: None.
+        """
+        super().__init__()
+        self.setAutoFillBackground(True)  # hides what the bar draws under it
+        self.flow = StatusLayout(self, message_min)
+        self.flow.setContentsMargins(0, 0, 0, 0)
+        self.notices = QWidget()  # error report, tip and view hint
+        self.notices_row = QHBoxLayout(self.notices)
+        self.notices_row.setContentsMargins(0, 0, 0, 0)
+        self.notices_row.setSpacing(StatusLayout.GAP)
+        self.message_label = QLabel()  # a temporary message replaces the notices
+        self.message_label.setVisible(False)
+        self.message_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.message_area = QWidget()
+        area = QHBoxLayout(self.message_area)
+        area.setContentsMargins(0, 0, 0, 0)
+        area.addWidget(self.notices)
+        area.addWidget(self.message_label)
+        self.flow.addWidget(self.message_area)
+
+    def add_notice(self, widget, stretch=0):
+        """Add a widget to the message area.
+
+        Args: widget is the QWidget; stretch is its share of spare width.
+        Returns: None.
+        """
+        self.notices_row.addWidget(widget, stretch)
+
+    def add_item(self, widget):
+        """Add a readout or button after the message area.
+
+        Args: widget is the QWidget.
+        Returns: None.
+        """
+        self.flow.addWidget(widget)
+
+    def show_message(self, text):
+        """Show a temporary status-bar message, or bring the notices back.
+
+        Args: text is the message; "" ends it (QStatusBar.messageChanged).
+        Returns: None.
+        """
+        self.message_label.setText(text)
+        self.message_label.setVisible(bool(text))
+        self.notices.setVisible(not text)
+
+
 class FixedLabel(QLabel):
     """A status-bar label whose width never depends on its text.
 
@@ -1462,8 +1707,10 @@ class FixedLabel(QLabel):
         super().__init__()
         self._full = ""
         self._hold = False  # when True, the bar may not shrink this label
-        self._reserved = max(self.fontMetrics().horizontalAdvance(text)
-                             for text in samples) + 2
+        self._grow = False  # when True, text wider than the samples widens the label
+        self._sampled = max(self.fontMetrics().horizontalAdvance(text)
+                            for text in samples) + 2
+        self._reserved = self._sampled
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
 
     def hold_full_text(self):
@@ -1473,6 +1720,17 @@ class FixedLabel(QLabel):
         Returns: None.
         """
         self._hold = True
+
+    def grow_to_text(self):
+        """Widen the label for text wider than the samples, instead of shortening it.
+
+        The width is then that of the widest sample or the current text,
+        whichever is larger, and changes only when the text does.
+
+        Args: None.
+        Returns: None.
+        """
+        self._grow = True
 
     def sizeHint(self):
         """Return the reserved width, whatever the text.
@@ -1509,6 +1767,11 @@ class FixedLabel(QLabel):
         Returns: None.
         """
         self._full = text
+        if self._grow:
+            reserved = max(self._sampled, self.fontMetrics().horizontalAdvance(text) + 2)
+            if reserved != self._reserved:
+                self._reserved = reserved
+                self.updateGeometry()
         super().setText(self.fontMetrics().elidedText(text, Qt.ElideRight, self.width()))
 
     def resizeEvent(self, event):
@@ -2272,47 +2535,60 @@ class MainWindow(QMainWindow):
         """
         bar = self.statusBar()
         bar.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+        # One strip holds every item: it keeps them on one row while they fit
+        # and wraps them onto more rows when the window is narrower, so nothing
+        # is cut short. The strip is the bar's only widget, and it also shows
+        # the bar's temporary messages.
+        self.status_strip = StatusStrip(message_min=0)
+        bar.addPermanentWidget(self.status_strip, 1)
+        bar.messageChanged.connect(self.status_strip.show_message)
         self.error_report_label = QLabel()  # error-report results, with the issue link
         self.error_report_label.setTextFormat(Qt.RichText)
         self.error_report_label.setOpenExternalLinks(True)
         self.error_report_label.setVisible(False)
         self.error_report_label.setStyleSheet("color:#b00020;")
-        bar.addWidget(self.error_report_label)
+        self.status_strip.add_notice(self.error_report_label)
         self.error_report_timer = QTimer(self)
         self.error_report_timer.setSingleShot(True)
         self.error_report_timer.timeout.connect(self.error_report_label.hide)
         settings = QSettings("ESPI", "espi_live")
         self.tips = tips.TipRotator(
             hidden=bool(settings.value("tips/hidden", False, bool)))
-        # Ignored, with no minimum, so the badges keep the width they had
-        # before the tip existed. Stretch 20 against the view hint's 1 fills
-        # the sentence first; the cap is the longest tip, and the hint gets
-        # whatever is left. Right-click and View > Help tips dismiss it.
+        # The hint keeps its whole sentence; the tip is Ignored, with no
+        # minimum, and fills what the hint leaves (capped at the longest tip),
+        # shortened with an ellipsis when that is little. Right-click and
+        # View > Help tips dismiss it.
         self.tip_label = TipLabel(*tips.TIPS)
         self.tip_label.clicked.connect(self._rotate_tip)
         self.tip_label.dismissed.connect(lambda: self._set_tips_visible(False))
         self.tip_label.setMinimumWidth(0)
         self.tip_label.setMaximumWidth(self.tip_label.sizeHint().width())
         self.tip_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        bar.addWidget(self.tip_label, 20)
-        self.hint_label = QLabel()  # takes the space the tip does not use
+        self.hint_label = QLabel()  # the current view's one-line explanation
         self.hint_label.setMinimumWidth(0)
-        self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.hint_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         set_tooltip(self.hint_label, "What the current view is showing.")
-        bar.addWidget(self.hint_label, 1)
+        self.status_strip.add_notice(self.tip_label, 1)  # left of the hint, as before
+        self.status_strip.add_notice(self.hint_label)
+        # The message area keeps the longest hint and a little of the tip
+        # beside the readouts; with less room the readouts move to their own rows.
+        self.status_strip.flow.message_min = (
+            self.hint_label.fontMetrics().horizontalAdvance(LONGEST_HINT)
+            + MESSAGE_TIP_WIDTH)
         self._show_tip()
-        # Leftmost permanent item: showing it only narrows the hint, so it moves
-        # nothing else.
+        # First item after the message area: showing it only narrows the hint
+        # on a shared row, and takes its place in the flow on a wrapped one.
         self.frozen_badge = QLabel("  FROZEN  ")
         self.frozen_badge.setStyleSheet(FROZEN_STYLE)
         set_tooltip(self.frozen_badge,
                     "The image on screen is held; the camera keeps running. "
                     "Shortcut: Space returns to live.")
         self.frozen_badge.setVisible(False)
-        bar.addPermanentWidget(self.frozen_badge)
+        self.status_strip.add_item(self.frozen_badge)
         # Every readout has a fixed width, so no value can move its neighbours.
         self.source_badge = FixedLabel("  DUMMY MODE  ", "  BFS-U3-200S6M-C  ")
         self.source_badge.hold_full_text()  # never "DUMM…"; the readouts ellipsize first
+        self.source_badge.grow_to_text()  # a long camera name widens it
         self.record_label = FixedLabel("Recording: finishing file", "Recording: 999.9 fps")
         set_tooltip(self.record_label,
                     "Whether this camera is recording, and the rate the file is "
@@ -2364,24 +2640,25 @@ class MainWindow(QMainWindow):
         slot.setContentsMargins(0, 0, 0, 0)
         for button in (self.update_button, self.check_button):
             slot.addWidget(button, 0, 0)  # same cell; the slot fits the visible one
-        bar.addPermanentWidget(self.update_slot)
+        self.status_strip.add_item(self.update_slot)
         self.feature_button = QPushButton()
         _set_icon_action(self.feature_button, FEATURE_LABEL, FEATURE_TIP)
         self.feature_button.clicked.connect(lambda: self._request_feature())
         _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE, ("",),
                            _status_icon("idea", ink))
-        bar.addPermanentWidget(self.feature_button)
+        self.status_strip.add_item(self.feature_button)
         self.codex_button = QPushButton()
         _set_icon_action(self.codex_button, CODEX_LABEL, CODEX_TIP)
         self.codex_button.clicked.connect(self._open_codex)
         _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE, ("",),
                            _status_icon("code", ink))
-        bar.addPermanentWidget(self.codex_button)
+        self.status_strip.add_item(self.codex_button)
         self.status_actions_rule = QFrame()
         self.status_actions_rule.setFrameShape(QFrame.Shape.VLine)
         self.status_actions_rule.setFrameShadow(QFrame.Shadow.Sunken)
         self.status_actions_rule.setFixedWidth(10)
-        bar.addPermanentWidget(self.status_actions_rule)
+        self.status_strip.add_item(self.status_actions_rule)
+        self.status_strip.flow.separator = self.status_actions_rule
         buttons = (self.update_button, self.check_button, self.feature_button,
                    self.codex_button)
         height = max(button.sizeHint().height() for button in buttons)
@@ -2389,7 +2666,7 @@ class MainWindow(QMainWindow):
             button.setFixedHeight(height)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
-            bar.addPermanentWidget(widget)
+            self.status_strip.add_item(widget)
 
     def _build_menus(self):
         """Create the View menu (docks, zoom and freeze) and the Help menu.
