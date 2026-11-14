@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-14 — Interface size slider
+
+### Previous state
+
+- Text, buttons, sliders, panels and the status bar had one fixed size. On a 1280 × 720 laptop or a high-resolution screen the window was too big or too small, and the only remedy was the operating system's display scaling, which needs a restart of the program.
+
+### Current state
+
+- **Interface size** (Controls panel, Display section) scales the whole window while it runs: text, buttons, sliders, check boxes, icons, docks, tooltips, dialogs and the status bar. It runs from 70% to 200% in 5% steps; 100% is the look it had before. Drag the slider and release (it applies on release, so the slider does not move away from the pointer), type a percentage, or press **Reset interface size to 100%**.
+- **View → Interface size** has **Larger**, **Smaller** and **Reset to 100%**, on `Ctrl++` (or `Ctrl+=`), `Ctrl+-` and `Ctrl+0` (`Cmd` on a Mac). The plain `0` and `1` keys still fit the image and show it at actual size.
+- The size is remembered and applied before the window opens the next time. The controls panel and the log keep their share of the window when the size changes.
+- A size that would make the window's smallest size larger than the screen (200% on a small screen, or a resolution change while the program runs) is lowered until it fits, and the log says so. 100% and smaller are never changed.
+- The image is not scaled: it still fills the room the panels leave. Status-bar wrapping is unchanged; at larger sizes it simply wraps onto more rows.
+- On the Mac the menu bar belongs to the system and keeps its size; the camera PC (Windows) scales it with the rest.
+
 ## 2026-11-14 — The status bar wraps instead of crowding
 
 ### Previous state
