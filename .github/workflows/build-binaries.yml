@@ -301,11 +301,13 @@ jobs:
       # uploads its scrubbed run logs there. Without it the build only warns
       # and that copy does not upload.
       # COMMITTED_AT is the commit time the error reporter compares against
-      # an issue's closed_at to tell a regression from a fixed bug.
+      # an issue's closed_at to tell a regression from a fixed bug. VERSION is
+      # the release tag the "version" job chose.
       - name: Write build info
         shell: bash
         env:
           BUILD_NUMBER: ${{ github.run_number }}
+          VERSION: ${{ needs.version.outputs.tag }}
           COMMIT: ${{ env.BUILD_REF }}
           REPO: ${{ github.repository }}
           ASSET: ${{ matrix.asset }}
@@ -318,6 +320,12 @@ jobs:
           python - <<'EOF'
           import os
           values = {"BUILD": int(os.environ["BUILD_NUMBER"])}
+          # The release's tag (v0.10.0, or v0.10.0-pre.N): shown in the window
+          # title, --version and the About box. The updater still orders builds
+          # by BUILD, never by this.
+          values["VERSION"] = os.environ["VERSION"].strip()
+          if not values["VERSION"]:
+              raise SystemExit("The version job produced no release tag")
           for name in ("COMMIT", "COMMITTED_AT", "REPO", "ASSET"):
               values[name] = os.environ[name]
           values["TOKEN"] = os.environ.get("UPDATE_TOKEN", "")
@@ -335,7 +343,7 @@ jobs:
                         'error_reports.py and log_uploads.py."""\n')
               for name, value in values.items():
                   out.write(f"{name} = {value!r}\n")
-          print("Build", values["BUILD"], values["ASSET"],
+          print("Version", values["VERSION"], "build", values["BUILD"], values["ASSET"],
                 "with update token" if values["TOKEN"] else "WITHOUT update token",
                 "and with feedback token",
                 "and with logs token" if values["LOGS_TOKEN"] else "and WITHOUT logs token",

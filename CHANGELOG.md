@@ -5,6 +5,11 @@
 - The first start after an update shows a **What's new** window with the notes from the GitHub Releases page for every full release the update moved past, newest first, each with a link to its release page. The download and platform notes every release repeats are left out.
 - The notes are fetched with the update check and saved beside the program (`espi-live-whats-new.json`) when the update installs, so the window works offline and appears only once, also after `espi-live --update`. Updating from a build older than this one installs normally but shows no notes, since that build does not save them.
 
+## 2026-11-14 — The window title shows the version
+
+- The main window's title now starts with the release version, for example `ESPI live v0.10.0 — BFS-U3-63S4M` or `ESPI live v0.10.0 — DUMMY MODE`. The version is the release's tag: the Release workflow bakes the tag chosen by its `version` job (`vX.Y.Z`, or `vX.Y.Z-pre.N` for a pre-release) into the build as `VERSION`.
+- **Help > About**, `--version`, the log header and error reports name the version before the build number. A source checkout, and a build made before this change, shows `dev` in the title and leaves the version out of the description. Updates are still ordered by build number only.
+
 ## 2026-11-14 — Releases are started by hand again
 
 ### Previous state

@@ -99,6 +99,8 @@ class BuildInfoTests(unittest.TestCase):
             self.assertEqual(updater.current_build(), 0)
             self.assertEqual(updater.build_value("X", "dflt"), "dflt")
             self.assertIn("source checkout", updater.describe_build())
+            self.assertEqual(updater.current_version(), "dev")
+            self.assertEqual(updater.app_title(), "ESPI live dev")
 
     def test_frozen_build_is_described_from_build_info(self):
         """With _build_info present the description names build and commit.
@@ -110,6 +112,20 @@ class BuildInfoTests(unittest.TestCase):
             self.assertEqual(updater.current_build(), 3)
             self.assertEqual(updater.describe_build(),
                              f"ESPI live build 3 (0123456, {ASSET})")
+            self.assertEqual(updater.current_version(), "dev")
+
+    def test_release_tag_is_the_version(self):
+        """A baked-in release tag is the version, in the title and description.
+
+        Args: None.
+        Returns: None.
+        """
+        tagged = types.SimpleNamespace(**{**vars(BUILD_INFO), "VERSION": "v0.10.0"})
+        with mock.patch.object(updater, "_build_info", tagged):
+            self.assertEqual(updater.current_version(), "v0.10.0")
+            self.assertEqual(updater.app_title(), "ESPI live v0.10.0")
+            self.assertEqual(updater.describe_build(),
+                             f"ESPI live v0.10.0 build 3 (0123456, {ASSET})")
 
 
 class InstallTargetTests(unittest.TestCase):

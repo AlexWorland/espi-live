@@ -1,7 +1,7 @@
 """Self-update of the prebuilt binaries from the newest GitHub release.
 
 Only PyInstaller builds update themselves; a source checkout updates with git.
-CI writes ``_build_info.py`` before freezing (build number, commit, repository,
+CI writes ``_build_info.py`` before freezing (release tag, build number, commit, repository,
 the archive name for this platform and an optional read-only token for the
 repository) and publishes ``build-info.json`` with each archive's SHA-256 next
 to the archives. Only the newest full release is used: GitHub's "latest"
@@ -54,6 +54,8 @@ except ImportError:  # source checkout: CI generates this module
 logger = logging.getLogger(__name__)
 
 API_ROOT = "https://api.github.com"
+# The version shown when no release tag was baked in (a source checkout).
+DEV_VERSION = "dev"
 MANIFEST_NAME = "build-info.json"
 TOKEN_FILE = "update-token.txt"
 TOKEN_ENV = "ESPI_UPDATE_TOKEN"
@@ -171,6 +173,26 @@ def current_build():
     return int(build_value("BUILD", 0))
 
 
+def current_version():
+    """Return this copy's release version, the GitHub release tag.
+
+    Args: None.
+    Returns: The tag baked in by CI (such as "v0.10.0", or "v0.10.0-pre.12"
+        for a pre-release), or "dev" for a source checkout or a build made
+        before the tag was recorded.
+    """
+    return str(build_value("VERSION", "")).strip() or DEV_VERSION
+
+
+def app_title():
+    """Name the program with its version, for the main window's title.
+
+    Args: None.
+    Returns: A string such as "ESPI live v0.10.0" or "ESPI live dev".
+    """
+    return f"ESPI live {current_version()}"
+
+
 def describe_build():
     """Describe this copy for --version and the About box.
 
@@ -179,7 +201,9 @@ def describe_build():
     """
     if _build_info is None:
         return "ESPI live (source checkout, no build number)"
-    return (f"ESPI live build {current_build()} "
+    version = build_value("VERSION", "").strip()
+    return (f"ESPI live {version + ' ' if version else ''}"
+            f"build {current_build()} "
             f"({build_value('COMMIT', '')[:7]}, {build_value('ASSET', '?')})")
 
 
