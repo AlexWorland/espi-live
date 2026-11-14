@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
-                               QSizePolicy, QSlider, QStyle, QTextEdit, QToolBar, QToolTip,
+                               QSizePolicy, QSlider, QStyle, QTextBrowser, QTextEdit, QToolBar, QToolTip,
                                QVBoxLayout, QWidget)
 
 from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, tips, updater
@@ -1548,6 +1548,31 @@ class TipLabel(FixedLabel):
             self.dismissed.emit()
 
 
+class WhatsNewDialog(QDialog):
+    """Show the release notes of the update that was just installed."""
+
+    def __init__(self, parent, whats_new):
+        """Build a read-only view of the notes with links that open in a browser.
+
+        Args: parent is the main window; whats_new is the updater.WhatsNew.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("ESPI live was updated")
+        self.resize(640, 540)
+        heading = QLabel(f"<b>Updated to build {whats_new.to_build}</b> "
+                         f"(from build {whats_new.from_build}). What's new:")
+        self.notes = QTextBrowser()
+        self.notes.setOpenExternalLinks(True)
+        self.notes.setMarkdown(whats_new.markdown())
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(self.accept)
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addWidget(self.notes, 1)
+        layout.addWidget(buttons)
+
+
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
 
@@ -1657,6 +1682,10 @@ class MainWindow(QMainWindow):
             self._schedule_update_check()
         if check_updates:
             self.source.start()  # downloads this build's source if it is missing
+        self.whats_new = updater.take_whats_new()
+        if self.whats_new is not None:
+            # After the window is on screen, so the notes appear in front of it.
+            QTimer.singleShot(0, self._show_whats_new)
 
     def showEvent(self, event):
         """Fit the window to its screen and follow that screen from now on.
@@ -3350,6 +3379,16 @@ class MainWindow(QMainWindow):
                                         "<br><br>Check the internet connection and try again.")
 
     # ----- updates -----------------------------------------------------------
+
+    def _show_whats_new(self):
+        """Show the release notes of the update this start follows.
+
+        Args: None.
+        Returns: None.
+        """
+        self.log.write(f"Updated from build {self.whats_new.from_build} to "
+                       f"{self.whats_new.to_build}")
+        WhatsNewDialog(self, self.whats_new).exec()
 
     def _schedule_update_check(self):
         """Arm the next update check a few hours from now, with a little jitter.

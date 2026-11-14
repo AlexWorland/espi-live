@@ -1104,6 +1104,51 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertLessEqual(span, qt_app.UPDATE_CHECK_JITTER_MS)
         window.close()
 
+    def test_first_start_after_update_shows_release_notes(self):
+        """Notes left by an update open in a dialog once the window is up.
+
+        Args: None.
+        Returns: None.
+        """
+        notes = updater.WhatsNew(4, 6, (
+            updater.ReleaseNote(6, "Build 6", "Faster [recording](https://x.invalid/r)",
+                                "https://x.invalid/6"),))
+        shown = []
+
+        def fake_exec(dialog):
+            """Record the dialog instead of blocking.
+
+            Args: dialog is the WhatsNewDialog.
+            Returns: 0.
+            """
+            shown.append((dialog.windowTitle(), dialog.notes.toPlainText(),
+                          dialog.notes.openExternalLinks()))
+            return 0
+
+        with mock.patch.object(qt_app.updater, "take_whats_new", return_value=notes):
+            window = demo_window(self.engine, self.log)
+        self.addCleanup(window.deleteLater)
+        window.frame_timer.stop()
+        window.status_timer.stop()
+        self.assertEqual(shown, [])  # waits for the event loop
+        with mock.patch.object(qt_app.WhatsNewDialog, "exec", fake_exec):
+            APP.processEvents()
+        window.close()
+        self.assertEqual(len(shown), 1)
+        title, text, external = shown[0]
+        self.assertEqual(title, "ESPI live was updated")
+        self.assertIn("Faster recording", text)
+        self.assertTrue(external)
+        self.assertIn("Updated from build 4 to 6", self.log.lines)
+
+    def test_normal_start_shows_no_release_notes(self):
+        """Without notes from an update no dialog is scheduled.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIsNone(self.window.whats_new)
+
     def test_mode_button_changes_engine_mode(self):
         """Clicking a view-mode button updates the engine's mode.
 

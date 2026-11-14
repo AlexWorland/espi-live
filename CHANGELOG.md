@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-14 — Release notes after an update
+
+- The first start after an update shows a **What's new** window with the notes from the GitHub Releases page for every full release the update moved past, newest first, each with a link to its release page. The download and platform notes every release repeats are left out.
+- The notes are fetched with the update check and saved beside the program (`espi-live-whats-new.json`) when the update installs, so the window works offline and appears only once, also after `espi-live --update`. Updating from a build older than this one installs normally but shows no notes, since that build does not save them.
+
 ## 2026-11-13 — Search the user guide
 
 - The user guide (**Help → User Guide**, **F1**) has a search box at the top of the page that stays in view while you scroll. Press `/` to jump to it; the browser's own Ctrl+F / Cmd+F still works as before.
