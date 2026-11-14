@@ -28,9 +28,9 @@ import cv2
 import numpy as np
 
 from espi_live import error_reports, sources
-from espi_live.diagnostics import (FrameCheckMonitor, FrameGapMonitor,
-                                   SharpnessMonitor, StreamCounterMonitor,
-                                   settings_summary)
+from espi_live.diagnostics import (BURST_COLOURS, Burst, FrameCheckMonitor,
+                                   FrameGapMonitor, SharpnessMonitor,
+                                   StreamCounterMonitor, settings_summary)
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
@@ -161,6 +161,7 @@ class Engine:
         self._settings = Settings()
         self._settings_lock = threading.Lock()
         self._actions = queue.SimpleQueue()
+        self._burst = None  # diagnostic capture in progress (worker thread only)
         self._saves_waiting = 0  # frame saves queued or being written
         self._saves_lock = threading.Lock()
         self._packet = None
@@ -351,8 +352,11 @@ class Engine:
         Args: action is "save" (payload title, notes; optionally packet, a
             frozen display's FramePacket to save instead of the newest one,
             and frozen_at, its datetime), "reference", "reset_previous",
-            "reset_average" or "switch_live" (the "switched_live" event then
-            carries every detected CameraInfo).
+            "reset_average", "switch_live" (the "switched_live" event then
+            carries every detected CameraInfo) or "diagnostics" (payload
+            count: the next count raw frames are posted as a
+            "diagnostic_burst" event; settings and the display are not
+            changed).
         Returns: None.
         """
         if action == "save":
@@ -576,10 +580,12 @@ class Engine:
             if frame.ndim != 2 or frame.dtype != np.uint8:
                 raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
             interlaced = self.camera is not None and self.camera.interlaced
+            colour = getattr(self.camera, "last_colour", None)
             # Measured before single-field mode, so both fields are seen.
             frame_check.observe(frame, time.monotonic(), context,
-                                colour=getattr(self.camera, "last_colour", None),
-                                interlaced=interlaced)
+                                colour=colour, interlaced=interlaced)
+            if self._burst is not None:
+                self._collect_burst(frame, colour, interlaced)
             if s.single_field and interlaced:
                 frame = single_field(frame)
 
@@ -756,6 +762,43 @@ class Engine:
         if recorder.error is not None:
             error_reports.caught(self.log, recorder.error, "recorder", "Recording error")
 
+    def _collect_burst(self, frame, colour, interlaced):
+        """Add a raw frame to a diagnostic capture; post it when complete.
+
+        Runs on the worker thread, the only one that may read the source.
+
+        Args: frame is the raw Mono8 frame before single-field mode; colour
+            is the BGR frame the device delivered, or None; interlaced says
+            the frame holds two fields.
+        Returns: None; a complete capture is posted as a "diagnostic_burst"
+            event carrying a diagnostics.Burst.
+        """
+        burst = self._burst
+        burst["frames"].append(frame.copy())
+        if colour is not None and len(burst["colours"]) < BURST_COLOURS:
+            burst["colours"].append(colour.copy())
+        if len(burst["frames"]) < burst["count"]:
+            return
+        self._burst = None
+        if self.demo:
+            camera, details = ("Dummy mode: synthetic frames, not camera data",), ()
+        else:
+            camera = tuple(self.camera.identity.description())
+            details = ()
+            if self.camera_info.kind == "capture":
+                try:
+                    details = tuple(self.camera.read_details())
+                except Exception as exc:
+                    self.log.write(f"Could not read the device details: {exc}")
+        packet = self.latest_packet()
+        self.events.put(("diagnostic_burst", Burst(
+            frames=tuple(burst["frames"]), colours=tuple(burst["colours"]),
+            interlaced=interlaced, camera=camera, details=details,
+            settings=self.settings(),
+            screen=packet.render() if packet is not None else None,
+            demo=self.demo)))
+        self.log.write(f"Diagnostic capture: {len(burst['frames'])} raw frames collected")
+
     def _handle_actions(self, processor, frame):
         """Run queued one-shot commands on the worker thread.
 
@@ -782,6 +825,11 @@ class Engine:
                 finally:
                     with self._saves_lock:
                         self._saves_waiting -= 1
+            elif action == "diagnostics":
+                self._burst = {"count": max(2, int(payload.get("count", 2))),
+                               "frames": [], "colours": []}
+                self.log.write(f"Diagnostic capture: collecting "
+                               f"{self._burst['count']} raw frames")
             elif action == "reset_previous":
                 processor.prev = None
                 self.log.write("Reset previous frame.")

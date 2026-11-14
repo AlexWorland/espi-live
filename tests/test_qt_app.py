@@ -5101,5 +5101,218 @@ class ScreenFitTests(unittest.TestCase):
         self.assertGreaterEqual(note.height(), note.heightForWidth(note.width()))
 
 
+
+class FakeDiagnosticWorker:
+    """Stand in for diagnostic_capture.DiagnosticWorker; records what it is given."""
+
+    made = []
+
+    def __init__(self, folder, log_path, serials):
+        """Record the arguments.
+
+        Args: folder, log_path and serials as the real worker takes them.
+        Returns: None.
+        """
+        self.folder, self.log_path, self.serials = folder, log_path, serials
+        self.events = queue.Queue()
+        self.bursts = []
+        FakeDiagnosticWorker.made.append(self)
+
+    def start(self, burst):
+        """Record a burst.
+
+        Args: burst is the diagnostics.Burst.
+        Returns: True.
+        """
+        self.bursts.append(burst)
+        return True
+
+
+class DiagnosticCaptureTests(WindowTestCase):
+    """Help > Send diagnostic capture: explanation, capture, result."""
+
+    def setUp(self):
+        """Build the window with a temporary output folder and a fake worker.
+
+        Args: None.
+        Returns: None.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        FakeDiagnosticWorker.made = []
+        for patcher in (mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
+                        mock.patch.object(qt_app.diagnostic_capture, "DiagnosticWorker",
+                                          FakeDiagnosticWorker)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def open_dialog(self):
+        """Open the dialog from the window.
+
+        Args: None.
+        Returns: The DiagnosticCaptureDialog.
+        """
+        self.window._send_diagnostics()
+        return self.window.diagnostic_dialog
+
+    def burst(self):
+        """Build a burst like an engine posts.
+
+        Args: None.
+        Returns: A diagnostics.Burst.
+        """
+        from test_diagnostic_capture import burst
+        return burst()
+
+    def test_menu_item_needs_a_live_camera(self):
+        """The Help item is disabled in dummy mode and enabled for a camera.
+
+        Args: None.
+        Returns: None.
+        """
+        action = self.window.diagnostics_action
+        self.assertEqual(action.text(), "Send diagnostic capture…")
+        self.assertFalse(action.isEnabled())
+        self.assertIn("Needs a live camera", action.toolTip())
+        self.window._set_demo(False)
+        self.assertTrue(action.isEnabled())
+        self.assertIn("Your settings are not changed", " ".join(action.toolTip().split()))
+
+    def test_explanation_with_go_back_and_continue(self):
+        """The dialog explains the capture; Go back closes it without capturing.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(dialog.windowTitle(), "Send diagnostic capture")
+        text = dialog.message.text()
+        for phrase in ("different settings", "exactly as you left them",
+                       "send it to the developer", "DEMO1"):
+            self.assertIn(phrase, text)
+        row = [dialog.buttons.itemAt(index).widget()
+               for index in range(dialog.buttons.count())]
+        self.assertEqual([button.text() for button in row
+                          if button is not None and button.isVisible()],
+                         ["Go back", "Continue"])
+        layout = dialog.layout()
+        self.assertIs(layout.itemAt(layout.count() - 1).layout(), dialog.buttons)
+        self.assertFalse(dialog.busy.isVisible())
+        self.assertTrue(dialog.continue_button.isDefault())
+        self.window._send_diagnostics()  # a second request raises the same dialog
+        self.assertIs(self.window.diagnostic_dialog, dialog)
+        dialog.back_button.click()
+        self.assertIsNone(self.window.diagnostic_dialog)
+        self.assertEqual(self.queued(), [])
+
+    def test_continue_captures_sends_and_shows_the_result(self):
+        """Continue asks the engine for frames; the burst is sent; Close remains.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.continue_button.click()
+        self.assertEqual(self.queued(), [("diagnostics", {"count": 8})])
+        self.assertFalse(dialog.continue_button.isVisible())
+        self.assertFalse(dialog.back_button.isVisible())
+        self.assertIn("Capturing frames", dialog.message.text())
+        self.assertTrue(dialog.busy.isVisible())
+        self.assertTrue(self.window.diagnostic_timeout.isActive())
+        burst = self.burst()
+        self.window._handle_event(self.window.current, "diagnostic_burst", burst)
+        self.assertFalse(self.window.diagnostic_timeout.isActive())
+        self.assertIn("Packaging and sending", dialog.message.text())
+        worker, = FakeDiagnosticWorker.made
+        self.assertEqual(worker.bursts, [burst])
+        self.assertEqual(worker.log_path, self.log.path)
+        self.window._poll_diagnostics()  # nothing yet
+        self.assertTrue(self.window.diagnostic_poll.isActive())
+        local = os.path.join(paths.output_folder("logs"), "diagnostics", "d.zip")
+        worker.events.put(("done", qt_app.diagnostic_capture.Result(
+            "sent", local=local, remote="diagnostics/2026-11-14/153012-ab.zip")))
+        self.window._poll_diagnostics()
+        self.assertFalse(self.window.diagnostic_poll.isActive())
+        self.assertIn("Sent.", dialog.message.text())
+        self.assertIn("153012-ab.zip", dialog.message.text())
+        self.assertTrue(dialog.close_button.isVisible())
+        self.assertTrue(dialog.folder_button.isVisible())
+        self.assertTrue(self.log.has("Diagnostic capture sent: diagnostics/2026-11-14"))
+        with mock.patch.object(qt_app.QDesktopServices, "openUrl", return_value=False):
+            dialog.folder_button.click()
+        self.dialogs.information.assert_called_once()
+        dialog.close_button.click()
+        self.assertIsNone(self.window.diagnostic_dialog)
+
+    def test_results_without_a_token_or_a_send(self):
+        """Saved-only and failed captures say where the copy is, or that there is none.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        Result = qt_app.diagnostic_capture.Result
+        dialog.show_result(Result("no_token", local="/x/diagnostics/d.zip"))
+        self.assertIn("Saved, not sent", dialog.message.text())
+        self.assertIn("/x/diagnostics/d.zip", dialog.message.text())
+        dialog.show_result(Result("no_token", error="could not save a copy: full"))
+        self.assertIn("could not save a copy: full", dialog.message.text())
+        self.assertFalse(dialog.folder_button.isVisible())
+        dialog.show_result(Result("failed", local="/x/d.zip", error="HTTP 500"))
+        self.assertIn("Not sent:</b> HTTP 500", dialog.message.text())
+        self.assertIn("try again later", dialog.message.text())
+        dialog.show_result(Result("failed", error="HTTP 500"))
+        self.assertIn("could not be saved", dialog.message.text())
+        self.assertNotIn("try again later", dialog.message.text())
+
+    def test_timeout_and_stopped_camera_fail_the_capture(self):
+        """No burst in time, or no running engine, ends with a failure.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.continue_button.click()
+        self.window._diagnostics_timed_out()
+        self.assertIn("the camera sent no frames", dialog.message.text())
+        self.assertIsNone(self.window.diagnostic_channel)
+        channel = self.window.current
+        engine, channel.engine = channel.engine, None
+        try:
+            self.window._start_diagnostics(channel)
+        finally:
+            channel.engine = engine
+        self.assertIn("the camera is not running", dialog.message.text())
+
+    def test_a_late_or_foreign_burst_is_ignored(self):
+        """A burst after the dialog closed, or from another camera, is dropped.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.continue_button.click()
+        other = Channel(self.log, CameraInfo("DEMO2", "Synthetic camera"), demo=True)
+        self.window._diagnostic_burst(other, self.burst())
+        self.assertEqual(FakeDiagnosticWorker.made, [])
+        dialog.reject()
+        self.assertFalse(self.window.diagnostic_timeout.isActive())
+        self.window._diagnostic_burst(self.window.current, self.burst())
+        self.assertEqual(FakeDiagnosticWorker.made, [])
+
+    def test_without_reporting_no_serials_are_known(self):
+        """A window without an error reporter passes an empty serial list.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.reporting = None
+        self.open_dialog().continue_button.click()
+        self.window._handle_event(self.window.current, "diagnostic_burst", self.burst())
+        self.assertEqual(FakeDiagnosticWorker.made[0].serials(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

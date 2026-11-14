@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-14 — Send a diagnostic capture from the Help menu
+
+- New **Help > Send diagnostic capture…** for working out why fringes are weak or missing. A window explains what will happen, with **Go back** and **Continue** at the bottom. Continue records eight raw frames in a row from the displayed camera (about a second), makes images from copies of them at several different settings (Raw, Previous with and without stretch, averaging, the speckle filter, Reference against the first frame and, for the analog camera, single field), and sends them to the developer's private logs repository together with the image on screen, the frame measurements, the capture device's details, the settings and this session's log (serial numbers and personal details removed).
+- Your settings and the live view are not changed: the other settings are applied only to copies of the frames, and the camera keeps running throughout.
+- A copy is always saved in `output/logs/diagnostics/`. If the capture cannot be sent (a copy without the logs token, or no network), the window says so and **Open folder** shows the file to send by hand. The item is unavailable in dummy mode.
+
 ## 2026-11-14 — Log evidence for weak or missing fringes
 
 - Every camera now writes a `Frame check:` line to the log every 10 seconds, measured on the raw camera frame before any processing, so view, stretch and gamma do not change it. It records brightness levels and how many pixels are clipped (including at analog video's 16 and 235 limits), how much the picture changes from one frame to the next, repeated frames, speckle contrast and size, detail across the image against detail down it (overall and around the NTSC colour-subcarrier spacing of about 3.8 pixels), colour in the frames of a monochrome camera, the mismatch between the two fields of an interlaced camera, and the input range of the view on screen.

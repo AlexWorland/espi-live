@@ -1110,6 +1110,69 @@ class CaptureEngineTests(CaptureEngineCase):
             lambda: self.log.has("Fields: single field (even rows, line-doubled)")))
 
 
+class DiagnosticBurstTests(CaptureEngineCase):
+    """A diagnostic capture collects raw frames on the worker thread."""
+
+    def test_capture_burst_holds_raw_frames_colour_and_details(self):
+        """Raw frames come before single-field mode; settings stay as they were.
+
+        Args: None.
+        Returns: None.
+        """
+        self.factory.frames = [interlaced_frame()]
+        engine_ = self.capture_engine()
+        engine_.start()
+        self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
+        before = engine_.settings()
+        engine_.request("diagnostics", count=3)
+        burst = self.wait_event("diagnostic_burst")
+        self.assertEqual(len(burst.frames), 3)
+        self.assertEqual(int(burst.frames[0][1].max()), 255)  # odd rows kept
+        self.assertEqual(len(burst.colours), diagnostics.BURST_COLOURS)
+        self.assertTrue(burst.interlaced)
+        self.assertFalse(burst.demo)
+        self.assertEqual(burst.camera[0], "Hauppauge USB-Live2 (analog capture)")
+        self.assertEqual(dict(burst.details)["Device name"], "Hauppauge USB-Live2")
+        self.assertEqual(burst.settings, before)
+        self.assertEqual(engine_.settings(), before)
+        self.assertIsNotNone(burst.screen)
+        self.assertTrue(self.log.has("Diagnostic capture: collecting 3 raw frames"))
+        self.assertTrue(wait_until(
+            lambda: self.log.has("Diagnostic capture: 3 raw frames collected")))
+
+    def test_burst_survives_unreadable_details(self):
+        """A device whose details cannot be read still gives its frames.
+
+        Args: None.
+        Returns: None.
+        """
+        engine_ = self.capture_engine()
+        engine_.start()
+        with mock.patch.object(capture.CaptureSession, "read_details",
+                               side_effect=RuntimeError("driver")):
+            engine_.request("diagnostics", count=2)
+            burst = self.wait_event("diagnostic_burst")
+        self.assertEqual(burst.details, ())
+        self.assertTrue(self.log.has("Could not read the device details: driver"))
+
+    def test_demo_burst_is_marked_and_takes_at_least_two_frames(self):
+        """Dummy mode says its frames are synthetic; one frame is not enough.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine = Engine(self.log)
+        self.engine.use_demo()
+        self.engine.start()
+        self.engine.request("diagnostics", count=1)
+        burst = self.wait_event("diagnostic_burst")
+        self.assertEqual(len(burst.frames), 2)
+        self.assertTrue(burst.demo)
+        self.assertEqual(burst.colours, ())
+        self.assertEqual(burst.details, ())
+        self.assertIn("synthetic", burst.camera[0])
+
+
 class SingleFieldFlirTests(CameraEngineCase):
     """Single-field mode never touches progressive FLIR frames."""
 

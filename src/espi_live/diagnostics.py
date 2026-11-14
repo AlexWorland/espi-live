@@ -24,6 +24,7 @@ periodic INFO line.
 """
 
 import collections
+import dataclasses
 import statistics
 
 import cv2
@@ -40,6 +41,7 @@ SHARPNESS_DROP = 0.6       # an episode starts below this share of typical
 SHARPNESS_RECOVER = 0.8    # and ends at or above this share
 DELIVERED_COUNTER = "StreamDeliveredFrameCount"
 FRAME_CHECK_INTERVAL_S = 10.0  # one frame-check line per camera this often
+BURST_COLOURS = 2          # a diagnostic capture keeps this many BGR frames
 CHECK_CROP = 256           # speckle and detail are measured on this square crop
 LOCAL_MEAN_SIGMA = 8.0     # px; removes illumination so only speckle remains
 REPEAT_STEP = 16           # repeated frames are spotted on every 16th pixel
@@ -542,39 +544,79 @@ class FrameCheckMonitor:
             frames hold two fields; context is the engine's context callable.
         Returns: The text of the line.
         """
-        levels = level_stats(previous)
-        change = change_stats(previous, frame)
-        parts = [
-            f"levels p1/p50/p99 {levels['p1']}/{levels['p50']}/{levels['p99']}, "
-            f"{levels['black']:.1f}% at or below {VIDEO_BLACK}, "
-            f"{levels['white']:.1f}% at or above {VIDEO_WHITE} "
-            f"({levels['zero']:.1f}% at 0, {levels['full']:.1f}% at 255)",
-            f"change to next frame median {change['median']} p95 {change['p95']} "
-            f"max {change['max']}",
-            f"repeated frames {self.repeats} of {self.frames}"]
-        crop, x, y = brightest_crop(previous)
-        speckle = speckle_stats(crop)
-        if speckle is None:
-            parts.append(f"speckle at ({x}, {y}): flat")
-        else:
-            parts.append(f"speckle at ({x}, {y}) contrast {speckle['contrast']:.2f}, "
-                         f"size {speckle['size_x']:.1f} × {speckle['size_y']:.1f} px "
-                         "(across × down)")
-        ratios = detail_ratios(crop)
-        if ratios is not None:
-            parts.append(f"detail across/down {ratios['low']:.2f} at "
-                         f"{LOW_BAND[0]:g}–{LOW_BAND[1]:g} c/px, "
-                         f"{ratios['subcarrier']:.2f} at "
-                         f"{SUBCARRIER_BAND[0]:g}–{SUBCARRIER_BAND[1]:g} c/px")
-        if colour is not None:
-            blue, red = colour_spread(colour)
-            parts.append(f"colour B−G {blue:.2f} R−G {red:.2f}")
-        if interlaced:
-            mismatch = field_mismatch(previous)
-            parts.append("field mismatch " + ("n/a" if mismatch is None
-                                              else f"{mismatch:.2f}"))
+        parts = pair_facts(previous, frame, colour, interlaced)
+        parts.insert(2, f"repeated frames {self.repeats} of {self.frames}")
         if self.view is not None:
             mode, low, high = self.view
             parts.append(f"view {mode}" if low is None
                          else f"view {mode} input {low}–{high}")
         return "Frame check: " + "; ".join(parts) + f"; {context()}"
+
+
+def pair_facts(previous, frame, colour=None, interlaced=False):
+    """Describe a raw frame and its change to the next one, as log phrases.
+
+    Shared by the frame-check line and the diagnostic capture's analysis.
+
+    Args: previous and frame are consecutive raw 2-D uint8 frames of one
+        shape; colour is the delivered BGR frame of the first one, or None;
+        interlaced says the frames hold two fields.
+    Returns: A list of phrases: levels, change to the next frame, speckle,
+        detail across/down (when the crop has detail), colour (when given)
+        and field mismatch (when interlaced).
+    """
+    levels = level_stats(previous)
+    change = change_stats(previous, frame)
+    parts = [
+        f"levels p1/p50/p99 {levels['p1']}/{levels['p50']}/{levels['p99']}, "
+        f"{levels['black']:.1f}% at or below {VIDEO_BLACK}, "
+        f"{levels['white']:.1f}% at or above {VIDEO_WHITE} "
+        f"({levels['zero']:.1f}% at 0, {levels['full']:.1f}% at 255)",
+        f"change to next frame median {change['median']} p95 {change['p95']} "
+        f"max {change['max']}"]
+    crop, x, y = brightest_crop(previous)
+    speckle = speckle_stats(crop)
+    if speckle is None:
+        parts.append(f"speckle at ({x}, {y}): flat")
+    else:
+        parts.append(f"speckle at ({x}, {y}) contrast {speckle['contrast']:.2f}, "
+                     f"size {speckle['size_x']:.1f} × {speckle['size_y']:.1f} px "
+                     "(across × down)")
+    ratios = detail_ratios(crop)
+    if ratios is not None:
+        parts.append(f"detail across/down {ratios['low']:.2f} at "
+                     f"{LOW_BAND[0]:g}–{LOW_BAND[1]:g} c/px, "
+                     f"{ratios['subcarrier']:.2f} at "
+                     f"{SUBCARRIER_BAND[0]:g}–{SUBCARRIER_BAND[1]:g} c/px")
+    if colour is not None:
+        blue, red = colour_spread(colour)
+        parts.append(f"colour B−G {blue:.2f} R−G {red:.2f}")
+    if interlaced:
+        mismatch = field_mismatch(previous)
+        parts.append("field mismatch " + ("n/a" if mismatch is None
+                                          else f"{mismatch:.2f}"))
+    return parts
+
+
+@dataclasses.dataclass(frozen=True)
+class Burst:
+    """Consecutive raw frames the engine collected for a diagnostic capture.
+
+    Attributes: frames are the raw 2-D uint8 frames, before single-field
+        mode, in order; colours are the BGR frames the device delivered for
+        the first few of them (empty for sources without colour);
+        interlaced says the frames hold two fields; camera lists the
+        source's description lines; details are a video device's (label,
+        text) pairs (empty for other sources); settings is the engine's
+        Settings at the time; screen is the displayed image (palette and
+        gamma applied) or None; demo marks synthetic frames.
+    """
+
+    frames: tuple
+    colours: tuple
+    interlaced: bool
+    camera: tuple
+    details: tuple
+    settings: object
+    screen: object
+    demo: bool
