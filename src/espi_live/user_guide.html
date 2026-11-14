@@ -1257,6 +1257,8 @@ python -m espi_live</code></pre>
               <td>&lt; 1 darkens midtones; &gt; 1 brightens.</td></tr>
             <tr><td>CLAHE</td><td>On</td><td>On / off</td>
               <td>Only with a color palette.</td></tr>
+            <tr><td>Interface size</td><td>100%</td><td>70–200%, step 5%</td>
+              <td>Scales the whole window; remembered for the next run.</td></tr>
             <tr><td>Record AVI</td><td>Off</td><td>On / off</td>
               <td>Output capped at 30 fps, floor 1 fps.</td></tr>
           </tbody>
@@ -1473,6 +1475,20 @@ python -m espi_live</code></pre>
             the app starts, shrunk to fit if the screen is now smaller.</li>
           <li>On a short screen, scroll the <strong>Controls</strong> panel to
             reach the controls below the fold.</li>
+          <li>If the text and controls are too large or too small for your
+            screen, change the <strong>Interface size</strong> slider in the
+            <strong>Display</strong> section of the Controls panel: drag it and
+            release, and the whole window (text, buttons, panels, status bar and
+            dialogs) takes the new size at once, without restarting. It is
+            remembered for the next run. <strong>Reset interface size to
+            100%</strong> returns to the standard size. <strong>View → Interface
+            size</strong> offers <strong>Larger</strong>,
+            <strong>Smaller</strong> and <strong>Reset</strong>, also on
+            <kbd>Ctrl</kbd>+<kbd>+</kbd>, <kbd>Ctrl</kbd>+<kbd>−</kbd> and
+            <kbd>Ctrl</kbd>+<kbd>0</kbd> (<kbd>⌘</kbd> on a Mac). A size that
+            would make the window larger than the screen is lowered until it
+            fits. The image itself is not scaled: it still fills the room the
+            panels leave.</li>
           <li>On a small screen, hide the log while measuring and show it when
             you need to check a saved path or an error.</li>
         </ul>
@@ -1549,6 +1565,11 @@ python -m espi_live</code></pre>
               64×</td></tr>
             <tr><td>Drag</td><td>Pan while zoomed</td></tr>
             <tr><td>Double-click</td><td>Toggle between fit and 4× zoom</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd> (or <kbd>Ctrl</kbd>+<kbd>=</kbd>),
+              <kbd>Ctrl</kbd>+<kbd>−</kbd></td><td>Make the whole interface
+              larger or smaller</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Return the interface
+              to 100%</td></tr>
             <tr><td><kbd>F1</kbd></td><td>Open this guide in your browser</td></tr>
           </tbody>
         </table>
@@ -1717,6 +1738,10 @@ python -m espi_live</code></pre>
           <strong>Help → Check for updates…</strong> checks on demand; it is
           greyed out while a check runs. While the app stays open it also
           checks on its own every few hours.</li>
+        <li>The first start after an update shows a <strong>What's new</strong>
+          window with the release notes of every release the update moved past,
+          newest first, each with a link to its page on GitHub. It appears once
+          and needs no network.</li>
         <li><code>espi-live --update</code> updates without opening a window;
           <code>--no-update-check</code> skips the startup check and source
           download.</li>

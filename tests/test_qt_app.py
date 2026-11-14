@@ -25,13 +25,14 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QHelpEvent, QKeyEvent, QScreen, QSurfaceFormat
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt
+from PySide6.QtGui import QFont, QHelpEvent, QKeyEvent, QKeySequence, QScreen, QSurfaceFormat
 from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSlider,
                                QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
-                               QPlainTextEdit, QPushButton, QStyle, QTextEdit, QWidget)
+                               QPlainTextEdit, QPushButton, QStyle, QTextEdit, QToolTip, QWidget)
 
-from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, tips, updater
+from espi_live import (camera, camera_reports, capture, feedback, paths, qt_app, sources, tips,
+                       ui_scale, updater)
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, integrated_webcam,
                           interlaced_frame, usb_live2, webcam)
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
@@ -1105,6 +1106,51 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertLessEqual(span, qt_app.UPDATE_CHECK_JITTER_MS)
         window.close()
 
+    def test_first_start_after_update_shows_release_notes(self):
+        """Notes left by an update open in a dialog once the window is up.
+
+        Args: None.
+        Returns: None.
+        """
+        notes = updater.WhatsNew(4, 6, (
+            updater.ReleaseNote(6, "Build 6", "Faster [recording](https://x.invalid/r)",
+                                "https://x.invalid/6"),))
+        shown = []
+
+        def fake_exec(dialog):
+            """Record the dialog instead of blocking.
+
+            Args: dialog is the WhatsNewDialog.
+            Returns: 0.
+            """
+            shown.append((dialog.windowTitle(), dialog.notes.toPlainText(),
+                          dialog.notes.openExternalLinks()))
+            return 0
+
+        with mock.patch.object(qt_app.updater, "take_whats_new", return_value=notes):
+            window = demo_window(self.engine, self.log)
+        self.addCleanup(window.deleteLater)
+        window.frame_timer.stop()
+        window.status_timer.stop()
+        self.assertEqual(shown, [])  # waits for the event loop
+        with mock.patch.object(qt_app.WhatsNewDialog, "exec", fake_exec):
+            APP.processEvents()
+        window.close()
+        self.assertEqual(len(shown), 1)
+        title, text, external = shown[0]
+        self.assertEqual(title, "ESPI live was updated")
+        self.assertIn("Faster recording", text)
+        self.assertTrue(external)
+        self.assertIn("Updated from build 4 to 6", self.log.lines)
+
+    def test_normal_start_shows_no_release_notes(self):
+        """Without notes from an update no dialog is scheduled.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIsNone(self.window.whats_new)
+
     def test_mode_button_changes_engine_mode(self):
         """Clicking a view-mode button updates the engine's mode.
 
@@ -2004,7 +2050,7 @@ class PollingTests(WindowTestCase):
 
         def geometry():
             QApplication.processEvents()
-            return [(w.x(), w.width()) for w in items]
+            return [w.geometry().getRect() for w in items]
 
         before = geometry()
         window.camera_fps_status.setText("Camera: 1000000000.0 fps (simulated)")
@@ -2066,8 +2112,14 @@ class PollingTests(WindowTestCase):
                          qt_app.format_tooltip(
                              "Request feature: Send a feature request to the developers "
                              "as a GitHub issue."))
-        self.assertLess(window.codex_button.x(), window.status_actions_rule.x())
-        self.assertLess(window.status_actions_rule.x(), window.source_badge.x())
+        # Reading order (row, then left to right): the buttons, the rule, then the source.
+        def reading_order(widget):
+            return (widget.y(), widget.x())
+
+        self.assertLess(reading_order(window.codex_button),
+                        reading_order(window.status_actions_rule))
+        self.assertLess(reading_order(window.status_actions_rule),
+                        reading_order(window.source_badge))
         self.assertEqual(QLabel.text(window.source_badge), "  DUMMY MODE  ")
         self.assertGreaterEqual(window.source_badge.width(),
                                 window.source_badge.sizeHint().width())
@@ -2358,6 +2410,309 @@ class EngineEventTests(WindowTestCase):
             self.engine.events.put(("stopped", None))
             self.window._handle_events()
         close.assert_called_once()
+
+
+def box(width, height):
+    """Make a widget of a fixed size, to stand in for a status-bar item.
+
+    Args: width and height are its size in pixels.
+    Returns: A QWidget.
+    """
+    widget = QWidget()
+    widget.setFixedSize(width, height)
+    return widget
+
+
+class StatusLayoutTests(unittest.TestCase):
+    """StatusLayout: one row when everything fits, more rows when it does not."""
+
+    def build(self, sizes, message_min=100):
+        """Make a host with a 50x10 message area and items of the given sizes.
+
+        Args: sizes lists (width, height) of the items after the message;
+            message_min is the layout's least message width.
+        Returns: The StatusLayout; self.host, self.message and self.items
+            hold the widgets.
+        """
+        self.host = QWidget()
+        self.addCleanup(self.host.deleteLater)
+        flow = qt_app.StatusLayout(self.host, message_min)
+        self.message = QWidget()  # at least 50x10, and free to grow
+        self.message.setMinimumSize(50, 10)
+        flow.addWidget(self.message)
+        self.items = [box(*size) for size in sizes]
+        for item in self.items:
+            flow.addWidget(item)
+        return flow
+
+    def test_items_share_one_row_when_they_fit(self):
+        """The message area takes what the items leave; the items sit at the right.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.assertEqual(flow.heightForWidth(400), 20)
+        flow.setGeometry(QRect(0, 0, 400, 20))
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 202, 20))
+        self.assertEqual([item.geometry().getRect() for item in self.items],
+                         [(208, 0, 60, 20), (274, 0, 60, 20), (340, 0, 60, 20)])
+        self.assertEqual(self.host.height(), 20)
+
+    def test_items_centre_vertically_in_their_row(self):
+        """A shorter item sits in the middle of its row.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20), (60, 10)])
+        flow.setGeometry(QRect(0, 0, 400, 20))
+        self.assertEqual(self.items[1].geometry().y(), 5)
+
+    def test_items_that_do_not_fit_move_to_more_rows(self):
+        """Too narrow: the message keeps the first row, the items wrap beneath it.
+
+        Each row is as tall as its tallest item, and the rows are right-aligned.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.assertEqual(flow.heightForWidth(150), 10 + 2 + 20 + 2 + 20)
+        flow.setGeometry(QRect(0, 0, 150, 54))
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 150, 10))
+        self.assertEqual([item.geometry().getRect() for item in self.items],
+                         [(24, 12, 60, 20), (90, 12, 60, 20), (90, 34, 60, 20)])
+        self.assertEqual(self.host.height(), 54)
+        flow.setGeometry(QRect(0, 0, 400, 54))  # wider again: back to one row
+        self.assertEqual(self.host.height(), 20)
+
+    def test_the_first_row_is_shared_when_the_message_keeps_its_minimum(self):
+        """Items that fit beside the message's minimum stay on its row.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3, message_min=100)
+        flow.setGeometry(QRect(0, 0, 290, 0))  # two items fit beside the 100 px minimum
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 158, 20))
+        self.assertEqual([item.geometry().y() for item in self.items], [0, 0, 22])
+
+    def test_hidden_items_take_no_room(self):
+        """A hidden item leaves no gap, and showing it again restores its room.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.items[1].hide()
+        flow.setGeometry(QRect(0, 0, 400, 0))
+        self.assertEqual([item.geometry().x() for item in (self.items[0], self.items[2])],
+                         [274, 340])
+        self.assertEqual(flow.sizeHint().width(), 50 + 2 * 60 + 2 * 6)
+        self.items[1].show()
+        self.assertEqual(flow.sizeHint().width(), 50 + 3 * 60 + 3 * 6)
+
+    def test_the_separator_is_dropped_at_the_edge_of_a_row(self):
+        """The rule never begins or ends a row; it is parked past the right edge.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20), (60, 20), (10, 20), (60, 20)])
+        flow.separator = self.items[2]
+        flow.setGeometry(QRect(0, 0, 140, 0))  # a and b fill the row, then the rule
+        self.assertGreaterEqual(self.items[2].x(), 140)
+        self.assertEqual(self.items[3].x(), 80)  # c wrapped, right-aligned alone
+        self.assertEqual(self.items[3].y(), self.items[0].y() + 22)
+        flow.setGeometry(QRect(0, 0, 400, 0))  # roomy: the rule sits between b and c
+        self.assertLess(self.items[2].x(), 400)
+        self.assertEqual(self.items[2].width(), 10)
+
+    def test_the_separator_is_dropped_first_and_last(self):
+        """A rule with nothing before it, or nothing after it, is not shown.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(10, 20), (60, 20)])
+        flow.separator = self.items[0]
+        flow.setGeometry(QRect(0, 0, 300, 0))
+        self.assertGreaterEqual(self.items[0].x(), 300)
+        flow = self.build([(60, 20), (10, 20)])
+        flow.separator = self.items[1]
+        flow.setGeometry(QRect(0, 0, 300, 0))
+        self.assertGreaterEqual(self.items[1].x(), 300)
+
+    def test_a_lone_message_gets_every_row_width(self):
+        """With no other items the message area fills the strip.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([])
+        flow.setGeometry(QRect(0, 0, 300, 0))
+        self.assertEqual(self.message.geometry().getRect(), (0, 0, 300, 10))
+        self.assertEqual(self.host.height(), 10)
+
+    def test_size_hints_and_item_access(self):
+        """The one-row size, the any-width minimum and the QLayout item protocol.
+
+        Args: None.
+        Returns: None.
+        """
+        flow = self.build([(60, 20)] * 3)
+        self.assertEqual(flow.sizeHint(), QSize(50 + 3 * 60 + 3 * 6, 20))
+        self.assertEqual(flow.minimumSize(), QSize(0, 20))
+        self.assertTrue(flow.hasHeightForWidth())
+        self.assertEqual(flow.expandingDirections(), Qt.Orientation(0))
+        self.assertEqual(flow.count(), 4)
+        self.assertIs(flow.itemAt(1).widget(), self.items[0])
+        self.assertIsNone(flow.itemAt(9))
+        self.assertIsNone(flow.itemAt(-1))
+        self.assertIsNone(flow.takeAt(9))
+        self.assertIs(flow.takeAt(1).widget(), self.items[0])
+        self.assertEqual(flow.count(), 3)
+
+
+class StatusBarLayoutTests(WindowTestCase):
+    """The window's status bar wraps its readouts instead of cutting them short."""
+
+    WIDEST = {
+        "camera_fps_status": "Camera: 999.9 fps (simulated)",
+        "speed_status": "Processed: 999.9 fps    Work: 99.9 ms/frame    Displayed: 999.9 fps",
+        "record_label": "Recording: 999.9 fps",
+        "range_status": "Input: 255–255    Scaled: 255–255",
+        "pixel_status": "x 3088, y 2064: 255",
+        "source_badge": "  BFS-U3-200S6M-C  ",
+    }
+
+    def settle(self, width):
+        """Resize the window and let the layout, and the bar's height, settle.
+
+        Args: width is the window width in pixels.
+        Returns: None.
+        """
+        self.window.resize(width, 700)
+        for _ in range(3):
+            QApplication.processEvents()
+
+    def readouts(self):
+        """List the widgets the strip lays out after its message area.
+
+        Args: None.
+        Returns: The visible items, in layout order.
+        """
+        flow = self.window.status_strip.flow
+        items = [flow.itemAt(i).widget() for i in range(1, flow.count())]
+        return [item for item in items if not item.isHidden()]
+
+    def test_every_readout_shows_in_full_at_any_width(self):
+        """Wide or narrow, nothing is shortened, clipped or drawn over another item.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        for name, text in self.WIDEST.items():
+            getattr(window, name).setText(text)
+        window.hint_label.setText(qt_app.LONGEST_HINT)
+        for width in (2400, 1600, 1280, 900, 700):
+            self.settle(width)
+            strip = window.status_strip
+            seen = []
+            for item in self.readouts():
+                rect = item.geometry()
+                if item is window.status_actions_rule and rect.x() >= strip.width():
+                    continue  # dropped at a row's edge
+                self.assertGreaterEqual(rect.left(), 0, (width, item))
+                self.assertLessEqual(rect.right(), strip.width() - 1, (width, item))
+                self.assertFalse(any(rect.intersects(other) for other in seen), (width, item))
+                seen.append(rect)
+            for name in self.WIDEST:
+                label = getattr(window, name)
+                self.assertEqual(QLabel.text(label), label.text(), (width, name))
+            self.assertGreaterEqual(window.hint_label.width(),
+                                    window.hint_label.sizeHint().width(), width)
+
+    def test_the_bar_is_one_row_when_wide_and_taller_when_narrow(self):
+        """Extra rows cost height only when the window is too narrow for one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        heights = {}
+        for width in (700, 900, 1280, 2400):
+            self.settle(width)
+            strip = window.status_strip
+            heights[width] = strip.height()
+            self.assertGreaterEqual(window.statusBar().height(), strip.height())
+            self.assertEqual(strip.height(), strip.flow.heightForWidth(strip.width()))
+        self.assertEqual(heights[2400], window.status_strip.flow.sizeHint().height())
+        self.assertLessEqual(heights[1280], heights[900])
+        self.assertLessEqual(heights[900], heights[700])
+        self.assertLess(heights[2400], heights[1280])
+
+    def test_the_hint_and_readouts_do_not_crowd_each_other_when_narrow(self):
+        """A narrow window moves the readouts below the message instead of squeezing it.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        window.hint_label.setText(qt_app.LONGEST_HINT)
+        self.settle(900)
+        strip = window.status_strip
+        self.assertGreater(strip.height(), strip.flow.sizeHint().height())
+        self.assertGreaterEqual(window.hint_label.width(),
+                                window.hint_label.fontMetrics().horizontalAdvance(
+                                    qt_app.LONGEST_HINT))
+        hint_top = window.hint_label.mapTo(strip, QPoint(0, 0)).y()
+        self.assertGreater(window.pixel_status.y(), hint_top)  # a row below the hint
+
+    def test_a_temporary_message_replaces_the_notices_but_not_the_readouts(self):
+        """showMessage shows its text in the strip; the readouts stay on screen.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        QApplication.processEvents()
+        strip = window.status_strip
+        self.assertTrue(window.hint_label.isVisible())
+        self.assertFalse(strip.message_label.isVisible())
+        window.statusBar().showMessage("Checking GitHub for a newer build…")
+        QApplication.processEvents()
+        self.assertTrue(strip.message_label.isVisible())
+        self.assertEqual(strip.message_label.text(), "Checking GitHub for a newer build…")
+        self.assertFalse(window.hint_label.isVisible())
+        self.assertTrue(window.source_badge.isVisible())
+        window.statusBar().clearMessage()
+        QApplication.processEvents()
+        self.assertFalse(strip.message_label.isVisible())
+        self.assertTrue(window.hint_label.isVisible())
+
+    def test_a_long_camera_name_widens_the_source_badge(self):
+        """The badge shows the whole name, and goes back to its usual width after.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.show()
+        usual = window.source_badge.sizeHint().width()
+        window.source_badge.setText("  Hauppauge USB-Live2 capture stick  ")
+        QApplication.processEvents()
+        self.assertGreater(window.source_badge.sizeHint().width(), usual)
+        self.assertEqual(QLabel.text(window.source_badge),
+                         "  Hauppauge USB-Live2 capture stick  ")
+        window.source_badge.setText("  DUMMY MODE  ")
+        self.assertEqual(window.source_badge.sizeHint().width(), usual)
 
 
 class MultiCameraTests(unittest.TestCase):
@@ -4651,6 +5006,9 @@ class CodexTests(WindowTestCase):
         patcher = mock.patch.object(qt_app.codex, "write_guide", return_value=None)
         self.write_guide = patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(qt_app.codex, "open_cli", return_value="/bin/codex")
+        self.open_cli = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def ready(self, note=""):
         """Deliver a "source ready" event.
@@ -4720,15 +5078,12 @@ class CodexTests(WindowTestCase):
                          "Getting the source code for Codex…")
         self.window.source.start.assert_called_once_with()
         FakeSettings.store["codex/intro_shown"] = True
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                               return_value=True) as open_url:
-            self.ready("Downloaded the source code")
+        self.ready("Downloaded the source code")
         self.assertTrue(self.window.codex_button.isEnabled())
         self.assertEqual(self.window.codex_button.accessibleName(), "Open in Codex")
         self.assertIn("Downloaded the source code", self.log.lines)
         self.write_guide.assert_called_once_with(self.FOLDER)
-        url = open_url.call_args.args[0]
-        self.assertEqual(url.toEncoded().data().decode(), qt_app.codex.deep_link(self.FOLDER))
+        self.open_cli.assert_called_once_with(self.FOLDER)
         self.assertIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
         self.assertIn("Opening Codex", self.window.statusBar().currentMessage())
 
@@ -4739,10 +5094,9 @@ class CodexTests(WindowTestCase):
         Returns: None.
         """
         before = list(self.log.lines)
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
-            self.ready()
+        self.ready()
         self.assertEqual(self.window.source_folder, self.FOLDER)
-        open_url.assert_not_called()
+        self.open_cli.assert_not_called()
         self.assertEqual(self.log.lines, before)
 
     def test_click_while_downloading_waits(self):
@@ -4782,21 +5136,19 @@ class CodexTests(WindowTestCase):
         Returns: None.
         """
         self.ready()
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                               return_value=True) as open_url:
-            with mock.patch.object(self.window, "_codex_intro", return_value=False):
-                self.window._open_codex()
-            open_url.assert_not_called()
-            self.assertNotIn("codex/intro_shown", FakeSettings.store)
-            with mock.patch.object(self.window, "_codex_intro", return_value=True) as intro:
-                self.window._open_codex()
-                self.window._open_codex()
+        with mock.patch.object(self.window, "_codex_intro", return_value=False):
+            self.window._open_codex()
+        self.open_cli.assert_not_called()
+        self.assertNotIn("codex/intro_shown", FakeSettings.store)
+        with mock.patch.object(self.window, "_codex_intro", return_value=True) as intro:
+            self.window._open_codex()
+            self.window._open_codex()
         intro.assert_called_once_with()
         self.assertTrue(FakeSettings.store["codex/intro_shown"])
-        self.assertEqual(open_url.call_count, 2)
+        self.assertEqual(self.open_cli.call_count, 2)
 
     def test_intro_buttons(self):
-        """Open Codex goes on; Get Codex opens the download page; Cancel stops.
+        """Open Codex goes on; How to install opens the install page; Cancel stops.
 
         Args: None.
         Returns: None.
@@ -4821,27 +5173,41 @@ class CodexTests(WindowTestCase):
         self.ready()
         FakeSettings.store["codex/intro_shown"] = True
         self.write_guide.side_effect = PermissionError("read-only")
-        with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
-            self.window._open_codex()
-        open_url.assert_not_called()
+        self.window._open_codex()
+        self.open_cli.assert_not_called()
         self.assertIn("read-only", self.dialogs.warning.call_args.args[2])
 
-    def test_missing_codex_offers_the_download(self):
-        """When no app takes the link, a dialog offers the download page.
+    def test_missing_codex_offers_the_install_page(self):
+        """When Codex is not installed, a dialog says so and links the install page.
 
         Args: None.
         Returns: None.
         """
         self.ready()
         FakeSettings.store["codex/intro_shown"] = True
-        for choice, opened in ((1, 1), (0, 2)):
+        self.open_cli.return_value = None
+        for choice, opened in ((1, 0), (0, 1)):
             self.buttons(choice, 2)
-            with mock.patch.object(qt_app.QDesktopServices, "openUrl",
-                                   return_value=False) as open_url:
+            with mock.patch.object(qt_app.QDesktopServices, "openUrl") as open_url:
                 self.window._open_codex()
             self.assertEqual(open_url.call_count, opened)
             self.assertEqual(self.dialogs.call_args.args[1], "Codex not found")
         self.assertEqual(open_url.call_args.args[0].toString(), qt_app.codex.INSTALL_URL)
+        self.assertNotIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
+
+    def test_terminal_that_cannot_start_warns(self):
+        """A terminal that fails to start is reported, not mistaken for a missing Codex.
+
+        Args: None.
+        Returns: None.
+        """
+        self.ready()
+        FakeSettings.store["codex/intro_shown"] = True
+        self.open_cli.side_effect = OSError("no terminal program was found")
+        self.window._open_codex()
+        self.dialogs.warning.assert_called_once()
+        self.assertIn("no terminal program", self.dialogs.warning.call_args.args[2])
+        self.assertNotIn(f"Opened Codex on {self.FOLDER}", self.log.lines)
 
 
 class HelpTipTests(WindowTestCase):
@@ -5116,6 +5482,563 @@ class ScreenFitTests(unittest.TestCase):
         QApplication.processEvents()
         note = self.window.noise_note
         self.assertGreaterEqual(note.height(), note.heightForWidth(note.width()))
+
+
+BIG_SCREEN = QRect(0, 0, 3000, 2000)
+
+
+class UiScaleTests(unittest.TestCase):
+    """The interface-size slider, menu and shortcuts scale the whole window live."""
+
+    def setUp(self):
+        """Build a demo window on a screen big enough for every interface size.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(QScreen, "availableGeometry", return_value=BIG_SCREEN),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(qt_app.apply_app_scale, ui_scale.DEFAULT_PERCENT)
+        self.log = FakeLog()
+        self.window = self.make_window()
+        self.base_point_size = qt_app.base_font().pointSizeF()
+
+    def make_window(self):
+        """Build a demo window with its timers stopped.
+
+        Args: None.
+        Returns: The MainWindow.
+        """
+        engine = Engine(self.log)
+        engine.use_demo()
+        window = demo_window(engine, self.log)
+        window.frame_timer.stop()
+        window.status_timer.stop()
+        window.tip_timer.stop()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        window.show()  # Qt re-fonts a widget only once it has been shown
+        QApplication.processEvents()
+        return window
+
+    def test_the_default_is_the_standard_size(self):
+        """Nothing stored means 100%: the font is untouched and the controls say so.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(QApplication.font().pointSizeF(), self.base_point_size)
+        self.assertEqual(window.ui_scale_row.value(), 100)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 130)
+        self.assertEqual(window.ui_scale_row.spin.maximumWidth(), 104)
+        self.assertFalse(window.ui_scale_reset.isEnabled())
+        self.assertFalse(window.scale_reset_action.isEnabled())
+        self.assertTrue(window.scale_larger_action.isEnabled())
+        self.assertTrue(window.scale_smaller_action.isEnabled())
+        self.assertEqual(FakeSettings.store, {})
+
+    def test_the_slider_row_explains_itself_in_the_display_section(self):
+        """The slider is labeled, spans the allowed range and has a tooltip.
+
+        Args: None.
+        Returns: None.
+        """
+        row = self.window.ui_scale_row
+        self.assertEqual((row.spin.minimum(), row.spin.maximum()), (70, 200))
+        self.assertEqual(row.spin.suffix(), "%")
+        self.assertIn("release", row.toolTip())
+        self.assertIn("Now: 100%", row.toolTip())
+        labels = [label.text() for label in self.window.controls_panel.findChildren(QLabel)]
+        self.assertIn("Interface size", labels)
+
+    def test_a_larger_size_scales_text_pixel_sizes_and_icons(self):
+        """150% makes every font and every fixed pixel size one and a half times larger.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        buttons = window._status_buttons()
+        before_widths = [button.maximumWidth() for button in buttons]
+        window.set_ui_scale(150)
+        self.assertEqual(ui_scale.percent(), 150)
+        self.assertAlmostEqual(QApplication.font().pointSizeF(), self.base_point_size * 1.5)
+        for widget in (window, window.log_view, window.statusBar(), window.menuBar(),
+                       window.zoom_label, window.ui_scale_row.spin):
+            self.assertAlmostEqual(widget.font().pointSizeF(), self.base_point_size * 1.5, 1,
+                                   msg=type(widget).__name__)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 195)
+        self.assertEqual(window.zoom_label.minimumWidth(), 66)
+        self.assertEqual(window.frame_notes.maximumHeight(), 72)
+        self.assertEqual(window.ui_scale_row.spin.maximumWidth(), 156)
+        self.assertEqual(window.status_actions_rule.maximumWidth(), 15)
+        self.assertEqual(window.controls_panel.minimumWidth(), 480)
+        self.assertEqual(window.controls_panel.layout().contentsMargins().left(), 15)
+        self.assertIn("padding:9px", window.demo_banner.styleSheet())
+        self.assertIn("margin-top:12px", window.frozen_banner.styleSheet())
+        self.assertAlmostEqual(QToolTip.font().pointSizeF(), self.base_point_size * 1.5)
+        for button, before in zip(buttons, before_widths):
+            self.assertGreater(button.maximumWidth(), before)
+            self.assertEqual(button.iconSize(), QSize(24, 24))
+        self.assertGreater(window.controls_scroll.minimumWidth(), 480)
+
+    def test_status_bar_items_are_measured_again(self):
+        """Readouts, the tip cap, the message area and the buttons follow the font.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        readout = window.speed_status.sizeHint().width()
+        tip_cap = window.tip_label.maximumWidth()
+        message_min = window.status_strip.flow.message_min
+        window.set_ui_scale(150)
+        self.assertGreater(window.speed_status.sizeHint().width(), readout * 1.3)
+        self.assertGreater(window.tip_label.maximumWidth(), tip_cap * 1.3)
+        self.assertGreater(window.status_strip.flow.message_min, message_min * 1.3)
+        heights = {button.maximumHeight() for button in window._status_buttons()}
+        self.assertEqual(len(heights), 1)
+        self.assertEqual({button.minimumHeight() for button in window._status_buttons()}, heights)
+
+    def test_dock_titles_follow_the_size(self):
+        """A dock's title is drawn from an explicit font, which Qt would otherwise keep stale.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(150)
+        for dock in (self.window.controls_dock, self.window.log_dock):
+            self.assertAlmostEqual(dock.font().pointSizeF(), self.base_point_size * 1.5, 1)
+            self.assertNotEqual(dock.font(), QApplication.font())
+
+    def test_the_controls_and_log_keep_their_share_of_the_window(self):
+        """The controls dock widens and the log dock deepens with the size.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.resize(2400, 1200)
+        QApplication.processEvents()
+        with mock.patch.object(window, "resizeDocks") as resize_docks:
+            window.controls_dock.setFixedWidth(400)
+            window.log_dock.setFixedHeight(100)
+            window.set_ui_scale(125)
+        self.assertEqual(resize_docks.call_args_list[0].args[1], [500])
+        self.assertEqual(resize_docks.call_args_list[1].args[1], [125])
+
+    def test_returning_to_100_percent_restores_the_original_sizes(self):
+        """Resetting undoes every change: fonts, pixel sizes, icons and styles.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        widths = [button.maximumWidth() for button in window._status_buttons()]
+        reserved = window.range_status.sizeHint().width()
+        banner = window.demo_banner.styleSheet()
+        window.set_ui_scale(175)
+        window.ui_scale_reset.click()
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(QApplication.font().pointSizeF(), self.base_point_size)
+        self.assertEqual([button.maximumWidth() for button in window._status_buttons()], widths)
+        self.assertEqual(window.range_status.sizeHint().width(), reserved)
+        self.assertEqual(window.demo_banner.styleSheet(), banner)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 130)
+        self.assertEqual(window._status_buttons()[1].iconSize(), QSize(16, 16))
+        self.assertFalse(window.ui_scale_reset.isEnabled())
+
+    def test_a_change_is_remembered_and_logged(self):
+        """The size is stored for the next run and named in the log.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(125)
+        self.assertEqual(FakeSettings.store[ui_scale.SETTING_KEY], 125)
+        self.assertIn("Interface size: 125%", self.log.drain())
+        self.window.set_ui_scale(125)  # no change: nothing more to say
+        self.assertNotIn("Interface size", self.log.drain())
+
+    def test_a_stored_size_is_applied_before_the_window_is_built(self):
+        """The next run starts at the remembered size, whatever type the store holds.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store[ui_scale.SETTING_KEY] = "150"  # ini files hand back text
+        window = self.make_window()
+        self.assertEqual(ui_scale.percent(), 150)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 195)
+        self.assertEqual(window.ui_scale_row.value(), 150)
+        self.assertTrue(window.ui_scale_reset.isEnabled())
+        self.assertAlmostEqual(window.log_view.font().pointSizeF(), self.base_point_size * 1.5, 1)
+
+    def test_a_damaged_stored_size_means_100_percent(self):
+        """Junk or out-of-range values do not break startup.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store[ui_scale.SETTING_KEY] = "huge"
+        self.make_window()
+        self.assertEqual(ui_scale.percent(), 100)
+        FakeSettings.store[ui_scale.SETTING_KEY] = 9000
+        self.make_window()
+        self.assertEqual(ui_scale.percent(), ui_scale.MAX_PERCENT)
+
+    def test_dragging_the_slider_applies_only_on_release(self):
+        """Mid-drag the value shows but the window waits, so the slider stays under the pointer.
+
+        Args: None.
+        Returns: None.
+        """
+        row = self.window.ui_scale_row
+        row.slider.setSliderDown(True)
+        row.slider.setValue(30)  # 150%
+        self.assertEqual(row.spin.value(), 150)
+        self.assertEqual(ui_scale.percent(), 100)
+        row.slider.setSliderDown(False)  # the release
+        self.assertEqual(ui_scale.percent(), 150)
+        self.assertEqual(row.value(), 150)
+
+    def test_keys_wheel_clicks_and_typing_apply_at_once(self):
+        """Without a drag in progress, every change takes effect immediately.
+
+        Args: None.
+        Returns: None.
+        """
+        row = self.window.ui_scale_row
+        row.slider.setValue(25)  # 125%: a click on the groove, a key or the wheel
+        self.assertEqual(ui_scale.percent(), 125)
+        row.spin.setValue(90)
+        self.assertEqual(ui_scale.percent(), 90)
+        self.assertLess(QApplication.font().pointSizeF(), self.base_point_size)
+
+    def test_the_reset_button_returns_to_100_percent(self):
+        """The Display section's button undoes any size and then disables itself.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(80)
+        self.assertTrue(self.window.ui_scale_reset.isEnabled())
+        self.window.ui_scale_reset.click()
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(self.window.ui_scale_row.value(), 100)
+        self.assertFalse(self.window.ui_scale_reset.isEnabled())
+
+    def test_the_view_menu_steps_resets_and_stops_at_the_ends(self):
+        """Larger, Smaller and Reset move through the presets and disable at the limits.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.scale_larger_action.trigger()
+        self.assertEqual(ui_scale.percent(), 110)
+        window.scale_smaller_action.trigger()
+        window.scale_smaller_action.trigger()
+        self.assertEqual(ui_scale.percent(), 90)
+        window.scale_reset_action.trigger()
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertFalse(window.scale_reset_action.isEnabled())
+        window.set_ui_scale(ui_scale.MAX_PERCENT)
+        self.assertFalse(window.scale_larger_action.isEnabled())
+        self.assertTrue(window.scale_smaller_action.isEnabled())
+        window.set_ui_scale(ui_scale.MIN_PERCENT)
+        self.assertFalse(window.scale_smaller_action.isEnabled())
+        self.assertTrue(window.scale_larger_action.isEnabled())
+
+    def test_the_menu_is_in_the_view_menu_with_shortcuts(self):
+        """Ctrl++, Ctrl+= , Ctrl+- and Ctrl+0 are bound, and each action has a tooltip.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        view = window.menuBar().actions()[0].menu()
+        names = [action.text() for action in view.actions()]
+        self.assertIn("Interface size", names)
+        submenu = next(action.menu() for action in view.actions()
+                       if action.text() == "Interface size")
+        self.assertEqual([action.text() for action in submenu.actions()],
+                         ["Larger", "Smaller", "Reset to 100%"])
+        self.assertIn(QKeySequence("Ctrl+="), window.scale_larger_action.shortcuts())
+        self.assertIn(QKeySequence(QKeySequence.ZoomIn), window.scale_larger_action.shortcuts())
+        self.assertEqual(window.scale_smaller_action.shortcut(), QKeySequence(QKeySequence.ZoomOut))
+        self.assertEqual(window.scale_reset_action.shortcut(), QKeySequence("Ctrl+0"))
+        for action in submenu.actions():
+            self.assertTrue(action.toolTip().strip(), action.text())
+
+    def test_the_digit_shortcuts_still_mean_fit_and_actual_size(self):
+        """Ctrl+0 is the size reset; the plain 0 key still fits the image.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window.view, "fit") as fit:
+            self.assertTrue(self.window.handle_key(Qt.Key_0))
+        fit.assert_called_once()
+
+    def test_a_size_too_large_for_the_screen_is_stepped_down(self):
+        """The window's smallest size must fit the screen, so the size backs off.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.set_ui_scale(150)
+        window.layout().activate()
+        smallest = window.minimumSizeHint()
+        tight = QRect(0, 0, smallest.width() + 20, smallest.height() + 20)  # fits 150%
+        with mock.patch.object(QScreen, "availableGeometry", return_value=tight):
+            window.set_ui_scale(ui_scale.MAX_PERCENT)
+            self.assertLess(ui_scale.percent(), ui_scale.MAX_PERCENT)
+            self.assertGreaterEqual(ui_scale.percent(), 100)
+            self.assertTrue(window._fits_screen())
+        self.assertEqual(window.ui_scale_row.value(), ui_scale.percent())
+        self.assertEqual(FakeSettings.store[ui_scale.SETTING_KEY], ui_scale.percent())
+
+    def test_100_percent_is_never_lowered_for_a_small_screen(self):
+        """A screen too small even for 100% leaves it alone, as before this feature.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        with mock.patch.object(QScreen, "availableGeometry",
+                               return_value=QRect(0, 0, 200, 150)):
+            window.set_ui_scale(125)
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(window.ui_scale_row.value(), 100)
+        self.assertNotIn(ui_scale.SETTING_KEY, FakeSettings.store)
+
+    def test_a_smaller_screen_while_running_lowers_a_large_size(self):
+        """A resolution change refits the window and steps the interface size down.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.set_ui_scale(200)
+        window.layout().activate()
+        smallest = window.minimumSizeHint()
+        self.log.drain()
+        screen = window.screen()
+        smaller = QRect(0, 0, smallest.width() - 100, smallest.height() + 400)
+        with mock.patch.object(QScreen, "availableGeometry", return_value=smaller):
+            screen.availableGeometryChanged.emit(smaller)
+            QApplication.processEvents()
+            self.assertTrue(window._fits_screen())
+        self.assertLess(ui_scale.percent(), 200)
+        self.assertEqual(FakeSettings.store[ui_scale.SETTING_KEY], ui_scale.percent())
+        self.assertIn("limited to", self.log.drain())
+        self.assertEqual(window.ui_scale_row.value(), ui_scale.percent())
+
+    def test_a_screen_change_that_still_fits_keeps_the_size(self):
+        """Nothing is lowered or logged when the window still fits.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.set_ui_scale(125)
+        self.log.drain()
+        window.screen().availableGeometryChanged.emit(BIG_SCREEN)
+        self.assertEqual(ui_scale.percent(), 125)
+        self.assertNotIn("limited", self.log.drain())
+
+    def test_dialogs_open_at_the_scaled_size(self):
+        """The guide and request dialogs scale their opening size with the interface.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(150)
+        guide = qt_app.SettingsGuideDialog(self.window)
+        self.addCleanup(guide.deleteLater)
+        self.assertEqual((guide.width(), guide.height()), (1020, 960))
+        request = qt_app.FeatureRequestDialog(self.window)
+        self.addCleanup(request.deleteLater)
+        self.assertEqual((request.width(), request.height()), (840, 630))
+
+    def test_a_status_label_keeps_its_reserved_width_in_any_font(self):
+        """A FixedLabel reserves room for its samples again when the font changes.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.FixedLabel("Camera: 999.9 fps")
+        label.setText("Camera: 30.0 fps")
+        before = label.sizeHint().width()
+        font = QFont(label.font())
+        font.setPointSizeF(font.pointSizeF() * 2)
+        label.setFont(font)
+        self.assertGreater(label.sizeHint().width(), before * 1.6)
+        self.assertEqual(label.text(), "Camera: 30.0 fps")
+
+    def test_a_growing_label_still_grows_after_a_font_change(self):
+        """A label that widens for long text keeps doing so at a new size.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.FixedLabel("short")
+        label.grow_to_text()
+        label.setText("a much longer camera name than the sample")
+        wide = label.sizeHint().width()
+        font = QFont(label.font())
+        font.setPointSizeF(font.pointSizeF() * 1.5)
+        label.setFont(font)
+        self.assertGreater(label.sizeHint().width(), wide * 1.3)
+
+
+class ScaledStyleTests(unittest.TestCase):
+    """The application style, font helpers and icons that follow the interface size."""
+
+    def tearDown(self):
+        """Return the application to the standard size.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(ui_scale.DEFAULT_PERCENT)
+
+    def test_chrome_metrics_scale_but_frames_do_not(self):
+        """Indicators, handles and icons grow with the size; a frame stays a hairline.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.install_tooltip_delay()
+        qt_app.apply_app_scale(100)
+        style = QApplication.style()
+        scaled_metrics = (QStyle.PM_IndicatorWidth, QStyle.PM_SliderLength,
+                          QStyle.PM_ScrollBarExtent, QStyle.PM_SmallIconSize)
+        before = [style.pixelMetric(metric) for metric in scaled_metrics]
+        frame = style.pixelMetric(QStyle.PM_DefaultFrameWidth)
+        qt_app.apply_app_scale(200)
+        style = QApplication.style()
+        self.assertIsInstance(style, qt_app.ScaledStyle)
+        self.assertEqual([style.pixelMetric(metric) for metric in scaled_metrics],
+                         [value * 2 for value in before])
+        self.assertEqual(style.pixelMetric(QStyle.PM_DefaultFrameWidth), frame)
+
+    def test_the_tooltip_delay_survives_a_size_change(self):
+        """Replacing the style keeps the hover delay.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(150)
+        self.assertEqual(QApplication.style().styleHint(QStyle.SH_ToolTip_WakeUpDelay),
+                         qt_app.TOOLTIP_DELAY_MS)
+
+    def test_applying_the_same_size_again_keeps_the_style(self):
+        """Nothing is re-polished when the size did not change.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(125)
+        style = QApplication.style()
+        self.assertEqual(qt_app.apply_app_scale(125), 125)
+        self.assertIs(QApplication.style(), style)
+
+    def test_the_platform_font_is_left_alone_at_100_percent(self):
+        """At the standard size, applying 100% does not replace the application font.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(100)
+        font = QFont(QApplication.font())
+        with mock.patch.object(QApplication, "setFont") as set_font:
+            qt_app.apply_app_scale(100)
+        set_font.assert_not_called()
+        self.assertEqual(QApplication.font(), font)
+        with mock.patch.object(QApplication, "setFont") as set_font:
+            qt_app.apply_app_scale(125)
+            qt_app.apply_app_scale(100)  # undoing a size does set the font back
+        self.assertEqual(set_font.call_count, 2)
+
+    def test_sizes_are_clamped(self):
+        """An out-of-range request is limited to the allowed range.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.apply_app_scale(10_000), ui_scale.MAX_PERCENT)
+        self.assertEqual(qt_app.apply_app_scale(1), ui_scale.MIN_PERCENT)
+
+    def test_scaled_font_handles_point_and_pixel_sizes(self):
+        """Fonts sized in points or in pixels both scale.
+
+        Args: None.
+        Returns: None.
+        """
+        points = QFont("Sans Serif")
+        points.setPointSizeF(10)
+        self.assertAlmostEqual(qt_app.scaled_font(points, 150).pointSizeF(), 15)
+        pixels = QFont("Sans Serif")
+        pixels.setPixelSize(12)
+        self.assertEqual(qt_app.scaled_font(pixels, 150).pixelSize(), 18)
+        self.assertEqual(points.pointSizeF(), 10)  # the original is untouched
+
+    def test_nudged_font_differs_a_little(self):
+        """A nudged font is not equal to the original but is the same size to the eye.
+
+        Args: None.
+        Returns: None.
+        """
+        points = QFont("Sans Serif")
+        points.setPointSizeF(10)
+        nudged = qt_app.nudged_font(points)
+        self.assertNotEqual(nudged, points)
+        self.assertAlmostEqual(nudged.pointSizeF(), 10, 1)
+        pixels = QFont("Sans Serif")
+        pixels.setPixelSize(12)
+        self.assertEqual(qt_app.nudged_font(pixels).pixelSize(), 13)
+
+    def test_the_base_font_is_taken_once(self):
+        """The unscaled font is remembered, so a scaled font is never scaled again.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app, "_base_font", None):
+            first = qt_app.base_font()
+            qt_app.apply_app_scale(150)
+            self.assertEqual(qt_app.base_font().pointSizeF(), first.pointSizeF())
+            qt_app.apply_app_scale(150)
+            self.assertAlmostEqual(QApplication.font().pointSizeF(), first.pointSizeF() * 1.5)
+            qt_app.apply_app_scale(100)
+
+    def test_status_icons_are_drawn_at_the_requested_size(self):
+        """Icons come out at the button's icon size, with the drawing scaled to fit.
+
+        Args: None.
+        Returns: None.
+        """
+        for kind in ("refresh", "download", "idea", "code"):
+            pixmap = qt_app._paint_status_icon(kind, qt_app.QColor("black"), 32)
+            self.assertEqual((pixmap.width(), pixmap.height()), (32, 32), kind)
+            icon = qt_app._status_icon(kind, qt_app.QColor("black"), 24)
+            self.assertEqual(icon.actualSize(QSize(64, 64)), QSize(24, 24), kind)
+        self.assertEqual(qt_app._paint_status_icon("idea", qt_app.QColor("black")).width(), 16)
 
 
 if __name__ == "__main__":

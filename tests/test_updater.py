@@ -192,7 +192,9 @@ class InstallTests(unittest.TestCase):
         with running_from(self.new_library):  # the next start runs build 7
             self.assertTrue(updater.cleanup_previous_update(self.target,
                                                             report=messages.append))
-        self.assertEqual(sorted(os.listdir(self.folder)), ["_internal-7", "espi-live"])
+        # The release notes stay for the new build to show (take_whats_new).
+        self.assertEqual(sorted(os.listdir(self.folder)),
+                         ["_internal-7", "espi-live", updater.WHATS_NEW_FILE])
         self.assertEqual(messages, ["Removed the previous build: espi-live.old, _internal-6"])
 
     def test_checksum_mismatch_leaves_program_untouched(self):

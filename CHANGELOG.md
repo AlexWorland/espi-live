@@ -1,9 +1,53 @@
 # Changelog
 
+## 2026-11-14 — Interface size slider
+
+### Previous state
+
+- Text, buttons, sliders, panels and the status bar had one fixed size. On a 1280 × 720 laptop or a high-resolution screen the window was too big or too small, and the only remedy was the operating system's display scaling, which needs a restart of the program.
+
+### Current state
+
+- **Interface size** (Controls panel, Display section) scales the whole window while it runs: text, buttons, sliders, check boxes, icons, docks, tooltips, dialogs and the status bar. It runs from 70% to 200% in 5% steps; 100% is the look it had before. Drag the slider and release (it applies on release, so the slider does not move away from the pointer), type a percentage, or press **Reset interface size to 100%**.
+- **View → Interface size** has **Larger**, **Smaller** and **Reset to 100%**, on `Ctrl++` (or `Ctrl+=`), `Ctrl+-` and `Ctrl+0` (`Cmd` on a Mac). The plain `0` and `1` keys still fit the image and show it at actual size.
+- The size is remembered and applied before the window opens the next time. The controls panel and the log keep their share of the window when the size changes.
+- A size that would make the window's smallest size larger than the screen (200% on a small screen, or a resolution change while the program runs) is lowered until it fits, and the log says so. 100% and smaller are never changed.
+- The image is not scaled: it still fills the room the panels leave. Status-bar wrapping is unchanged; at larger sizes it simply wraps onto more rows.
+- On the Mac the menu bar belongs to the system and keeps its size; the camera PC (Windows) scales it with the rest.
+
+## 2026-11-14 — The status bar wraps instead of crowding
+
+### Previous state
+
+- Every status-bar item shared one row. On a laptop-width window the readouts squeezed the "Did you know" tip down to "Did yo…", cut the camera name to "Hauppauge USB…" and left no room for the view hint.
+
+### Current state
+
+- The status bar adapts to the window width. When everything fits it is one row, as before. When it does not, the readouts and buttons wrap onto further rows beneath the tip and hint, so none is shortened or hidden. Each row is only as tall as it needs to be: at 1280 × 720 the bar is two compact rows (44 px, against 27 px for one), and a 1920-pixel-wide window still fits it all on one row.
+- The view hint ("Raw view: camera pixels, …") always shows its whole sentence. The tip takes the rest of its row and is shortened with an ellipsis only when little is left.
+- The source badge widens to fit a long camera name ("Hauppauge USB-Live2 …") instead of cutting it.
+- Temporary messages (for example "Checking GitHub for a newer build…") still replace the tip and hint while the readouts stay visible.
+
+## 2026-11-14 — Release notes after an update
+
+- The first start after an update shows a **What's new** window with the notes from the GitHub Releases page for every full release the update moved past, newest first, each with a link to its release page. The download and platform notes every release repeats are left out.
+- The notes are fetched with the update check and saved beside the program (`espi-live-whats-new.json`) when the update installs, so the window works offline and appears only once, also after `espi-live --update`. Updating from a build older than this one installs normally but shows no notes, since that build does not save them.
+
 ## 2026-11-14 — The window title shows the version
 
 - The main window's title now starts with the release version, for example `ESPI live v0.10.0 — BFS-U3-63S4M` or `ESPI live v0.10.0 — DUMMY MODE`. The version is the release's tag: the Release workflow bakes the tag chosen by its `version` job (`vX.Y.Z`, or `vX.Y.Z-pre.N` for a pre-release) into the build as `VERSION`.
 - **Help > About**, `--version`, the log header and error reports name the version before the build number. A source checkout, and a build made before this change, shows `dev` in the title and leaves the version out of the description. Updates are still ordered by build number only.
+
+## 2026-11-14 — Open in Codex uses the Codex command-line tool
+
+### Previous state
+
+- **Open in Codex** opened a `codex://` link for the Codex app. On a computer without the app, Windows reported the link as handled and showed its own "Get an app to open this 'codex' link" box, so the program's explanation never appeared.
+
+### Current state
+
+- The program looks for the `codex` command. If it is installed, **Open in Codex** (and **Help > Ask Codex about the source code…**) opens it in a new terminal window in the `espi-live-source` folder (a console window on Windows, Terminal on macOS, the desktop's terminal on Linux). If not, a dialog says Codex is missing and its **How to install Codex…** button opens the install page. A terminal that cannot start is reported separately.
+- The first-use dialog now asks for the Codex command-line tool and a ChatGPT account (sign-in happens the first time `codex` runs), instead of the Codex app.
 
 ## 2026-11-14 — Releases are started by hand again
 
