@@ -333,10 +333,26 @@ class CheckForUpdateTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        with self.fake_responses(self.release, self.manifest):
+        releases = [{"tag_name": "v0.2.0", "name": "v0.2.0", "html_url": "https://x.invalid/8",
+                     "body": "New\n\nRelease from `main`, commit `feedfac`, build 8. Build log: u"},
+                    {"tag_name": "v0.1.0", "name": "v0.1.0",
+                     "body": "Old\n\nRelease from `main`, commit `0123456`, build 3. Build log: u"}]
+        with self.fake_responses(self.release, self.manifest, releases):
             info = updater.check_for_update()
         self.assertEqual((info.build, info.asset_url, info.size),
                          (8, "https://api/asset", 50))
+        self.assertEqual([(note.build, note.title) for note in info.notes], [(8, "v0.2.0")])
+
+    def test_release_list_failure_falls_back_to_newest_release(self):
+        """If the release list cannot be read the newest release's notes are used.
+
+        Args: None.
+        Returns: None.
+        """
+        self.release.update(name="v0.2.0", body="Latest notes")
+        with self.fake_responses(self.release, self.manifest, http_error(500)):
+            info = updater.check_for_update()
+        self.assertEqual(info.notes, (updater.ReleaseNote(8, "v0.2.0", "Latest notes", ""),))
 
     def test_same_build_returns_none(self):
         """An equal build number means no update.

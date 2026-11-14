@@ -18,8 +18,12 @@ bundle is swapped that way. When the new build starts (StartupCleanup), it
 deletes ``*.old`` and, once that is gone (proof on Windows that the old build
 has exited), the old build's ``_internal-*`` folder, retrying in the
 background while the old build is still closing; it also deletes old
-single-file copies (build 6 and earlier) just above its folder. No GUI
-imports: the front ends drive this module.
+single-file copies (build 6 and earlier) just above its folder.
+
+The release notes of every full release between this build and the new one
+are captured during the check and saved beside the program when the update
+installs, so the new build can show them once (``take_whats_new``) without
+asking GitHub again. No GUI imports: the front ends drive this module.
 """
 
 import glob
@@ -40,7 +44,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 
 try:
     from espi_live import _build_info
@@ -72,10 +76,60 @@ PYINSTALLER_ENTRY = struct.Struct("!IIIIBc")
 PYINSTALLER_TAIL_BYTES = 1 << 20
 TIMEOUT_S = 20
 CHUNK_BYTES = 1 << 20
+RELEASES_PER_PAGE = 30  # how far back the release notes of skipped builds reach
+NOTES_SUFFIX = ".notes.json"  # beside the unpacked build until it installs
+WHATS_NEW_FILE = "espi-live-whats-new.json"  # beside the program until shown
+# build-binaries.yml adds a block to every release's notes, after any typed
+# notes and before GitHub's generated ones. Its first line names the build
+# ("Release from `main`, commit `abc1234`, build 31. Build log: ..."); the
+# block (downloads, platforms) runs to the generated notes' comment or
+# heading. Releases made before the line named the build were tagged build-N.
+CI_BUILD_LINE = re.compile(r"^(?:Pre-release|Release)[^\n]* from [^\n]*?, build (\d+)\.",
+                           re.MULTILINE)
+CI_BLOCK = re.compile(r"^(?:Pre-release|Release)[^\n]* from [^\n]*Build log:.*?(?=^<!--|^#|\Z)",
+                      re.MULTILINE | re.DOTALL)
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+OLD_TAG = re.compile(r"^build-(\d+)$")
 
 
 class UpdateError(Exception):
     """An update check, download or install that could not complete."""
+
+
+@dataclass(frozen=True)
+class ReleaseNote:
+    """The notes of one published build, as written on its release page."""
+
+    build: int
+    title: str
+    body: str
+    url: str
+
+
+@dataclass(frozen=True)
+class WhatsNew:
+    """What changed between the build that installed an update and this one."""
+
+    from_build: int
+    to_build: int
+    notes: tuple
+
+    def markdown(self):
+        """Render the notes, newest release first, for a dialog.
+
+        Args: None.
+        Returns: A Markdown string. Each release is a level-1 heading, so
+            the headings in GitHub's generated notes nest under it.
+        """
+        if not self.notes:
+            return ("No release notes were found for this update. The Releases "
+                    "page on GitHub lists every release.")
+        sections = []
+        for note in self.notes:
+            body = release_summary(note.body) or "*No notes were written for this release.*"
+            link = f"\n\n[Release page]({note.url})" if note.url else ""
+            sections.append(f"# {note.title or f'Build {note.build}'}\n\n{body}{link}")
+        return "\n\n".join(sections)
 
 
 @dataclass(frozen=True)
@@ -88,6 +142,7 @@ class UpdateInfo:
     asset_url: str
     sha256: str
     size: int
+    notes: tuple = ()  # ReleaseNote of each release after this build, newest first
 
     def label(self):
         """Describe the build for messages.
@@ -269,6 +324,80 @@ def select_update(manifest, assets, local_build, asset_name):
                       sha256=digest.lower(), size=int(asset.get("size", 0)))
 
 
+def release_build(release):
+    """Read which build a release holds.
+
+    Args: release is a GitHub API release record.
+    Returns: The build number from the line CI adds to the notes, or from an
+        old "build-N" tag; None when neither is there.
+    """
+    match = CI_BUILD_LINE.search(str(release.get("body") or "").replace("\r\n", "\n"))
+    match = match or OLD_TAG.match(str(release.get("tag_name", "")))
+    return int(match.group(1)) if match else None
+
+
+def release_note(release, build):
+    """Keep the parts of a release record the update dialog shows.
+
+    Args: release is a GitHub API release record; build is its build number.
+    Returns: A ReleaseNote.
+    """
+    return ReleaseNote(build=build,
+                       title=str(release.get("name") or release.get("tag_name") or ""),
+                       body=str(release.get("body") or ""),
+                       url=str(release.get("html_url") or ""))
+
+
+def release_summary(body):
+    """Drop the download and platform block CI adds to every release.
+
+    Args: body is a release description in Markdown.
+    Returns: The typed and generated notes, without HTML comments, stripped
+        ("" when there are none).
+    """
+    body = HTML_COMMENT.sub("", CI_BLOCK.sub("", body.replace("\r\n", "\n")))
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
+
+
+def collect_notes(releases, local_build, remote_build):
+    """Pick the full releases an update moves past.
+
+    Args: releases are GitHub API release records; local_build is this copy's
+        build; remote_build is the build being installed.
+    Returns: A tuple of ReleaseNote for builds local_build < N <= remote_build,
+        newest first. Drafts and pre-releases are skipped, as the updater
+        never offers them.
+    """
+    notes = {}
+    for release in releases:
+        build = release_build(release)
+        if (build is not None and local_build < build <= remote_build
+                and not release.get("draft") and not release.get("prerelease")):
+            notes[build] = release_note(release, build)
+    return tuple(notes[build] for build in sorted(notes, reverse=True))
+
+
+def fetch_notes(repo, token, latest, local_build, remote_build):
+    """Gather release notes for an update (best effort).
+
+    Lists recent releases so the ones skipped since this build are included;
+    if that fails, the newest release alone is used.
+
+    Args: repo is "owner/name"; token is "" or a GitHub token; latest is the
+        newest release record (already fetched); local_build and remote_build
+        bound the builds to include.
+    Returns: A tuple of ReleaseNote, newest first.
+    """
+    try:
+        with open_url(f"{API_ROOT}/repos/{repo}/releases?per_page={RELEASES_PER_PAGE}",
+                      token, "application/vnd.github+json") as response:
+            releases = json.load(response)
+        notes = collect_notes(releases, local_build, remote_build)
+    except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError):
+        notes = ()
+    return notes or (release_note(latest, remote_build),)
+
+
 def check_for_update():
     """Ask GitHub whether a newer build exists for this platform.
 
@@ -295,7 +424,10 @@ def check_for_update():
         raise explain_http_error(exc) from exc
     except ValueError as exc:
         raise UpdateError(f"unreadable release information: {exc}") from exc
-    return select_update(manifest, assets, current_build(), build_value("ASSET", ""))
+    info = select_update(manifest, assets, current_build(), build_value("ASSET", ""))
+    if info is None:
+        return None
+    return replace(info, notes=fetch_notes(repo, token, release, current_build(), info.build))
 
 
 def remove_path(path):
@@ -350,8 +482,9 @@ def download_update(info, progress=None, target=None):
     Args: info is the UpdateInfo; progress is an optional callable taking
         (bytes_done, bytes_total) from the download thread; target overrides
         install_target() (tests).
-    Returns: The path of the unpacked program, ready for install_update().
-        Raises UpdateError on network, disk or checksum failure.
+    Returns: The path of the unpacked program, ready for install_update(),
+        with the release notes saved beside it. Raises UpdateError on
+        network, disk or checksum failure.
     """
     target = target or install_target()
     if target is None:
@@ -384,7 +517,61 @@ def download_update(info, progress=None, target=None):
         raise UpdateError(f"download failed: {exc}") from exc
     if digest.hexdigest() != info.sha256:
         raise UpdateError("the download is corrupt (SHA-256 mismatch); try again")
-    return unpack(archive, os.path.join(staging, "unpacked"))
+    staged = unpack(archive, os.path.join(staging, "unpacked"))
+    save_notes(staged + NOTES_SUFFIX, info)
+    return staged
+
+
+def save_notes(path, info):
+    """Write an update's release notes for the new build to show (best effort).
+
+    Args: path is the file to write; info is the UpdateInfo being installed.
+    Returns: None. A write failure only loses the notes, never the update.
+    """
+    record = {"from_build": current_build(), "to_build": info.build,
+              "notes": [asdict(note) for note in info.notes]}
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2)
+    except OSError:
+        pass
+
+
+def take_whats_new(target=None):
+    """Read, once, the release notes an update left for this build.
+
+    The file is deleted whether or not it is usable, so the notes show only
+    on the first start after the update.
+
+    Args: target overrides install_target() (tests).
+    Returns: A WhatsNew when this build was just installed by an update,
+        else None (also from source, or when the file is unreadable or meant
+        for another build).
+    """
+    target = target or install_target()
+    if target is None:
+        return None
+    path = os.path.join(os.path.dirname(target), WHATS_NEW_FILE)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except OSError:
+        return None
+    except ValueError:
+        record = {}
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    try:
+        whats_new = WhatsNew(
+            from_build=int(record["from_build"]), to_build=int(record["to_build"]),
+            notes=tuple(ReleaseNote(int(note["build"]), str(note["title"]),
+                                    str(note["body"]), str(note["url"]))
+                        for note in record["notes"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return whats_new if whats_new.to_build == current_build() else None
 
 
 def discard(path):
@@ -595,7 +782,8 @@ def install_update(staged, target=None):
     Args: staged is the path download_update() returned; target overrides
         install_target() (tests).
     Returns: The installed path. Raises UpdateError if the swap fails (the
-        running copy is left as it was).
+        running copy is left as it was). The release notes download_update()
+        saved move beside the program for take_whats_new().
     """
     target = target or install_target()
     if target is None:
@@ -611,6 +799,11 @@ def install_update(staged, target=None):
             raise
         if os.name != "nt":
             os.chmod(target, 0o755)
+    try:
+        os.replace(staged + NOTES_SUFFIX,
+                   os.path.join(os.path.dirname(target), WHATS_NEW_FILE))
+    except OSError:
+        pass  # no notes were saved; the update itself succeeded
     cleanup_previous_update(target, keep_backup=True)
     return target
 

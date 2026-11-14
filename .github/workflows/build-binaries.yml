@@ -491,6 +491,10 @@ jobs:
           else
             kind="Release"
           fi
+          # The app's "What's new" window reads the build number from the
+          # "$kind from ..., build N." line and leaves out this block, up to
+          # the generated notes (updater.CI_BUILD_LINE and CI_BLOCK): keep
+          # that line first, with ", build N." and "Build log:" in it.
           {
             if [ -n "$intro" ]; then printf '%s\n\n' "$intro"; fi
             cat <<EOF
