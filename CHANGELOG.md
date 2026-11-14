@@ -5,6 +5,17 @@
 - The first start after an update shows a **What's new** window with the notes from the GitHub Releases page for every full release the update moved past, newest first, each with a link to its release page. The download and platform notes every release repeats are left out.
 - The notes are fetched with the update check and saved beside the program (`espi-live-whats-new.json`) when the update installs, so the window works offline and appears only once, also after `espi-live --update`. Updating from a build older than this one installs normally but shows no notes, since that build does not save them.
 
+## 2026-11-14 — Releases are started by hand again
+
+### Previous state
+
+- Every merge into `main` started the **Release** workflow, which tested, built and published a release, so each merge was offered to installed copies at once and several quick merges meant several releases.
+
+### Current state
+
+- Merging into `main` releases nothing. `release-drafter.yml` runs after every merge and keeps the draft release up to date (next version and notes from the merged pull requests' labels), so merges stack up in one draft.
+- Run **Actions > Release > Run workflow** from `main` when the changes are ready: it tests, builds and publishes one release covering everything merged since the last one. Everything else about the workflow is unchanged: the **Version**, **Notes**, **Pre-release** and **Publish** inputs, and publishing the draft by hand.
+
 ## 2026-11-13 — Search the user guide
 
 - The user guide (**Help → User Guide**, **F1**) has a search box at the top of the page that stays in view while you scroll. Press `/` to jump to it; the browser's own Ctrl+F / Cmd+F still works as before.

@@ -5,17 +5,18 @@ name: Release drafter
 # (config: .github/release-drafter.yml). The draft is not public and builds
 # nothing.
 #
-# After every merge into main, "Release" (build-binaries.yml) rewrites the
-# draft itself, in its "version" job, and releases the version it proposes;
-# a run here at the same time could race with it, so this workflow no longer
-# runs on merges. "Release" starts it after each full release, so the draft
-# moves on to the next version, and "Run workflow" regenerates the draft by
-# hand. Publishing the draft by hand (Releases > the draft > Edit > Publish
-# release) still starts "Release" for that tag.
+# It runs after every merge into main, so merged pull requests pile up in one
+# draft until someone starts "Release" (build-binaries.yml) by hand, which
+# releases the version the draft proposes. "Release" also starts this workflow
+# after each full release, so the draft moves on to the next version, and
+# "Run workflow" regenerates the draft by hand. Publishing the draft by hand
+# (Releases > the draft > Edit > Publish release) starts "Release" for that tag.
 #
 # The notes are rewritten every time, so edits made to the draft by hand are
 # lost; change a pull request's title or labels instead.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
