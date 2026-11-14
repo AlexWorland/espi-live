@@ -86,13 +86,13 @@ class HeaderTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        info = mock.Mock(BUILD=42, COMMIT="abcdef1234", ASSET="espi.zip",
+        info = mock.Mock(VERSION="v0.10.0", BUILD=42, COMMIT="abcdef1234", ASSET="espi.zip",
                          COMMITTED_AT="2026-10-29T10:00:00+00:00")
         fake_spin = mock.Mock(__version__="4.2.0.88")
         with mock.patch.object(logs.updater, "_build_info", info), \
                 mock.patch.dict(sys.modules, {"PySpin": fake_spin}):
             lines = logs.header_lines("Qt", logging.DEBUG)
-        self.assertEqual(lines[0], "ESPI live build 42 (abcdef1, espi.zip), "
+        self.assertEqual(lines[0], "ESPI live v0.10.0 build 42 (abcdef1, espi.zip), "
                                    "committed 2026-10-29T10:00:00+00:00")
         self.assertTrue(lines[1].startswith("Platform: "))
         self.assertIn("Python ", lines[2])
