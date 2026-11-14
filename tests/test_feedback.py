@@ -167,6 +167,23 @@ class SubmitTests(unittest.TestCase):
             with self.assertRaisesRegex(feedback.FeedbackError, "cannot reach GitHub: no route"):
                 feedback.submit(REQUEST)
 
+    def test_http_error_keeps_status(self):
+        """An HTTP error carries its status, so callers can tell 404 from a failure.
+
+        Args: None.
+        Returns: None.
+        """
+        error = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        self.assertEqual(feedback.explain_http_error(error).status, 404)
+
+    def test_network_error_has_no_status(self):
+        """A network error has no HTTP status.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIsNone(feedback.explain_http_error(urllib.error.URLError("down")).status)
+
     def test_unreadable_reply_is_reported(self):
         """A reply that is not JSON becomes a FeedbackError.
 
