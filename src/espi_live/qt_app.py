@@ -47,7 +47,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QSizePolicy, QSlider, QStyle, QTextEdit, QToolBar, QToolTip,
                                QVBoxLayout, QWidget)
 
-from espi_live import camera, camera_reports, codex, error_reports, feedback, paths, source_code, tips, updater
+from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
+                       source_code, tips, updater)
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
@@ -177,7 +178,7 @@ def setting_on(value):
 
 
 class Reporting:
-    """This run's error reporter, Python hooks, Qt message handler and worker."""
+    """This run's error reporter, Python hooks, Qt message handler, worker and log uploads."""
 
     def __init__(self, log, send_reports=True):
         """Create the reporter from the switches; nothing is hooked until start().
@@ -194,6 +195,9 @@ class Reporting:
         self.reporter.update_context(front_end="Qt")
         self.worker = error_reports.ErrorReportWorker(self.reporter)
         self.reporter.listeners.append(self.worker.kick)
+        # Log uploads have no switch: every copy with the logs token sends them.
+        self.uploads = log_uploads.LogUploadWorker(log_uploads.LogUploader(
+            paths.output_folder("logs"), self.reporter.serials))
         self.hooks = None
         self.previous_handler = None
 
@@ -207,8 +211,18 @@ class Reporting:
         self.previous_handler = qInstallMessageHandler(handle_qt_message)
         log.info("Error reports: " + ("on" if self.reporter.enabled else
                                       f"off ({self.forced or 'turned off in the Help menu'})"))
+        log.info("Log uploads: " + ("on" if log_uploads.logs_token()
+                                    else "off (no logs token in this copy)"))
         self.reporter.collect_native_crashes(log.crash_path)
         self.worker.start()
+
+    def start_uploads(self):
+        """Start the log uploads, once the cameras are open and their serials known.
+
+        Args: None.
+        Returns: None.
+        """
+        self.uploads.start()
 
     def choose(self, on, log):
         """Apply the Help menu choice.
@@ -234,6 +248,7 @@ class Reporting:
             self.hooks.uninstall()
             self.hooks = None
         self.worker.stop()
+        self.uploads.stop()
 
 
 def describe_session(channels, display):
@@ -2707,15 +2722,15 @@ class MainWindow(QMainWindow):
         name = identity.short_name() if identity else "Camera"
         lines = identity.description() if identity else []
         several = len(self.channels) > 1
+        app = updater.app_title()
         if demo:
-            title = f"ESPI live — {self.current.label}" if several else "ESPI live"
+            title = f"{app} — {self.current.label}" if several else app
             self.setWindowTitle(f"{title} — DUMMY MODE")
         elif identity:  # the serial tells same-model cameras apart
             serial = f" ({self.current.info.serial})" if several else ""
-            self.setWindowTitle(f"ESPI live — {name}{serial}")
+            self.setWindowTitle(f"{app} — {name}{serial}")
         else:
-            self.setWindowTitle(f"ESPI live — {self.current.label}" if several
-                                else "ESPI live")
+            self.setWindowTitle(f"{app} — {self.current.label}" if several else app)
         self.demo_banner.setVisible(demo)
         self.switch_live_button.setVisible(demo)
         self.camera_label.setVisible(not demo)
@@ -3732,6 +3747,7 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
         for channel in channels:
             if channel.active:
                 channel.engine.start()
+        reporting.start_uploads()  # after the cameras opened, so their serials are scrubbed
         return app.exec()
     except Exception as exc:  # the hooks are restored below, before Python's own hook runs
         error_reports.caught(log, exc, "main_thread", "ESPI live stopped", fatal=True)

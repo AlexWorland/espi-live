@@ -34,7 +34,17 @@ MAX_TITLE = 200
 
 
 class FeedbackError(Exception):
-    """A feature request that could not be filed."""
+    """A GitHub call (a feature request, report or log upload) that failed."""
+
+    def __init__(self, message, status=None):
+        """Create the error.
+
+        Args: message explains the failure; status is the HTTP status code,
+            or None for network and decoding errors.
+        Returns: None.
+        """
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -132,21 +142,21 @@ def explain_http_error(exc):
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 401:
             return FeedbackError("the feedback token was rejected (expired or revoked); "
-                                 f"put a new one in {TOKEN_FILE} beside the program")
+                                 f"put a new one in {TOKEN_FILE} beside the program", 401)
         if exc.code in (403, 404):
             return FeedbackError("the feedback token may not create issues in "
-                                 f"{repository()} (needs Issues: read & write)")
+                                 f"{repository()} (needs Issues: read & write)", exc.code)
         if exc.code == 410:
-            return FeedbackError(f"issues are turned off in {repository()}")
-        return FeedbackError(f"GitHub returned HTTP {exc.code}")
+            return FeedbackError(f"issues are turned off in {repository()}", 410)
+        return FeedbackError(f"GitHub returned HTTP {exc.code}", exc.code)
     return FeedbackError(f"cannot reach GitHub: {getattr(exc, 'reason', exc)}")
 
 
 def github_request(method, path, token, payload=None):
     """Call the GitHub REST API.
 
-    Args: method is "GET" or "POST"; path starts with "/repos/" and may
-        carry a query string; token authorizes the call ("" for an anonymous
+    Args: method is "GET", "POST", "PATCH" or "PUT"; path starts with
+        "/repos/" and may carry a query string; token authorizes the call ("" for an anonymous
         call, enough to read a public repository); payload is the JSON body
         to send, if any.
     Returns: The decoded JSON reply. Raises FeedbackError on HTTP, network

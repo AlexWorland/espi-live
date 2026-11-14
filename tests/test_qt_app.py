@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -1059,7 +1060,7 @@ class MainWindowBuildTests(WindowTestCase):
         Returns: None.
         """
         self.window._set_demo(False)
-        self.assertEqual(self.window.windowTitle(), "ESPI live")
+        self.assertEqual(self.window.windowTitle(), updater.app_title())
         self.assertTrue(self.window.demo_banner.isHidden())
         self.assertTrue(self.window.switch_live_button.isHidden())
         self.assertFalse(self.window.camera_label.isHidden())
@@ -2238,6 +2239,19 @@ class EngineEventTests(WindowTestCase):
         self.assertEqual(self.window.gain.spin.maximum(), 12)
         self.assertEqual(self.window.fps.spin.maximum(), 60)
 
+    def test_window_title_carries_the_release_version(self):
+        """A build made by CI shows its release tag first in every title form.
+
+        Args: None.
+        Returns: None.
+        """
+        tagged = types.SimpleNamespace(VERSION="v0.10.0")
+        with mock.patch.object(updater, "_build_info", tagged):
+            self.window._set_demo(True)
+            self.assertEqual(self.window.windowTitle(), "ESPI live v0.10.0 — DUMMY MODE")
+            self.window._set_demo(False)
+            self.assertTrue(self.window.windowTitle().startswith("ESPI live v0.10.0"))
+
     def test_camera_identity_names_the_model(self):
         """camera_identity puts the model in the title, badge and controls.
 
@@ -2249,7 +2263,8 @@ class EngineEventTests(WindowTestCase):
         self.engine.events.put(("camera_identity", CameraIdentity(
             vendor="FLIR", model="Blackfly S BFS-U3-70S7C", serial="42")))
         self.window._handle_events()
-        self.assertEqual(self.window.windowTitle(), "ESPI live — BFS-U3-70S7C")
+        self.assertEqual(self.window.windowTitle(),
+                         f"{updater.app_title()} — BFS-U3-70S7C")
         self.assertEqual(self.window.source_badge.text(), "  BFS-U3-70S7C  ")
         self.assertIn("S/N 42", self.window.source_badge.toolTip())
         self.assertFalse(self.window.model_label.isHidden())
@@ -2303,7 +2318,7 @@ class EngineEventTests(WindowTestCase):
         checked = [b.text() for b in self.window.mode_group.buttons() if b.isChecked()]
         self.assertEqual(checked, ["Raw"])
         self.assertFalse(self.window.record_button.isChecked())
-        self.assertEqual(self.window.windowTitle(), "ESPI live")
+        self.assertEqual(self.window.windowTitle(), updater.app_title())
 
     def test_switch_failed_warns_and_keeps_demo(self):
         """switch_failed warns the user and stays in demo mode.
@@ -2396,7 +2411,7 @@ class MultiCameraTests(unittest.TestCase):
         self.addCleanup(window.deleteLater)
         self.addCleanup(window.close)
         self.assertTrue(window.cameras_box.isHidden())
-        self.assertEqual(window.windowTitle(), "ESPI live — DUMMY MODE")
+        self.assertEqual(window.windowTitle(), f"{updater.app_title()} — DUMMY MODE")
 
     def test_cameras_are_listed_with_the_displayed_one_locked_on(self):
         """The drop-down lists every camera; the shown one must keep processing.
@@ -2572,10 +2587,12 @@ class MultiCameraTests(unittest.TestCase):
         second.engine.events.put(("camera_identity", CameraIdentity(
             model="Blackfly S BFS-U3-70S7C", serial="DEMO2")))
         window._handle_events()
-        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-63S4M (DEMO1)")
+        self.assertEqual(window.windowTitle(),
+                         f"{updater.app_title()} — BFS-U3-63S4M (DEMO1)")
         self.assertEqual(second.identity.model, "Blackfly S BFS-U3-70S7C")
         window.camera_combo.setCurrentIndex(1)
-        self.assertEqual(window.windowTitle(), "ESPI live — BFS-U3-70S7C (DEMO2)")
+        self.assertEqual(window.windowTitle(),
+                         f"{updater.app_title()} — BFS-U3-70S7C (DEMO2)")
         self.assertIn("⚠ Colour camera", window.model_label.text())
 
     def test_failed_open_of_the_shown_camera_returns_to_another(self):
@@ -2646,7 +2663,7 @@ class MultiCameraTests(unittest.TestCase):
         self.assertFalse(demo_two.active)
         self.assertIn(demo_two, window.retired_channels)
         self.assertEqual(window.camera_combo.itemText(1), "BFS (222)")
-        self.assertIn("ESPI live — BFS (111)", window.windowTitle())
+        self.assertIn(f"{updater.app_title()} — BFS (111)", window.windowTitle())
 
     def test_close_stops_every_engine(self):
         """Closing stops the running and the retired engines.
@@ -3306,6 +3323,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.main_window.call_args.args[2:], (True, False, self.reporting))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
+        self.reporting.start_uploads.assert_called_once_with()
         self.finish.assert_called_once_with(self.window, self.log)
         self.assertIn("closed", self.log.lines)
         self.assertIn("Display: GPU (OpenGL 4.1 on X)", self.log.lines)
@@ -3981,7 +3999,7 @@ class ReportingClassTests(unittest.TestCase):
                 mock.patch.object(reporting.worker, "start") as start:
             try:
                 reporting.start(self.log)
-                self.assertIn("Error reports: off", self.log.lines[-1])
+                self.assertIn("Error reports: off", self.log.lines[-2])
                 collect.assert_called_once_with(None)
                 start.assert_called_once()
                 handler.assert_called_once_with(qt_app.handle_qt_message)
@@ -4028,6 +4046,53 @@ class ReportingClassTests(unittest.TestCase):
         with mock.patch.object(reporting.worker, "stop") as stop:
             reporting.stop()
         stop.assert_called_once()
+
+
+    def test_reporting_starts_and_stops_log_uploads(self):
+        """Starting logs the upload state and starts the uploader; stopping stops it.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        self.assertEqual(reporting.uploads.uploader.folder,
+                         os.path.join(paths.OUTPUT_DIR, "logs"))
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}), \
+                mock.patch.object(reporting.worker, "start"), \
+                mock.patch.object(reporting.uploads, "start") as start:
+            reporting.start(self.log)
+            start.assert_not_called()  # not before the cameras are open
+            reporting.start_uploads()
+        start.assert_called_once()
+        reporting.stop()
+        self.assertTrue(reporting.uploads.stopping.is_set())
+        # Error reports turned off (or on) never changes log uploads: only the token does.
+        for reports, token, expected in (("0", "t", "Log uploads: on"),
+                                         ("1", "", "Log uploads: off (no logs token in this copy)")):
+            with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: reports}), \
+                    mock.patch.object(qt_app.log_uploads, "logs_token", return_value=token):
+                reporting = self.reporting()
+                with mock.patch.object(reporting.worker, "start"), \
+                        mock.patch.object(reporting.uploads, "start"):
+                    reporting.start(self.log)
+                reporting.stop()
+            self.assertIn(expected, self.log.lines)
+
+    def test_menu_switch_leaves_log_uploads_alone(self):
+        """The Help-menu switch is for error reports only; log uploads have no switch.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: "1"}):
+            reporting = self.reporting()
+            self.assertIs(reporting.uploads.uploader.serials.__self__, reporting.reporter)
+            self.assertFalse(hasattr(reporting.uploads.uploader, "enabled"))
+            with mock.patch.object(reporting.worker, "kick"), \
+                    mock.patch.object(reporting.uploads, "kick") as kick:
+                reporting.choose(False, self.log)
+                reporting.choose(True, self.log)
+            kick.assert_not_called()
 
 
 class SessionDescriptionTests(unittest.TestCase):
@@ -4084,6 +4149,8 @@ class ErrorReportUITests(WindowTestCase):
         self.assertTrue(self.window.reports_action.isChecked())
         self.assertTrue(self.window.reports_action.isEnabled())
         self.assertIn("public GitHub issues", self.window.reports_action.toolTip())
+        self.assertNotIn("logs", self.window.reports_action.toolTip())
+        self.assertEqual(self.window.reports_action.text(), "Send error reports automatically")
 
     def test_a_forced_off_shows_the_reason(self):
         """When a switch forces reporting off, the action is locked.
