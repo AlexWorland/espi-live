@@ -1011,6 +1011,53 @@ class CaptureEngineTests(CaptureEngineCase):
         self.assertTrue(engine_.status()["camera"].startswith("Analog capture 720 × 480"))
         self.assertEqual(engine_.camera_info.kind, "capture")
 
+    def test_capture_details_and_frame_checks_are_logged(self):
+        """The device's details are logged at open; frame checks follow.
+
+        The check sees the raw frame before single-field mode (so both fields
+        and the delivered colour frame) and the view's difference range.
+
+        Args: None.
+        Returns: None.
+        """
+        def quick(log):
+            """Build a frame-check monitor with a short interval.
+
+            Args: log is the engine's log.
+            Returns: A FrameCheckMonitor.
+            """
+            return diagnostics.FrameCheckMonitor(log, interval=0.05)
+
+        with mock.patch.object(engine, "FrameCheckMonitor", quick):
+            engine_ = self.capture_engine()
+            self.assertTrue(self.log.has("Capture device: Device name Hauppauge USB-Live2"))
+            engine_.update_settings(mode="Previous")
+            engine_.start()
+            self.assertTrue(wait_until(lambda: self.log.has("view Previous input")))
+        line = next(text for text in self.log.lines if "view Previous input" in text)
+        self.assertIn("colour B−G 0.00 R−G 0.00", line)
+        self.assertIn("field mismatch", line)
+        self.assertIn("mode=Previous", line)
+
+    def test_raw_view_is_named_in_frame_checks(self):
+        """In Raw view the frame check names the view without a range.
+
+        Args: None.
+        Returns: None.
+        """
+        def quick(log):
+            """Build a frame-check monitor with a short interval.
+
+            Args: log is the engine's log.
+            Returns: A FrameCheckMonitor.
+            """
+            return diagnostics.FrameCheckMonitor(log, interval=0.05)
+
+        with mock.patch.object(engine, "FrameCheckMonitor", quick):
+            engine_ = self.capture_engine()
+            engine_.start()
+            self.assertTrue(wait_until(lambda: self.log.has("view Raw;")))
+
     def test_unplugged_device_keeps_engine_running(self):
         """A device that stops sending frames leaves the engine waiting, not dead.
 

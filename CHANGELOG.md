@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-14 — Log evidence for weak or missing fringes
+
+- Every camera now writes a `Frame check:` line to the log every 10 seconds, measured on the raw camera frame before any processing, so view, stretch and gamma do not change it. It records brightness levels and how many pixels are clipped (including at analog video's 16 and 235 limits), how much the picture changes from one frame to the next, repeated frames, speckle contrast and size, detail across the image against detail down it (overall and around the NTSC colour-subcarrier spacing of about 3.8 pixels), colour in the frames of a monochrome camera, the mismatch between the two fields of an interlaced camera, and the input range of the view on screen.
+- A video device such as the Hauppauge USB-Live2 also logs a `Capture device:` line when it opens: name, USB ID, backend, video format, the driver's settings (now including sharpness, gamma and backlight) and the first frame's levels and colour. Camera reports for unrecognised devices include the same new fields.
+- Together they show whether weak fringes come from the capture path (speckle detail removed by a colour decoder, frames smoothed together, clipped levels) or from the scene. Nothing about acquisition, processing or display changed; the check takes a few milliseconds once every 10 seconds.
+
 ## 2026-11-14 — Releases are started by hand again
 
 ### Previous state

@@ -28,8 +28,9 @@ import cv2
 import numpy as np
 
 from espi_live import error_reports, sources
-from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
-                                   StreamCounterMonitor, settings_summary)
+from espi_live.diagnostics import (FrameCheckMonitor, FrameGapMonitor,
+                                   SharpnessMonitor, StreamCounterMonitor,
+                                   settings_summary)
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
@@ -242,7 +243,9 @@ class Engine:
         Args: session is an opened CameraSession or CaptureSession.
         Returns: None; publishes the model as a "camera_identity" event, the
             device limits as a "camera_limits" event and, for a video device
-            the viewer does not recognise, a "camera_report" event.
+            the viewer does not recognise, a "camera_report" event. A video
+            device's details (driver properties, format, first frame) are
+            logged, since they explain what the capture path does to the image.
         """
         self.camera = session
         self.camera_info = session.info
@@ -258,22 +261,27 @@ class Engine:
         self.events.put(("camera_identity", identity))
         self._set_status(demo=False, camera=session.describe(session.read_values()))
         self.events.put(("camera_limits", session.limits()))
-        if session.info.kind == "capture" and not identity.supported:
-            self._report_camera(session)
+        if session.info.kind == "capture":
+            details = self._capture_details(session)
+            if not identity.supported:
+                self.events.put(("camera_report",
+                                 capture_report(session.info, identity, details)))
 
-    def _report_camera(self, session):
-        """Queue a camera report for an unrecognised video device.
+    def _capture_details(self, session):
+        """Read and log what a video device reports about itself.
 
         Args: session is the opened CaptureSession.
-        Returns: None; a failure to read details sends the report without them.
+        Returns: The (label, text) pairs; empty, after a log line, when they
+            cannot be read (a camera report is then sent without them).
         """
         try:
             details = session.read_details()
         except Exception as exc:
             self.log.write(f"Could not read the device details: {exc}")
-            details = ()
-        self.events.put(("camera_report",
-                         capture_report(session.info, session.identity, details)))
+            return ()
+        self.log.write("Capture device: " + "; ".join(
+            f"{label} {text}" for label, text in details))
+        return details
 
     # ----- thread control ----------------------------------------------
 
@@ -484,6 +492,7 @@ class Engine:
         gaps = FrameGapMonitor(self.log)
         counters = StreamCounterMonitor(self.log)
         camera_sharpness = SharpnessMonitor(self.log, "camera frame")
+        frame_check = FrameCheckMonitor(self.log)
         shown_sharpness = SharpnessMonitor(self.log, "displayed frame")
         s = applied
 
@@ -566,7 +575,12 @@ class Engine:
                 frame = grabbed
             if frame.ndim != 2 or frame.dtype != np.uint8:
                 raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
-            if s.single_field and self.camera is not None and self.camera.interlaced:
+            interlaced = self.camera is not None and self.camera.interlaced
+            # Measured before single-field mode, so both fields are seen.
+            frame_check.observe(frame, time.monotonic(), context,
+                                colour=getattr(self.camera, "last_colour", None),
+                                interlaced=interlaced)
+            if s.single_field and interlaced:
                 frame = single_field(frame)
 
             now = time.monotonic()
@@ -612,6 +626,7 @@ class Engine:
                 gamma = s.gamma  # curve only; Raw skips stretch and palette
                 if update_range:
                     self._set_status(range="Raw Mono8: no brightness scaling")
+                    frame_check.note_view(s.mode)
                     last_range_time = now
             else:
                 difference = processor.difference(frame, s.mode)
@@ -632,6 +647,7 @@ class Engine:
                     if update_range:
                         self._set_status(range=(
                             f"Input: {low}–{high}    Scaled: {scaled[0]}–{scaled[1]}"))
+                        frame_check.note_view(s.mode, low, high)
                         last_range_time = now
                     if s.invert:
                         image = cv2.bitwise_not(image)
