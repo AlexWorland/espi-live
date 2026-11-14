@@ -13,6 +13,11 @@
 - The source badge widens to fit a long camera name ("Hauppauge USB-Live2 …") instead of cutting it.
 - Temporary messages (for example "Checking GitHub for a newer build…") still replace the tip and hint while the readouts stay visible.
 
+## 2026-11-14 — The window title shows the version
+
+- The main window's title now starts with the release version, for example `ESPI live v0.10.0 — BFS-U3-63S4M` or `ESPI live v0.10.0 — DUMMY MODE`. The version is the release's tag: the Release workflow bakes the tag chosen by its `version` job (`vX.Y.Z`, or `vX.Y.Z-pre.N` for a pre-release) into the build as `VERSION`.
+- **Help > About**, `--version`, the log header and error reports name the version before the build number. A source checkout, and a build made before this change, shows `dev` in the title and leaves the version out of the description. Updates are still ordered by build number only.
+
 ## 2026-11-14 — Releases are started by hand again
 
 ### Previous state

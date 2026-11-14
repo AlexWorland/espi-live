@@ -2999,15 +2999,15 @@ class MainWindow(QMainWindow):
         name = identity.short_name() if identity else "Camera"
         lines = identity.description() if identity else []
         several = len(self.channels) > 1
+        app = updater.app_title()
         if demo:
-            title = f"ESPI live — {self.current.label}" if several else "ESPI live"
+            title = f"{app} — {self.current.label}" if several else app
             self.setWindowTitle(f"{title} — DUMMY MODE")
         elif identity:  # the serial tells same-model cameras apart
             serial = f" ({self.current.info.serial})" if several else ""
-            self.setWindowTitle(f"ESPI live — {name}{serial}")
+            self.setWindowTitle(f"{app} — {name}{serial}")
         else:
-            self.setWindowTitle(f"ESPI live — {self.current.label}" if several
-                                else "ESPI live")
+            self.setWindowTitle(f"{app} — {self.current.label}" if several else app)
         self.demo_banner.setVisible(demo)
         self.switch_live_button.setVisible(demo)
         self.camera_label.setVisible(not demo)
