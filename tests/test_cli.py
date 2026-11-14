@@ -170,6 +170,7 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIn("PySpin /sdk/PySpin.py", out.getvalue())
         self.assertIn("build 7", out.getvalue())
         self.assertIn("feedback token: absent", out.getvalue())
+        self.assertRegex(out.getvalue(), "logs token: (present|absent)")
 
     def test_reports_feedback_token_present_without_printing_it(self):
         """A baked-in feedback token is reported as present, never as text.

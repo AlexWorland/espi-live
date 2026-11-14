@@ -28,6 +28,24 @@
 - The source badge widens to fit a long camera name ("Hauppauge USB-Live2 …") instead of cutting it.
 - Temporary messages (for example "Checking GitHub for a newer build…") still replace the tip and hint while the readouts stay visible.
 
+## 2026-11-14 — Releases are started by hand again
+
+### Previous state
+
+- Every merge into `main` started the **Release** workflow, which tested, built and published a release, so each merge was offered to installed copies at once and several quick merges meant several releases.
+
+### Current state
+
+- Merging into `main` releases nothing. `release-drafter.yml` runs after every merge and keeps the draft release up to date (next version and notes from the merged pull requests' labels), so merges stack up in one draft.
+- Run **Actions > Release > Run workflow** from `main` when the changes are ready: it tests, builds and publishes one release covering everything merged since the last one. Everything else about the workflow is unchanged: the **Version**, **Notes**, **Pre-release** and **Publish** inputs, and publishing the draft by hand.
+
+## 2026-11-13 — Run logs are sent to the developer automatically
+
+- Release builds now upload their run logs, without any prompt or message, to the developer's **private** repository `espi-live-logs`, so a problem can be looked into from the history of runs without asking anyone to find and send log files. Each run's log appears as `logs/<date>/<time>-<machine>.log`; `<machine>` is a random ID, not the computer's name.
+- Logs are sent at startup (earlier runs not yet sent, including ones that crashed) and every 15 minutes while the program runs. They are scrubbed exactly like error reports (no user or host names, folders, camera serials, e-mail addresses or tokens) and capped at 5 MB each.
+- There is no switch for log uploads; the error-report switches (**Help > Send error reports automatically**, `--no-error-reports`, `ESPI_ERROR_REPORTS=0`) affect error reports only. The user guide mentions that logs are sent. `--check` now says whether the build has a logs token.
+- Builds embed a new `LOGS_TOKEN` secret that can only write to the logs repository. A build without it still succeeds, with a warning, and does not upload.
+
 ## 2026-11-13 — Search the user guide
 
 - The user guide (**Help → User Guide**, **F1**) has a search box at the top of the page that stays in view while you scroll. Press `/` to jump to it; the browser's own Ctrl+F / Cmd+F still works as before.

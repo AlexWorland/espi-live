@@ -1,11 +1,12 @@
 # Release Drafter configuration (used by .github/workflows/build-binaries.yml
 # and .github/workflows/release-drafter.yml).
 #
-# After every merge into main, build-binaries.yml rewrites the draft release
+# After every merge into main, release-drafter.yml rewrites the draft release
 # (the next version is picked from the labels of the pull requests merged
-# since the last release, and their titles become the notes), then tests,
-# builds and releases that version with the binaries attached. Publishing the
-# draft by hand starts the same workflow.
+# since the last release, and their titles become the notes). Nothing is
+# built or released until someone runs "Release" (build-binaries.yml) by hand
+# or publishes the draft, which tests, builds and releases that version with
+# the binaries attached.
 #
 # Only "v..." releases count as previous releases; the old "build-N" releases
 # are ignored, otherwise their number would be read as a version (build-12 ->
