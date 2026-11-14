@@ -25,12 +25,13 @@ from unittest import mock
 
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt
-from PySide6.QtGui import QHelpEvent, QKeyEvent, QScreen, QSurfaceFormat
+from PySide6.QtGui import QFont, QHelpEvent, QKeyEvent, QKeySequence, QScreen, QSurfaceFormat
 from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSlider,
                                QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
-                               QPlainTextEdit, QPushButton, QStyle, QTextEdit, QWidget)
+                               QPlainTextEdit, QPushButton, QStyle, QTextEdit, QToolTip, QWidget)
 
-from espi_live import camera, camera_reports, capture, feedback, paths, qt_app, sources, tips, updater
+from espi_live import (camera, camera_reports, capture, feedback, paths, qt_app, sources, tips,
+                       ui_scale, updater)
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, integrated_webcam,
                           interlaced_frame, usb_live2, webcam)
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
@@ -5358,6 +5359,563 @@ class ScreenFitTests(unittest.TestCase):
         QApplication.processEvents()
         note = self.window.noise_note
         self.assertGreaterEqual(note.height(), note.heightForWidth(note.width()))
+
+
+BIG_SCREEN = QRect(0, 0, 3000, 2000)
+
+
+class UiScaleTests(unittest.TestCase):
+    """The interface-size slider, menu and shortcuts scale the whole window live."""
+
+    def setUp(self):
+        """Build a demo window on a screen big enough for every interface size.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(QScreen, "availableGeometry", return_value=BIG_SCREEN),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(qt_app.apply_app_scale, ui_scale.DEFAULT_PERCENT)
+        self.log = FakeLog()
+        self.window = self.make_window()
+        self.base_point_size = qt_app.base_font().pointSizeF()
+
+    def make_window(self):
+        """Build a demo window with its timers stopped.
+
+        Args: None.
+        Returns: The MainWindow.
+        """
+        engine = Engine(self.log)
+        engine.use_demo()
+        window = demo_window(engine, self.log)
+        window.frame_timer.stop()
+        window.status_timer.stop()
+        window.tip_timer.stop()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        window.show()  # Qt re-fonts a widget only once it has been shown
+        QApplication.processEvents()
+        return window
+
+    def test_the_default_is_the_standard_size(self):
+        """Nothing stored means 100%: the font is untouched and the controls say so.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(QApplication.font().pointSizeF(), self.base_point_size)
+        self.assertEqual(window.ui_scale_row.value(), 100)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 130)
+        self.assertEqual(window.ui_scale_row.spin.maximumWidth(), 104)
+        self.assertFalse(window.ui_scale_reset.isEnabled())
+        self.assertFalse(window.scale_reset_action.isEnabled())
+        self.assertTrue(window.scale_larger_action.isEnabled())
+        self.assertTrue(window.scale_smaller_action.isEnabled())
+        self.assertEqual(FakeSettings.store, {})
+
+    def test_the_slider_row_explains_itself_in_the_display_section(self):
+        """The slider is labeled, spans the allowed range and has a tooltip.
+
+        Args: None.
+        Returns: None.
+        """
+        row = self.window.ui_scale_row
+        self.assertEqual((row.spin.minimum(), row.spin.maximum()), (70, 200))
+        self.assertEqual(row.spin.suffix(), "%")
+        self.assertIn("release", row.toolTip())
+        self.assertIn("Now: 100%", row.toolTip())
+        labels = [label.text() for label in self.window.controls_panel.findChildren(QLabel)]
+        self.assertIn("Interface size", labels)
+
+    def test_a_larger_size_scales_text_pixel_sizes_and_icons(self):
+        """150% makes every font and every fixed pixel size one and a half times larger.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        buttons = window._status_buttons()
+        before_widths = [button.maximumWidth() for button in buttons]
+        window.set_ui_scale(150)
+        self.assertEqual(ui_scale.percent(), 150)
+        self.assertAlmostEqual(QApplication.font().pointSizeF(), self.base_point_size * 1.5)
+        for widget in (window, window.log_view, window.statusBar(), window.menuBar(),
+                       window.zoom_label, window.ui_scale_row.spin):
+            self.assertAlmostEqual(widget.font().pointSizeF(), self.base_point_size * 1.5, 1,
+                                   msg=type(widget).__name__)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 195)
+        self.assertEqual(window.zoom_label.minimumWidth(), 66)
+        self.assertEqual(window.frame_notes.maximumHeight(), 72)
+        self.assertEqual(window.ui_scale_row.spin.maximumWidth(), 156)
+        self.assertEqual(window.status_actions_rule.maximumWidth(), 15)
+        self.assertEqual(window.controls_panel.minimumWidth(), 480)
+        self.assertEqual(window.controls_panel.layout().contentsMargins().left(), 15)
+        self.assertIn("padding:9px", window.demo_banner.styleSheet())
+        self.assertIn("margin-top:12px", window.frozen_banner.styleSheet())
+        self.assertAlmostEqual(QToolTip.font().pointSizeF(), self.base_point_size * 1.5)
+        for button, before in zip(buttons, before_widths):
+            self.assertGreater(button.maximumWidth(), before)
+            self.assertEqual(button.iconSize(), QSize(24, 24))
+        self.assertGreater(window.controls_scroll.minimumWidth(), 480)
+
+    def test_status_bar_items_are_measured_again(self):
+        """Readouts, the tip cap, the message area and the buttons follow the font.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        readout = window.speed_status.sizeHint().width()
+        tip_cap = window.tip_label.maximumWidth()
+        message_min = window.status_strip.flow.message_min
+        window.set_ui_scale(150)
+        self.assertGreater(window.speed_status.sizeHint().width(), readout * 1.3)
+        self.assertGreater(window.tip_label.maximumWidth(), tip_cap * 1.3)
+        self.assertGreater(window.status_strip.flow.message_min, message_min * 1.3)
+        heights = {button.maximumHeight() for button in window._status_buttons()}
+        self.assertEqual(len(heights), 1)
+        self.assertEqual({button.minimumHeight() for button in window._status_buttons()}, heights)
+
+    def test_dock_titles_follow_the_size(self):
+        """A dock's title is drawn from an explicit font, which Qt would otherwise keep stale.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(150)
+        for dock in (self.window.controls_dock, self.window.log_dock):
+            self.assertAlmostEqual(dock.font().pointSizeF(), self.base_point_size * 1.5, 1)
+            self.assertNotEqual(dock.font(), QApplication.font())
+
+    def test_the_controls_and_log_keep_their_share_of_the_window(self):
+        """The controls dock widens and the log dock deepens with the size.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.resize(2400, 1200)
+        QApplication.processEvents()
+        with mock.patch.object(window, "resizeDocks") as resize_docks:
+            window.controls_dock.setFixedWidth(400)
+            window.log_dock.setFixedHeight(100)
+            window.set_ui_scale(125)
+        self.assertEqual(resize_docks.call_args_list[0].args[1], [500])
+        self.assertEqual(resize_docks.call_args_list[1].args[1], [125])
+
+    def test_returning_to_100_percent_restores_the_original_sizes(self):
+        """Resetting undoes every change: fonts, pixel sizes, icons and styles.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        widths = [button.maximumWidth() for button in window._status_buttons()]
+        reserved = window.range_status.sizeHint().width()
+        banner = window.demo_banner.styleSheet()
+        window.set_ui_scale(175)
+        window.ui_scale_reset.click()
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(QApplication.font().pointSizeF(), self.base_point_size)
+        self.assertEqual([button.maximumWidth() for button in window._status_buttons()], widths)
+        self.assertEqual(window.range_status.sizeHint().width(), reserved)
+        self.assertEqual(window.demo_banner.styleSheet(), banner)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 130)
+        self.assertEqual(window._status_buttons()[1].iconSize(), QSize(16, 16))
+        self.assertFalse(window.ui_scale_reset.isEnabled())
+
+    def test_a_change_is_remembered_and_logged(self):
+        """The size is stored for the next run and named in the log.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(125)
+        self.assertEqual(FakeSettings.store[ui_scale.SETTING_KEY], 125)
+        self.assertIn("Interface size: 125%", self.log.drain())
+        self.window.set_ui_scale(125)  # no change: nothing more to say
+        self.assertNotIn("Interface size", self.log.drain())
+
+    def test_a_stored_size_is_applied_before_the_window_is_built(self):
+        """The next run starts at the remembered size, whatever type the store holds.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store[ui_scale.SETTING_KEY] = "150"  # ini files hand back text
+        window = self.make_window()
+        self.assertEqual(ui_scale.percent(), 150)
+        self.assertEqual(window.zoom_slider.maximumWidth(), 195)
+        self.assertEqual(window.ui_scale_row.value(), 150)
+        self.assertTrue(window.ui_scale_reset.isEnabled())
+        self.assertAlmostEqual(window.log_view.font().pointSizeF(), self.base_point_size * 1.5, 1)
+
+    def test_a_damaged_stored_size_means_100_percent(self):
+        """Junk or out-of-range values do not break startup.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store[ui_scale.SETTING_KEY] = "huge"
+        self.make_window()
+        self.assertEqual(ui_scale.percent(), 100)
+        FakeSettings.store[ui_scale.SETTING_KEY] = 9000
+        self.make_window()
+        self.assertEqual(ui_scale.percent(), ui_scale.MAX_PERCENT)
+
+    def test_dragging_the_slider_applies_only_on_release(self):
+        """Mid-drag the value shows but the window waits, so the slider stays under the pointer.
+
+        Args: None.
+        Returns: None.
+        """
+        row = self.window.ui_scale_row
+        row.slider.setSliderDown(True)
+        row.slider.setValue(30)  # 150%
+        self.assertEqual(row.spin.value(), 150)
+        self.assertEqual(ui_scale.percent(), 100)
+        row.slider.setSliderDown(False)  # the release
+        self.assertEqual(ui_scale.percent(), 150)
+        self.assertEqual(row.value(), 150)
+
+    def test_keys_wheel_clicks_and_typing_apply_at_once(self):
+        """Without a drag in progress, every change takes effect immediately.
+
+        Args: None.
+        Returns: None.
+        """
+        row = self.window.ui_scale_row
+        row.slider.setValue(25)  # 125%: a click on the groove, a key or the wheel
+        self.assertEqual(ui_scale.percent(), 125)
+        row.spin.setValue(90)
+        self.assertEqual(ui_scale.percent(), 90)
+        self.assertLess(QApplication.font().pointSizeF(), self.base_point_size)
+
+    def test_the_reset_button_returns_to_100_percent(self):
+        """The Display section's button undoes any size and then disables itself.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(80)
+        self.assertTrue(self.window.ui_scale_reset.isEnabled())
+        self.window.ui_scale_reset.click()
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(self.window.ui_scale_row.value(), 100)
+        self.assertFalse(self.window.ui_scale_reset.isEnabled())
+
+    def test_the_view_menu_steps_resets_and_stops_at_the_ends(self):
+        """Larger, Smaller and Reset move through the presets and disable at the limits.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.scale_larger_action.trigger()
+        self.assertEqual(ui_scale.percent(), 110)
+        window.scale_smaller_action.trigger()
+        window.scale_smaller_action.trigger()
+        self.assertEqual(ui_scale.percent(), 90)
+        window.scale_reset_action.trigger()
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertFalse(window.scale_reset_action.isEnabled())
+        window.set_ui_scale(ui_scale.MAX_PERCENT)
+        self.assertFalse(window.scale_larger_action.isEnabled())
+        self.assertTrue(window.scale_smaller_action.isEnabled())
+        window.set_ui_scale(ui_scale.MIN_PERCENT)
+        self.assertFalse(window.scale_smaller_action.isEnabled())
+        self.assertTrue(window.scale_larger_action.isEnabled())
+
+    def test_the_menu_is_in_the_view_menu_with_shortcuts(self):
+        """Ctrl++, Ctrl+= , Ctrl+- and Ctrl+0 are bound, and each action has a tooltip.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        view = window.menuBar().actions()[0].menu()
+        names = [action.text() for action in view.actions()]
+        self.assertIn("Interface size", names)
+        submenu = next(action.menu() for action in view.actions()
+                       if action.text() == "Interface size")
+        self.assertEqual([action.text() for action in submenu.actions()],
+                         ["Larger", "Smaller", "Reset to 100%"])
+        self.assertIn(QKeySequence("Ctrl+="), window.scale_larger_action.shortcuts())
+        self.assertIn(QKeySequence(QKeySequence.ZoomIn), window.scale_larger_action.shortcuts())
+        self.assertEqual(window.scale_smaller_action.shortcut(), QKeySequence(QKeySequence.ZoomOut))
+        self.assertEqual(window.scale_reset_action.shortcut(), QKeySequence("Ctrl+0"))
+        for action in submenu.actions():
+            self.assertTrue(action.toolTip().strip(), action.text())
+
+    def test_the_digit_shortcuts_still_mean_fit_and_actual_size(self):
+        """Ctrl+0 is the size reset; the plain 0 key still fits the image.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window.view, "fit") as fit:
+            self.assertTrue(self.window.handle_key(Qt.Key_0))
+        fit.assert_called_once()
+
+    def test_a_size_too_large_for_the_screen_is_stepped_down(self):
+        """The window's smallest size must fit the screen, so the size backs off.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.set_ui_scale(150)
+        window.layout().activate()
+        smallest = window.minimumSizeHint()
+        tight = QRect(0, 0, smallest.width() + 20, smallest.height() + 20)  # fits 150%
+        with mock.patch.object(QScreen, "availableGeometry", return_value=tight):
+            window.set_ui_scale(ui_scale.MAX_PERCENT)
+            self.assertLess(ui_scale.percent(), ui_scale.MAX_PERCENT)
+            self.assertGreaterEqual(ui_scale.percent(), 100)
+            self.assertTrue(window._fits_screen())
+        self.assertEqual(window.ui_scale_row.value(), ui_scale.percent())
+        self.assertEqual(FakeSettings.store[ui_scale.SETTING_KEY], ui_scale.percent())
+
+    def test_100_percent_is_never_lowered_for_a_small_screen(self):
+        """A screen too small even for 100% leaves it alone, as before this feature.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        with mock.patch.object(QScreen, "availableGeometry",
+                               return_value=QRect(0, 0, 200, 150)):
+            window.set_ui_scale(125)
+        self.assertEqual(ui_scale.percent(), 100)
+        self.assertEqual(window.ui_scale_row.value(), 100)
+        self.assertNotIn(ui_scale.SETTING_KEY, FakeSettings.store)
+
+    def test_a_smaller_screen_while_running_lowers_a_large_size(self):
+        """A resolution change refits the window and steps the interface size down.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.set_ui_scale(200)
+        window.layout().activate()
+        smallest = window.minimumSizeHint()
+        self.log.drain()
+        screen = window.screen()
+        smaller = QRect(0, 0, smallest.width() - 100, smallest.height() + 400)
+        with mock.patch.object(QScreen, "availableGeometry", return_value=smaller):
+            screen.availableGeometryChanged.emit(smaller)
+            QApplication.processEvents()
+            self.assertTrue(window._fits_screen())
+        self.assertLess(ui_scale.percent(), 200)
+        self.assertEqual(FakeSettings.store[ui_scale.SETTING_KEY], ui_scale.percent())
+        self.assertIn("limited to", self.log.drain())
+        self.assertEqual(window.ui_scale_row.value(), ui_scale.percent())
+
+    def test_a_screen_change_that_still_fits_keeps_the_size(self):
+        """Nothing is lowered or logged when the window still fits.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.set_ui_scale(125)
+        self.log.drain()
+        window.screen().availableGeometryChanged.emit(BIG_SCREEN)
+        self.assertEqual(ui_scale.percent(), 125)
+        self.assertNotIn("limited", self.log.drain())
+
+    def test_dialogs_open_at_the_scaled_size(self):
+        """The guide and request dialogs scale their opening size with the interface.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_ui_scale(150)
+        guide = qt_app.SettingsGuideDialog(self.window)
+        self.addCleanup(guide.deleteLater)
+        self.assertEqual((guide.width(), guide.height()), (1020, 960))
+        request = qt_app.FeatureRequestDialog(self.window)
+        self.addCleanup(request.deleteLater)
+        self.assertEqual((request.width(), request.height()), (840, 630))
+
+    def test_a_status_label_keeps_its_reserved_width_in_any_font(self):
+        """A FixedLabel reserves room for its samples again when the font changes.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.FixedLabel("Camera: 999.9 fps")
+        label.setText("Camera: 30.0 fps")
+        before = label.sizeHint().width()
+        font = QFont(label.font())
+        font.setPointSizeF(font.pointSizeF() * 2)
+        label.setFont(font)
+        self.assertGreater(label.sizeHint().width(), before * 1.6)
+        self.assertEqual(label.text(), "Camera: 30.0 fps")
+
+    def test_a_growing_label_still_grows_after_a_font_change(self):
+        """A label that widens for long text keeps doing so at a new size.
+
+        Args: None.
+        Returns: None.
+        """
+        label = qt_app.FixedLabel("short")
+        label.grow_to_text()
+        label.setText("a much longer camera name than the sample")
+        wide = label.sizeHint().width()
+        font = QFont(label.font())
+        font.setPointSizeF(font.pointSizeF() * 1.5)
+        label.setFont(font)
+        self.assertGreater(label.sizeHint().width(), wide * 1.3)
+
+
+class ScaledStyleTests(unittest.TestCase):
+    """The application style, font helpers and icons that follow the interface size."""
+
+    def tearDown(self):
+        """Return the application to the standard size.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(ui_scale.DEFAULT_PERCENT)
+
+    def test_chrome_metrics_scale_but_frames_do_not(self):
+        """Indicators, handles and icons grow with the size; a frame stays a hairline.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.install_tooltip_delay()
+        qt_app.apply_app_scale(100)
+        style = QApplication.style()
+        scaled_metrics = (QStyle.PM_IndicatorWidth, QStyle.PM_SliderLength,
+                          QStyle.PM_ScrollBarExtent, QStyle.PM_SmallIconSize)
+        before = [style.pixelMetric(metric) for metric in scaled_metrics]
+        frame = style.pixelMetric(QStyle.PM_DefaultFrameWidth)
+        qt_app.apply_app_scale(200)
+        style = QApplication.style()
+        self.assertIsInstance(style, qt_app.ScaledStyle)
+        self.assertEqual([style.pixelMetric(metric) for metric in scaled_metrics],
+                         [value * 2 for value in before])
+        self.assertEqual(style.pixelMetric(QStyle.PM_DefaultFrameWidth), frame)
+
+    def test_the_tooltip_delay_survives_a_size_change(self):
+        """Replacing the style keeps the hover delay.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(150)
+        self.assertEqual(QApplication.style().styleHint(QStyle.SH_ToolTip_WakeUpDelay),
+                         qt_app.TOOLTIP_DELAY_MS)
+
+    def test_applying_the_same_size_again_keeps_the_style(self):
+        """Nothing is re-polished when the size did not change.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(125)
+        style = QApplication.style()
+        self.assertEqual(qt_app.apply_app_scale(125), 125)
+        self.assertIs(QApplication.style(), style)
+
+    def test_the_platform_font_is_left_alone_at_100_percent(self):
+        """At the standard size, applying 100% does not replace the application font.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.apply_app_scale(100)
+        font = QFont(QApplication.font())
+        with mock.patch.object(QApplication, "setFont") as set_font:
+            qt_app.apply_app_scale(100)
+        set_font.assert_not_called()
+        self.assertEqual(QApplication.font(), font)
+        with mock.patch.object(QApplication, "setFont") as set_font:
+            qt_app.apply_app_scale(125)
+            qt_app.apply_app_scale(100)  # undoing a size does set the font back
+        self.assertEqual(set_font.call_count, 2)
+
+    def test_sizes_are_clamped(self):
+        """An out-of-range request is limited to the allowed range.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(qt_app.apply_app_scale(10_000), ui_scale.MAX_PERCENT)
+        self.assertEqual(qt_app.apply_app_scale(1), ui_scale.MIN_PERCENT)
+
+    def test_scaled_font_handles_point_and_pixel_sizes(self):
+        """Fonts sized in points or in pixels both scale.
+
+        Args: None.
+        Returns: None.
+        """
+        points = QFont("Sans Serif")
+        points.setPointSizeF(10)
+        self.assertAlmostEqual(qt_app.scaled_font(points, 150).pointSizeF(), 15)
+        pixels = QFont("Sans Serif")
+        pixels.setPixelSize(12)
+        self.assertEqual(qt_app.scaled_font(pixels, 150).pixelSize(), 18)
+        self.assertEqual(points.pointSizeF(), 10)  # the original is untouched
+
+    def test_nudged_font_differs_a_little(self):
+        """A nudged font is not equal to the original but is the same size to the eye.
+
+        Args: None.
+        Returns: None.
+        """
+        points = QFont("Sans Serif")
+        points.setPointSizeF(10)
+        nudged = qt_app.nudged_font(points)
+        self.assertNotEqual(nudged, points)
+        self.assertAlmostEqual(nudged.pointSizeF(), 10, 1)
+        pixels = QFont("Sans Serif")
+        pixels.setPixelSize(12)
+        self.assertEqual(qt_app.nudged_font(pixels).pixelSize(), 13)
+
+    def test_the_base_font_is_taken_once(self):
+        """The unscaled font is remembered, so a scaled font is never scaled again.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app, "_base_font", None):
+            first = qt_app.base_font()
+            qt_app.apply_app_scale(150)
+            self.assertEqual(qt_app.base_font().pointSizeF(), first.pointSizeF())
+            qt_app.apply_app_scale(150)
+            self.assertAlmostEqual(QApplication.font().pointSizeF(), first.pointSizeF() * 1.5)
+            qt_app.apply_app_scale(100)
+
+    def test_status_icons_are_drawn_at_the_requested_size(self):
+        """Icons come out at the button's icon size, with the drawing scaled to fit.
+
+        Args: None.
+        Returns: None.
+        """
+        for kind in ("refresh", "download", "idea", "code"):
+            pixmap = qt_app._paint_status_icon(kind, qt_app.QColor("black"), 32)
+            self.assertEqual((pixmap.width(), pixmap.height()), (32, 32), kind)
+            icon = qt_app._status_icon(kind, qt_app.QColor("black"), 24)
+            self.assertEqual(icon.actualSize(QSize(64, 64)), QSize(24, 24), kind)
+        self.assertEqual(qt_app._paint_status_icon("idea", qt_app.QColor("black")).width(), 16)
 
 
 if __name__ == "__main__":
