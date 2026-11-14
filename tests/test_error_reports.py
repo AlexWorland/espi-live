@@ -831,6 +831,7 @@ class ReporterTests(ReporterBase):
         self.reporter.update_context(front_end="Qt", serials=("SN-99",))
         self.assertEqual(self.reporter.context["front_end"], "Qt")
         self.assertEqual(self.reporter.scrubber()("camera serial SN-99"), "camera serial <serial>")
+        self.assertEqual(self.reporter.serials(), ("SN-99",))
 
     def test_capture_saves_one_pending_report_per_error(self):
         """The first capture saves and announces; repeats return the same report.
