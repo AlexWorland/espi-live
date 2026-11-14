@@ -1,25 +1,34 @@
-"""Open the Codex app on the program's source code.
+"""Open the Codex command-line tool on the program's source code.
 
-``deep_link`` builds Codex's documented ``codex://threads/new?path=...``
-link, which starts a new chat with a folder as its workspace (the Codex app,
-now also part of the ChatGPT desktop app, handles these links on macOS,
-Windows and Linux). Before a downloaded source copy is opened,
-``write_guide`` puts ``AGENTS.override.md`` in it. Codex reads that file
-instead of ``AGENTS.md`` and learns that the person is a user, not a
-developer: answer from the code in plain words, ask before sending a change,
-and send it with this program's ``--send-changes`` (``changes.py``). A source
-checkout opens as it is, with the developers' ``AGENTS.md``. No GUI imports:
-the front end opens the link.
+``find_cli`` looks for the ``codex`` command and ``open_cli`` starts it in a
+new terminal window with the source folder as its working directory (a
+program started from the desktop does not always see the same ``PATH`` as a
+terminal, so the usual install folders are searched too). Before a downloaded
+source copy is opened, ``write_guide`` puts ``AGENTS.override.md`` in it.
+Codex reads that file instead of ``AGENTS.md`` and learns that the person is
+a user, not a developer: answer from the code in plain words, ask before
+sending a change, and send it with this program's ``--send-changes``
+(``changes.py``). A source checkout opens as it is, with the developers'
+``AGENTS.md``. No GUI imports: the front end reports what happened.
 """
 
 import os
 import shlex
+import shutil
+import subprocess
 import sys
-import urllib.parse
 
 from espi_live import source_code, updater
 
-INSTALL_URL = "https://developers.openai.com/codex/app"
+INSTALL_URL = "https://developers.openai.com/codex/cli"
+CLI_NAME = "codex"
+# Where the command usually lives when the program was not started from a shell.
+EXTRA_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin", "~/.npm-global/bin",
+                  "~/.bun/bin", "~/.volta/bin")
+# How each Linux terminal is told to run a command: its name and the arguments
+# that come before the command.
+LINUX_TERMINALS = (("x-terminal-emulator", ("-e",)), ("gnome-terminal", ("--",)),
+                   ("konsole", ("-e",)), ("xfce4-terminal", ("-x",)), ("xterm", ("-e",)))
 GUIDE = """\
 # You are helping a user of ESPI live
 
@@ -91,14 +100,67 @@ find what changed: never edit it), this file and `{request}`.
 """
 
 
-def deep_link(folder):
-    """Build the link that opens a new Codex chat in a folder.
+def find_cli(platform=None):
+    """Find the ``codex`` command.
 
-    Args: folder is the workspace folder.
-    Returns: The ``codex://threads/new?path=...`` URL, with the absolute
-        path percent-encoded.
+    Args: platform is a sys.platform value; None uses the running one.
+    Returns: The command's absolute path, or None when it is not installed.
     """
-    return "codex://threads/new?path=" + urllib.parse.quote(os.path.abspath(folder), safe="")
+    found = shutil.which(CLI_NAME)
+    if found is None and (platform or sys.platform) != "win32":
+        extra = os.pathsep.join(os.path.expanduser(d) for d in EXTRA_BIN_DIRS)
+        found = shutil.which(CLI_NAME, path=extra)
+    return found
+
+
+def apple_script_quote(text):
+    """Quote text as an AppleScript string literal.
+
+    Args: text is the text to quote.
+    Returns: The text in double quotes, with backslashes and quotes escaped.
+    """
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def terminal_command(exe, folder, platform=None, which=shutil.which):
+    """Build the command that runs Codex in a new terminal window.
+
+    Args: exe is the codex command's path; folder is the working directory;
+        platform is a sys.platform value (None uses the running one); which
+        finds a terminal program on Linux.
+    Returns: A (command line, subprocess options) tuple. Raises OSError when
+        Linux has no terminal program to use.
+    """
+    platform = platform or sys.platform
+    if platform == "win32":
+        # /k keeps the window open if Codex stops at once, so its error can be read.
+        return (["cmd.exe", "/k", exe],
+                {"cwd": folder, "creationflags": getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10)})
+    if platform == "darwin":
+        shell = f"cd {shlex.quote(folder)} && {shlex.quote(exe)}"
+        return (["osascript", "-e",
+                 f"tell application \"Terminal\" to do script {apple_script_quote(shell)}",
+                 "-e", 'tell application "Terminal" to activate'], {})
+    for name, lead in LINUX_TERMINALS:
+        terminal = which(name)
+        if terminal:
+            return ([terminal, *lead, "sh", "-c", 'cd "$1" && exec "$2"', "sh", folder, exe], {})
+    raise OSError("no terminal program was found to run Codex in")
+
+
+def open_cli(folder):
+    """Start Codex in a new terminal window, working in a folder.
+
+    Args: folder is the source folder.
+    Returns: The codex command's path when it was started, or None when Codex
+        is not installed. Raises OSError if the terminal cannot be started.
+    """
+    exe = find_cli()
+    if exe is None:
+        return None
+    command, options = terminal_command(exe, folder)
+    subprocess.Popen(command, **options)
+    return exe
 
 
 def send_command(platform=None):

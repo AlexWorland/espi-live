@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-14 — Open in Codex uses the Codex command-line tool
+
+### Previous state
+
+- **Open in Codex** opened a `codex://` link for the Codex app. On a computer without the app, Windows reported the link as handled and showed its own "Get an app to open this 'codex' link" box, so the program's explanation never appeared.
+
+### Current state
+
+- The program looks for the `codex` command. If it is installed, **Open in Codex** (and **Help > Ask Codex about the source code…**) opens it in a new terminal window in the `espi-live-source` folder (a console window on Windows, Terminal on macOS, the desktop's terminal on Linux). If not, a dialog says Codex is missing and its **How to install Codex…** button opens the install page. A terminal that cannot start is reported separately.
+- The first-use dialog now asks for the Codex command-line tool and a ChatGPT account (sign-in happens the first time `codex` runs), instead of the Codex app.
+
 ## 2026-11-14 — Releases are started by hand again
 
 ### Previous state
