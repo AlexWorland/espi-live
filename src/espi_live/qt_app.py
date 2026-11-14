@@ -31,9 +31,10 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QSettings, QSize,
-                            Qt, QtMsgType, QTimer, QUrl, Signal, qInstallMessageHandler)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFontMetrics, QIcon, QImage,
+from PySide6.QtCore import (QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect,
+                            QSettings, QSize, Qt, QtMsgType, QTimer, QUrl, Signal,
+                            qInstallMessageHandler)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
                            QKeySequence, QOffscreenSurface, QOpenGLContext, QPainter,
                            QPainterPath, QPalette, QPen, QPixmap, QSurfaceFormat, QVector4D)
 from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
@@ -49,7 +50,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
-                       source_code, tips, updater)
+                       source_code, tips, ui_scale, updater)
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
@@ -61,6 +62,7 @@ from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHO
 # size shrinks to the screen when shown (MainWindow.fit_to_screen).
 DEFAULT_WIDTH = 2100
 DEFAULT_HEIGHT = 900
+QWIDGETSIZE_MAX = 16777215  # Qt's "no maximum size" (not exported by PySide6)
 
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
 # Gamma stays its own Display control: it is a curve, not a second stretch.
@@ -405,16 +407,20 @@ QPushButton:disabled {
 """
 
 
-def _paint_status_icon(kind, color):
-    """Draw a 16px monochrome icon for a status-bar action.
+def _paint_status_icon(kind, color, size=16):
+    """Draw a monochrome icon for a status-bar action.
 
-    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor.
+    The drawing is laid out on a 16-unit square and scaled to the size.
+
+    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor;
+        size is the side in pixels.
     Returns: A QPixmap with a transparent background.
     """
-    pixmap = QPixmap(16, 16)
+    pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     try:
+        painter.scale(size / 16, size / 16)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         pen = QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                    Qt.PenJoinStyle.RoundJoin)
@@ -448,17 +454,19 @@ def _paint_status_icon(kind, color):
     return pixmap
 
 
-def _status_icon(kind, color):
+def _status_icon(kind, color, size=16):
     """Build a status-bar icon, with a dimmer copy for the disabled state.
 
-    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor.
+    Args: kind is "refresh", "download", "idea" or "code"; color is a QColor;
+        size is the side in pixels.
     Returns: A QIcon.
     """
     icon = QIcon()
-    icon.addPixmap(_paint_status_icon(kind, color), QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(_paint_status_icon(kind, color, size), QIcon.Mode.Normal, QIcon.State.Off)
     dimmed = QColor(color)
     dimmed.setAlpha(150)
-    icon.addPixmap(_paint_status_icon(kind, dimmed), QIcon.Mode.Disabled, QIcon.State.Off)
+    icon.addPixmap(_paint_status_icon(kind, dimmed, size), QIcon.Mode.Disabled,
+                   QIcon.State.Off)
     return icon
 
 
@@ -466,19 +474,23 @@ def _arm_status_button(button, style, texts, icon=None):
     """Give a status-bar control button chrome, a pointer and a fixed width.
 
     The width fits every label the button shows, so a busy label cannot push
-    the readouts sideways.
+    the readouts sideways. The arguments are kept on the button, so the same
+    call can be repeated when the interface size changes (the style sheet's
+    lengths, the icon and the width all follow it).
 
-    Args: button is a QPushButton; style is its style sheet; texts are the
-        labels; icon is a QIcon, or None.
+    Args: button is a QPushButton; style is its style sheet, written for 100%;
+        texts are the labels; icon is (kind, color) for _status_icon, or None.
     Returns: The fixed width in pixels.
     """
+    button.arm = (style, texts, icon)
     button.setFlat(False)
     button.setCursor(Qt.PointingHandCursor)
     button.setFocusPolicy(Qt.StrongFocus)
-    button.setStyleSheet(style)
+    button.setStyleSheet(ui_scale.scale_stylesheet(style, ui_scale.percent()))
     if icon is not None:
-        button.setIcon(icon)
-        button.setIconSize(QSize(16, 16))
+        side = ui_scale.px(16)
+        button.setIcon(_status_icon(*icon, size=side))
+        button.setIconSize(QSize(side, side))
     current = button.text()
     width = 0
     for text in texts:
@@ -568,8 +580,48 @@ class TooltipDelayStyle(QProxyStyle):
         return super().styleHint(hint, option, widget, returnData)
 
 
+# The style's own pixel sizes that grow with the interface size: layout margins and
+# spacing, check and radio indicators, slider handles, scroll bars, icons, docks and
+# toolbars. Frame and border widths are left alone, so lines stay crisp.
+SCALED_METRICS = frozenset((
+    QStyle.PM_LayoutLeftMargin, QStyle.PM_LayoutTopMargin, QStyle.PM_LayoutRightMargin,
+    QStyle.PM_LayoutBottomMargin, QStyle.PM_LayoutHorizontalSpacing,
+    QStyle.PM_LayoutVerticalSpacing, QStyle.PM_ButtonMargin,
+    QStyle.PM_IndicatorWidth, QStyle.PM_IndicatorHeight,
+    QStyle.PM_ExclusiveIndicatorWidth, QStyle.PM_ExclusiveIndicatorHeight,
+    QStyle.PM_SliderThickness, QStyle.PM_SliderLength, QStyle.PM_SliderControlThickness,
+    QStyle.PM_ScrollBarExtent, QStyle.PM_ScrollBarSliderMin,
+    QStyle.PM_SmallIconSize, QStyle.PM_ButtonIconSize, QStyle.PM_ToolBarIconSize,
+    QStyle.PM_LargeIconSize, QStyle.PM_DockWidgetSeparatorExtent,
+    QStyle.PM_DockWidgetTitleMargin, QStyle.PM_DockWidgetTitleBarButtonMargin,
+    QStyle.PM_SplitterWidth, QStyle.PM_ToolBarHandleExtent,
+    QStyle.PM_ToolBarSeparatorExtent, QStyle.PM_ToolBarItemSpacing,
+    QStyle.PM_ToolBarItemMargin))
+
+
+class ScaledStyle(TooltipDelayStyle):
+    """The application style: the tooltip delay, and chrome sized by the interface size.
+
+    The metrics in SCALED_METRICS are multiplied by ``ui_scale.factor()``, read at
+    every call, so check boxes, slider handles, icons, margins and docks follow the
+    font when the interface size changes.
+    """
+
+    def pixelMetric(self, metric, option=None, widget=None):
+        """Return a pixel size, scaled for the metrics in SCALED_METRICS.
+
+        Args: metric is a QStyle.PixelMetric; option and widget are the Qt
+            arguments for this metric.
+        Returns: The size in pixels (negative "use the default" values pass through).
+        """
+        size = super().pixelMetric(metric, option, widget)
+        if metric in SCALED_METRICS and size > 0:
+            return ui_scale.scaled(size, ui_scale.percent())
+        return size
+
+
 def install_tooltip_delay():
-    """Apply the tooltip delay once for this process.
+    """Install the application style (tooltip delay, scaled chrome) once for this process.
 
     Args: None. A QApplication must already exist.
     Returns: None.
@@ -577,7 +629,87 @@ def install_tooltip_delay():
     app = QApplication.instance()
     if isinstance(app.style(), TooltipDelayStyle):
         return
-    app.setStyle(TooltipDelayStyle())
+    app.setStyle(ScaledStyle())
+
+
+_base_font = None  # the application font before any scaling, taken on first use
+_font_scaled = False  # True while the application font has been replaced by a scaled one
+
+
+def base_font():
+    """Return the application font as it was before the interface size changed it.
+
+    Args: None. A QApplication must already exist.
+    Returns: A QFont (a copy).
+    """
+    global _base_font
+    if _base_font is None:
+        _base_font = QFont(QApplication.font())
+    return QFont(_base_font)
+
+
+def scaled_font(font, percent):
+    """Scale a font's size.
+
+    Args: font is the QFont at 100%; percent is the interface size.
+    Returns: A new QFont, sized in points when the original is, else in pixels.
+    """
+    result = QFont(font)
+    if font.pointSizeF() > 0:
+        result.setPointSizeF(font.pointSizeF() * percent / 100)
+    else:
+        result.setPixelSize(ui_scale.scaled(font.pixelSize(), percent))
+    return result
+
+
+def nudged_font(font):
+    """Return a font that looks the same but differs from the given one.
+
+    Qt draws a dock's title bar with a stale font after the application font
+    changes, unless the dock holds an explicit font that is not equal to the
+    application's. A hundredth of a point (or one pixel, for pixel-sized fonts)
+    is invisible and forces the title to be drawn in the right size.
+
+    Args: font is a QFont, normally the application font.
+    Returns: A new QFont.
+    """
+    result = QFont(font)
+    if font.pointSizeF() > 0:
+        result.setPointSizeF(font.pointSizeF() + 0.01)
+    else:
+        result.setPixelSize(font.pixelSize() + 1)
+    return result
+
+
+def apply_app_scale(percent):
+    """Make the whole application follow an interface size, without restarting.
+
+    Sets the shared value, the application font (every widget, menu, dialog and
+    tooltip that has no font of its own size follows it), and replaces the
+    application style so Qt re-polishes every widget with the new metrics. When it
+    returns every widget already has the new font. The caller still re-applies the
+    pixel sizes it fixed itself.
+
+    Args: percent is the wanted interface size (clamped to the allowed range).
+    Returns: The percentage now in force.
+    """
+    global _font_scaled
+    font = base_font()  # before anything changes
+    changed = ui_scale.percent() != ui_scale.clamp_percent(percent)
+    percent = ui_scale.set_percent(percent)
+    # At 100% the platform's own fonts stay in force (setFont would replace its
+    # per-widget-class ones), unless a larger or smaller size has to be undone.
+    if percent != ui_scale.DEFAULT_PERCENT or _font_scaled:
+        QApplication.setFont(scaled_font(font, percent))
+        _font_scaled = percent != ui_scale.DEFAULT_PERCENT
+    if changed:
+        QApplication.setStyle(ScaledStyle())  # Qt polishes every widget again
+    else:
+        install_tooltip_delay()
+    # Qt hands the new font to existing widgets through posted events; deliver
+    # them now, so the caller measures widgets that already have it.
+    QCoreApplication.sendPostedEvents()
+    return percent
 
 
 def tooltip_size(text):
@@ -1188,7 +1320,7 @@ class SliderSpin(QWidget):
         self.spin.setSingleStep(step)
         self.spin.setSuffix(suffix)
         self.spin.setKeyboardTracking(False)
-        self.spin.setFixedWidth(104)  # equal widths keep every value column aligned
+        self.spin.setFixedWidth(ui_scale.px(104))  # equal widths keep value columns aligned
         for widget in (self, self.slider, self.spin):
             widget.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         layout = QHBoxLayout(self)
@@ -1200,6 +1332,14 @@ class SliderSpin(QWidget):
         self.slider.valueChanged.connect(
             lambda ticks: self.spin.setValue(ticks * self.step))
         self.spin.valueChanged.connect(self._spin_changed)
+
+    def rescale(self):
+        """Resize the spin box for the interface size now in force.
+
+        Args: None.
+        Returns: None.
+        """
+        self.spin.setFixedWidth(ui_scale.px(104))
 
     def set_range(self, low, high):
         """Change the allowed range, clamping the current value.
@@ -1372,7 +1512,7 @@ class FeatureRequestDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("Request a feature")
-        self.resize(560, 420)
+        self.resize(ui_scale.px(560), ui_scale.px(420))
         settings = QSettings("ESPI", "espi_live")
         self.title = QLineEdit(request.title if request else "")
         self.title.setMaxLength(feedback.MAX_TITLE)
@@ -1449,7 +1589,7 @@ class SettingsGuideDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("Which settings should I use?")
-        self.resize(680, 640)
+        self.resize(ui_scale.px(680), ui_scale.px(640))
         self.guide = QPlainTextEdit(SETTINGS_GUIDE)
         self.guide.setReadOnly(True)
         self.guide.setObjectName("settingsGuide")
@@ -1723,10 +1863,32 @@ class FixedLabel(QLabel):
         self._full = ""
         self._hold = False  # when True, the bar may not shrink this label
         self._grow = False  # when True, text wider than the samples widens the label
-        self._sampled = max(self.fontMetrics().horizontalAdvance(text)
-                            for text in samples) + 2
-        self._reserved = self._sampled
+        self._samples = samples
+        self._sampled = self._reserved = 0
+        self._measure()
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+    def _measure(self):
+        """Reserve room for the samples in the label's current font.
+
+        Args: None.
+        Returns: None.
+        """
+        self._sampled = max(self.fontMetrics().horizontalAdvance(text)
+                            for text in self._samples) + 2
+        self._reserved = self._sampled
+
+    def changeEvent(self, event):
+        """Reserve room again when the font changes (the interface size did).
+
+        Args: event is the QEvent.
+        Returns: None.
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange and hasattr(self, "_samples"):
+            self._measure()
+            self.updateGeometry()
+            self.setText(self._full)
 
     def hold_full_text(self):
         """Keep the reserved width, so the samples are never shortened.
@@ -1844,6 +2006,10 @@ class MainWindow(QMainWindow):
         """
         super().__init__()
         install_tooltip_delay()
+        self._size_rules = []  # (setter, 100% sizes): pixel sizes this window fixes itself
+        self._style_rules = []  # (widget, style sheet written for 100%)
+        apply_app_scale(ui_scale.parse_percent(
+            QSettings("ESPI", "espi_live").value(ui_scale.SETTING_KEY, ui_scale.DEFAULT_PERCENT)))
         self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.channels = list(channels)
         self.current = next(channel for channel in self.channels if channel.active)
@@ -1882,8 +2048,8 @@ class MainWindow(QMainWindow):
         # mouse events pass through it so zoom, pan and the readout still work.
         self.frozen_banner = QLabel()
         self.frozen_banner.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.frozen_banner.setStyleSheet(
-            FROZEN_STYLE + "padding:4px 12px;margin-top:8px;border-radius:4px;")
+        self._styled(self.frozen_banner,
+                     FROZEN_STYLE + "padding:4px 12px;margin-top:8px;border-radius:4px;")
         self.frozen_banner.setVisible(False)
         center = QWidget()
         stack = QGridLayout(center)
@@ -1899,6 +2065,7 @@ class MainWindow(QMainWindow):
         self._build_log()
         self._build_status_bar()
         self._build_menus()
+        self._sync_scale_controls()
         self._rebuild_cameras()
         self._set_demo(self.current.demo)
         self.shortcut_filter = ShortcutFilter(self)
@@ -1959,10 +2126,10 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         if self._watched_screen is not None:
-            self._watched_screen.availableGeometryChanged.disconnect(self.fit_to_screen)
+            self._watched_screen.availableGeometryChanged.disconnect(self._fit_window)
         self._watched_screen = screen
-        screen.availableGeometryChanged.connect(self.fit_to_screen)
-        self.fit_to_screen()
+        screen.availableGeometryChanged.connect(self._fit_window)
+        self._fit_window()
 
     def fit_to_screen(self, *_):
         """Shrink and move the window so all of it is on its screen.
@@ -1987,6 +2154,155 @@ class MainWindow(QMainWindow):
                          fitted.y() + inner.y() - frame.y(),
                          fitted.width() - (frame.width() - inner.width()),
                          fitted.height() - (frame.height() - inner.height()))
+
+    def _sized(self, setter, *lengths):
+        """Set a pixel size now, and again whenever the interface size changes.
+
+        Only for widgets that live as long as the window.
+
+        Args: setter is the bound Qt setter (for example widget.setFixedWidth);
+            lengths are the arguments it takes, written for 100%.
+        Returns: None.
+        """
+        self._size_rules.append((setter, lengths))
+        setter(*[ui_scale.px(length) for length in lengths])
+
+    def _styled(self, widget, style):
+        """Style a widget with lengths that follow the interface size.
+
+        Only for widgets that live as long as the window.
+
+        Args: widget is the QWidget; style is its style sheet, written for 100%
+            (1px borders stay 1px).
+        Returns: None.
+        """
+        self._style_rules.append((widget, style))
+        widget.setStyleSheet(ui_scale.scale_stylesheet(style, ui_scale.percent()))
+
+    def set_ui_scale(self, percent):
+        """Resize the whole interface (text, controls, docks, status bar) live.
+
+        The size is remembered for the next run. The controls dock and the log
+        keep their share of the window. A size above 100% that would make the
+        window's smallest size larger than its screen is stepped down until it
+        fits, so the window never leaves the screen.
+
+        Args: percent is the wanted interface size, clamped to the allowed range.
+        Returns: None.
+        """
+        before = ui_scale.percent()
+        self._apply_scale(ui_scale.clamp_percent(percent))
+        self._limit_scale_to_screen()
+        after = ui_scale.percent()
+        if after != before:
+            QSettings("ESPI", "espi_live").setValue(ui_scale.SETTING_KEY, after)
+            self.log.write(f"Interface size: {after}%")
+        self.fit_to_screen()
+        self._sync_scale_controls()
+
+    def _apply_scale(self, percent):
+        """Apply an interface size to Qt, the fixed pixel sizes and the docks.
+
+        Args: percent is an allowed interface size; the current one is a no-op.
+        Returns: None.
+        """
+        before = ui_scale.percent()
+        if percent == before:
+            return
+        ratio = percent / before
+        controls_width, log_height = self.controls_dock.width(), self.log_dock.height()
+        apply_app_scale(percent)
+        self._rescale_widgets()
+        self.resizeDocks([self.controls_dock], [round(controls_width * ratio)], Qt.Horizontal)
+        self.resizeDocks([self.log_dock], [round(log_height * ratio)], Qt.Vertical)
+        self.layout().activate()
+
+    def _fits_screen(self):
+        """Say whether the window's smallest size, frame included, fits its screen.
+
+        Args: None.
+        Returns: True when it does.
+        """
+        area = self.screen().availableGeometry()
+        smallest = self.minimumSizeHint()
+        frame, inner = self.frameGeometry(), self.geometry()
+        return (smallest.width() + frame.width() - inner.width() <= area.width()
+                and smallest.height() + frame.height() - inner.height() <= area.height())
+
+    def _limit_scale_to_screen(self):
+        """Step an interface size above 100% down until the window fits its screen.
+
+        Controls and docks scroll or shrink, but the text and the toolbar have a
+        smallest size; on a small screen a large interface size would push the
+        window past the edge. 100% and below are never changed here.
+
+        Args: None.
+        Returns: None.
+        """
+        while ui_scale.percent() > ui_scale.DEFAULT_PERCENT and not self._fits_screen():
+            self._apply_scale(ui_scale.smaller(ui_scale.percent()))
+
+    def _fit_window(self, *_):
+        """Fit the window, and an interface size above 100%, to the screen.
+
+        Args: _ ignores the new area that availableGeometryChanged passes.
+        Returns: None.
+        """
+        before = ui_scale.percent()
+        self._limit_scale_to_screen()
+        if ui_scale.percent() != before:
+            QSettings("ESPI", "espi_live").setValue(ui_scale.SETTING_KEY, ui_scale.percent())
+            self.log.write(f"Interface size limited to {ui_scale.percent()}% to fit the screen")
+            self._sync_scale_controls()
+        self.fit_to_screen()
+
+    def _rescale_widgets(self):
+        """Re-apply every pixel size the window fixed itself, for the new size.
+
+        Qt re-measures anything laid out from the font by itself; this covers
+        the lengths written down in pixels.
+
+        Args: None.
+        Returns: None.
+        """
+        percent = ui_scale.percent()
+        for setter, lengths in self._size_rules:
+            setter(*[ui_scale.scaled(length, percent) for length in lengths])
+        for widget, style in self._style_rules:
+            widget.setStyleSheet(ui_scale.scale_stylesheet(style, percent))
+        for row in self.findChildren(SliderSpin):
+            row.rescale()
+        for button in self._status_buttons():
+            _arm_status_button(button, *button.arm)
+        for dock in (self.controls_dock, self.log_dock):
+            dock.setFont(nudged_font(QApplication.font()))  # else its title keeps the old size
+        self._fit_controls_width()
+        self._fit_status_bar()
+
+    def _sync_scale_controls(self):
+        """Show the interface size in the slider, Reset button and View menu.
+
+        Args: None.
+        Returns: None.
+        """
+        percent = ui_scale.percent()
+        self.ui_scale_row.set_value(percent)
+        self.ui_scale_reset.setEnabled(percent != ui_scale.DEFAULT_PERCENT)
+        self.scale_larger_action.setEnabled(percent < ui_scale.MAX_PERCENT)
+        self.scale_smaller_action.setEnabled(percent > ui_scale.MIN_PERCENT)
+        self.scale_reset_action.setEnabled(percent != ui_scale.DEFAULT_PERCENT)
+
+    def _scale_slider_changed(self, value):
+        """Apply a slider or spin-box change, except while the handle is being dragged.
+
+        The slider itself resizes with the interface, so applying mid-drag would
+        move it away from the pointer; the release applies the final value.
+
+        Args: value is the slider's percentage.
+        Returns: None.
+        """
+        if not self.ui_scale_row.slider.isSliderDown():
+            self.set_ui_scale(value)
 
     @property
     def camera_identity(self):
@@ -2094,12 +2410,12 @@ class MainWindow(QMainWindow):
         self.zoom_slider.setSingleStep(round(
             ZOOM_TICKS * math.log(1.25) / math.log(MAX_ZOOM) / 3))
         self.zoom_slider.setPageStep(ZOOM_TICKS // 6)
-        self.zoom_slider.setFixedWidth(130)
+        self._sized(self.zoom_slider.setFixedWidth, 130)
         self.zoom_slider.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.zoom_slider.valueChanged.connect(
             lambda ticks: self.view.set_zoom(MAX_ZOOM ** (ticks / ZOOM_TICKS)))
         self.zoom_label = QLabel()
-        self.zoom_label.setMinimumWidth(44)
+        self._sized(self.zoom_label.setMinimumWidth, 44)
         set_tooltip(self.zoom_label, "100% means the whole image fits the window.")
         self.view.zoomChanged.connect(self._show_zoom)
         fit_button = QPushButton("Fit")
@@ -2109,7 +2425,7 @@ class MainWindow(QMainWindow):
         set_tooltip(actual_button, "One camera pixel per screen pixel. Shortcut: 1.")
         actual_button.clicked.connect(self.view.actual_size)
         zoom_icon = QLabel("Zoom")
-        zoom_icon.setContentsMargins(0, 0, 4, 0)
+        self._sized(zoom_icon.setContentsMargins, 0, 0, 4, 0)
         set_tooltip(zoom_icon, "Zoom from the whole image (100%) up to 64 times.")
         bar.addWidget(zoom_icon)
         bar.addWidget(self.zoom_slider)
@@ -2128,12 +2444,12 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         panel.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         column = QVBoxLayout(panel)
-        column.setContentsMargins(10, 8, 10, 8)
+        self._sized(column.setContentsMargins, 10, 8, 10, 8)
 
         # Shown only when there is more than one camera.
         self.cameras_box = QWidget()
         cameras = QVBoxLayout(self.cameras_box)
-        cameras.setContentsMargins(0, 0, 0, 6)
+        self._sized(cameras.setContentsMargins, 0, 0, 0, 6)
         title = QLabel("Cameras")
         title.setStyleSheet("font-weight:bold;")
         cameras.addWidget(title)
@@ -2152,7 +2468,7 @@ class MainWindow(QMainWindow):
         cameras.addWidget(process_note)
         self.camera_rows = QGridLayout()
         self.camera_rows.setColumnStretch(0, 1)
-        self.camera_rows.setVerticalSpacing(2)
+        self._sized(self.camera_rows.setVerticalSpacing, 2)
         cameras.addLayout(self.camera_rows)
         self.camera_checks = []
         self.camera_states = []
@@ -2164,9 +2480,9 @@ class MainWindow(QMainWindow):
             "DUMMY MODE — synthetic video; exposure, gain and FPS are simulated")
         self.demo_banner.setWordWrap(True)
         self.demo_banner.setAlignment(Qt.AlignCenter)
-        self.demo_banner.setStyleSheet(
-            "background:#8b0000;color:white;font-weight:bold;padding:6px;"
-            "border-radius:4px;")
+        self._styled(self.demo_banner,
+                     "background:#8b0000;color:white;font-weight:bold;padding:6px;"
+                     "border-radius:4px;")
         column.addWidget(self.demo_banner)
         self.switch_live_button = QPushButton("Switch to live capture")
         set_tooltip(self.switch_live_button,
@@ -2181,8 +2497,8 @@ class MainWindow(QMainWindow):
         # One grid for every section keeps labels, sliders and values in the
         # same three columns; headings replace group-box frames.
         grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
+        self._sized(grid.setHorizontalSpacing, 8)
+        self._sized(grid.setVerticalSpacing, 4)
         grid.setColumnStretch(1, 1)
         column.addLayout(grid)
         row = 0
@@ -2196,7 +2512,7 @@ class MainWindow(QMainWindow):
             nonlocal row
             label = QLabel(text)
             label.setStyleSheet("font-weight:bold;")
-            label.setContentsMargins(0, 0 if row == 0 else 10, 0, 2)
+            self._sized(label.setContentsMargins, 0, 0 if row == 0 else 10, 0, 2)
             grid.addWidget(label, row, 0, 1, 2)
             row += 1
 
@@ -2427,6 +2743,25 @@ class MainWindow(QMainWindow):
         add(self.palette_combo, "Palette")
         add(self.gamma, "Gamma")
         add(self.clahe)
+        self.ui_scale_row = SliderSpin(
+            ui_scale.MIN_PERCENT, ui_scale.MAX_PERCENT, ui_scale.STEP_PERCENT, 0,
+            ui_scale.percent(), "%")
+        self.ui_scale_row.set_description(
+            "Size of the whole window: text, buttons, controls, docks and the "
+            "status bar. Drag, then release to apply; it takes effect at once and "
+            "is remembered. Make it smaller on a small or high-resolution screen, "
+            "larger when text is hard to read. 100% is the standard size. "
+            "Shortcuts: Ctrl++, Ctrl+- and Ctrl+0.")
+        self.ui_scale_row.valueChanged.connect(self._scale_slider_changed)
+        self.ui_scale_row.slider.sliderReleased.connect(
+            lambda: self.set_ui_scale(self.ui_scale_row.value()))
+        add(self.ui_scale_row, "Interface size")
+        self.ui_scale_reset = QPushButton(f"Reset interface size to {ui_scale.DEFAULT_PERCENT}%")
+        set_tooltip(self.ui_scale_reset,
+                    "Return the window to its standard size. Shortcut: Ctrl+0.")
+        self.ui_scale_reset.clicked.connect(
+            lambda: self.set_ui_scale(ui_scale.DEFAULT_PERCENT))
+        add(self.ui_scale_reset)
 
         heading("Saved frame details")
         self.frame_title = QLineEdit()
@@ -2439,7 +2774,7 @@ class MainWindow(QMainWindow):
         set_tooltip(self.frame_notes,
                     "Optional notes written beside the PNG when you save. Leave the "
                     "title and the notes blank to save the image only. Shortcut: S.")
-        self.frame_notes.setFixedHeight(48)
+        self._sized(self.frame_notes.setFixedHeight, 48)
         add(self.frame_title)
         add(self.frame_notes)
 
@@ -2450,20 +2785,32 @@ class MainWindow(QMainWindow):
         # also gives wrapped notes their full height, which a dock alone does
         # not. Its width leaves room for the scroll bar, so nothing is cut off
         # sideways.
-        panel.setMinimumWidth(320)
+        self.controls_panel = panel
         self.controls_scroll = QScrollArea()
         self.controls_scroll.setWidget(panel)
         self.controls_scroll.setWidgetResizable(True)
         self.controls_scroll.setFrameShape(QFrame.NoFrame)
         self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.controls_scroll.setMinimumWidth(
-            panel.minimumSizeHint().expandedTo(panel.minimumSize()).width()
-            + self.controls_scroll.verticalScrollBar().sizeHint().width())
+        self._fit_controls_width()
         self.controls_dock = QDockWidget("Controls", self)
         self.controls_dock.setObjectName("controls")
         self.controls_dock.setWidget(self.controls_scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self._tip_dock_buttons(self.controls_dock)
+
+    def _fit_controls_width(self):
+        """Give the controls panel the width its widest row needs, plus the scroll bar.
+
+        Runs at build time and whenever the interface size changes.
+
+        Args: None.
+        Returns: None.
+        """
+        panel = self.controls_panel
+        panel.setMinimumWidth(ui_scale.px(320))
+        self.controls_scroll.setMinimumWidth(
+            panel.minimumSizeHint().expandedTo(panel.minimumSize()).width()
+            + self.controls_scroll.verticalScrollBar().sizeHint().width())
 
     def _add_preset_buttons(self, add):
         """Add the Live preview and Measurement buttons to the controls grid.
@@ -2523,7 +2870,7 @@ class MainWindow(QMainWindow):
         self.log_dock.setWidget(self.log_view)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
         self._tip_dock_buttons(self.log_dock)
-        self.resizeDocks([self.log_dock], [120], Qt.Vertical)
+        self.resizeDocks([self.log_dock], [ui_scale.px(120)], Qt.Vertical)
 
     def _tip_dock_buttons(self, dock):
         """Explain the float and close buttons Qt puts on a dock title.
@@ -2577,7 +2924,6 @@ class MainWindow(QMainWindow):
         self.tip_label.clicked.connect(self._rotate_tip)
         self.tip_label.dismissed.connect(lambda: self._set_tips_visible(False))
         self.tip_label.setMinimumWidth(0)
-        self.tip_label.setMaximumWidth(self.tip_label.sizeHint().width())
         self.tip_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.hint_label = QLabel()  # the current view's one-line explanation
         self.hint_label.setMinimumWidth(0)
@@ -2585,11 +2931,6 @@ class MainWindow(QMainWindow):
         set_tooltip(self.hint_label, "What the current view is showing.")
         self.status_strip.add_notice(self.tip_label, 1)  # left of the hint, as before
         self.status_strip.add_notice(self.hint_label)
-        # The message area keeps the longest hint and a little of the tip
-        # beside the readouts; with less room the readouts move to their own rows.
-        self.status_strip.flow.message_min = (
-            self.hint_label.fontMetrics().horizontalAdvance(LONGEST_HINT)
-            + MESSAGE_TIP_WIDTH)
         self._show_tip()
         # First item after the message area: showing it only narrows the hint
         # on a shared row, and takes its place in the flow on a wrapped one.
@@ -2647,9 +2988,9 @@ class MainWindow(QMainWindow):
             self.update_button, UPDATE_BUTTON_STYLE,
             ("Install update", "Downloading update… 100%",
              "Restart to update"),
-            _status_icon("download", QColor(Qt.white)))
+            ("download", QColor(Qt.white)))
         _arm_status_button(self.check_button, STATUS_BUTTON_STYLE, ("",),
-                           _status_icon("refresh", ink))
+                           ("refresh", ink))
         self.update_slot = QWidget()
         slot = QGridLayout(self.update_slot)
         slot.setContentsMargins(0, 0, 0, 0)
@@ -2660,28 +3001,58 @@ class MainWindow(QMainWindow):
         _set_icon_action(self.feature_button, FEATURE_LABEL, FEATURE_TIP)
         self.feature_button.clicked.connect(lambda: self._request_feature())
         _arm_status_button(self.feature_button, STATUS_BUTTON_STYLE, ("",),
-                           _status_icon("idea", ink))
+                           ("idea", ink))
         self.status_strip.add_item(self.feature_button)
         self.codex_button = QPushButton()
         _set_icon_action(self.codex_button, CODEX_LABEL, CODEX_TIP)
         self.codex_button.clicked.connect(self._open_codex)
         _arm_status_button(self.codex_button, STATUS_BUTTON_STYLE, ("",),
-                           _status_icon("code", ink))
+                           ("code", ink))
         self.status_strip.add_item(self.codex_button)
         self.status_actions_rule = QFrame()
         self.status_actions_rule.setFrameShape(QFrame.Shape.VLine)
         self.status_actions_rule.setFrameShadow(QFrame.Shadow.Sunken)
-        self.status_actions_rule.setFixedWidth(10)
+        self._sized(self.status_actions_rule.setFixedWidth, 10)
         self.status_strip.add_item(self.status_actions_rule)
         self.status_strip.flow.separator = self.status_actions_rule
-        buttons = (self.update_button, self.check_button, self.feature_button,
-                   self.codex_button)
-        height = max(button.sizeHint().height() for button in buttons)
-        for button in buttons:
-            button.setFixedHeight(height)
         for widget in (self.source_badge, self.record_label, self.range_status,
                        self.camera_fps_status, self.speed_status, self.pixel_status):
             self.status_strip.add_item(widget)
+        self._fit_status_bar()
+
+    def _status_buttons(self):
+        """List the status bar's four action buttons.
+
+        Args: None.
+        Returns: A tuple of QPushButton.
+        """
+        return (self.update_button, self.check_button, self.feature_button,
+                self.codex_button)
+
+    def _fit_status_bar(self):
+        """Measure the status bar's items in the current font.
+
+        The message area keeps the longest hint and a little of the tip beside
+        the readouts (with less room the readouts move to their own rows), the
+        tip is capped at its longest sentence, and the four buttons share the
+        tallest one's height. Runs at build time and whenever the interface
+        size changes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.tip_label.setMaximumWidth(self.tip_label.sizeHint().width())
+        self.status_strip.flow.message_min = (
+            self.hint_label.fontMetrics().horizontalAdvance(LONGEST_HINT)
+            + ui_scale.px(MESSAGE_TIP_WIDTH))
+        buttons = self._status_buttons()
+        for button in buttons:
+            button.setMinimumHeight(0)
+            button.setMaximumHeight(QWIDGETSIZE_MAX)
+        height = max(button.sizeHint().height() for button in buttons)
+        for button in buttons:
+            button.setFixedHeight(height)
+        self.status_strip.flow.invalidate()
 
     def _build_menus(self):
         """Create the View menu (docks, zoom and freeze) and the Help menu.
@@ -2703,6 +3074,29 @@ class MainWindow(QMainWindow):
         set_tooltip(self.tips_action, "Show rotating help tips in the status bar.")
         self.tips_action.triggered.connect(self._set_tips_visible)
         menu.addAction(self.tips_action)
+        scale_menu = menu.addMenu("Interface size")
+        self.scale_larger_action = QAction("Larger", self)
+        self.scale_larger_action.setShortcuts(
+            [QKeySequence(QKeySequence.ZoomIn), QKeySequence("Ctrl+=")])
+        set_tooltip(self.scale_larger_action,
+                    "Make the text and controls larger. Shortcut: Ctrl++.")
+        self.scale_larger_action.triggered.connect(
+            lambda: self.set_ui_scale(ui_scale.larger(ui_scale.percent())))
+        self.scale_smaller_action = QAction("Smaller", self)
+        self.scale_smaller_action.setShortcut(QKeySequence(QKeySequence.ZoomOut))
+        set_tooltip(self.scale_smaller_action,
+                    "Make the text and controls smaller. Shortcut: Ctrl+-.")
+        self.scale_smaller_action.triggered.connect(
+            lambda: self.set_ui_scale(ui_scale.smaller(ui_scale.percent())))
+        self.scale_reset_action = QAction(f"Reset to {ui_scale.DEFAULT_PERCENT}%", self)
+        self.scale_reset_action.setShortcut(QKeySequence("Ctrl+0"))
+        set_tooltip(self.scale_reset_action,
+                    "Return the window to its standard size. Shortcut: Ctrl+0.")
+        self.scale_reset_action.triggered.connect(
+            lambda: self.set_ui_scale(ui_scale.DEFAULT_PERCENT))
+        for action in (self.scale_larger_action, self.scale_smaller_action,
+                       self.scale_reset_action):
+            scale_menu.addAction(action)
         menu.addSeparator()
         for text, key, tip, handler in (
                 ("Fit to window", "0", "Show the whole image. Shortcut: 0.", self.view.fit),
