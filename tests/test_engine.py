@@ -296,13 +296,21 @@ class EngineDemoTests(unittest.TestCase):
         recordings = os.path.join(self.tmp.name, "recordings")
         self.assertTrue(wait_until(lambda: os.path.isdir(recordings) and
                                    os.listdir(recordings)))
+        (name,) = os.listdir(recordings)
+        folder = os.path.join(recordings, name)
+        self.assertTrue(name.startswith("dummy_espi_"))
+        self.assertTrue(wait_until(
+            lambda: self.engine.status()["recording_folder"] == folder))
         time.sleep(0.6)
         self.engine.update_settings(record=False)
-        self.assertTrue(wait_until(lambda: any(
-            "Saved AVI" in line for line in self.log.lines)))
-        avi = os.path.join(recordings, os.listdir(recordings)[0])
-        self.assertTrue(os.path.basename(avi).startswith("dummy_espi_previous_"))
-        self.assertGreater(os.path.getsize(avi), 1000)
+        self.assertTrue(wait_until(lambda: sum(
+            "Saved AVI" in line for line in self.log.lines) == 2))
+        self.assertEqual(sorted(os.listdir(folder)),
+                         ["processed_01_previous.avi", "raw.avi", "session.txt"])
+        for avi in ("raw.avi", "processed_01_previous.avi"):
+            self.assertGreater(os.path.getsize(os.path.join(folder, avi)), 1000)
+        with open(os.path.join(folder, "session.txt"), encoding="utf-8") as info:
+            self.assertIn("mode: Previous", info.read())
 
     def test_save_pending_until_the_worker_writes_the_frame(self):
         """A queued save counts as pending until the worker finishes it.

@@ -81,6 +81,51 @@ class FakeRecorder:
         return "fake summary"
 
 
+class FakeSession:
+    """A RecordingSession double that hands out FakeRecorders."""
+
+    created = []
+
+    def __init__(self, demo, tag="", details=""):
+        """Remember how the engine built the session.
+
+        Args: demo, tag and details are the RecordingSession arguments.
+        Returns: None.
+        """
+        self.demo = demo
+        self.tag = tag
+        self.details = details
+        self.folder = "/tmp/fake-session"
+        self.raw = None
+        self.processed = []
+        self.modes = []
+        FakeSession.created.append(self)
+
+    def open_raw(self, frame, fps, log):
+        """Hand out a raw recorder holding the first frame.
+
+        Args: frame is the first raw frame; fps is the rate; log is unused.
+        Returns: A FakeRecorder.
+        """
+        self.raw = FakeRecorder(finished=False)
+        self.raw.fps = fps
+        self.raw.frames.append(frame)
+        return self.raw
+
+    def open_processed(self, mode, frame, fps):
+        """Hand out the next processed recorder holding the first frame.
+
+        Args: mode is the view mode; frame is the first frame; fps is the rate.
+        Returns: A FakeRecorder.
+        """
+        recorder = FakeRecorder(finished=False)
+        recorder.fps = fps
+        recorder.frames.append(frame)
+        self.processed.append(recorder)
+        self.modes.append(mode)
+        return recorder
+
+
 class CameraEngineCase(unittest.TestCase):
     """Base class: temporary outputs, a fake camera rig and cleanup."""
 
@@ -476,32 +521,190 @@ class CameraStreamingTests(CameraEngineCase):
         Args: None.
         Returns: None.
         """
-        recorder = FakeRecorder(finished=False)
-        with mock.patch.object(engine, "AVIRecorder",
-                               lambda *a, **k: recorder):
+        FakeSession.created = []
+        with mock.patch.object(engine, "RecordingSession", FakeSession):
             self.start_camera()
             self.assertTrue(wait_until(
                 lambda: self.engine.latest_packet() is not None))
             self.engine.update_settings(record=True)
-            self.assertTrue(wait_until(lambda: recorder.frames))
+            self.assertTrue(wait_until(
+                lambda: FakeSession.created and FakeSession.created[0].processed))
+            recorder = FakeSession.created[0].processed[0]
             recorder.error = OSError("disk full")
             recorder.done.set()
             self.assertEqual(self.wait_event("record_off"), None)
             self.assertFalse(self.engine.settings().record)
             self.assertTrue(wait_until(lambda: self.log.has("Recording error: disk full")))
+            self.assertEqual(self.engine.status()["recording_folder"], "")
 
     def test_recording_open_failure_is_reported(self):
-        """An OSError opening the AVI logs and clears the record flag.
+        """An OSError creating the session logs and clears the record flag.
 
         Args: None.
         Returns: None.
         """
-        with mock.patch.object(engine, "recording_path",
+        with mock.patch.object(engine, "RecordingSession",
                                side_effect=OSError("no folder")):
             self.start_camera()
             self.engine.update_settings(record=True)
             self.assertEqual(self.wait_event("record_off"), None)
         self.assertTrue(self.log.has("no folder"))
+        self.assertFalse(self.engine.settings().record)
+
+
+class SessionRecordingTests(CameraEngineCase):
+    """Raw and processed streams share one recording session."""
+
+    def setUp(self):
+        """Swap in the fake session and clear its history.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        FakeSession.created = []
+        patcher = mock.patch.object(engine, "RecordingSession", FakeSession)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def start_camera(self):
+        """Open the fake camera and start the worker.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.open_camera()
+        self.engine.start()
+
+    def record(self, **settings):
+        """Start the camera engine, wait for a frame and turn recording on.
+
+        Args: settings are extra Settings fields applied with record=True.
+        Returns: None.
+        """
+        self.start_camera()
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        self.engine.update_settings(record=True, **settings)
+
+    def test_status_starts_without_a_recording_folder(self):
+        """Before recording the folder status is empty.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.engine.status()["recording_folder"], "")
+
+    def test_session_starts_once_for_both_streams(self):
+        """One session feeds a raw and a processed recorder and is announced.
+
+        Args: None.
+        Returns: None.
+        """
+        self.record()
+        self.assertTrue(wait_until(lambda: (
+            FakeSession.created and FakeSession.created[0].raw is not None and
+            len(FakeSession.created[0].raw.frames) > 2 and
+            FakeSession.created[0].processed and
+            len(FakeSession.created[0].processed[0].frames) > 2)))
+        self.assertEqual(len(FakeSession.created), 1)
+        self.assertEqual(self.engine.status()["recording_folder"], "/tmp/fake-session")
+        self.assertEqual(FakeSession.created[0].tag, "")
+        self.assertIn("exposure_us: 8000.0", FakeSession.created[0].details)
+
+    def test_raw_recorder_gets_pre_noise_frame(self):
+        """Noise reduction changes the display but never the raw recording.
+
+        Args: None.
+        Returns: None.
+        """
+        counter = [0]
+        dark = np.full((16, 16), 40, np.uint8)
+        bright = np.full((16, 16), 200, np.uint8)
+
+        def alternating():
+            """Alternate dark and bright camera frames.
+
+            Args: None.
+            Returns: A FakeImage.
+            """
+            counter[0] += 1
+            return FakeImage((dark if counter[0] % 2 else bright).copy())
+        self.cam.frame_source = alternating
+        self.engine.update_settings(noise_reduction=50.0)
+        self.record()
+        self.assertTrue(wait_until(lambda: (
+            FakeSession.created and FakeSession.created[0].raw is not None and
+            len(FakeSession.created[0].raw.frames) > 6)))
+        raw_values = {int(v) for frame in FakeSession.created[0].raw.frames
+                      for v in np.unique(frame)}
+        self.assertEqual(raw_values, {40, 200})
+        self.assertTrue(wait_until(lambda: any(
+            int(v) not in (40, 200)
+            for v in np.unique(self.engine.latest_packet().image))))
+
+    def test_stream_flags_off_still_creates_folder(self):
+        """With both streams off the folder is still announced.
+
+        Args: None.
+        Returns: None.
+        """
+        self.record(save_raw=False, save_processed=False)
+        self.assertTrue(wait_until(
+            lambda: self.engine.status()["recording_folder"] == "/tmp/fake-session"))
+        time.sleep(0.2)
+        session = FakeSession.created[0]
+        self.assertIsNone(session.raw)
+        self.assertEqual(session.processed, [])
+
+    def test_mode_change_starts_next_processed_file(self):
+        """A new view mode splits only the processed stream.
+
+        Args: None.
+        Returns: None.
+        """
+        self.record()
+        self.assertTrue(wait_until(lambda: (
+            FakeSession.created and FakeSession.created[0].processed)))
+        self.engine.update_settings(mode="Previous", average=1)
+        session = FakeSession.created[0]
+        self.assertTrue(wait_until(lambda: len(session.processed) == 2))
+        self.assertEqual(session.modes, ["Raw", "Previous"])
+        self.assertTrue(session.processed[0].stopped)
+        self.assertFalse(session.raw.stopped)
+        self.assertEqual(len(FakeSession.created), 1)
+
+    def test_record_off_ends_session(self):
+        """Turning recording off stops both recorders and clears the folder.
+
+        Args: None.
+        Returns: None.
+        """
+        self.record()
+        self.assertTrue(wait_until(lambda: (
+            FakeSession.created and FakeSession.created[0].processed)))
+        self.engine.update_settings(record=False)
+        session = FakeSession.created[0]
+        self.assertTrue(wait_until(lambda: (
+            session.raw.stopped and session.processed[0].stopped)))
+        self.assertTrue(wait_until(
+            lambda: self.engine.status()["recording_folder"] == ""))
+        self.assertEqual(self.engine.status()["record"], "Recording: finishing file")
+
+    def test_raw_recorder_error_turns_recording_off(self):
+        """A failing raw writer ends the whole recording like a processed one.
+
+        Args: None.
+        Returns: None.
+        """
+        self.record()
+        self.assertTrue(wait_until(lambda: (
+            FakeSession.created and FakeSession.created[0].raw is not None)))
+        raw = FakeSession.created[0].raw
+        raw.error = OSError("raw disk full")
+        raw.done.set()
+        self.assertEqual(self.wait_event("record_off"), None)
+        self.assertFalse(self.engine.settings().record)
+        self.assertTrue(wait_until(lambda: self.log.has("Recording error: raw disk full")))
 
 
 class DemoLoopTests(CameraEngineCase):
@@ -629,7 +832,10 @@ class DirectWorkerTests(CameraEngineCase):
         """
         super().setUp()
         self.engine._recorder = None
+        self.engine._raw_recorder = None
+        self.engine._session = None
         self.engine._retired = []
+        FakeSession.created = []
 
     def packet(self):
         """Build a small frame packet.
@@ -682,6 +888,7 @@ class DirectWorkerTests(CameraEngineCase):
         """
         recorder = FakeRecorder()
         self.engine._recorder = recorder
+        self.engine._session = FakeSession(False)
         result = self.engine._feed_recorder(
             engine.Settings(record=True), ("Raw", 1, False), "sig",
             self.packet(), None)
@@ -694,11 +901,137 @@ class DirectWorkerTests(CameraEngineCase):
         Args: None.
         Returns: None.
         """
-        with mock.patch.object(engine, "AVIRecorder") as recorder_class:
+        with mock.patch.object(engine, "RecordingSession", FakeSession):
             self.engine._feed_recorder(
                 engine.Settings(record=True, fps=60.0), ("Previous", 10, True),
                 None, self.packet(), None)
-        self.assertEqual(recorder_class.call_args.args[2], 30.0)
+        self.assertEqual(FakeSession.created[0].processed[0].fps, 30.0)
+
+    def test_feed_recorder_skips_processed_when_disabled(self):
+        """save_processed off opens the session but no processed file.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(engine, "RecordingSession", FakeSession):
+            result = self.engine._feed_recorder(
+                engine.Settings(record=True, save_processed=False),
+                ("Raw", 1, False), None, self.packet(), None)
+        self.assertEqual(FakeSession.created[0].processed, [])
+        self.assertIsNone(result)
+        self.assertEqual(self.engine.status()["recording_folder"], "/tmp/fake-session")
+
+    def test_feed_raw_ignored_when_not_recording(self):
+        """Without the record flag no session or recorder is created.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(engine, "RecordingSession", FakeSession):
+            self.engine._feed_raw(engine.Settings(), np.zeros((4, 4), np.uint8), None)
+        self.assertEqual(FakeSession.created, [])
+
+    def test_feed_raw_uses_measured_rate_capped_at_30(self):
+        """The raw rate is the camera rate, not divided by averaging.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(engine, "RecordingSession", FakeSession):
+            self.engine._feed_raw(engine.Settings(record=True, fps=10.0),
+                                  np.zeros((4, 4), np.uint8), 45.0)
+        self.assertEqual(FakeSession.created[0].raw.fps, 30.0)
+
+    def test_demo_raw_frame_is_watermarked(self):
+        """Demo raw frames carry the dummy banner; the source stays untouched.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.use_demo()
+        source = np.full((200, 400), 100, np.uint8)
+        with mock.patch.object(engine, "RecordingSession", FakeSession):
+            self.engine._feed_raw(engine.Settings(record=True), source, None)
+        written = FakeSession.created[0].raw.frames[0]
+        self.assertTrue(FakeSession.created[0].demo)
+        self.assertEqual(int(written[0, 0]), 0)
+        self.assertEqual(int(source[0, 0]), 100)
+
+    def test_session_failure_clears_record_from_raw_path(self):
+        """A session that cannot be created turns recording off.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(engine, "RecordingSession",
+                               side_effect=OSError("no folder")):
+            self.engine.update_settings(record=True)
+            self.engine._feed_raw(engine.Settings(record=True),
+                                  np.zeros((4, 4), np.uint8), None)
+        self.assertFalse(self.engine.settings().record)
+        self.assertTrue(self.log.has("no folder"))
+
+    def test_raw_open_failure_ends_session_and_clears_record(self):
+        """A raw file that cannot be opened ends the whole recording.
+
+        Args: None.
+        Returns: None.
+        """
+        def failing(session, frame, fps, log):
+            """Fail like a locked file.
+
+            Args: session, frame, fps and log match open_raw.
+            Returns: None. Raises OSError.
+            """
+            raise OSError("raw locked")
+        self.engine.update_settings(record=True)
+        with mock.patch.object(engine, "RecordingSession", FakeSession), \
+                mock.patch.object(FakeSession, "open_raw", failing):
+            self.engine._feed_raw(engine.Settings(record=True),
+                                  np.zeros((4, 4), np.uint8), None)
+        self.assertFalse(self.engine.settings().record)
+        self.assertIsNone(self.engine._session)
+        self.assertEqual(self.engine.status()["recording_folder"], "")
+        self.assertEqual(self.engine.events.get_nowait(), ("record_off", None))
+        self.assertTrue(self.log.has("raw locked"))
+
+    def test_processed_open_failure_ends_session_and_clears_record(self):
+        """A processed file that cannot be opened ends the whole recording.
+
+        Args: None.
+        Returns: None.
+        """
+        def failing(session, mode, frame, fps):
+            """Fail like a locked file.
+
+            Args: session, mode, frame and fps match open_processed.
+            Returns: None. Raises OSError.
+            """
+            raise OSError("processed locked")
+        self.engine.update_settings(record=True)
+        with mock.patch.object(engine, "RecordingSession", FakeSession), \
+                mock.patch.object(FakeSession, "open_processed", failing):
+            result = self.engine._feed_recorder(
+                engine.Settings(record=True), ("Raw", 1, False), None,
+                self.packet(), None)
+        self.assertIsNone(result)
+        self.assertFalse(self.engine.settings().record)
+        self.assertIsNone(self.engine._session)
+        self.assertTrue(self.log.has("processed locked"))
+
+    def test_feed_recorder_without_session_returns_none(self):
+        """If the session cannot be created the processed feed gives up.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(engine, "RecordingSession",
+                               side_effect=OSError("no folder")):
+            result = self.engine._feed_recorder(
+                engine.Settings(record=True), ("Raw", 1, False), "old",
+                self.packet(), None)
+        self.assertIsNone(result)
+        self.assertTrue(self.log.has("no folder"))
 
     def test_handle_actions_save_without_frame_logs(self):
         """Saving before the first frame explains why nothing was written.
@@ -763,18 +1096,24 @@ class DirectWorkerTests(CameraEngineCase):
         switch.assert_not_called()
         self.assertEqual(result, ("processor", "frame"))
 
-    def test_switch_live_stops_active_recorder(self):
-        """A successful switch stops and retires the demo recording.
+    def test_switch_live_ends_session(self):
+        """A successful switch stops and retires every demo recorder.
 
         Args: None.
         Returns: None.
         """
         recorder = FakeRecorder()
+        raw = FakeRecorder()
         self.engine._recorder = recorder
+        self.engine._raw_recorder = raw
+        self.engine._session = FakeSession(True)
+        self.engine._set_status(recording_folder="/tmp/fake-session")
         self.engine.use_demo()
         processor, frame = self.engine._switch_live("old", "frame")
-        self.assertTrue(recorder.stopped)
-        self.assertEqual(self.engine._retired, [recorder])
+        self.assertTrue(recorder.stopped and raw.stopped)
+        self.assertEqual(self.engine._retired, [recorder, raw])
+        self.assertIsNone(self.engine._session)
+        self.assertEqual(self.engine.status()["recording_folder"], "")
         self.assertIsNone(frame)
         self.assertIsNone(self.engine.latest_packet())
         self.assertFalse(self.engine.demo)
@@ -893,10 +1232,11 @@ class CameraTagTests(CameraEngineCase):
         self.engine.use_demo("CAM7")
         self.engine.update_settings(record=True)
         self.engine.start()
-        self.assertTrue(wait_until(lambda: self.log.has("Recording AVI")))
+        self.assertTrue(wait_until(lambda: self.log.has("Recording to folder")))
         self.engine.request("save", title="", notes="")
         self.assertTrue(wait_until(lambda: self.log.has("Saved: ")))
-        self.assertTrue(self.log.has("dummy_espi_raw_CAM7_"))
+        self.assertTrue(self.log.has("dummy_espi_"))
+        self.assertTrue(self.log.has("_CAM7"))
         self.assertTrue(self.log.has("dummy_frame_CAM7_"))
 
 
