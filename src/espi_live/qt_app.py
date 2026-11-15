@@ -27,6 +27,7 @@ import sys
 import textwrap
 import time
 import traceback
+from dataclasses import asdict
 from datetime import datetime
 
 import cv2
@@ -54,8 +55,9 @@ from espi_live import (camera, camera_reports, codex, error_reports, feedback, l
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
-from espi_live.processing import (MAX_DENOISE_PERCENT, PALETTES, SMOOTHING_METHODS,
-                                  VIEW_MODES, palette_rgb_table)
+from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, MAX_DENOISE_PERCENT,
+                                  MAX_FRAMES_BACK, PALETTES, SCALING_MODES,
+                                  SMOOTHING_METHODS, VIEW_MODES, palette_rgb_table)
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
 # layout is kept; a narrower window keeps the badge and elides the tip. Either
@@ -67,17 +69,21 @@ QWIDGETSIZE_MAX = 16777215  # Qt's "no maximum size" (not exported by PySide6)
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
 # Gamma stays its own Display control: it is a curve, not a second stretch.
 GAMMA_TIP = (
-    "Shifts mid-tones after Stretch to 0–255, in Raw, Previous and Reference. "
-    "Stretch is a straight remap of this frame's dark-to-bright range "
-    "(contrast); gamma is a curve on top of that. Below 1.0 darkens mid-tones, "
+    "Shifts mid-tones after Scaling (Fixed gain or Auto stretch), in Raw, "
+    "Previous and Reference. Scaling is a straight remap of the difference "
+    "values (contrast); gamma is a curve on top of that. Below 1.0 darkens mid-tones, "
     "above 1.0 brightens them. With a good stretch, start at 1.0."
 )
-STRETCH_TIP = (
-    "Map each difference frame's darkest and brightest pixels, after Stretch "
-    "clip, to 0 and 255 so fringes fill the display. This is a straight "
-    "remap (contrast), not gamma. Off keeps the difference values as they "
-    "are. The status bar shows both ranges. On by default. Previous and "
-    "Reference only; Raw is not stretched."
+SCALING_TIP = (
+    "How difference values become screen brightness. Fixed gain multiplies "
+    "every difference by Difference gain and shows anything above 255 as "
+    "white, as the LabVIEW VI did: a still scene's few levels of noise stay "
+    "dark and the brightness does not pump. Auto stretch maps each frame's "
+    "darkest and brightest pixels, after Stretch clip, to 0 and 255, which "
+    "fills the display but also blows a quiet frame's noise up to full "
+    "contrast. Both are straight remaps (contrast), not gamma. The status bar "
+    "shows the input and scaled ranges. Analog cameras start in Fixed gain, "
+    "others in Auto stretch. Previous and Reference only; Raw is not scaled."
 )
 GL_TEXTURE_2D = 0x0DE1
 GL_R8 = 0x8229
@@ -278,8 +284,9 @@ FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 LONGEST_HINT = "ESPI difference view; min/max range is before gamma and palette"
 MESSAGE_TIP_WIDTH = 120
 # Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
-PIPELINE = ("noise reduction → difference → average → speckle filter → "
-            "stretch → invert → gamma/CLAHE → palette")
+PIPELINE = ("noise reduction → difference (N frames back) → outlier filter → "
+            "average → speckle filter → fixed gain or stretch → invert → "
+            "gamma/CLAHE → palette")
 # Opt-in processing setups. Exposure, gain, frame rate and recording stay put.
 PROCESSING_PRESETS = {
     "Live preview": {
@@ -290,7 +297,10 @@ PROCESSING_PRESETS = {
         "ref_refresh_s": 0.0,
         "smoothing": 0,
         "smoothing_method": "Gaussian",
+        "frames_back": 1,
+        "outlier_filter": 0,
         "scale_range": True,
+        "gain_before_average": False,
         "clip_percent": 0.0,
         "invert": False,
         "palette": "Gray",
@@ -305,7 +315,10 @@ PROCESSING_PRESETS = {
         "ref_refresh_s": 2.0,
         "smoothing": 3,
         "smoothing_method": "Median",
+        "frames_back": 1,
+        "outlier_filter": 0,
         "scale_range": True,
+        "gain_before_average": False,
         "clip_percent": 0.5,
         "invert": False,
         "palette": "Gray",
@@ -313,6 +326,38 @@ PROCESSING_PRESETS = {
         "clahe": True,
     },
 }
+# The processing of the LabVIEW ESPI 1.5 VI (the known-good flow for the Sony
+# XC-ST50, docs/labview/README.md): a reference grabbed at the start, full
+# frames, each difference multiplied by a fixed gain and saturated, no noise
+# reduction, smoothing, CLAHE or invert. Difference gain is the VI's adjustable
+# "Constant", so it stays whatever the user set; so do exposure, gain, frame
+# rate and recording.
+LABVIEW_FLOW = {
+    "mode": "Reference",
+    "noise_reduction": 0.0,
+    "frames_back": 1,
+    "outlier_filter": 0,
+    "average": 1,
+    "rolling": False,
+    "ref_refresh_s": 0.0,
+    "smoothing": 0,
+    "scale_range": False,
+    "gain_before_average": True,
+    "average_multiplier": 1.0,
+    "invert": False,
+    "palette": "Gray",
+    "gamma": 1.0,
+    "clahe": False,
+    "single_field": False,
+}
+LABVIEW_FLOW_TIP = (
+    "Switch between your own settings and the LabVIEW ESPI 1.5 flow: Reference "
+    "view with a reference captured now, full frames, Fixed gain applied to "
+    "each frame before averaging, and no noise reduction, speckle filter, "
+    "CLAHE or invert. Difference gain, exposure, gain, frame rate and "
+    "recording stay as they are. Turning it off puts back the settings you "
+    "had before; changes made while it is on are dropped."
+)
 PRESET_TIPS = {
     "Live preview": "Watch fringes form while you align the setup: Previous view, "
                     "no averaging, no noise reduction, speckle filter off. "
@@ -326,7 +371,8 @@ SETTINGS_GUIDE = f"""A typical ESPI measurement starts with one of the two prese
 Live preview — while you aim the camera and check that fringes form.
   View: Previous. Average N: 1 (off). Rolling average: off.
   Noise reduction: 0. Speckle filter: off. Ref. refresh: 0.
-  Stretch to 0–255: on. Palette: Gray. Gamma: 1.0. CLAHE: off.
+  Frames back: 1. Outlier filter: off.
+  Scaling: Auto stretch. Palette: Gray. Gamma: 1.0. CLAHE: off.
   Switch the view to Raw to frame the object. Raw skips difference processing but still applies display gamma.
 
 Measurement — a still object, compared with one reference.
@@ -335,13 +381,15 @@ Measurement — a still object, compared with one reference.
   Speckle filter: Median, width 3 px, well below the fringe spacing.
   Ref. refresh: 2 s. That cancels slow drift (air, heat). Motion slower than the refresh disappears; use 0 and press F when you need one fixed before/after.
   Noise reduction: 0. Raise it only when the camera is noisy and the object is still.
-  Stretch to 0–255: on, clip 0.5% so a few speckles don't flatten the contrast.
+  Scaling: Auto stretch, clip 0.5% so a few speckles don't flatten the contrast.
   Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
 
 Processing order (Previous and Reference views):
   {PIPELINE}
 
 Raw view applies noise reduction and display gamma, without stretch or palette.
+
+Analog camera (Sony XC-ST50): it starts in Fixed gain, as the LabVIEW ESPI 1.5 VI showed it. Its capture noise is only a few grey levels, so a fixed Difference gain (8× to start) keeps it dark, where Auto stretch would blow it up to full-contrast grain. Raise the gain until the fringes are bright. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths.
 
 Three controls that are easy to mix up:
   Noise reduction blends camera frames over time, before the difference. It removes sensor noise and keeps the speckle. It trails motion and weakens Previous-view fringes.
@@ -2620,9 +2668,11 @@ class MainWindow(QMainWindow):
         self.single_field = QCheckBox("Single field (interlaced camera)")
         set_tooltip(self.single_field,
                     "Show only the even rows of each interlaced frame, doubled to full "
-                    "height: removes the 1/60 s offset between the two fields (cleaner "
-                    "fringes) at half the vertical detail. Changing it clears the "
-                    "reference and the averages. On by default for an interlaced camera.")
+                    "height: removes the 1/60 s offset between the two fields at half "
+                    "the vertical detail. Reference and Previous differences compare "
+                    "rows woven the same way, so the offset rarely matters for ESPI. "
+                    "Changing it clears the reference and the averages. Off by "
+                    "default: full frames, as the LabVIEW VI used.")
         self.single_field.setChecked(s.single_field)
         self.single_field.toggled.connect(
             lambda on: self.engine.update_settings(single_field=on))
@@ -2685,8 +2735,29 @@ class MainWindow(QMainWindow):
         self.ref_refresh.valueChanged.connect(
             lambda v: self.engine.update_settings(ref_refresh_s=v))
         add(self.ref_refresh, "Ref. refresh")
+        self.frames_back = SliderSpin(1, MAX_FRAMES_BACK, 1, 0, s.frames_back, " frames")
+        self.frames_back.set_description(
+            "In Previous view, which earlier frame each one is compared with: 1 "
+            "is the frame just before. A larger number spans more time, so "
+            "slow changes show up instead of cancelling, as the LabVIEW VI did "
+            "by waiting between grabs. Each step back keeps one more frame in "
+            "memory. Start at 1.")
+        self.frames_back.valueChanged.connect(
+            lambda v: self.engine.update_settings(frames_back=int(v)))
+        add(self.frames_back, "Frames back")
 
         heading("Fringe enhancement")
+        self.outlier_filter = SliderSpin(0, 15, 1, 0, s.outlier_filter, " px")
+        self.outlier_filter.set_description(
+            "Pulls isolated bright or dark pixels back to their neighbourhood's "
+            "mean, on every difference frame before averaging (NI Vision's "
+            "Lowpass filter, from the LabVIEW VI). A pixel is replaced only when "
+            "it is further from the mean than the neighbourhood's spread, so "
+            "fringes and smooth areas stay untouched. 0 turns it off. Start at 0; "
+            "try 3 px when single hot pixels sparkle.")
+        self.outlier_filter.valueChanged.connect(
+            lambda v: self.engine.update_settings(outlier_filter=int(v)))
+        add(self.outlier_filter, "Outlier filter")
         self.smoothing_combo = QComboBox()
         self.smoothing_combo.addItems(SMOOTHING_METHODS)
         self.smoothing_combo.setCurrentText(s.smoothing_method)
@@ -2708,13 +2779,42 @@ class MainWindow(QMainWindow):
             lambda v: self.engine.update_settings(smoothing=int(v)))
         add(self.smoothing_combo, "Speckle filter")
         add(self.smoothing, "Filter width")
-        self.scale_range = QCheckBox("Stretch to 0–255")
-        set_tooltip(self.scale_range, STRETCH_TIP,
-                    "Gamma is a separate curve applied afterwards and does not "
-                    "replace this stretch. Start on.")
-        self.scale_range.setChecked(s.scale_range)
-        self.scale_range.toggled.connect(
-            lambda on: self.engine.update_settings(scale_range=on))
+        self.scaling = QComboBox()
+        self.scaling.addItems(SCALING_MODES)
+        self.scaling.setCurrentText(SCALING_MODES[1] if s.scale_range else SCALING_MODES[0])
+        set_tooltip(self.scaling, SCALING_TIP,
+                    "Gamma is a separate curve applied afterwards and replaces "
+                    "neither. Start with Fixed gain on an analog camera, Auto "
+                    "stretch on the Blackfly.")
+        self.scaling.currentTextChanged.connect(self._scaling_changed)
+        add(self.scaling, "Scaling")
+        self.difference_gain = SliderSpin(1, 64, 0.5, 1, s.difference_gain, " ×")
+        self.difference_gain.set_description(
+            "Fixed gain: each difference is multiplied by this and anything "
+            "above 255 shows white, as in the LabVIEW VI (IMAQ Multiply by "
+            "Constant). Noise of a few levels stays dark; raise it until the "
+            f"fringes are bright. Start at {DEFAULT_DIFFERENCE_GAIN:g}.")
+        self.difference_gain.valueChanged.connect(
+            lambda v: self.engine.update_settings(difference_gain=v))
+        add(self.difference_gain, "Difference gain")
+        self.gain_before_average = QCheckBox("Gain before averaging (LabVIEW order)")
+        set_tooltip(self.gain_before_average,
+            "Fixed gain only. On: the gain is applied to every difference frame "
+            "(saturating at 255) and the outlier filter runs on that; Average N "
+            "then averages those frames and multiplies the mean by the Average "
+            "multiplier, as the LabVIEW VI did. Off: the raw differences are "
+            "averaged and the gain is applied once at the end. Start off.")
+        self.gain_before_average.setChecked(s.gain_before_average)
+        self.gain_before_average.toggled.connect(self._gain_order_changed)
+        add(self.gain_before_average)
+        self.average_multiplier = SliderSpin(0.1, 10, 0.1, 1, s.average_multiplier, " ×")
+        self.average_multiplier.set_description(
+            "With Gain before averaging on and Average N above 1, the mean is "
+            "multiplied by this before it is shown (the LabVIEW VI's Multiplier). "
+            "Start at 1.")
+        self.average_multiplier.valueChanged.connect(
+            lambda v: self.engine.update_settings(average_multiplier=v))
+        add(self.average_multiplier, "Average multiplier")
         self.invert = QCheckBox("Invert")
         set_tooltip(self.invert,
             "Swaps bright and dark fringes. Use it when the pattern is easier to "
@@ -2724,19 +2824,19 @@ class MainWindow(QMainWindow):
         toggles = QWidget()
         toggles_row = QHBoxLayout(toggles)
         toggles_row.setContentsMargins(0, 0, 0, 0)
-        toggles_row.addWidget(self.scale_range)
         toggles_row.addWidget(self.invert)
         toggles_row.addStretch(1)
         add(toggles)
         self.clip = SliderSpin(0, 10, 0.1, 1, s.clip_percent, " %")
         self.clip.set_description(
-            "With Stretch on, lets this share of the darkest and brightest pixels "
+            "With Auto stretch, lets this share of the darkest and brightest pixels "
             "saturate so a few stray speckles don't flatten the contrast. 0 uses "
             "the exact minimum and maximum. Start at 0; try 0.5% when speckles "
             "wash the image out.")
         self.clip.valueChanged.connect(
             lambda v: self.engine.update_settings(clip_percent=v))
         add(self.clip, "Stretch clip")
+        self._sync_scaling_controls(s.scale_range, s.gain_before_average)
 
         heading("Display")
         self.flip_button = QPushButton("Flip horizontally")
@@ -2856,7 +2956,36 @@ class MainWindow(QMainWindow):
             button.clicked.connect(
                 lambda _checked=False, name=name: self.apply_preset(name))
             row.addWidget(button)
+        self.labview_button = QPushButton("LabVIEW flow")
+        self.labview_button.setCheckable(True)
+        set_tooltip(self.labview_button, LABVIEW_FLOW_TIP)
+        self.labview_button.toggled.connect(self.set_labview_flow)
+        row.addWidget(self.labview_button)
         add(row_widget)
+
+    def set_labview_flow(self, on):
+        """Swap the displayed camera between the user's and the LabVIEW settings.
+
+        Turning it on keeps the user's values of every LABVIEW_FLOW setting on
+        the channel, applies the LabVIEW flow and captures a reference, as the
+        VI did when it started. Turning it off restores the kept values.
+
+        Args: on is True to use the LabVIEW flow.
+        Returns: None.
+        """
+        channel = self.current
+        if on and channel.labview_saved is None:
+            settings = asdict(self.engine.settings())
+            channel.labview_saved = {key: settings[key] for key in LABVIEW_FLOW}
+            self.engine.update_settings(**LABVIEW_FLOW)
+            self.engine.request("reference")
+            self.log.write("LabVIEW flow on: your settings are kept and come back "
+                           "when you turn it off.")
+        elif not on and channel.labview_saved is not None:
+            self.engine.update_settings(**channel.labview_saved)
+            channel.labview_saved = None
+            self.log.write("LabVIEW flow off: your settings are back.")
+        self._load_settings(self.engine.settings(), channel.limits)
 
     def apply_preset(self, name):
         """Apply a processing preset to the displayed camera.
@@ -3325,14 +3454,19 @@ class MainWindow(QMainWindow):
                               (self.average, s.average),
                               (self.ref_refresh, s.ref_refresh_s),
                               (self.smoothing, s.smoothing), (self.clip, s.clip_percent),
-                              (self.gamma, s.gamma)):
+                              (self.gamma, s.gamma), (self.frames_back, s.frames_back),
+                              (self.outlier_filter, s.outlier_filter),
+                              (self.difference_gain, s.difference_gain),
+                              (self.average_multiplier, s.average_multiplier)):
             widget.set_value(value)
-        toggles = ((self.rolling, s.rolling), (self.scale_range, s.scale_range),
+        toggles = ((self.rolling, s.rolling),
+                   (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
                    (self.clahe, s.clahe),
                    (self.record_button, s.record), (self.single_field, s.single_field))
         combos = ((self.smoothing_combo, s.smoothing_method),
-                  (self.palette_combo, s.palette))
+                  (self.palette_combo, s.palette),
+                  (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
         for widget, _ in toggles + combos:
             widget.blockSignals(True)
         for widget, on in toggles:
@@ -3343,6 +3477,43 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
         for button in self.mode_group.buttons():
             button.setChecked(button.text() == s.mode)
+        self._sync_scaling_controls(s.scale_range, s.gain_before_average)
+        self.labview_button.blockSignals(True)
+        self.labview_button.setChecked(self.current is not None and
+                                       self.current.labview_saved is not None)
+        self.labview_button.blockSignals(False)
+
+    def _scaling_changed(self, name):
+        """Send a Scaling choice to the engine and match the related controls.
+
+        Args: name is a SCALING_MODES entry.
+        Returns: None.
+        """
+        stretch = name == SCALING_MODES[1]
+        self.engine.update_settings(scale_range=stretch)
+        self._sync_scaling_controls(stretch, self.gain_before_average.isChecked())
+
+    def _gain_order_changed(self, on):
+        """Send the Gain before averaging choice and match the multiplier.
+
+        Args: on is the checkbox state.
+        Returns: None.
+        """
+        self.engine.update_settings(gain_before_average=on)
+        self._sync_scaling_controls(
+            self.scaling.currentText() == SCALING_MODES[1], on)
+
+    def _sync_scaling_controls(self, stretch, before_average):
+        """Enable only the controls that the chosen scaling uses.
+
+        Args: stretch is True for Auto stretch; before_average is the Gain
+            before averaging choice.
+        Returns: None.
+        """
+        self.clip.setEnabled(stretch)
+        self.difference_gain.setEnabled(not stretch)
+        self.gain_before_average.setEnabled(not stretch)
+        self.average_multiplier.setEnabled(not stretch and before_average)
 
     def _apply_limits(self, limits):
         """Set the camera sliders to device limits.

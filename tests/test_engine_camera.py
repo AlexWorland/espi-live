@@ -401,7 +401,8 @@ class CameraStreamingTests(CameraEngineCase):
         for text in ("Frame gap:", "Incomplete-frame burst:",
                      "Camera stream counters rose: StreamLostFrameCount",
                      "Sharpness drop (camera frame)", "Sharpness drop (displayed frame)",
-                     "Sharpness recovered (camera frame)", "mode=Raw noise_reduction=0"):
+                     "Sharpness recovered (camera frame)",
+                     "mode=Raw frames_back=1 noise_reduction=0"):
             self.assertTrue(self.log.has(text), text)
 
     def test_readback_reports_na_when_resulting_rate_unreadable(self):
@@ -444,7 +445,7 @@ class CameraStreamingTests(CameraEngineCase):
         """
         self.start_camera()
         self.engine.update_settings(mode="Previous", average=2, palette="Gray",
-                                    scale_range=False)
+                                    scale_range=False, difference_gain=1.0)
         self.assertTrue(wait_until(lambda: (
             self.engine.latest_packet() is not None and
             self.engine.latest_packet().mode == "Previous")))
@@ -1028,21 +1029,21 @@ class CaptureEngineTests(CaptureEngineCase):
         self.assertEqual(len(errors), 1)
 
     def test_engine_applies_single_field_to_interlaced_source(self):
-        """Single field is on by default for the USB-Live2 and can be turned off.
+        """The USB-Live2 shows full frames by default; single field is optional.
 
         Args: None.
         Returns: None.
         """
         self.factory.frames = [interlaced_frame()]
         engine_ = self.capture_engine()
-        self.assertTrue(engine_.settings().single_field)
+        self.assertFalse(engine_.settings().single_field)
         engine_.start()
         self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
-        self.assertEqual(int(engine_.latest_packet().image.max()), 0)
-        engine_.update_settings(single_field=False)
+        self.assertEqual(int(engine_.latest_packet().image[1].max()), 255)
+        engine_.update_settings(single_field=True)
         self.assertTrue(wait_until(
-            lambda: int(engine_.latest_packet().image[1].max()) == 255))
-        self.assertTrue(self.log.has("Fields: full interlaced frames"))
+            lambda: int(engine_.latest_packet().image.max()) == 0))
+        self.assertTrue(self.log.has("Fields: single field (even rows, line-doubled)"))
 
     def test_toggle_resets_reference(self):
         """Switching fields drops the reference, which must be captured again.
@@ -1056,11 +1057,11 @@ class CaptureEngineTests(CaptureEngineCase):
         self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
         engine_.request("reference")
         self.assertTrue(wait_until(lambda: "press F" not in engine_.status()["hint"]))
-        engine_.update_settings(single_field=False)
-        self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
         engine_.update_settings(single_field=True)
+        self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
+        engine_.update_settings(single_field=False)
         self.assertTrue(wait_until(
-            lambda: self.log.has("Fields: single field (even rows, line-doubled)")))
+            lambda: self.log.has("Fields: full interlaced frames")))
 
 
 class SingleFieldFlirTests(CameraEngineCase):
@@ -1076,7 +1077,7 @@ class SingleFieldFlirTests(CameraEngineCase):
         frame[1::2] = 255
         self.cam.frame_source = lambda: FakeImage(frame.copy())
         self.engine.open_camera()
-        self.assertTrue(self.engine.settings().single_field)
+        self.engine.update_settings(single_field=True)
         self.engine.start()
         self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
         self.assertEqual(int(self.engine.latest_packet().image[1].max()), 255)

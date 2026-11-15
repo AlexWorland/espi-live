@@ -8,9 +8,11 @@ import unittest
 import numpy as np
 
 from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_DENOISE_STRENGTH,
-                                  DemoSource, ESPIProcessor, denoise_strength,
-                                  normalize_min_max, single_field,
-                                  stretch_contrast, watermark_demo)
+                                  MAX_FRAMES_BACK, DemoSource, ESPIProcessor,
+                                  apply_gain, denoise_strength,
+                                  normalize_min_max, reject_outliers,
+                                  single_field, stretch_contrast,
+                                  watermark_demo)
 
 
 class NormalizeTests(unittest.TestCase):
@@ -320,6 +322,88 @@ class DemoTests(unittest.TestCase):
             marked = watermark_demo(image)
             self.assertFalse(image.any())
             self.assertTrue(marked.any())
+
+
+class LabviewFlowTests(unittest.TestCase):
+    """Fixed gain, the outlier filter, frames back and scaled averages."""
+
+    def test_apply_gain_saturates_and_leaves_unit_gain_alone(self):
+        """Gain multiplies, rounds and stops at 255; 1.0 returns the input.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.array([[0, 3, 40, 200]], dtype=np.uint8)
+        self.assertIs(apply_gain(image, 1.0), image)
+        self.assertEqual(apply_gain(image, 8).tolist(), [[0, 24, 255, 255]])
+        self.assertEqual(apply_gain(image, 1.5).tolist(), [[0, 4, 60, 255]])
+
+    def test_reject_outliers_replaces_only_spikes(self):
+        """A lone spike becomes the neighbourhood mean; flat and smooth areas stay.
+
+        Args: None.
+        Returns: None.
+        """
+        flat = np.full((9, 9), 20, dtype=np.uint8)
+        self.assertIs(reject_outliers(flat, 1), flat)
+        self.assertIs(reject_outliers(flat, 0), flat)
+        self.assertTrue(np.array_equal(reject_outliers(flat, 3), flat))
+        spiked = flat.copy()
+        spiked[4, 4] = 200
+        result = reject_outliers(spiked, 3)
+        self.assertEqual(int(result[4, 4]), 40)  # mean of eight 20s and one 200
+        self.assertEqual(int(result[0, 0]), 20)
+        self.assertEqual(int(spiked[4, 4]), 200)  # the input is not changed
+        ramp = np.tile(np.arange(0, 90, 10, dtype=np.uint8), (9, 1))
+        self.assertTrue(np.array_equal(reject_outliers(ramp, 4)[:, 2:-2],
+                                       ramp[:, 2:-2]))  # even width made odd
+
+    def test_previous_compares_with_the_frame_n_back(self):
+        """Frames back picks the earlier frame and refills after a change.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        frames = [np.full((2, 2), value, dtype=np.uint8) for value in (0, 10, 30, 60)]
+        outputs = [int(processor.difference(frame, "Previous", 2)[0, 0])
+                   for frame in frames]
+        self.assertEqual(outputs, [0, 0, 30, 50])
+        self.assertEqual(int(processor.difference(frames[0], "Previous", 1)[0, 0]), 60)
+        self.assertEqual(processor.history.maxlen, 1)
+        processor.difference(frames[0], "Previous", 99)
+        self.assertEqual(processor.history.maxlen, MAX_FRAMES_BACK)
+        processor.difference(np.zeros((3, 3), dtype=np.uint8), "Previous", 2)
+        self.assertEqual(len(processor.history), 1)  # a new size starts over
+        processor.reset_previous()
+        self.assertEqual(len(processor.history), 0)
+
+    def test_scaled_block_average_rounds_and_saturates(self):
+        """With a scale, the mean is multiplied, rounded and clipped to 255.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        one = np.full((2, 2), 1, dtype=np.uint8)
+        two = np.full((2, 2), 2, dtype=np.uint8)
+        self.assertIs(processor.average(one, 1, 3.0), one)
+        self.assertIsNone(processor.average(one, 2, 3.0))
+        self.assertEqual(int(processor.average(two, 2, 3.0)[0, 0]), 4)  # 1.5 x 3 = 4.5
+        self.assertIsNone(processor.average(two, 2, 200.0))
+        self.assertEqual(int(processor.average(two, 2, 200.0)[0, 0]), 255)
+
+    def test_scaled_rolling_average(self):
+        """A rolling average can be scaled; count 1 returns the input.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        image = np.full((2, 2), 10, dtype=np.uint8)
+        self.assertIs(processor.rolling_average(image, 1, 2.0), image)
+        self.assertEqual(int(processor.rolling_average(image, 4, 2.0)[0, 0]), 20)
+        self.assertEqual(int(processor.rolling_average(image, 4)[0, 0]), 10)
 
 
 if __name__ == "__main__":

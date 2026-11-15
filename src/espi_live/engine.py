@@ -32,8 +32,11 @@ from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
                                    StreamCounterMonitor, settings_summary)
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
-from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
-                                  denoise_strength, gamma_lut, single_field,
+from espi_live.capture_models import adapter_for
+from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
+                                  ESPIProcessor, apply_gain, apply_palette,
+                                  denoise_strength, gamma_lut,
+                                  reject_outliers, single_field,
                                   smooth_speckle, stretch_contrast,
                                   watermark_demo)
 from espi_live.recording import AVIRecorder, recording_path, save_frame
@@ -61,7 +64,12 @@ class Settings:
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
     smoothing: int = 0            # speckle filter width in pixels; 0 = off
     smoothing_method: str = "Gaussian"
-    scale_range: bool = True
+    frames_back: int = 1          # Previous view compares with the frame N back
+    outlier_filter: int = 0       # IMAQ LowPass-style width in px, per frame; 0 = off
+    scale_range: bool = True      # True: Auto stretch; False: Fixed gain
+    difference_gain: float = DEFAULT_DIFFERENCE_GAIN  # Fixed gain multiplier
+    gain_before_average: bool = False  # LabVIEW order: gain each frame, then average
+    average_multiplier: float = 1.0    # scales the average in LabVIEW order
     clip_percent: float = 0.0     # stretch ignores this % of pixels at each end
     invert: bool = False
     flip_horizontal: bool = False  # mirror left-right (flip across the vertical axis)
@@ -69,7 +77,31 @@ class Settings:
     gamma: float = 1.0
     clahe: bool = True
     record: bool = False
-    single_field: bool = True     # interlaced sources: even rows only, line-doubled
+    single_field: bool = False    # interlaced sources: even rows only, line-doubled
+
+
+def is_analog(info):
+    """Tell whether a camera is an analog camera behind a capture adapter.
+
+    Args: info is a CameraInfo, or None for a demo or not-yet-chosen source.
+    Returns: True for a recognised capture adapter (the Sony XC-ST50 through
+        a Hauppauge USB-Live2).
+    """
+    return (info is not None and info.kind == "capture"
+            and adapter_for(info.vid, info.pid, info.model) is not None)
+
+
+def default_settings(info):
+    """Choose the starting settings for a camera.
+
+    An analog camera starts in Fixed gain, as the LabVIEW ESPI 1.5 VI showed
+    it: its few levels of capture noise stay dark instead of being stretched
+    to full contrast. Other cameras and demo sources start in Auto stretch.
+
+    Args: info is a CameraInfo, or None for a demo source.
+    Returns: A new Settings.
+    """
+    return Settings(scale_range=not is_analog(info))
 
 
 @dataclass(frozen=True)
@@ -157,7 +189,7 @@ class Engine:
         self.camera_info = None  # CameraInfo of the opened camera
         self._open_after = None  # (predecessor engine,) when opening on the worker
         self.events = queue.SimpleQueue()
-        self._settings = Settings()
+        self._settings = default_settings(info)
         self._settings_lock = threading.Lock()
         self._actions = queue.SimpleQueue()
         self._saves_waiting = 0  # frame saves queued or being written
@@ -517,7 +549,7 @@ class Engine:
             if s.mode != last_mode:
                 processor.reset_avg()
                 if s.mode == "Previous":
-                    processor.prev = None
+                    processor.reset_previous()
                 self.log.write(f"View: {s.mode}")
                 last_mode = s.mode
             if s.rolling != last_rolling:
@@ -525,7 +557,7 @@ class Engine:
                 last_rolling = s.rolling
             if s.single_field != last_single_field:
                 processor.reset_avg()  # field geometry changed: start over
-                processor.prev = None
+                processor.reset_previous()
                 processor.ref = None
                 self.log.write("Fields: single field (even rows, line-doubled)"
                                if s.single_field else "Fields: full interlaced frames")
@@ -614,21 +646,31 @@ class Engine:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
             else:
-                difference = processor.difference(frame, s.mode)
-                averaged = (processor.rolling_average(difference, s.average)
-                            if s.rolling else processor.average(difference, s.average))
+                difference = processor.difference(frame, s.mode, s.frames_back)
+                # LabVIEW order (Fixed gain only): gain and saturate each frame,
+                # then average and scale the mean by the multiplier.
+                labview_order = s.gain_before_average and not s.scale_range
+                if labview_order:
+                    difference = apply_gain(difference, s.difference_gain)
+                difference = reject_outliers(difference, s.outlier_filter)
+                scale = s.average_multiplier if labview_order else None
+                averaged = (processor.rolling_average(difference, s.average, scale)
+                            if s.rolling else
+                            processor.average(difference, s.average, scale))
                 if averaged is not None:
                     averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
                     if s.scale_range:
                         image, low, high = stretch_contrast(averaged, s.clip_percent)
                         scaled = (0, 255) if high > low else (0, 0)
                     else:
-                        image = averaged
+                        image = (averaged if labview_order
+                                 else apply_gain(averaged, s.difference_gain))
                         low = high = scaled = None
                         if update_range:
                             low, high, _, _ = cv2.minMaxLoc(averaged)
                             low, high = int(low), int(high)
-                            scaled = (low, high)
+                            top, bottom, _, _ = cv2.minMaxLoc(image)
+                            scaled = (int(top), int(bottom))
                     if update_range:
                         self._set_status(range=(
                             f"Input: {low}–{high}    Scaled: {scaled[0]}–{scaled[1]}"))
@@ -767,7 +809,7 @@ class Engine:
                     with self._saves_lock:
                         self._saves_waiting -= 1
             elif action == "reset_previous":
-                processor.prev = None
+                processor.reset_previous()
                 self.log.write("Reset previous frame.")
             elif action == "reset_average":
                 processor.reset_avg()

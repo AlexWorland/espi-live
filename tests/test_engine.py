@@ -11,7 +11,8 @@ import unittest
 import numpy as np
 
 from espi_live import paths
-from espi_live.engine import Engine
+from espi_live.camera import CameraInfo
+from espi_live.engine import Engine, default_settings, is_analog
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
                                   apply_palette, normalize_min_max,
                                   palette_rgb_table, smooth_speckle,
@@ -197,6 +198,70 @@ class EngineDemoTests(unittest.TestCase):
             self.engine.latest_packet().sequence > 3)))
         self.assertEqual(self.engine.latest_packet().mode, "Raw")
 
+    def test_fixed_gain_and_labview_order(self):
+        """Fixed gain scales the difference; LabVIEW order scales the average.
+
+        The source alternates 0 and 3, so every Previous difference is 3.
+        With gain 8 it shows 24. With the gain before averaging, two frames
+        averaged and a multiplier of 2 it shows 48. The outlier filter leaves
+        a flat difference alone.
+
+        Args: None.
+        Returns: None.
+        """
+        state = {"n": 0}
+
+        def next_frame(exposure_us, gain_db, now):
+            """Return the next frame, alternating 0 and 3.
+
+            Args: exposure_us, gain_db and now are the demo source arguments.
+            Returns: A Mono8 frame.
+            """
+            state["n"] += 1
+            return np.full((80, 60), 3 * (state["n"] % 2), dtype=np.uint8)
+
+        self.engine.demo_source.next_frame = next_frame
+        self.engine.update_settings(
+            fps=120, mode="Previous", scale_range=False, difference_gain=8.0,
+            outlier_filter=3, clahe=False, palette="Gray", average=1)
+
+        def pixel_is(value):
+            """Wait for a published Previous frame with this pixel value.
+
+            Args: value is the expected pixel below the dummy-mode banner.
+            Returns: True when it arrived.
+            """
+            return wait_until(lambda: (
+                (packet := self.engine.latest_packet()) is not None and
+                packet.mode == "Previous" and int(packet.image[60, 30]) == value))
+
+        self.assertTrue(pixel_is(24))
+        self.assertTrue(wait_until(lambda: "Scaled: 24–24" in self.engine.status()["range"]))
+        self.engine.update_settings(gain_before_average=True, average=2,
+                                    average_multiplier=2.0)
+        self.assertTrue(pixel_is(48))
+        self.engine.update_settings(scale_range=True)
+        self.assertTrue(pixel_is(0))  # a constant difference stretches to zeros
+
+    def test_default_settings_choose_fixed_gain_for_analog_cameras(self):
+        """Only a recognised capture adapter starts in Fixed gain, full frames.
+
+        Args: None.
+        Returns: None.
+        """
+        analog = CameraInfo("video 1", "Hauppauge USB-Live2", kind="capture",
+                            vid=0x2040, pid=0xC200)
+        webcam = CameraInfo("video 2", "Some webcam", kind="capture", vid=1, pid=2)
+        self.assertTrue(is_analog(analog))
+        self.assertFalse(is_analog(webcam))
+        self.assertFalse(is_analog(CameraInfo("123")))
+        self.assertFalse(is_analog(None))
+        self.assertFalse(default_settings(analog).scale_range)
+        self.assertFalse(default_settings(analog).single_field)
+        self.assertTrue(default_settings(webcam).scale_range)
+        self.assertTrue(default_settings(None).scale_range)
+        self.assertFalse(Engine(self.log, info=analog).settings().scale_range)
+
     def test_noise_reduction_changes_raw_previous_and_reference(self):
         """The mapped slider changes the published pixels in every view.
 
@@ -223,7 +288,8 @@ class EngineDemoTests(unittest.TestCase):
 
         self.engine.demo_source.next_frame = next_frame
         self.engine.update_settings(
-            fps=120, scale_range=False, clahe=False, smoothing=0, average=1,
+            fps=120, scale_range=False, difference_gain=1.0, clahe=False,
+            smoothing=0, average=1,
             rolling=False, invert=False, palette="Gray", mode="Raw",
             noise_reduction=0)
 

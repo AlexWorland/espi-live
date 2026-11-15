@@ -15,7 +15,7 @@ from dataclasses import asdict, replace
 
 from espi_live import error_reports, sources
 from espi_live.camera import CameraInfo
-from espi_live.engine import Engine, Settings
+from espi_live.engine import Engine, default_settings
 
 
 class PrefixedLog:
@@ -111,12 +111,14 @@ class Channel:
         self.demo_source = demo
         self.log = PrefixedLog(log, "")  # the window names cameras when several
         self.engine = engine
-        self.settings = engine.settings() if engine is not None else Settings()
+        self.settings = (engine.settings() if engine is not None
+                         else default_settings(None if demo else info))
         self.limits = {}  # last "camera_limits" payload: {node name: (low, high)}
         self.identity = None  # last "camera_identity" payload (CameraIdentity)
         self.report = None  # last "camera_report" payload (camera_reports.Report)
         self.frozen = None  # FramePacket held on screen while the display is frozen
         self.frozen_at = None  # datetime the display was frozen
+        self.labview_saved = None  # the user's settings while the LabVIEW flow is on
         self.retired = []  # stopped engines that may still be finishing
 
     @property
