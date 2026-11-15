@@ -32,10 +32,12 @@ from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
                                    StreamCounterMonitor, settings_summary)
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
-from espi_live.processing import (DemoSource, ESPIProcessor, apply_palette,
-                                  denoise_strength, gamma_lut, single_field,
-                                  smooth_speckle, stretch_contrast,
-                                  watermark_demo)
+from espi_live.processing import (DemoSource, ESPIProcessor, NoiseCalibration,
+                                  PeakHold, RangeTracker, apply_levels,
+                                  apply_palette, denoise_strength, display_lut,
+                                  even_out_brightness, gamma_lut,
+                                  local_normalize, single_field, smooth_speckle,
+                                  stretch_levels, watermark_demo)
 from espi_live.recording import RecordingSession, save_frame
 
 CAMERA_TIMEOUT_MS = 100
@@ -63,10 +65,19 @@ class Settings:
     smoothing_method: str = "Gaussian"
     scale_range: bool = True
     clip_percent: float = 0.0     # stretch ignores this % of pixels at each end
+    min_range: int = 0            # sensitivity floor: stretch never spans fewer levels; 0 = off
+    threshold: int = 0            # raw differences below this many levels become 0; 0 = off
+    steady_range_s: float = 0.0   # the stretch range shrinks over this many s; 0 = per frame
+    even_brightness: bool = False  # divide out the illumination profile before averaging
+    peak_hold_s: float = 0.0      # show each pixel's maximum over the last N s; 0 = off
+    normalize_window: int = 0     # local normalization window in px (replaces stretch); 0 = off
     invert: bool = False
     flip_horizontal: bool = False  # mirror left-right (flip across the vertical axis)
     palette: str = "Gray"
     gamma: float = 1.0
+    brightness: int = 0           # grey levels added to every displayed pixel; 0 = off
+    display_gain: float = 1.0     # every displayed pixel multiplied by this; 1 = off
+    contrast: float = 0.0         # S-curve contrast strength, 0–100 %; 0 = off
     clahe: bool = True
     record: bool = False
     single_field: bool = True     # interlaced sources: even rows only, line-doubled
@@ -162,6 +173,7 @@ class Engine:
         self._settings = Settings()
         self._settings_lock = threading.Lock()
         self._actions = queue.SimpleQueue()
+        self._calibration = None  # a running NoiseCalibration (worker thread only)
         self._saves_waiting = 0  # frame saves queued or being written
         self._saves_lock = threading.Lock()
         self._packet = None
@@ -350,8 +362,10 @@ class Engine:
         Args: action is "save" (payload title, notes; optionally packet, a
             frozen display's FramePacket to save instead of the newest one,
             and frozen_at, its datetime), "reference", "reset_previous",
-            "reset_average" or "switch_live" (the "switched_live" event then
-            carries every detected CameraInfo).
+            "reset_average", "calibrate_noise" (measure a still scene's
+            difference noise for 2 s, then set min_range and send a
+            "noise_calibrated" event) or "switch_live" (the "switched_live"
+            event then carries every detected CameraInfo).
         Returns: None.
         """
         if action == "save":
@@ -466,6 +480,8 @@ class Engine:
         Returns: None.
         """
         processor = ESPIProcessor()
+        ranges = RangeTracker()
+        peaks = PeakHold()
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         applied = self.settings()  # the camera was opened at these values
         last_setting_time = 0.0
@@ -528,6 +544,8 @@ class Engine:
                     record_signature = None
             if s.mode != last_mode:
                 processor.reset_avg()
+                ranges.reset()
+                peaks.reset()
                 if s.mode == "Previous":
                     processor.prev = None
                 self.log.write(f"View: {s.mode}")
@@ -537,6 +555,7 @@ class Engine:
                 last_rolling = s.rolling
             if s.single_field != last_single_field:
                 processor.reset_avg()  # field geometry changed: start over
+                peaks.reset()
                 processor.prev = None
                 processor.ref = None
                 self.log.write("Fields: single field (even rows, line-doubled)"
@@ -626,17 +645,40 @@ class Engine:
             if s.mode == "Raw":
                 image = frame
                 gamma = s.gamma  # curve only; Raw skips stretch and palette
+                if self._calibration is not None:
+                    self._calibration = None
+                    self.log.warning("Noise calibration needs the Previous or "
+                                     "Reference view; switch views and try again.")
                 if update_range:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
             else:
                 difference = processor.difference(frame, s.mode)
+                if s.threshold > 0:  # raw differences below the threshold count as no change
+                    difference = cv2.threshold(difference, int(s.threshold) - 1, 0,
+                                               cv2.THRESH_TOZERO)[1]
+                if s.even_brightness:
+                    difference = even_out_brightness(difference, frame)
                 averaged = (processor.rolling_average(difference, s.average)
                             if s.rolling else processor.average(difference, s.average))
                 if averaged is not None:
                     averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
-                    if s.scale_range:
-                        image, low, high = stretch_contrast(averaged, s.clip_percent)
+                    averaged = peaks.update(averaged, s.peak_hold_s, now)
+                    self._sample_noise(averaged, now)
+                    if s.normalize_window > 0:
+                        image = local_normalize(averaged, s.normalize_window, s.min_range)
+                        if update_range:
+                            low, high, _, _ = cv2.minMaxLoc(averaged)
+                            self._set_status(range=(
+                                f"Input: {int(low)}–{int(high)}    Local normalization "
+                                f"{s.normalize_window} px"))
+                            last_range_time = now
+                        update_range = False  # status already written
+                    elif s.scale_range:
+                        low, high = stretch_levels(averaged, s.clip_percent)
+                        low, high = ranges.update(low, high, s.min_range,
+                                                  s.steady_range_s, now)
+                        image = apply_levels(averaged, low, high)
                         scaled = (0, 255) if high > low else (0, 0)
                     else:
                         image = averaged
@@ -663,6 +705,9 @@ class Engine:
 
             if image is not None:
                 shown_sharpness.observe(image, now, context)
+                tone = display_lut(s.display_gain, s.contrast, s.brightness)
+                if tone is not None:  # every view; LUT makes a new array, camera frame untouched
+                    image = cv2.LUT(image, tone)
                 if s.flip_horizontal:  # every view; before the watermark so its text reads normally
                     image = cv2.flip(image, 1)
                 if self.demo:
@@ -810,6 +855,27 @@ class Engine:
         self.log.write(f"Recording processed stream at {fps:.1f} fps")
         return signature
 
+    def _sample_noise(self, image, now):
+        """Feed a running noise calibration and finish it when its time is up.
+
+        Args: image is the processed difference frame, before the stretch;
+            now is the monotonic time.
+        Returns: None. On completion sets min_range, logs the result and
+            sends a "noise_calibrated" event carrying the new floor.
+        """
+        calibration = self._calibration
+        if calibration is None:
+            return
+        calibration.add(image)
+        if not calibration.done(now):
+            return
+        self._calibration = None
+        noise, floor = calibration.result()
+        self.update_settings(min_range=floor)
+        self.log.write(f"Noise calibration: still-scene differences peak at "
+                       f"{noise:.1f} grey levels; sensitivity floor set to {floor}.")
+        self.events.put(("noise_calibrated", floor))
+
     def _reap_recorders(self):
         """Report and forget recordings whose writer threads have finished.
 
@@ -866,6 +932,9 @@ class Engine:
             elif action == "reset_average":
                 processor.reset_avg()
                 self.log.write("Reset averaging.")
+            elif action == "calibrate_noise":
+                self._calibration = NoiseCalibration(time.monotonic())
+                self.log.write("Noise calibration: keep the object still for 2 s.")
             elif action == "reference":
                 if frame is None:
                     self.log.write("No frame available yet for a reference.")
