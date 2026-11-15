@@ -365,7 +365,7 @@ Measurement — a still object, compared with one reference.
 Processing order (Previous and Reference views):
   {PIPELINE}
 
-Raw view applies noise reduction and display gamma, without stretch or palette.
+Raw view applies noise reduction and display gamma, without scaling or palette.
 
 Analog camera (Sony XC-ST50): it starts in the LabVIEW flow, the LabVIEW ESPI 1.5 VI's processing with its saved defaults: Reference view with an automatic reference, Fixed gain 42× (the VI's Constant) on each frame, no averaging or filters. Turn LabVIEW flow off for your own settings, which also use Fixed gain: Auto stretch would blow the camera's few grey levels of noise up to full-contrast grain. Lower Difference gain when noise shows as grey grain. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths, including its N + 1 frames divided by N.
 
@@ -2662,9 +2662,9 @@ class MainWindow(QMainWindow):
             "Settle flickering sensor noise in Raw, Previous and Reference by "
             "blending each camera frame with the ones before it. The speckle "
             "grain stays, so a still speckle image looks almost the same: "
-            "watch for less boiling and a trail when something moves. Stretch "
-            "to 0–255 repaints a quieter difference at full brightness; judge "
-            "it with stretch off, or by the status bar's Input range. This is "
+            "watch for less boiling and a trail when something moves. Auto "
+            "stretch repaints a quieter difference at full brightness; judge "
+            "it with Fixed gain, or by the status bar's Input range. This is "
             "not the Speckle filter (that blurs the grain) or Average N (that "
             "smooths the fringe picture). 0 = off. The number is how far the "
             "control is turned up, not the share of the previous frame kept: "
@@ -2676,8 +2676,8 @@ class MainWindow(QMainWindow):
         add(self.noise_reduction, "Noise reduction")
         self.noise_note = QLabel(
             "Grain stays. Look for less flicker and a motion trail, not a "
-            "smoother still image. Stretch hides a quieter difference. Not "
-            "the Speckle filter or Average N.")
+            "smoother still image. Auto stretch hides a quieter difference; "
+            "Fixed gain shows it. Not the Speckle filter or Average N.")
         note(self.noise_note)
         self.camera_label = QLabel()
         note(self.camera_label)
@@ -2713,7 +2713,7 @@ class MainWindow(QMainWindow):
         self.ref_refresh.valueChanged.connect(
             lambda v: self.engine.update_settings(ref_refresh_s=v))
         add(self.ref_refresh, "Ref. refresh")
-        self.frames_back = SliderSpin(1, MAX_FRAMES_BACK, 1, 0, s.frames_back, " frames")
+        self.frames_back = SliderSpin(1, MAX_FRAMES_BACK, 1, 0, s.frames_back)
         self.frames_back.set_description(
             "In Previous view, which earlier frame each one is compared with: 1 "
             "is the frame just before. A larger number spans more time, so "
@@ -3092,8 +3092,9 @@ class MainWindow(QMainWindow):
         self.range_status = FixedLabel("Input: 255–255    Scaled: 255–255",
                                        "Raw Mono8: no brightness scaling")
         set_tooltip(self.range_status,
-                    "Brightness before and after stretch to 0–255, measured before "
-                    "gamma and the palette. Raw view is not scaled.")
+                    "Brightness before and after Scaling (Fixed gain or Auto "
+                    "stretch), measured before gamma and the palette. Raw view is "
+                    "not scaled.")
         self.camera_fps_status = FixedLabel(  # sensor rate, then what the app keeps up with
             "Camera: 999.9 fps (simulated)")
         set_tooltip(self.camera_fps_status,

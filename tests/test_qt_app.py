@@ -1218,7 +1218,7 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertIn("grain stays", tip)
         self.assertIn("Speckle filter", tip)
         self.assertIn("Average N", tip)
-        self.assertIn("Stretch", tip)
+        self.assertIn("Auto stretch", tip)
         self.assertIn("Now: 60 %", tip)
         note = w.noise_note.text()
         self.assertIn("Grain stays", note)
