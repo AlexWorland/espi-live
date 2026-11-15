@@ -873,12 +873,20 @@ python -m espi_live</code></pre>
           For a still-object measurement, <strong>Measurement</strong> selects
           Reference view, an 8-frame block average, Median at 3 px, reference
           refresh 2 s and stretch clip 0.5%. Press <kbd>F</kbd> when the object
-          is still. Neither preset changes exposure, gain, frame rate or recording.</p>
-        <p><strong>Help → Which settings should I use?</strong> explains both
+          is still. For a vibrating object through the analog camera,
+          <strong>Peak hold</strong> selects Previous view, a noise threshold of
+          6 levels, Median at 3 px, a 1 s peak hold window, a 1 s steady range,
+          stretch clip 0.5% and S-curve contrast 30%: each pixel keeps its
+          largest change over the last second, so a driven drum's ring pattern
+          builds up. It keeps your sensitivity floor; press <strong>Calibrate
+          noise</strong> with the drive off to measure it. No preset changes
+          exposure, gain, frame rate or recording, and each turns off the
+          fringe-enhancement and display controls it does not use.</p>
+        <p><strong>Help → Which settings should I use?</strong> explains the
           presets and can apply them to the displayed camera. Reference refresh
           also hides motion slower than its interval; use 0 for a fixed before/after.</p>
         <p>Processing order: noise reduction → difference → average → speckle filter →
-          stretch → invert → gamma/CLAHE → palette. Raw skips difference processing
+          peak hold → stretch or local normalization → invert → gamma/CLAHE → palette. Raw skips difference processing
           and still applies noise reduction and display gamma.</p>
         <ul>
           <li><strong>Average N</strong> — each displayed image becomes the

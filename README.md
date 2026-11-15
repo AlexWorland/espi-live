@@ -135,16 +135,17 @@ Camera acquisition and ESPI processing run on their own thread, so moving, resiz
 
 ### Which settings should I use?
 
-Hover a processing control for what it does, when to use it, and a starting value. The same guide is under **Help > Which settings should I use?**. Two buttons at the top of **ESPI measurement** apply a starting point and leave exposure, gain, frame rate and recording alone:
+Hover a processing control for what it does, when to use it, and a starting value. The same guide is under **Help > Which settings should I use?**. Three buttons at the top of **ESPI measurement** apply a starting point and leave exposure, gain, frame rate and recording alone. Each one also turns off the fringe-enhancement and display controls it does not use, so nothing carries over from the last preset:
 
 - **Live preview** — aim the camera and see whether fringes form. Previous view, averaging off, noise reduction 0, speckle filter off, reference refresh 0, gray display. Switch to **Raw** to frame the object.
 - **Measurement** — a still object against one reference. Reference view (press `F` once the object is still), an 8-frame block average (one clean image every 8 frames), Median speckle filter at 3 px, reference refresh 2 s, stretch on with a 0.5% clip, gray display. CLAHE stays on for when you switch to a color palette.
+- **Peak hold** — a vibrating object through the noisy analog camera (Sony XC-ST50 on the USB-Live2). Previous view; noise threshold 6 levels and a Median speckle filter at 3 px, both before peak hold, which would otherwise keep the loudest noise; peak hold window 1 s, so a steadily driven object's ring pattern builds up instead of flickering; stretch on with a 0.5% clip and a 1 s steady range; S-curve contrast 30%; gray display. It leaves the **Sensitivity floor** alone: analog cameras start at 30, and **Calibrate noise** (drive off) measures your own.
 
 **Ref. refresh** trades drift cancellation against seeing slow motion: 2 s removes air and heat drift, and also any real motion slower than that. Use 0 and press `F` for one fixed before/after.
 
 Noise reduction, averaging and the speckle filter are different steps. Noise reduction blends camera frames before the difference and keeps the speckle (it trails motion). Average N blends difference frames (block: one image per N frames; rolling: full frame rate, with a lag). The speckle filter blurs each difference image; keep its width well below the fringe spacing.
 
-Processing order for Previous and Reference views: noise reduction → difference → average → speckle filter → stretch → invert → gamma/CLAHE → palette. Raw applies noise reduction and display gamma, without stretch or palette.
+Processing order for Previous and Reference views: noise reduction → difference → average → speckle filter → peak hold → stretch or local normalization → invert → gamma/CLAHE → palette. Raw applies noise reduction and display gamma, without stretch or palette.
 
 Output goes to `output/logs/`, `output/frames/` and `output/recordings/`. Recordings and saved frames carry the camera's serial number in the filename (for example `espi_raw_12345678_<time>.avi`).
 

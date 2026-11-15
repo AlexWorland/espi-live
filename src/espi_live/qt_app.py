@@ -285,9 +285,24 @@ MESSAGE_TIP_WIDTH = 120
 PIPELINE = ("noise reduction → difference → average → speckle filter → "
             "peak hold → stretch or local normalization → invert → "
             "gamma/CLAHE → palette")
+# Fringe-enhancement and display-tone values every preset sets unless it
+# overrides them, so a preset never inherits peak hold or a threshold from the
+# last one. The sensitivity floor is not here: it is per camera (analog capture
+# starts at 30, Calibrate noise measures it) and no preset changes it.
+FRINGE_TOOLS_OFF = {
+    "threshold": 0,
+    "steady_range_s": 0.0,
+    "even_brightness": False,
+    "peak_hold_s": 0.0,
+    "normalize_window": 0,
+    "brightness": 0,
+    "display_gain": 1.0,
+    "contrast": 0.0,
+}
 # Opt-in processing setups. Exposure, gain, frame rate and recording stay put.
 PROCESSING_PRESETS = {
     "Live preview": {
+        **FRINGE_TOOLS_OFF,
         "mode": "Previous",
         "noise_reduction": 0.0,
         "average": 1,
@@ -303,6 +318,7 @@ PROCESSING_PRESETS = {
         "clahe": False,
     },
     "Measurement": {
+        **FRINGE_TOOLS_OFF,
         "mode": "Reference",
         "noise_reduction": 0.0,
         "average": 8,
@@ -317,6 +333,31 @@ PROCESSING_PRESETS = {
         "gamma": 1.0,
         "clahe": True,
     },
+    # A vibrating object seen through a noisy analog camera (Sony XC-ST50 on
+    # a USB-Live2): each pixel keeps its largest frame-to-frame change for 1 s,
+    # so a steadily driven drum's ring pattern builds up. The threshold and
+    # Median filter run before peak hold, which would otherwise ratchet noise
+    # and hot pixels up to their maximum.
+    "Peak hold": {
+        **FRINGE_TOOLS_OFF,
+        "mode": "Previous",
+        "noise_reduction": 0.0,
+        "average": 1,
+        "rolling": False,
+        "ref_refresh_s": 0.0,
+        "smoothing": 3,
+        "smoothing_method": "Median",
+        "scale_range": True,
+        "clip_percent": 0.5,
+        "invert": False,
+        "palette": "Gray",
+        "gamma": 1.0,
+        "clahe": False,
+        "threshold": 6,
+        "steady_range_s": 1.0,
+        "peak_hold_s": 1.0,
+        "contrast": 30.0,
+    },
 }
 PRESET_TIPS = {
     "Live preview": "Watch fringes form while you align the setup: Previous view, "
@@ -325,8 +366,12 @@ PRESET_TIPS = {
     "Measurement": "A still object against one reference: Reference view, 8-frame "
                    "block average, Median filter 3 px, reference refresh 2 s. "
                    "Does not change exposure, gain, frame rate or recording.",
+    "Peak hold": "Vibration fringes through a noisy analog camera: Previous "
+                 "view, noise threshold 6, Median filter 3 px, peak hold 1 s, "
+                 "steady range 1 s, S-curve contrast 30%. Keeps your sensitivity "
+                 "floor. Does not change exposure, gain, frame rate or recording.",
 }
-SETTINGS_GUIDE = f"""A typical ESPI measurement starts with one of the two presets. Neither changes exposure, gain, frame rate or recording.
+SETTINGS_GUIDE = f"""A typical ESPI measurement starts with one of the three presets. None of them changes exposure, gain, frame rate or recording, and each turns off the fringe-enhancement and display controls it does not use.
 
 Live preview — while you aim the camera and check that fringes form.
   View: Previous. Average N: 1 (off). Rolling average: off.
@@ -342,6 +387,14 @@ Measurement — a still object, compared with one reference.
   Noise reduction: 0. Raise it only when the camera is noisy and the object is still.
   Stretch to 0–255: on, clip 0.5% so a few speckles don't flatten the contrast.
   Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
+
+Peak hold — a vibrating object through a noisy analog camera (Sony XC-ST50 on the USB-Live2).
+  View: Previous. Each pixel shows its largest frame-to-frame change over the last second, so a steadily driven object's ring pattern builds up instead of flickering.
+  Noise threshold: 6 levels. Speckle filter: Median, 3 px. Both run before peak hold, which would otherwise keep the loudest noise and hot pixels.
+  Peak hold window: 1 s. Longer fills in fainter rings but trails changes in the drive.
+  Stretch to 0–255: on, clip 0.5%, steady range 1 s so the contrast does not pump.
+  Sensitivity floor: unchanged. Analog cameras start at 30; press Calibrate noise with the drive off to measure your own.
+  S-curve contrast: 30%. Palette: Gray, gamma 1.0, CLAHE off. Noise reduction, averaging and Ref. refresh: off.
 
 Processing order (Previous and Reference views):
   {PIPELINE}
@@ -1584,7 +1637,7 @@ class FeatureRequestDialog(QDialog):
 
 
 class SettingsGuideDialog(QDialog):
-    """Explain the processing controls and offer the two starting presets."""
+    """Explain the processing controls and offer the starting presets."""
 
     def __init__(self, parent):
         """Build the guide text and the buttons that apply a preset.
@@ -1599,11 +1652,11 @@ class SettingsGuideDialog(QDialog):
         self.guide.setReadOnly(True)
         self.guide.setObjectName("settingsGuide")
         buttons = QDialogButtonBox()
-        live = buttons.addButton("Apply Live preview", QDialogButtonBox.ActionRole)
-        measure = buttons.addButton("Apply Measurement", QDialogButtonBox.ActionRole)
+        for name in PROCESSING_PRESETS:
+            apply = buttons.addButton(f"Apply {name}", QDialogButtonBox.ActionRole)
+            apply.clicked.connect(
+                lambda _checked=False, name=name: parent.apply_preset(name))
         close = buttons.addButton(QDialogButtonBox.Close)
-        live.clicked.connect(lambda: parent.apply_preset("Live preview"))
-        measure.clicked.connect(lambda: parent.apply_preset("Measurement"))
         close.clicked.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addWidget(self.guide, 1)
@@ -2988,7 +3041,7 @@ class MainWindow(QMainWindow):
             + self.controls_scroll.verticalScrollBar().sizeHint().width())
 
     def _add_preset_buttons(self, add):
-        """Add the Live preview and Measurement buttons to the controls grid.
+        """Add one button per processing preset to the controls grid.
 
         Args: add places a widget on the next controls-grid row.
         Returns: None.
@@ -3018,7 +3071,7 @@ class MainWindow(QMainWindow):
         self.log.write(f"Preset applied: {name}")
 
     def _show_settings_guide(self):
-        """Open the guide to the processing controls and the two presets.
+        """Open the guide to the processing controls and the presets.
 
         Args: None.
         Returns: None.
