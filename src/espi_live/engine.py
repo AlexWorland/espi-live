@@ -78,6 +78,37 @@ class Settings:
     clahe: bool = True
     record: bool = False
     single_field: bool = False    # interlaced sources: even rows only, line-doubled
+    auto_reference: bool = False  # Reference view captures one when it has none
+
+
+# The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
+# defaults (the known-good flow for the Sony XC-ST50, docs/labview/README.md):
+# a reference grabbed at the start and never refreshed (BY FRAME off), full
+# frames, each difference multiplied by Constant = 42 and saturated, Low Pass
+# Filter off, Average off (block averaging, Multiplier 1, when turned on), no
+# wait between grabs, Gray palette, and nothing the VI lacks (noise
+# reduction, speckle filter, stretch, invert, gamma, CLAHE). Exposure, gain,
+# frame rate, recording and the image flip are left alone.
+LABVIEW_FLOW = {
+    "mode": "Reference",
+    "noise_reduction": 0.0,
+    "frames_back": 1,
+    "outlier_filter": 0,
+    "average": 1,
+    "rolling": False,
+    "ref_refresh_s": 0.0,
+    "smoothing": 0,
+    "scale_range": False,
+    "difference_gain": DEFAULT_DIFFERENCE_GAIN,
+    "gain_before_average": True,
+    "average_multiplier": 1.0,
+    "invert": False,
+    "palette": "Gray",
+    "gamma": 1.0,
+    "clahe": False,
+    "single_field": False,
+    "auto_reference": True,
+}
 
 
 def is_analog(info):
@@ -91,17 +122,32 @@ def is_analog(info):
             and adapter_for(info.vid, info.pid, info.model) is not None)
 
 
-def default_settings(info):
-    """Choose the starting settings for a camera.
+def own_settings(info):
+    """Choose a camera's own starting settings, without the LabVIEW flow.
 
-    An analog camera starts in Fixed gain, as the LabVIEW ESPI 1.5 VI showed
-    it: its few levels of capture noise stay dark instead of being stretched
-    to full contrast. Other cameras and demo sources start in Auto stretch.
+    An analog camera uses Fixed gain, as the LabVIEW ESPI 1.5 VI showed it:
+    its few levels of capture noise stay dark instead of being stretched to
+    full contrast. Other cameras and demo sources use Auto stretch. These are
+    what turning the LabVIEW flow off returns to.
 
     Args: info is a CameraInfo, or None for a demo source.
     Returns: A new Settings.
     """
     return Settings(scale_range=not is_analog(info))
+
+
+def default_settings(info):
+    """Choose the settings a camera starts with.
+
+    An analog camera starts in the LabVIEW flow (LABVIEW_FLOW on top of its
+    own settings), the known-good processing for the Sony XC-ST50. Other
+    cameras and demo sources start with their own settings.
+
+    Args: info is a CameraInfo, or None for a demo source.
+    Returns: A new Settings.
+    """
+    settings = own_settings(info)
+    return replace(settings, **LABVIEW_FLOW) if is_analog(info) else settings
 
 
 @dataclass(frozen=True)
@@ -629,6 +675,10 @@ class Engine:
                     applied = s
                     last_setting_time = now
 
+            if s.mode == "Reference" and s.auto_reference and processor.ref is None:
+                processor.set_reference(frame, now)  # as the LabVIEW VI did at start
+                processor.reset_avg()
+                self.log.write("Captured reference frame (automatic).")
             if s.mode == "Reference" and s.ref_refresh_s > 0 and (
                     processor.ref is None or
                     now - processor.ref_time >= s.ref_refresh_s):
@@ -653,10 +703,16 @@ class Engine:
                 if labview_order:
                     difference = apply_gain(difference, s.difference_gain)
                 difference = reject_outliers(difference, s.outlier_filter)
-                scale = s.average_multiplier if labview_order else None
-                averaged = (processor.rolling_average(difference, s.average, scale)
-                            if s.rolling else
-                            processor.average(difference, s.average, scale))
+                count, scale = s.average, None
+                if labview_order:
+                    scale = s.average_multiplier
+                    if s.average > 1 and not s.rolling:
+                        # The VI's loop stops after iteration N, so it sums N + 1
+                        # frames and divides by N: one frame more, (N+1)/N brighter.
+                        count = s.average + 1
+                        scale = s.average_multiplier * count / s.average
+                averaged = (processor.rolling_average(difference, count, scale)
+                            if s.rolling else processor.average(difference, count, scale))
                 if averaged is not None:
                     averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
                     if s.scale_range:

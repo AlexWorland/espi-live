@@ -1319,7 +1319,7 @@ class MainWindowBuildTests(WindowTestCase):
         s = self.engine.settings()
         for key, value in qt_app.LABVIEW_FLOW.items():
             self.assertEqual(getattr(s, key), value, key)
-        self.assertEqual((s.difference_gain, s.exposure_us), (12, 3000))
+        self.assertEqual((s.difference_gain, s.exposure_us), (42, 3000))
         self.assertEqual(w.scaling.currentText(), "Fixed gain")
         self.assertIn("LabVIEW flow on", " ".join(self.log.lines))
         w.set_labview_flow(True)  # already on: nothing more is kept
@@ -1328,6 +1328,7 @@ class MainWindowBuildTests(WindowTestCase):
         s = self.engine.settings()
         self.assertEqual((s.mode, s.noise_reduction, s.smoothing, s.palette),
                          ("Previous", 40, 5, "Turbo"))
+        self.assertEqual(s.difference_gain, 12)
         self.assertIsNone(w.current.labview_saved)
         self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
         self.assertIn("LabVIEW flow off", " ".join(self.log.lines))
@@ -1497,12 +1498,13 @@ class SettingsGuideTests(WindowTestCase):
             w.smoothing_combo: ("Gaussian", "Median", "5 px"),
             w.smoothing: ("fringe spacing", "Start at 3"),
             w.scaling: ("Fixed gain", "Auto stretch", "0 and 255", "Start with Fixed gain"),
-            w.difference_gain: ("255", "Start at 8"),
+            w.difference_gain: ("255", "Start at 42"),
             w.gain_before_average: ("LabVIEW", "Start off"),
             w.average_multiplier: ("Multiplier", "Start at 1"),
             w.frames_back: ("Previous view", "Start at 1"),
             w.outlier_filter: ("neighbourhood", "Start at 0"),
-            w.labview_button: ("LabVIEW ESPI 1.5", "Fixed gain", "settings you had before"),
+            w.labview_button: ("LabVIEW ESPI 1.5", "Fixed gain", "your own settings",
+                               "analog camera"),
             w.invert: ("bright and dark", "Start off"),
             w.flip_button: ("left to right", "Start off"),
             w.clip: ("speckles", "Start at 0"),
@@ -4167,6 +4169,8 @@ class CaptureWindowTests(unittest.TestCase):
         self.assertEqual(window.scaling.currentText(), "Fixed gain")
         self.assertTrue(window.difference_gain.isEnabled())
         self.assertFalse(window.clip.isEnabled())
+        self.assertTrue(window.labview_button.isChecked())  # on by default
+        self.assertEqual(window.mode_group.checkedButton().text(), "Reference")
         self.assertTrue(window.report_label.isHidden())
         window.show_channel(self.flir)
         for widget in (window.exposure, window.gain, window.fps):
@@ -4178,6 +4182,11 @@ class CaptureWindowTests(unittest.TestCase):
         self.assertEqual(window.scaling.currentText(), "Auto stretch")
         self.assertFalse(window.difference_gain.isEnabled())
         self.assertTrue(window.clip.isEnabled())
+        self.assertFalse(window.labview_button.isChecked())
+        window.show_channel(self.usb)
+        window.labview_button.setChecked(False)  # back to the analog camera's own
+        s = self.usb.engine.settings()
+        self.assertEqual((s.mode, s.scale_range, s.auto_reference), ("Raw", False, False))
 
     def test_single_field_checkbox_updates_engine(self):
         """Unticking the field toggle switches the engine to full frames.

@@ -70,11 +70,14 @@ reports whether it is present.
   interline-transfer cameras in subtraction ESPI favour non-interlaced field
   and frame modes (Optical Engineering 38(9), 1999). The camera's own
   field-integration setting helps too.
-- **Fixed gain** (the default for this camera): the difference is multiplied
-  by **Difference gain** (8× to start) and saturates at 255, as the LabVIEW VI
-  did. The capture noise is only 3–5 grey levels, so it stays dark grey; Auto
-  stretch would expand it to full-contrast grain. **LabVIEW flow** applies the
-  VI's whole processing in one click; see `docs/labview/README.md`.
+- **LabVIEW flow** (on by default for this camera): the LabVIEW ESPI 1.5 VI's
+  processing with its saved defaults: Reference view with an automatic
+  reference, the difference multiplied by **Difference gain** 42 (the VI's
+  Constant) and saturated at 255, no averaging or filters. At 42× the
+  capture noise (3–5 grey levels) shows as mid-grey; lower the gain if it
+  hides the fringes. Turning the toggle off gives this camera's own settings,
+  which also use Fixed gain: Auto stretch would expand the noise to
+  full-contrast grain. See `docs/labview/README.md`.
 - **Aspect:** NTSC pixels are not square (720 × 480 carries a 4:3 picture),
   so images look about 12 % too wide. They are not resampled, because
   resampling would blur the speckle.

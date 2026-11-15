@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
 from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
                        source_code, tips, ui_scale, updater)
 from espi_live.channels import Channel, demo_channels, open_camera_channels
+from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, MAX_DENOISE_PERCENT,
@@ -326,37 +327,14 @@ PROCESSING_PRESETS = {
         "clahe": True,
     },
 }
-# The processing of the LabVIEW ESPI 1.5 VI (the known-good flow for the Sony
-# XC-ST50, docs/labview/README.md): a reference grabbed at the start, full
-# frames, each difference multiplied by a fixed gain and saturated, no noise
-# reduction, smoothing, CLAHE or invert. Difference gain is the VI's adjustable
-# "Constant", so it stays whatever the user set; so do exposure, gain, frame
-# rate and recording.
-LABVIEW_FLOW = {
-    "mode": "Reference",
-    "noise_reduction": 0.0,
-    "frames_back": 1,
-    "outlier_filter": 0,
-    "average": 1,
-    "rolling": False,
-    "ref_refresh_s": 0.0,
-    "smoothing": 0,
-    "scale_range": False,
-    "gain_before_average": True,
-    "average_multiplier": 1.0,
-    "invert": False,
-    "palette": "Gray",
-    "gamma": 1.0,
-    "clahe": False,
-    "single_field": False,
-}
 LABVIEW_FLOW_TIP = (
     "Switch between your own settings and the LabVIEW ESPI 1.5 flow: Reference "
-    "view with a reference captured now, full frames, Fixed gain applied to "
-    "each frame before averaging, and no noise reduction, speckle filter, "
-    "CLAHE or invert. Difference gain, exposure, gain, frame rate and "
-    "recording stay as they are. Turning it off puts back the settings you "
-    "had before; changes made while it is on are dropped."
+    "view with a reference captured now (and again whenever Reference view has "
+    "none), full frames, Fixed gain applied to each frame before averaging, and "
+    "no noise reduction, speckle filter, CLAHE or invert. Difference gain, "
+    "exposure, gain, frame rate and recording stay as they are. On by default "
+    "for an analog camera. Turning it off puts back your own settings; changes "
+    "made while it is on are dropped."
 )
 PRESET_TIPS = {
     "Live preview": "Watch fringes form while you align the setup: Previous view, "
@@ -389,7 +367,7 @@ Processing order (Previous and Reference views):
 
 Raw view applies noise reduction and display gamma, without stretch or palette.
 
-Analog camera (Sony XC-ST50): it starts in Fixed gain, as the LabVIEW ESPI 1.5 VI showed it. Its capture noise is only a few grey levels, so a fixed Difference gain (8× to start) keeps it dark, where Auto stretch would blow it up to full-contrast grain. Raise the gain until the fringes are bright. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths.
+Analog camera (Sony XC-ST50): it starts in the LabVIEW flow, the LabVIEW ESPI 1.5 VI's processing with its saved defaults: Reference view with an automatic reference, Fixed gain 42× (the VI's Constant) on each frame, no averaging or filters. Turn LabVIEW flow off for your own settings, which also use Fixed gain: Auto stretch would blow the camera's few grey levels of noise up to full-contrast grain. Lower Difference gain when noise shows as grey grain. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths, including its N + 1 frames divided by N.
 
 Three controls that are easy to mix up:
   Noise reduction blends camera frames over time, before the difference. It removes sensor noise and keeps the speckle. It trails motion and weakens Previous-view fringes.
@@ -2792,8 +2770,9 @@ class MainWindow(QMainWindow):
         self.difference_gain.set_description(
             "Fixed gain: each difference is multiplied by this and anything "
             "above 255 shows white, as in the LabVIEW VI (IMAQ Multiply by "
-            "Constant). Noise of a few levels stays dark; raise it until the "
-            f"fringes are bright. Start at {DEFAULT_DIFFERENCE_GAIN:g}.")
+            "Constant). At the VI's default of 42, any difference of 7 grey "
+            "levels or more is white. Lower it when noise shows as grey grain; "
+            f"raise it when fringes are dim. Start at {DEFAULT_DIFFERENCE_GAIN:g}.")
         self.difference_gain.valueChanged.connect(
             lambda v: self.engine.update_settings(difference_gain=v))
         add(self.difference_gain, "Difference gain")
@@ -2802,7 +2781,9 @@ class MainWindow(QMainWindow):
             "Fixed gain only. On: the gain is applied to every difference frame "
             "(saturating at 255) and the outlier filter runs on that; Average N "
             "then averages those frames and multiplies the mean by the Average "
-            "multiplier, as the LabVIEW VI did. Off: the raw differences are "
+            "multiplier, as the LabVIEW VI did (it sums N + 1 frames and divides "
+            "by N, so each block is one frame longer and (N+1)/N brighter). Off: "
+            "the raw differences are "
             "averaged and the gain is applied once at the end. Start off.")
         self.gain_before_average.setChecked(s.gain_before_average)
         self.gain_before_average.toggled.connect(self._gain_order_changed)
@@ -2811,7 +2792,7 @@ class MainWindow(QMainWindow):
         self.average_multiplier.set_description(
             "With Gain before averaging on and Average N above 1, the mean is "
             "multiplied by this before it is shown (the LabVIEW VI's Multiplier). "
-            "Start at 1.")
+            "As in the VI, N + 1 frames are summed and divided by N. Start at 1.")
         self.average_multiplier.valueChanged.connect(
             lambda v: self.engine.update_settings(average_multiplier=v))
         add(self.average_multiplier, "Average multiplier")
@@ -2959,6 +2940,7 @@ class MainWindow(QMainWindow):
         self.labview_button = QPushButton("LabVIEW flow")
         self.labview_button.setCheckable(True)
         set_tooltip(self.labview_button, LABVIEW_FLOW_TIP)
+        self.labview_button.setChecked(self.current.labview_saved is not None)
         self.labview_button.toggled.connect(self.set_labview_flow)
         row.addWidget(self.labview_button)
         add(row_widget)

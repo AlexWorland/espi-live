@@ -12,11 +12,11 @@
 ### Current state
 
 - **Full frames by default** for interlaced cameras, as the LabVIEW VI used them. **Single field** is still there, now off.
-- **Scaling** chooses **Fixed gain** (each difference × **Difference gain**, 1–64, saturating at 255, as the VI's IMAQ Multiply did) or **Auto stretch** (the old stretch, with Stretch clip). The XC-ST50 starts in Fixed gain at 8×; the Blackfly and demo mode keep Auto stretch.
+- **Scaling** chooses **Fixed gain** (each difference × **Difference gain**, 1–64, saturating at 255, as the VI's IMAQ Multiply did) or **Auto stretch** (the old stretch, with Stretch clip). The default Difference gain is 42×, the VI's saved Constant. The XC-ST50's own settings use Fixed gain; the Blackfly and demo mode keep Auto stretch.
 - **Gain before averaging (LabVIEW order)** applies the fixed gain to every frame and averages those, then multiplies the mean by **Average multiplier**, as the VI did. Off, the raw differences are averaged and the gain is applied once.
 - **Frames back** (ESPI measurement): Previous compares with the frame N back, so slow changes show instead of cancelling. The VI got the same effect by waiting between grabs.
 - **Outlier filter** (Fringe enhancement): on every difference frame before averaging, a pixel further from its neighbourhood's mean than the neighbourhood's spread becomes that mean (NI Vision's Lowpass rule, from the VI). Off by default.
-- **LabVIEW flow** (a toggle beside the presets) switches the displayed camera to the VI's processing and captures a reference, as the VI did at start. Turning it off restores your settings. Difference gain, exposure, gain, frame rate and recording are left alone.
+- **LabVIEW flow** (a toggle beside the presets) switches the displayed camera to the VI's processing with its saved defaults (decoded from the VI: Constant 42, Multiplier 1, BY FRAME, Average and Low Pass Filter off, no wait) and captures a reference, as the VI did at start; Reference view then captures one whenever it has none. With averaging on it sums N + 1 frames and divides by N, as the VI's loop does. **It is on by default for the XC-ST50.** Turning it off restores your own settings. Exposure, gain, frame rate, recording and the flip are left alone.
 - The log's settings line names the scaling, frames back and outlier filter.
 - `docs/labview/` holds the VI, its block diagram and a decoded description of its flow, published with permission.
 - **Note for the Blackfly:** nothing changes until you pick Fixed gain or LabVIEW flow. A setting of the old "Stretch to 0–255" off now means Fixed gain; at a Difference gain of 1 it shows the raw difference, as before.

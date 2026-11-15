@@ -39,9 +39,9 @@ MAX_FRAMES_BACK = 30
 # LabVIEW ESPI 1.5 VI did (IMAQ Multiply by "Constant"), or a stretch of each
 # frame's range to 0..255. Settings.scale_range is True for "Auto stretch".
 SCALING_MODES = ("Fixed gain", "Auto stretch")
-# Default fixed gain: a 3-5 level noise floor stays dark grey and differences
-# of 32 levels or more reach white. The VI's own default could not be read.
-DEFAULT_DIFFERENCE_GAIN = 8.0
+# Default fixed gain: the LabVIEW VI's "Constant" default (42.0, read from its
+# front-panel default data). Differences of 7 grey levels or more reach white.
+DEFAULT_DIFFERENCE_GAIN = 42.0
 
 
 def normalize_min_max(image):

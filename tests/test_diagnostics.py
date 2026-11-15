@@ -73,7 +73,7 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("scaling=gain x6 exposure", busy)
         ordered = diagnostics.settings_summary(Settings(
             scale_range=False, gain_before_average=True, average_multiplier=2.5))
-        self.assertIn("scaling=gain x8 before average, multiplier x2.5", ordered)
+        self.assertIn("scaling=gain x42 before average, multiplier x2.5", ordered)
         self.assertIn("average=8 rolling", busy)
         self.assertIn("smoothing=Median 5", busy)
         self.assertIn("clahe=off", busy)

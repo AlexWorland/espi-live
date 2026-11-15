@@ -15,7 +15,8 @@ from dataclasses import asdict, replace
 
 from espi_live import error_reports, sources
 from espi_live.camera import CameraInfo
-from espi_live.engine import Engine, default_settings
+from espi_live.engine import (LABVIEW_FLOW, Engine, default_settings, is_analog,
+                              own_settings)
 
 
 class PrefixedLog:
@@ -119,6 +120,9 @@ class Channel:
         self.frozen = None  # FramePacket held on screen while the display is frozen
         self.frozen_at = None  # datetime the display was frozen
         self.labview_saved = None  # the user's settings while the LabVIEW flow is on
+        if not demo and is_analog(info):  # analog cameras start in the LabVIEW flow
+            own = own_settings(info)
+            self.labview_saved = {key: getattr(own, key) for key in LABVIEW_FLOW}
         self.retired = []  # stopped engines that may still be finishing
 
     @property

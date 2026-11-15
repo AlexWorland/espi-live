@@ -877,14 +877,17 @@ python -m espi_live</code></pre>
           refresh 2 s and stretch clip 0.5%. Press <kbd>F</kbd> when the object
           is still. Neither preset changes exposure, gain, frame rate or recording.</p>
         <p><strong>LabVIEW flow</strong>, the toggle beside them, switches the
-          displayed camera to the processing of the LabVIEW ESPI 1.5 program,
-          the known-good flow for the Sony XC-ST50: Reference view with a
-          reference captured at once, full frames, Fixed gain applied to each
-          frame before averaging, and no noise reduction, speckle or outlier
-          filter, CLAHE or invert. Difference gain, exposure, gain, frame rate
-          and recording keep their values. Turn it off to get your own settings
-          back; changes made while it is on are dropped. Each camera keeps its
-          own state.</p>
+          displayed camera to the processing of the LabVIEW ESPI 1.5 program
+          with that program's saved defaults, the known-good flow for the Sony
+          XC-ST50. It is on by default for that camera. It sets Reference view
+          and captures a reference at once (and whenever Reference has none),
+          full frames, Fixed gain 42× applied to each frame before averaging,
+          and turns off noise reduction, the speckle and outlier filters,
+          stretch, CLAHE and invert. If you turn averaging on, it sums N + 1
+          frames and divides by N, as the program did. Exposure, gain, frame
+          rate, recording and the flip keep their values. Turn it off to get
+          your own settings back; changes made while it is on are dropped. Each
+          camera keeps its own state.</p>
         <p><strong>Help → Which settings should I use?</strong> explains both
           presets and can apply them to the displayed camera. Reference refresh
           also hides motion slower than its interval; use 0 for a fixed before/after.</p>
@@ -945,7 +948,9 @@ python -m espi_live</code></pre>
             demo mode in Auto stretch. The status bar shows the input and scaled
             ranges, before gamma and palette.</li>
           <li><strong>Difference gain</strong> — Fixed gain's multiplier,
-            1–64×; 8× to start. Raise it until the fringes are bright.</li>
+            1–64×; 42× by default, the LabVIEW program's Constant, so any
+            difference of 7 grey levels or more is white. Lower it when noise
+            shows as grey grain.</li>
           <li><strong>Gain before averaging (LabVIEW order)</strong> — Fixed
             gain only. On: the gain is applied to each frame (saturating at 255)
             and Average N averages those frames, then multiplies the mean by
@@ -1232,10 +1237,12 @@ python -m espi_live</code></pre>
           fields, doubled to full height, removing the 1/60 s offset between
           fields at the cost of half the vertical detail. Differences compare
           rows woven the same way, so the offset rarely matters for ESPI.</li>
-        <li>It starts in <strong>Fixed gain</strong> (8×): its capture noise is
-          only a few grey levels, which Auto stretch would blow up to
-          full-contrast grain. <strong>LabVIEW flow</strong> applies the known-good
-          LabVIEW processing in one click.</li>
+        <li>It starts in the <strong>LabVIEW flow</strong>: the known-good
+          LabVIEW ESPI 1.5 processing with that program's saved defaults
+          (Fixed gain 42×, Reference view with an automatic reference, no
+          averaging or filters). Turn the toggle off for your own settings,
+          which also start in Fixed gain: Auto stretch would blow the capture
+          noise (3–5 grey levels) up to full-contrast grain.</li>
         <li>Images look about 12% wide because NTSC pixels are not square;
           they are not resampled. Expect coarser fringes than with the
           Blackfly.</li>
@@ -1295,7 +1302,7 @@ python -m espi_live</code></pre>
             <tr><td>Scaling</td><td>Fixed gain (analog camera); Auto stretch
               (others)</td><td>Fixed gain / Auto stretch</td>
               <td>Fixed multiplier, or each frame mapped to 0–255.</td></tr>
-            <tr><td>Difference gain</td><td>8×</td><td>1–64×, step 0.5</td>
+            <tr><td>Difference gain</td><td>42×</td><td>1–64×, step 0.5</td>
               <td>Fixed gain only; saturates at 255.</td></tr>
             <tr><td>Gain before averaging</td><td>Off</td><td>On / off</td>
               <td>LabVIEW order.</td></tr>

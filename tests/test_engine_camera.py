@@ -1037,6 +1037,7 @@ class CaptureEngineTests(CaptureEngineCase):
         self.factory.frames = [interlaced_frame()]
         engine_ = self.capture_engine()
         self.assertFalse(engine_.settings().single_field)
+        engine_.update_settings(mode="Raw")  # it starts in the LabVIEW flow's Reference
         engine_.start()
         self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
         self.assertEqual(int(engine_.latest_packet().image[1].max()), 255)
@@ -1052,7 +1053,7 @@ class CaptureEngineTests(CaptureEngineCase):
         Returns: None.
         """
         engine_ = self.capture_engine()
-        engine_.update_settings(mode="Reference")
+        engine_.update_settings(mode="Reference", auto_reference=False)
         engine_.start()
         self.assertTrue(wait_until(lambda: "press F" in engine_.status()["hint"]))
         engine_.request("reference")

@@ -37,8 +37,9 @@ runs.
      makes the difference run before `IMAQ Copy` replaces the previous frame.
      Because of the wait, "previous" is the frame from one loop pass ago, not
      the camera's preceding frame.
-   - `IMAQ Multiply` by **Constant** (SGL). On 8-bit images the product
-     saturates at 255: this is a fixed gain, not a stretch.
+   - `IMAQ Multiply` by **Constant** (SGL, default 42). On 8-bit images the
+     product saturates at 255: this is a fixed gain, not a stretch. At 42 any
+     difference of 7 grey levels or more is white.
    - **Low Pass Filter** (optional): `IMAQ LowPass` with a constant
      *Size & Tolerance* cluster that reads `1, 1, 0` (1 × 1 kernel, 0 %), so
      as configured it changes nothing.
@@ -47,19 +48,40 @@ runs.
      it to the AVI.
    - **Average** on: `IMAQ ImageToArray`, convert to DBL and add to a
      shift-register sum.
-   - The inner loop ends after **NUMBER OF FRAMES** passes, when
-     **Number of frames to average** frames are summed, or on **stop** or an
-     error.
-3. With **Average** on: sum × **Multiplier** ÷ N, `To Unsigned Byte` (rounds
-   and saturates), `IMAQ ArrayToImage`, draw in window 4 and write to the AVI.
+   - The inner loop stops when its iteration counter i equals **NUMBER OF
+     FRAMES**, or (with Average on) equals **Number of frames to average** N,
+     or on **stop** or an error. The test runs after the frame is added, so a
+     block holds N + 1 frames. With N above NUMBER OF FRAMES (30) the loop
+     stops first, which is why the control is labelled "< 31".
+3. With **Average** on: sum × **Multiplier** ÷ N (not N + 1, so the result is
+   (N+1)/N too bright), `To Unsigned Byte` (rounds and saturates),
+   `IMAQ ArrayToImage`, draw in window 4 and write to the AVI. The next outer
+   pass starts a fresh sum, so this is a block average.
 4. **Save Frame** ends the outer loop. The VI then closes the grabber, runs
    the error handler, closes the AVI, and writes the last image to a JPEG
    (its file dialog has no data dependency, so it probably appears at start).
 
-Front-panel controls: Image Type, Palette, Constant, Multiplier, Number of
-frames to average (< 31), NUMBER OF FRAMES, milliseconds to wait, BY FRAME,
-Average, Low Pass Filter, Show ESPI 2, Save AVI, Save Frame, stop, Selected
-Path. Frames are 640 × 480 (the X and Y Size constants).
+Frames are 640 × 480 (the X and Y Size constants).
+
+### Saved front-panel defaults
+
+Read from the `DefaultData` of each control in the front-panel heap (a
+control without one defaults to zero or off):
+
+| Control | Default |
+|---|---|
+| Constant | 42.0 |
+| Multiplier | 1.0 |
+| Number of frames to average | 30 |
+| NUMBER OF FRAMES | 30 |
+| Show ESPI 2 | on |
+| BY FRAME, Average, Low Pass Filter, Save AVI, Save Frame, stop | off |
+| milliseconds to wait | 0 |
+| Palette | 0 (Gray) |
+| Image Type | 0 (8 bits) |
+
+The operator may have changed any of these while the VI ran; these are the
+values it opens with.
 
 ### Not used
 
@@ -68,13 +90,13 @@ A *Waveform Array To Dynamic* Express VI (labelled "DAQ Assistant2") feeds a
 whose result goes to a `Format Into String "%4.1f"` with an unwired output.
 It computes nothing that is shown or saved.
 
-### Not recovered
+### Not in the VI
 
-The default values of **Constant**, **Multiplier** and **milliseconds to
-wait** sit in the VI's default-data block (`DFDS`), which NI does not
-document and pylabview cannot parse for this file (it fails on the IMAQ image
-type). The grabber's own settings (field or frame mode, gain, offset, lookup
-table) were in the NI MAX camera file for `img0`, not in the VI.
+The grabber's own settings (field or frame mode, gain, offset, lookup table)
+were in the NI MAX camera file for `img0`. The VI's default-data block
+(`DFDS`) is undocumented and pylabview cannot parse it for this file (it
+fails on the IMAQ image type), but the front-panel defaults above do not
+depend on it.
 
 ## How it maps to the app
 
@@ -82,17 +104,38 @@ table) were in the NI MAX camera file for `img0`, not in the VI.
 |---|---|
 | Reference grabbed at start | Reference view; **LabVIEW flow** captures one when turned on |
 | BY FRAME | Previous view; **Frames back** stands in for the wait between grabs |
-| `IMAQ Multiply` by Constant | Scaling **Fixed gain**, **Difference gain** |
+| `IMAQ Multiply` by Constant (42) | Scaling **Fixed gain**, **Difference gain** (42 by default) |
 | `IMAQ LowPass` | **Outlier filter** (NI's Lowpass rule; off by default, as the VI's 1 × 1 setting was in effect) |
 | Average, Number of frames to average | **Average N** (block) |
-| Gain before the sum, × Multiplier ÷ N to U8 | **Gain before averaging (LabVIEW order)**, **Average multiplier** |
+| Gain before the sum; N + 1 frames × Multiplier ÷ N to U8 | **Gain before averaging (LabVIEW order)**, **Average multiplier** (also sums N + 1 frames and divides by N) |
 | Full frames from the grabber | **Single field** off (the default) |
 | Palette | Palette |
 | Save AVI | Record AVI |
 | Save Frame (ends the run, writes a JPEG) | Save frame (keeps running, writes a PNG) |
 
-The **LabVIEW flow** button in the ESPI measurement section switches the
-displayed camera to this processing and back to the user's own settings.
+The **LabVIEW flow** toggle in the ESPI measurement section switches the
+displayed camera to this processing with the saved defaults above and back to
+the user's own settings. It is on by default for the Sony XC-ST50. It sets
+Reference view and captures a reference at once (and whenever Reference view
+has none), full frames, Fixed gain 42 applied to each frame, the outlier
+filter off, Average N 1, Average multiplier 1, Frames back 1, Gray, and turns
+off everything the VI does not have (noise reduction, speckle filter, stretch,
+invert, gamma, CLAHE). Exposure, gain, frame rate, recording and the image
+flip are not changed.
+
+What it cannot reproduce:
+
+- The capture hardware (below), and 640 × 480 frames (the USB-Live2 gives
+  720 × 480).
+- The VI's windows: the second "ESPI 2" window, and the separate window for
+  averages. The app shows one image.
+- **Save Frame** ending the run with a JPEG, the AVI file created on every
+  run, and averaged frames written to it whether or not Save AVI is on. The
+  app records and saves only when asked.
+- The VI's reference is captured once per run; the app also captures one
+  when Reference view has none (after switching fields, for example).
+- NUMBER OF FRAMES only restarts the VI's loop (and caps averaging at 30
+  frames); it has no visible effect, so it has no control here.
 
 The capture hardware still differs. The NI grabber digitised the monochrome
 video directly; the Hauppauge USB-Live2 is a colour NTSC decoder (chroma

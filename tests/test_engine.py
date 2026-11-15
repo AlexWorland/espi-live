@@ -12,7 +12,8 @@ import numpy as np
 
 from espi_live import paths
 from espi_live.camera import CameraInfo
-from espi_live.engine import Engine, default_settings, is_analog
+from espi_live.engine import (LABVIEW_FLOW, Engine, default_settings, is_analog,
+                              own_settings)
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
                                   apply_palette, normalize_min_max,
                                   palette_rgb_table, smooth_speckle,
@@ -202,9 +203,10 @@ class EngineDemoTests(unittest.TestCase):
         """Fixed gain scales the difference; LabVIEW order scales the average.
 
         The source alternates 0 and 3, so every Previous difference is 3.
-        With gain 8 it shows 24. With the gain before averaging, two frames
-        averaged and a multiplier of 2 it shows 48. The outlier filter leaves
-        a flat difference alone.
+        With gain 8 it shows 24. With the gain before averaging, Average N 2
+        and a multiplier of 2 it shows 72: as in the LabVIEW VI, three frames
+        are summed and divided by two. The outlier filter leaves a flat
+        difference alone.
 
         Args: None.
         Returns: None.
@@ -239,7 +241,9 @@ class EngineDemoTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: "Scaled: 24–24" in self.engine.status()["range"]))
         self.engine.update_settings(gain_before_average=True, average=2,
                                     average_multiplier=2.0)
-        self.assertTrue(pixel_is(48))
+        self.assertTrue(pixel_is(72))
+        self.engine.update_settings(rolling=True)
+        self.assertTrue(pixel_is(48))  # rolling: the multiplier only
         self.engine.update_settings(scale_range=True)
         self.assertTrue(pixel_is(0))  # a constant difference stretches to zeros
 
@@ -256,11 +260,28 @@ class EngineDemoTests(unittest.TestCase):
         self.assertFalse(is_analog(webcam))
         self.assertFalse(is_analog(CameraInfo("123")))
         self.assertFalse(is_analog(None))
-        self.assertFalse(default_settings(analog).scale_range)
-        self.assertFalse(default_settings(analog).single_field)
+        started = default_settings(analog)
+        for key, value in LABVIEW_FLOW.items():
+            self.assertEqual(getattr(started, key), value, key)
+        self.assertEqual(started.difference_gain, 42.0)
+        self.assertFalse(own_settings(analog).scale_range)
+        self.assertFalse(own_settings(analog).auto_reference)
+        self.assertEqual(own_settings(analog).mode, "Raw")
         self.assertTrue(default_settings(webcam).scale_range)
         self.assertTrue(default_settings(None).scale_range)
         self.assertFalse(Engine(self.log, info=analog).settings().scale_range)
+        self.assertEqual(default_settings(webcam).mode, "Raw")
+
+    def test_auto_reference_captures_one_when_reference_has_none(self):
+        """Reference view with auto_reference captures its own baseline.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(mode="Reference", auto_reference=True)
+        self.assertTrue(wait_until(
+            lambda: self.log.has("Captured reference frame (automatic).")))
+        self.assertTrue(wait_until(lambda: "press F" not in self.engine.status()["hint"]))
 
     def test_noise_reduction_changes_raw_previous_and_reference(self):
         """The mapped slider changes the published pixels in every view.
