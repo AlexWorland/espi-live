@@ -93,6 +93,25 @@ def demo_infos(count):
             for index in range(max(1, count))]
 
 
+# Sensitivity floor (grey levels) analog capture starts with. The analog chain
+# (cable, digitizer, YUV conversion) leaves about 15 levels of frame-to-frame
+# noise in a still scene, measured with a Sony XC-ST50 on a USB-Live2; twice
+# that keeps the noise dark. FLIR cameras start at 0, the original behaviour.
+ANALOG_MIN_RANGE = 30
+
+
+def default_settings(info, demo=False):
+    """Choose the starting settings for a camera.
+
+    Args: info is the camera's CameraInfo; demo is True for a synthetic source.
+    Returns: A Settings; analog capture devices get the ANALOG_MIN_RANGE
+        sensitivity floor, every other source the plain defaults.
+    """
+    if not demo and getattr(info, "kind", "") == "capture":
+        return Settings(min_range=ANALOG_MIN_RANGE)
+    return Settings()
+
+
 class Channel:
     """A camera and the engine that processes it while processing is on."""
 
@@ -111,7 +130,8 @@ class Channel:
         self.demo_source = demo
         self.log = PrefixedLog(log, "")  # the window names cameras when several
         self.engine = engine
-        self.settings = engine.settings() if engine is not None else Settings()
+        self.settings = (engine.settings() if engine is not None
+                         else default_settings(info, demo))
         self.limits = {}  # last "camera_limits" payload: {node name: (low, high)}
         self.identity = None  # last "camera_identity" payload (CameraIdentity)
         self.report = None  # last "camera_report" payload (camera_reports.Report)

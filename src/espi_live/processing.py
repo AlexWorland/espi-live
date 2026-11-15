@@ -4,6 +4,8 @@ Nothing here touches a GUI toolkit or PySpin, so it is safe to call from any
 thread and from camera-free tests.
 """
 
+import collections
+import functools
 import math
 import time
 
@@ -31,6 +33,18 @@ MAX_DENOISE_STRENGTH = 0.95
 # up, not the history weight: denoise_strength spreads the 20-frame memory
 # across the whole travel, so the low end is not a dead zone.
 MAX_DENOISE_PERCENT = 95
+# Noise calibration: each frame's level at the top 0.5% of pixels is its noise
+# peak, and the suggested sensitivity floor is the median peak times this.
+NOISE_PERCENTILE_CLIP = 0.5
+NOISE_MARGIN = 2.0
+# Brightness correction: blur width (pixels) for the illumination estimate,
+# the darkest local level still treated as lit, and the largest boost.
+BEAM_SIGMA_PX = 24.0
+DARK_LEVEL = 8.0
+MAX_BRIGHTNESS_GAIN = 6.0
+# Peak hold splits its window into this many slices; the window's edge is
+# accurate to one slice (0.25 s for a 3 s window).
+PEAK_SLICES = 12
 
 
 def normalize_min_max(image):
@@ -71,6 +85,258 @@ def stretch_contrast(image, clip_percent):
         return np.zeros_like(image), low, high
     levels = (np.arange(256, dtype=np.float32) - low) * (255.0 / (high - low))
     return cv2.LUT(image, np.clip(np.rint(levels), 0, 255).astype(np.uint8)), low, high
+
+
+def stretch_levels(image, clip_percent):
+    """Find the input levels a contrast stretch maps to black and white.
+
+    Args: image is a nonempty, single-channel uint8 array; clip_percent is
+        the share of pixels (0..50) allowed to saturate at each end, where 0
+        means the exact minimum and maximum.
+    Returns: A (low, high) tuple of integer grey levels.
+    """
+    if clip_percent <= 0:
+        low, high, _, _ = cv2.minMaxLoc(image)
+        return int(low), int(high)
+    counts = np.cumsum(cv2.calcHist([image], [0], None, [256], [0, 256]).ravel())
+    clipped = counts[-1] * min(clip_percent, 50.0) / 100.0
+    low = int(np.searchsorted(counts, clipped, side="right"))
+    high = int(np.searchsorted(counts, counts[-1] - clipped, side="left"))
+    return low, high
+
+
+def apply_levels(image, low, high):
+    """Map grey level low to 0 and high to 255, saturating outside them.
+
+    high may lie above 255: a sensitivity floor widens the range so that
+    small differences stay dark instead of filling the scale.
+
+    Args: image is a single-channel uint8 array; low and high are levels.
+    Returns: The stretched uint8 image, or zeros when high <= low.
+    """
+    if high <= low:
+        return np.zeros_like(image)
+    levels = (np.arange(256, dtype=np.float32) - low) * (255.0 / (high - low))
+    return cv2.LUT(image, np.clip(np.rint(levels), 0, 255).astype(np.uint8))
+
+
+class RangeTracker:
+    """Keep the stretch steady: a sensitivity floor plus slow release.
+
+    The floor (min_range) stops a quiet difference image, which holds only
+    camera noise, from being stretched to full contrast. The release time
+    (steady_s) lets the range shrink only gradually, so the contrast does not
+    pump from frame to frame; a range that grows is followed at once, so new
+    fringes show immediately.
+    """
+
+    def __init__(self):
+        """Start with no remembered range.
+
+        Args: None.
+        Returns: None.
+        """
+        self.low = None
+        self.high = None
+        self.time = None
+
+    def reset(self):
+        """Forget the remembered range, e.g. after a view change.
+
+        Args: None.
+        Returns: None.
+        """
+        self.low = self.high = self.time = None
+
+    def update(self, low, high, min_range, steady_s, now):
+        """Combine this frame's levels with the floor and the history.
+
+        Args: low and high are this frame's stretch levels; min_range is the
+            sensitivity floor in grey levels (0 = off); steady_s is the
+            release time in seconds (0 = follow every frame); now is the
+            monotonic time.
+        Returns: The (low, high) integer levels to stretch with.
+        """
+        low, high = float(low), float(high)
+        if self.high is None or steady_s <= 0:
+            self.low, self.high = low, high
+        else:
+            alpha = 1.0 - math.exp(-max(0.0, now - self.time) / steady_s)
+            self.high = high if high > self.high else self.high + alpha * (high - self.high)
+            self.low = low if low < self.low else self.low + alpha * (low - self.low)
+        self.time = now
+        low, high = int(round(self.low)), int(round(self.high))
+        if min_range > 0:
+            high = max(high, low + int(min_range))
+        return low, high
+
+
+class NoiseCalibration:
+    """Measure how large a still scene's difference images get.
+
+    Run it with the object at rest: each processed difference frame adds its
+    near-maximum level, and the median over the run is the noise peak. The
+    suggested sensitivity floor is that peak times NOISE_MARGIN.
+    """
+
+    def __init__(self, now, duration_s=2.0):
+        """Start a measurement.
+
+        Args: now is the monotonic start time; duration_s is how long to sample.
+        Returns: None.
+        """
+        self.until = now + duration_s
+        self.peaks = []
+
+    def add(self, image):
+        """Record one processed difference frame.
+
+        Args: image is a uint8 difference image (before the stretch).
+        Returns: None.
+        """
+        self.peaks.append(stretch_levels(image, NOISE_PERCENTILE_CLIP)[1])
+
+    def done(self, now):
+        """Report whether the sampling time has passed.
+
+        Args: now is the monotonic time.
+        Returns: True once the measurement is over.
+        """
+        return now >= self.until
+
+    def result(self):
+        """Summarize the measurement.
+
+        Args: None.
+        Returns: (noise peak, suggested floor) in grey levels, or None when no
+            frame was recorded.
+        """
+        if not self.peaks:
+            return None
+        noise = float(np.median(self.peaks))
+        return noise, int(min(255, max(1, math.ceil(noise * NOISE_MARGIN))))
+
+
+class PeakHold:
+    """Show each pixel's largest difference within the last hold_s seconds.
+
+    Previous view catches a vibration only in the frames where the motion
+    happens to differ; holding the peak keeps those moments on screen. It is
+    a sliding window: a value older than hold_s drops out, so the image is
+    exactly "the peak in the last hold_s seconds", to within one slice.
+
+    The window is split into PEAK_SLICES time slices, each holding the
+    maximum of its own frames. A new frame updates only the current slice;
+    the older slices are combined once, when a slice is closed, so each
+    frame costs one pixel-wise maximum whatever the window length.
+    """
+
+    def __init__(self):
+        """Start with nothing held.
+
+        Args: None.
+        Returns: None.
+        """
+        self.reset()
+
+    def reset(self):
+        """Drop everything held, e.g. after a view or baseline change.
+
+        Args: None.
+        Returns: None.
+        """
+        self.slices = collections.deque()  # (start time, uint8 max) closed slices
+        self.current = None                # max of the slice being filled
+        self.current_start = None
+        self.closed = None                 # max over self.slices, or None
+        self.window = None
+
+    def update(self, image, hold_s, now):
+        """Add a difference image and return the peak over the window.
+
+        Args: image is a uint8 difference image; hold_s is the window length
+            in seconds (0 = off); now is the monotonic time.
+        Returns: A new uint8 image holding each pixel's maximum over the last
+            hold_s seconds, or image itself when off.
+        """
+        if hold_s <= 0:
+            self.reset()
+            return image
+        if (hold_s != self.window or self.current is None
+                or self.current.shape != image.shape):
+            self.reset()
+            self.window = hold_s
+            self.current, self.current_start = image.copy(), now
+            return image.copy()
+        span = hold_s / PEAK_SLICES
+        if now - self.current_start >= span:
+            self.slices.append((self.current_start, self.current))
+            self.current, self.current_start = image.copy(), now
+            while self.slices and self.slices[0][0] + span <= now - hold_s:
+                self.slices.popleft()
+            self.closed = (functools.reduce(np.maximum, (s for _, s in self.slices))
+                           if self.slices else None)
+        else:
+            np.maximum(self.current, image, out=self.current)
+        if self.closed is None:
+            return self.current.copy()
+        return np.maximum(self.closed, self.current)
+
+
+def local_normalize(image, window, floor=0.0):
+    """Even out fringe contrast by normalizing against the local statistics.
+
+    Each pixel becomes (value - local mean) / local standard deviation, both
+    measured over a window wider than the fringe spacing, so faint and strong
+    fringes get the same contrast wherever they are (the fringe-normalization
+    approach of the ESPI literature). The result is centred on mid-grey: 128
+    is the local average, and +-2 standard deviations span black to white.
+    The deviation is never taken below floor / 4, so a still scene, whose
+    deviation is only camera noise, is not boosted into full contrast.
+
+    Args: image is a uint8 difference image (already speckle-filtered);
+        window is the window width in pixels; floor is the sensitivity floor
+        in grey levels (0 = no limit beyond one grey level).
+    Returns: The normalized uint8 image.
+    """
+    size = max(3, int(window) | 1)
+    data = image.astype(np.float32)
+    mean = cv2.blur(data, (size, size))
+    spread = cv2.blur(data * data, (size, size)) - mean * mean
+    std = np.sqrt(np.maximum(spread, 0.0))
+    np.maximum(std, max(1.0, floor / 4.0), out=std)
+    out = 128.0 + (data - mean) * (63.75 / std)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def even_out_brightness(difference, frame, sigma=BEAM_SIGMA_PX):
+    """Divide out the illumination profile so fringes read evenly.
+
+    A difference grows with the local brightness, so a Gaussian laser spot
+    makes the centre look busiest. Scaling each pixel by the average lit
+    brightness over its local brightness gives the same fringe contrast
+    across the spot. Pixels darker than DARK_LEVEL are set to 0, and the
+    boost is capped at MAX_BRIGHTNESS_GAIN so the beam's edge is not
+    amplified into noise.
+
+    Args: difference is a uint8 difference image; frame is the camera frame
+        it came from (same shape); sigma is the blur width in pixels used to
+        estimate the illumination.
+    Returns: A uint8 image of the same shape.
+    """
+    height, width = frame.shape
+    shrink = max(1, int(sigma // 4))
+    small = cv2.resize(frame, (max(1, width // shrink), max(1, height // shrink)),
+                       interpolation=cv2.INTER_AREA).astype(np.float32)
+    small = cv2.GaussianBlur(small, (0, 0), max(0.5, sigma / shrink))
+    local = cv2.resize(small, (width, height), interpolation=cv2.INTER_LINEAR)
+    lit = local >= DARK_LEVEL
+    if not lit.any():
+        return np.zeros_like(difference)
+    target = float(local[lit].mean())
+    gain = np.where(lit, target / np.maximum(local, DARK_LEVEL), 0.0)
+    gain = np.minimum(gain, MAX_BRIGHTNESS_GAIN).astype(np.float32)
+    return np.clip(difference.astype(np.float32) * gain, 0, 255).astype(np.uint8)
 
 
 def smooth_speckle(image, method, size):
@@ -140,6 +406,35 @@ def gamma_lut(gamma):
         return None
     return np.array([((i / 255.0) ** (1.0 / gamma)) * 255 for i in range(256)],
                     dtype=np.uint8)
+
+
+def display_lut(gain=1.0, contrast=0.0, brightness=0):
+    """Build one lookup table for gain, S-curve contrast and brightness.
+
+    Applied in that order: gain multiplies (black stays black, bright values
+    saturate at 255); the S-curve darkens values below mid-grey and brightens
+    those above it, keeping 0 and 255 fixed; brightness then adds a constant.
+
+    Args: gain is the multiplier (1 = off); contrast is the S-curve strength
+        in percent, 0..100 (0 = off); brightness is the grey levels added
+        (0 = off).
+    Returns: A 256-entry uint8 table, or None when every control is off.
+    """
+    if gain == 1.0 and contrast <= 0 and brightness <= 0:
+        return None
+    x = np.clip(np.arange(256, dtype=np.float64) * gain / 255.0, 0.0, 1.0)
+    steep = 12.0 * min(float(contrast), 100.0) / 100.0
+    if steep > 0:
+        def sigmoid(v):
+            """Logistic function.
+
+            Args: v is a number or array.
+            Returns: 1 / (1 + exp(-v)).
+            """
+            return 1.0 / (1.0 + np.exp(-v))
+        low, high = sigmoid(-steep / 2), sigmoid(steep / 2)
+        x = (sigmoid(steep * (x - 0.5)) - low) / (high - low)
+    return np.clip(np.rint(x * 255.0 + brightness), 0, 255).astype(np.uint8)
 
 
 def apply_palette(image, palette, gamma):
