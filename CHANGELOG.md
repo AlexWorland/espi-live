@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-11-15 — Sensitivity, peak hold and display tone controls (PR #61)
+
+### Previous state
+
+- With the analog XC-ST50, Previous and Reference looked like full-contrast grain: a still scene's few grey levels of noise were stretched to 0–255, and the stretch range jumped from frame to frame.
+- A driven drum barely showed in Previous view, because each frame's exposure averages many vibration cycles.
+- The Controls panel was one long column.
+
+### Current state
+
+- **Sensitivity floor** (grey levels): Auto stretch and Local normalization never span fewer, so noise stays dark. Video-capture devices start at 30; other sources at 0, as before. **Calibrate noise (object still)** measures a still scene for 2 s and sets the floor to twice its peak.
+- **Noise threshold**: raw differences below it become 0 right after the subtraction.
+- **Steady range**: Auto stretch's range shrinks only gradually, so the contrast stops pumping.
+- **Peak hold window**: each pixel shows its largest difference within the last N seconds, which makes a steady vibration build up in Previous view.
+- **Local normalization** and **Even out beam brightness** (both off by default).
+- **Display**: **Brightness**, **Gain** and **S-curve contrast** in one lookup table, in every view, before the palette; saved frames and recordings match.
+- Each Controls section collapses from its heading, and the state is remembered.
+- Everything new is off by default except the analog sensitivity floor.
+
 ## 2026-11-15 — The LabVIEW flow for the Sony XC-ST50
 
 ### Previous state

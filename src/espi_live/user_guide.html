@@ -728,6 +728,8 @@ python -m espi_live</code></pre>
 
     <section id="controls">
       <h2>Controls reference <a class="anchor" href="#controls" aria-label="Link to Controls reference">#</a></h2>
+      <p>Each Controls section can be collapsed: click its heading to hide or
+        show it. The choice is remembered between runs.</p>
 
       <section id="dummy-mode">
         <h3>Demo banner and Switch to live capture <a class="anchor" href="#dummy-mode" aria-label="Link to Demo banner and live switch">#</a></h3>
@@ -882,8 +884,10 @@ python -m espi_live</code></pre>
           XC-ST50. It is on by default for that camera. It sets Reference view
           and captures a reference at once (and whenever Reference has none),
           full frames, Fixed gain 42× applied to each frame before averaging,
-          and turns off noise reduction, the speckle and outlier filters,
-          stretch, CLAHE and invert. If you turn averaging on, it sums N + 1
+          and turns off noise reduction, the noise threshold, beam-brightness
+          correction, the speckle and outlier filters, peak hold, local
+          normalization, stretch, the display brightness, gain and contrast,
+          CLAHE and invert. If you turn averaging on, it sums N + 1
           frames and divides by N, as the program did. Exposure, gain, frame
           rate, recording and the flip keep their values. Turn it off to get
           your own settings back; changes made while it is on are dropped. Each
@@ -892,11 +896,13 @@ python -m espi_live</code></pre>
           presets and can apply them to the displayed camera. Reference refresh
           also hides motion slower than its interval; use 0 for a fixed before/after.</p>
         <p>Processing order: noise reduction → difference (N frames back) →
-          outlier filter → average → speckle filter → fixed gain or stretch →
-          invert → gamma/CLAHE → palette. With <strong>Gain before
-          averaging</strong>, the fixed gain moves to just after the difference.
-          Raw skips difference processing and still applies noise reduction and
-          display gamma.</p>
+          noise threshold → beam brightness → outlier filter → average →
+          speckle filter → peak hold → fixed gain, stretch or local
+          normalization → invert → gamma/CLAHE → brightness, gain and contrast
+          → palette. With <strong>Gain before averaging</strong>, the fixed
+          gain moves to just before the outlier filter. Raw skips difference
+          processing and still applies noise reduction, display gamma and the
+          display brightness, gain and contrast.</p>
         <ul>
           <li><strong>Average N</strong> — each displayed image becomes the
             mean of N consecutive difference frames. Averaging reduces random
@@ -964,6 +970,34 @@ python -m espi_live</code></pre>
             not flatten the contrast; 0 = exact min/max, about 0.5% when a few
             speckles dominate.</li>
           <li><strong>Invert</strong> — swaps bright and dark fringes.</li>
+          <li><strong>Sensitivity floor</strong> — with Auto stretch or Local
+            normalization, white is never fewer than this many grey levels of
+            difference, so a still scene's camera noise stays dark while real
+            fringes use the full range. Video-capture devices start at 30; 0 =
+            off.</li>
+          <li><strong>Calibrate noise (object still)</strong> — in Previous or
+            Reference view, with the object at rest, measures the difference
+            noise for 2 s and sets the Sensitivity floor to twice its peak. In
+            Raw it logs a warning and does nothing.</li>
+          <li><strong>Noise threshold</strong> — right after the subtraction,
+            differences below this many grey levels become 0. Hides camera
+            noise; too high also hides faint fringes. 0 = off; try 3–8.</li>
+          <li><strong>Steady range</strong> — Auto stretch only: the range
+            shrinks only over this many seconds, so the contrast stops pumping;
+            a growing range is followed at once. 0 = every frame.</li>
+          <li><strong>Even out beam brightness</strong> — divides each
+            difference by the local illumination so the centre of the laser
+            spot no longer dominates; unlit areas go black. Off by default: it
+            can amplify noise at the beam's edge.</li>
+          <li><strong>Peak hold window</strong> — each pixel shows its largest
+            difference within the last N seconds (a sliding window). In
+            Previous view a steady vibration then builds up on screen. 0 =
+            off; try 3 s.</li>
+          <li><strong>Local normalization</strong> — window in pixels: each
+            pixel is compared with the mean and spread of the difference around
+            it, in place of Fixed gain or Auto stretch, so faint and strong
+            fringes get the same contrast. Mid-grey is the local average. Use a
+            window wider than the fringe spacing. 0 = off; try 41–81 px.</li>
         </ul>
         <p>Scaling, clip and invert apply to difference views; Raw is never
           scaled or inverted.</p>
@@ -990,6 +1024,13 @@ python -m espi_live</code></pre>
             computed on the CPU, so it costs more processing time, and it is
             ignored when the palette is Gray. Gamma is applied before
             CLAHE.</li>
+          <li><strong>Brightness</strong>, <strong>Gain</strong> and
+            <strong>S-curve contrast</strong> — one lookup table applied in
+            every view before the palette: Gain multiplies the displayed image
+            (bright values saturate), the S-curve darkens values below mid-grey
+            and brightens those above, and Brightness adds grey levels. Saved
+            frames and recordings match the screen. All off by default (0, 1×,
+            0%).</li>
         </ul>
         <p>See <a href="#op-contrast">Get the best contrast</a>.</p>
       </section>
@@ -1308,6 +1349,24 @@ python -m espi_live</code></pre>
               <td>LabVIEW order.</td></tr>
             <tr><td>Average multiplier</td><td>1.0×</td><td>0.1–10×, step 0.1</td>
               <td>LabVIEW order with Average N above 1.</td></tr>
+            <tr><td>Sensitivity floor</td><td>0 (30 for video capture)</td>
+              <td>0–128 levels</td><td>Auto stretch and Local normalization.</td></tr>
+            <tr><td>Noise threshold</td><td>0 (off)</td><td>0–64 levels</td>
+              <td>Right after the subtraction.</td></tr>
+            <tr><td>Steady range</td><td>0 s</td><td>0–3 s, step 0.1</td>
+              <td>Auto stretch only.</td></tr>
+            <tr><td>Even out beam brightness</td><td>Off</td><td>On / off</td>
+              <td>Divides by the local illumination.</td></tr>
+            <tr><td>Peak hold window</td><td>0 s (off)</td><td>0–10 s, step 0.1</td>
+              <td>Maximum over the window.</td></tr>
+            <tr><td>Local normalization</td><td>0 px (off)</td><td>0–255 px</td>
+              <td>Replaces Fixed gain or Auto stretch.</td></tr>
+            <tr><td>Brightness</td><td>0</td><td>0–128 levels</td>
+              <td>Every view, before the palette.</td></tr>
+            <tr><td>Gain (display)</td><td>1×</td><td>1–8×, step 0.1</td>
+              <td>Every view, before the palette.</td></tr>
+            <tr><td>S-curve contrast</td><td>0%</td><td>0–100%</td>
+              <td>Every view, before the palette.</td></tr>
             <tr><td>Stretch clip</td><td>0%</td><td>0–10%, step 0.1%</td>
               <td>0 = exact min/max.</td></tr>
             <tr><td>Invert</td><td>Off</td><td>On / off</td>

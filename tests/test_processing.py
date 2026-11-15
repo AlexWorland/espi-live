@@ -7,12 +7,16 @@ import unittest
 
 import numpy as np
 
-from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_DENOISE_STRENGTH,
-                                  MAX_FRAMES_BACK, DemoSource, ESPIProcessor,
-                                  apply_gain, denoise_strength,
+from espi_live.processing import (MAX_BRIGHTNESS_GAIN, MAX_DENOISE_PERCENT,
+                                  MAX_DENOISE_STRENGTH, MAX_FRAMES_BACK,
+                                  NOISE_MARGIN, PEAK_SLICES, DemoSource,
+                                  ESPIProcessor, NoiseCalibration, PeakHold,
+                                  RangeTracker, apply_gain, apply_levels,
+                                  denoise_strength, display_lut,
+                                  even_out_brightness, local_normalize,
                                   normalize_min_max, reject_outliers,
                                   single_field, stretch_contrast,
-                                  watermark_demo)
+                                  stretch_levels, watermark_demo)
 
 
 class NormalizeTests(unittest.TestCase):
@@ -404,6 +408,125 @@ class LabviewFlowTests(unittest.TestCase):
         self.assertIs(processor.rolling_average(image, 1, 2.0), image)
         self.assertEqual(int(processor.rolling_average(image, 4, 2.0)[0, 0]), 20)
         self.assertEqual(int(processor.rolling_average(image, 4)[0, 0]), 10)
+
+
+class FringeEnhancementTests(unittest.TestCase):
+    """Sensitivity floor, steady range, noise calibration, peak hold and tone."""
+
+    def test_stretch_levels_and_apply_levels(self):
+        """Levels come from min/max or a clipped histogram; apply_levels maps them.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.arange(100, dtype=np.uint8).reshape(10, 10)
+        self.assertEqual(stretch_levels(image, 0), (0, 99))
+        low, high = stretch_levels(image, 5)
+        self.assertEqual((low, high), (5, 94))
+        mapped = apply_levels(image, 10, 20)
+        self.assertEqual((int(mapped[0, 5]), int(mapped[1, 5]), int(mapped[2, 5])),
+                         (0, 128, 255))
+        self.assertFalse(apply_levels(image, 20, 20).any())
+        self.assertEqual(int(apply_levels(image, 0, 510)[9, 9]), 50)  # floor above 255
+
+    def test_range_tracker_floor_and_slow_release(self):
+        """The floor widens a quiet range; a shrinking range is followed slowly.
+
+        Args: None.
+        Returns: None.
+        """
+        tracker = RangeTracker()
+        self.assertEqual(tracker.update(2, 5, 30, 0, 0.0), (2, 32))
+        self.assertEqual(tracker.update(0, 200, 0, 1.0, 1.0), (0, 200))  # grows at once
+        low, high = tracker.update(0, 100, 0, 1.0, 2.0)
+        self.assertTrue(100 < high < 200)  # shrinks part of the way
+        low, high = tracker.update(10, 100, 0, 1.0, 3.0)
+        self.assertTrue(0 < low < 10)
+        tracker.reset()
+        self.assertIsNone(tracker.high)
+        self.assertEqual(tracker.update(4, 8, 0, 1.0, 4.0), (4, 8))
+
+    def test_noise_calibration_suggests_a_floor(self):
+        """The floor is the median near-peak level times the margin.
+
+        Args: None.
+        Returns: None.
+        """
+        calibration = NoiseCalibration(now=0.0, duration_s=2.0)
+        self.assertIsNone(calibration.result())
+        self.assertFalse(calibration.done(1.0))
+        for level in (4, 6, 5):
+            calibration.add(np.full((10, 10), level, dtype=np.uint8))
+        self.assertTrue(calibration.done(2.0))
+        noise, floor = calibration.result()
+        self.assertEqual(noise, 5.0)
+        self.assertEqual(floor, int(5 * NOISE_MARGIN))
+
+    def test_peak_hold_keeps_the_maximum_within_the_window(self):
+        """A peak stays for the window, then drops out; 0 turns it off.
+
+        Args: None.
+        Returns: None.
+        """
+        hold = PeakHold()
+        quiet = np.zeros((4, 4), dtype=np.uint8)
+        spike = np.full((4, 4), 200, dtype=np.uint8)
+        self.assertIs(hold.update(quiet, 0, 0.0), quiet)
+        span = 3.0 / PEAK_SLICES
+        self.assertEqual(int(hold.update(spike, 3.0, 0.0)[0, 0]), 200)
+        self.assertEqual(int(hold.update(quiet, 3.0, span / 2)[0, 0]), 200)  # same slice
+        self.assertEqual(int(hold.update(quiet, 3.0, span * 2)[0, 0]), 200)  # closed slice
+        self.assertEqual(int(hold.update(quiet, 3.0, 4.0)[0, 0]), 0)  # aged out
+        self.assertEqual(int(hold.update(quiet, 3.0, 4.0 + span)[0, 0]), 0)
+        bigger = np.zeros((5, 5), dtype=np.uint8)
+        self.assertEqual(hold.update(bigger, 3.0, 5.0).shape, (5, 5))  # new size restarts
+
+    def test_local_normalize_centres_on_mid_grey(self):
+        """A flat image is mid-grey; a step is pushed apart; the floor limits gain.
+
+        Args: None.
+        Returns: None.
+        """
+        flat = np.full((20, 20), 40, dtype=np.uint8)
+        self.assertEqual(int(local_normalize(flat, 5)[10, 10]), 128)
+        step = np.zeros((20, 20), dtype=np.uint8)
+        step[:, 10:] = 20
+        result = local_normalize(step, 7)
+        self.assertLess(int(result[10, 9]), 128)
+        self.assertGreater(int(result[10, 10]), 128)
+        gentle = local_normalize(step, 7, floor=400)
+        self.assertLess(int(gentle[10, 10]) - 128, int(result[10, 10]) - 128)
+
+    def test_even_out_brightness_flattens_the_beam(self):
+        """Dim lit areas are boosted (capped); unlit areas go black.
+
+        Args: None.
+        Returns: None.
+        """
+        frame = np.full((64, 64), 200, dtype=np.uint8)
+        frame[:, :32] = 50
+        difference = np.full((64, 64), 10, dtype=np.uint8)
+        result = even_out_brightness(difference, frame, sigma=4)
+        self.assertGreater(int(result[32, 2]), int(result[32, 60]))
+        self.assertLessEqual(int(result.max()), int(10 * MAX_BRIGHTNESS_GAIN))
+        dark = np.zeros((16, 16), dtype=np.uint8)
+        self.assertFalse(even_out_brightness(np.full((16, 16), 9, dtype=np.uint8),
+                                             dark).any())
+
+    def test_display_lut_gain_contrast_and_brightness(self):
+        """Off returns None; gain, S-curve and brightness shape the table.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIsNone(display_lut())
+        self.assertEqual(int(display_lut(gain=2.0)[100]), 200)
+        self.assertEqual(int(display_lut(gain=2.0)[200]), 255)
+        curve = display_lut(contrast=50)
+        self.assertEqual((int(curve[0]), int(curve[255])), (0, 255))
+        self.assertLess(int(curve[64]), 64)
+        self.assertGreater(int(curve[192]), 192)
+        self.assertEqual(int(display_lut(brightness=10)[0]), 10)
 
 
 if __name__ == "__main__":

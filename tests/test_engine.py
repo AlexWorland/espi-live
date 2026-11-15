@@ -7,14 +7,17 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
+from espi_live import engine as engine_module
 from espi_live import paths
 from espi_live.camera import CameraInfo
 from espi_live.engine import (LABVIEW_FLOW, Engine, default_settings, is_analog,
                               own_settings)
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
+                                  NoiseCalibration,
                                   apply_palette, normalize_min_max,
                                   palette_rgb_table, smooth_speckle,
                                   stretch_contrast)
@@ -246,6 +249,61 @@ class EngineDemoTests(unittest.TestCase):
         self.assertTrue(pixel_is(48))  # rolling: the multiplier only
         self.engine.update_settings(scale_range=True)
         self.assertTrue(pixel_is(0))  # a constant difference stretches to zeros
+
+    def test_noise_calibration_sets_the_sensitivity_floor(self):
+        """Calibration needs a difference view; there it sets min_range.
+
+        The source alternates 0 and 4, so every Previous difference is 4 and
+        the floor becomes twice that.
+
+        Args: None.
+        Returns: None.
+        """
+        state = {"n": 0}
+
+        def next_frame(exposure_us, gain_db, now):
+            """Return the next frame, alternating 0 and 4.
+
+            Args: exposure_us, gain_db and now are the demo source arguments.
+            Returns: A Mono8 frame.
+            """
+            state["n"] += 1
+            return np.full((80, 60), 4 * (state["n"] % 2), dtype=np.uint8)
+
+        self.engine.demo_source.next_frame = next_frame
+        self.engine.update_settings(fps=120, mode="Raw")
+        self.engine.request("calibrate_noise")
+        self.assertTrue(wait_until(lambda: self.log.has("Noise calibration needs")))
+        self.engine.update_settings(mode="Previous")
+        with mock.patch.object(engine_module, "NoiseCalibration",
+                               lambda now: NoiseCalibration(now, duration_s=0.2)):
+            self.engine.request("calibrate_noise")
+            self.assertTrue(wait_until(lambda: self.engine.settings().min_range == 8))
+        events = []
+        while not self.engine.events.empty():
+            events.append(self.engine.events.get())
+        self.assertIn(("noise_calibrated", 8), events)
+        self.assertTrue(self.log.has("sensitivity floor set to 8"))
+
+    def test_fringe_enhancement_stages_publish_frames(self):
+        """Threshold, beam correction, peak hold, local normalization and tone run.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(
+            fps=120, mode="Previous", threshold=3, even_brightness=True,
+            peak_hold_s=1.0, normalize_window=9, display_gain=2.0, contrast=30,
+            brightness=5, clahe=False)
+        self.assertTrue(wait_until(lambda: "Local normalization 9 px"
+                                   in self.engine.status()["range"]))
+        packet = self.engine.latest_packet()
+        self.assertEqual(packet.mode, "Previous")
+        self.engine.update_settings(normalize_window=0, scale_range=True, min_range=30,
+                                    steady_range_s=0.5)
+        self.assertTrue(wait_until(lambda: "Scaled:" in self.engine.status()["range"]))
+        self.engine.update_settings(mode="Raw")  # a view change resets the trackers
+        self.assertTrue(wait_until(lambda: "Raw Mono8" in self.engine.status()["range"]))
 
     def test_default_settings_choose_fixed_gain_for_analog_cameras(self):
         """Only a recognised capture adapter starts in Fixed gain, full frames.

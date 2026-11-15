@@ -47,7 +47,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
                                QMessageBox,
                                QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
-                               QSizePolicy, QSlider, QStyle, QTextBrowser, QTextEdit, QToolBar, QToolTip,
+                               QSizePolicy, QSlider, QStyle, QTextBrowser, QTextEdit, QToolBar,
+                               QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
@@ -283,11 +284,15 @@ FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 # least width the tip keeps beside it. The hint is information and gets its whole
 # sentence; the tip takes what is left and is shortened with an ellipsis.
 LONGEST_HINT = "ESPI difference view; min/max range is before gamma and palette"
+# QSettings key prefix; "<prefix><section heading>" is true while that
+# Controls section is collapsed.
+SECTION_SETTING_PREFIX = "controls/collapsed/"
 MESSAGE_TIP_WIDTH = 120
 # Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
-PIPELINE = ("noise reduction → difference (N frames back) → outlier filter → "
-            "average → speckle filter → fixed gain or stretch → invert → "
-            "gamma/CLAHE → palette")
+PIPELINE = ("noise reduction → difference (N frames back) → noise threshold → "
+            "beam brightness → outlier filter → average → speckle filter → "
+            "peak hold → fixed gain, stretch or local normalization → invert → "
+            "gamma/CLAHE → brightness, gain and contrast → palette")
 # Opt-in processing setups. Exposure, gain, frame rate and recording stay put.
 PROCESSING_PRESETS = {
     "Live preview": {
@@ -2331,6 +2336,7 @@ class MainWindow(QMainWindow):
             _arm_status_button(button, *button.arm)
         for dock in (self.controls_dock, self.log_dock):
             dock.setFont(nudged_font(QApplication.font()))  # else its title keeps the old size
+        self._align_sections()
         self._fit_controls_width()
         self._fit_status_bar()
 
@@ -2549,27 +2555,57 @@ class MainWindow(QMainWindow):
             lambda: self.engine.request("switch_live"))
         column.addWidget(self.switch_live_button)
 
-        # One grid for every section keeps labels, sliders and values in the
-        # same three columns; headings replace group-box frames.
-        grid = QGridLayout()
-        self._sized(grid.setHorizontalSpacing, 8)
-        self._sized(grid.setVerticalSpacing, 4)
-        grid.setColumnStretch(1, 1)
-        column.addLayout(grid)
+        # Each section is a heading button over its own grid, so a section can
+        # be collapsed without touching the visibility its widgets manage
+        # themselves. _align_sections gives every grid the same label column,
+        # so labels, sliders and values still line up across sections.
+        self._section_grids = []
+        self._section_names = []  # the label in each labeled row, for alignment
+        self._section_toggles = {}  # heading text -> its toggle button
+        grid = None
         row = 0
 
         def heading(text):
-            """Add a section heading row.
+            """Start a collapsible section.
 
-            Args: text is the section name.
+            Args: text is the section name; clicking it hides or shows the
+                section, and the choice is remembered between runs.
             Returns: None.
             """
-            nonlocal row
-            label = QLabel(text)
-            label.setStyleSheet("font-weight:bold;")
-            self._sized(label.setContentsMargins, 0, 0 if row == 0 else 10, 0, 2)
-            grid.addWidget(label, row, 0, 1, 2)
-            row += 1
+            nonlocal grid, row
+            toggle = QToolButton()
+            toggle.setText(text)
+            toggle.setCheckable(True)
+            toggle.setChecked(True)
+            toggle.setArrowType(Qt.DownArrow)
+            toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            toggle.setAutoRaise(True)
+            set_tooltip(toggle, f"Show or hide the {text} controls.")
+            self._styled(toggle, "QToolButton { font-weight:bold; border:none; "
+                         f"padding-top:{0 if not self._section_grids else 8}px; }}")
+            body = QWidget()
+            grid = QGridLayout(body)
+            grid.setContentsMargins(0, 0, 0, 0)
+            self._sized(grid.setHorizontalSpacing, 8)
+            self._sized(grid.setVerticalSpacing, 4)
+            grid.setColumnStretch(1, 1)
+            row = 0
+            column.addWidget(toggle)
+            column.addWidget(body)
+            self._section_grids.append(grid)
+            self._section_toggles[text] = toggle
+
+            def show_section(on, body=body, toggle=toggle, text=text):
+                """Show or hide one section and remember the choice.
+
+                Args: on is True to show the section.
+                Returns: None.
+                """
+                body.setVisible(on)
+                toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+                QSettings("ESPI", "espi_live").setValue(
+                    f"{SECTION_SETTING_PREFIX}{text}", not on)
+            toggle.toggled.connect(show_section)
 
         def add(widget, label=None):
             """Add a labeled setting, or a full-width widget when unlabeled.
@@ -2585,6 +2621,7 @@ class MainWindow(QMainWindow):
                 name.setToolTip(widget.toolTip())
                 grid.addWidget(name, row, 0)
                 grid.addWidget(widget, row, 1)
+                self._section_names.append(name)
             row += 1
 
         def note(label):
@@ -2817,6 +2854,73 @@ class MainWindow(QMainWindow):
         self.clip.valueChanged.connect(
             lambda v: self.engine.update_settings(clip_percent=v))
         add(self.clip, "Stretch clip")
+        self.min_range = SliderSpin(0, 128, 1, 0, s.min_range, " lv")
+        self.min_range.set_description(
+            "Sensitivity floor: with Auto stretch (or Local normalization), white "
+            "is never fewer than this "
+            "many grey levels of difference. A still scene's camera noise (a few "
+            "levels) then stays dark instead of filling the screen, while real "
+            "fringes, which change far more, still use the full range. 0 = off. "
+            "Use Calibrate noise with the object still to set it.")
+        self.min_range.valueChanged.connect(
+            lambda v: self.engine.update_settings(min_range=int(v)))
+        add(self.min_range, "Sensitivity floor")
+        self.threshold = SliderSpin(0, 64, 1, 0, s.threshold, " lv")
+        self.threshold.set_description(
+            "Noise threshold: right after the subtraction, any pixel whose "
+            "difference is below this many grey levels is set to 0 (no change), "
+            "before averaging, smoothing, peak hold and the stretch. Hides camera "
+            "noise; too high also hides faint fringes. 0 = off. Try 3–8.")
+        self.threshold.valueChanged.connect(
+            lambda v: self.engine.update_settings(threshold=int(v)))
+        add(self.threshold, "Noise threshold")
+        self.calibrate_button = QPushButton("Calibrate noise (object still)")
+        set_tooltip(self.calibrate_button,
+            "In Previous or Reference view, with the object at rest, measures "
+            "the difference noise for 2 s and sets the Sensitivity floor to "
+            "twice its peak.")
+        self.calibrate_button.clicked.connect(
+            lambda: self.engine.request("calibrate_noise"))
+        add(self.calibrate_button)
+        self.steady_range = SliderSpin(0, 3, 0.1, 1, s.steady_range_s, " s")
+        self.steady_range.set_description(
+            "With Auto stretch, lets the stretch range shrink only over this many "
+            "seconds, so the contrast stops pumping from frame to frame. A range "
+            "that grows (new fringes) is followed at once. 0 = recompute every "
+            "frame. Try 0.5 s.")
+        self.steady_range.valueChanged.connect(
+            lambda v: self.engine.update_settings(steady_range_s=v))
+        add(self.steady_range, "Steady range")
+        self.even_brightness = QCheckBox("Even out beam brightness")
+        set_tooltip(self.even_brightness,
+            "Divides each difference by the local illumination, so the bright "
+            "middle of the laser spot no longer dominates and fringes near its "
+            "edge stay visible. Unlit areas go black. Start off.")
+        self.even_brightness.setChecked(s.even_brightness)
+        self.even_brightness.toggled.connect(
+            lambda on: self.engine.update_settings(even_brightness=on))
+        add(self.even_brightness)
+        self.peak_hold = SliderSpin(0, 10, 0.1, 1, s.peak_hold_s, " s")
+        self.peak_hold.set_description(
+            "Shows each pixel's largest difference in the last this-many seconds "
+            "(a sliding window: older peaks drop out). In Previous view a "
+            "vibration only shows in the frames where the motion happens to "
+            "change; peak hold keeps those moments on screen so the pattern "
+            "builds up. 0 = off. Try 3 s.")
+        self.peak_hold.valueChanged.connect(
+            lambda v: self.engine.update_settings(peak_hold_s=v))
+        add(self.peak_hold, "Peak hold window")
+        self.normalize_window = SliderSpin(0, 255, 1, 0, s.normalize_window, " px")
+        self.normalize_window.set_description(
+            "Local normalization, in place of Stretch: each pixel is compared with "
+            "the average and spread of the difference within this window, so faint "
+            "and strong fringes get the same contrast everywhere. Mid-grey is the "
+            "local average. Use a window wider than the fringe spacing; the "
+            "Sensitivity floor still keeps camera noise from being boosted. "
+            "0 = off. Try 41–81 px.")
+        self.normalize_window.valueChanged.connect(
+            lambda v: self.engine.update_settings(normalize_window=int(v)))
+        add(self.normalize_window, "Local normalization")
         self._sync_scaling_controls(s.scale_range, s.gain_before_average)
 
         heading("Display")
@@ -2842,6 +2946,28 @@ class MainWindow(QMainWindow):
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
         self.gamma.set_description(GAMMA_TIP + " Start at 1.0.")
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
+        self.brightness = SliderSpin(0, 128, 1, 0, s.brightness, " lv")
+        self.brightness.set_description(
+            "Adds this many grey levels to every pixel in every view, so the whole "
+            "image is brighter. Values near white stay white, and black becomes "
+            "grey, so contrast drops a little. Saved frames and recordings match "
+            "the screen. 0 = off. Try 30–60.")
+        self.brightness.valueChanged.connect(
+            lambda v: self.engine.update_settings(brightness=int(v)))
+        self.display_gain = SliderSpin(1, 8, 0.1, 1, s.display_gain, " ×")
+        self.display_gain.set_description(
+            "Multiplies every pixel, so bright areas get brighter while black stays "
+            "black. Pixels pushed past white saturate. 1 = off. Try 2–3.")
+        self.display_gain.valueChanged.connect(
+            lambda v: self.engine.update_settings(display_gain=v))
+        self.contrast = SliderSpin(0, 100, 1, 0, s.contrast, " %")
+        self.contrast.set_description(
+            "S-curve contrast: darkens values below mid-grey and brightens those "
+            "above it, keeping black and white fixed, so bright features stand out "
+            "from a dim background. Very faint features can be pushed toward "
+            "black. 0 = off. Try 30–60%.")
+        self.contrast.valueChanged.connect(
+            lambda v: self.engine.update_settings(contrast=v))
         self.clahe = QCheckBox("CLAHE (color palettes only)")
         set_tooltip(self.clahe,
             "Boosts local contrast so faint fringes show up in a color palette. "
@@ -2852,6 +2978,9 @@ class MainWindow(QMainWindow):
         self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
         add(self.palette_combo, "Palette")
         add(self.gamma, "Gamma")
+        add(self.brightness, "Brightness")
+        add(self.display_gain, "Gain")
+        add(self.contrast, "S-curve contrast")
         add(self.clahe)
         self.ui_scale_row = SliderSpin(
             ui_scale.MIN_PERCENT, ui_scale.MAX_PERCENT, ui_scale.STEP_PERCENT, 0,
@@ -2901,12 +3030,30 @@ class MainWindow(QMainWindow):
         self.controls_scroll.setWidgetResizable(True)
         self.controls_scroll.setFrameShape(QFrame.NoFrame)
         self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._fit_controls_width()
+        self._align_sections()
+        self._fit_controls_width()  # measured with every section open
+        saved = QSettings("ESPI", "espi_live")
+        for text, toggle in self._section_toggles.items():
+            if str(saved.value(f"{SECTION_SETTING_PREFIX}{text}", False)).lower() == "true":
+                toggle.setChecked(False)
         self.controls_dock = QDockWidget("Controls", self)
         self.controls_dock.setObjectName("controls")
         self.controls_dock.setWidget(self.controls_scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self._tip_dock_buttons(self.controls_dock)
+
+    def _align_sections(self):
+        """Give every controls section the same label-column width.
+
+        Runs at build time and whenever the interface size changes, so the
+        sliders of all sections start at the same x position.
+
+        Args: None.
+        Returns: None.
+        """
+        width = max((name.sizeHint().width() for name in self._section_names), default=0)
+        for grid in self._section_grids:
+            grid.setColumnMinimumWidth(0, width)
 
     def _fit_controls_width(self):
         """Give the controls panel the width its widest row needs, plus the scroll bar.
@@ -3440,12 +3587,20 @@ class MainWindow(QMainWindow):
                               (self.gamma, s.gamma), (self.frames_back, s.frames_back),
                               (self.outlier_filter, s.outlier_filter),
                               (self.difference_gain, s.difference_gain),
-                              (self.average_multiplier, s.average_multiplier)):
+                              (self.average_multiplier, s.average_multiplier),
+                              (self.min_range, s.min_range),
+                              (self.threshold, s.threshold),
+                              (self.steady_range, s.steady_range_s),
+                              (self.peak_hold, s.peak_hold_s),
+                              (self.normalize_window, s.normalize_window),
+                              (self.brightness, s.brightness),
+                              (self.display_gain, s.display_gain),
+                              (self.contrast, s.contrast)):
             widget.set_value(value)
         toggles = ((self.rolling, s.rolling),
                    (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
-                   (self.clahe, s.clahe),
+                   (self.clahe, s.clahe), (self.even_brightness, s.even_brightness),
                    (self.record_button, s.record), (self.single_field, s.single_field))
         combos = ((self.smoothing_combo, s.smoothing_method),
                   (self.palette_combo, s.palette),
@@ -3494,6 +3649,7 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         self.clip.setEnabled(stretch)
+        self.steady_range.setEnabled(stretch)
         self.difference_gain.setEnabled(not stretch)
         self.gain_before_average.setEnabled(not stretch)
         self.average_multiplier.setEnabled(not stretch and before_average)
@@ -4456,6 +4612,8 @@ class MainWindow(QMainWindow):
             channel.limits = payload
             if displayed:
                 self._apply_limits(payload)
+        elif kind == "noise_calibrated" and displayed:
+            self.min_range.set_value(payload)
         elif kind == "record_off" and displayed:
             self.record_button.blockSignals(True)
             self.record_button.setChecked(False)

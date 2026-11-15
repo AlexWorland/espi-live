@@ -1278,6 +1278,54 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertEqual(after.smoothing_method, w.smoothing_combo.currentText())
         self.assertEqual(after.palette, w.palette_combo.currentText())
 
+    def test_fringe_and_display_controls_update_engine(self):
+        """Sensitivity, threshold, steady range, peak hold, normalization, tone.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.min_range.spin.setValue(12)
+        w.threshold.spin.setValue(4)
+        w.steady_range.spin.setValue(0.5)
+        w.even_brightness.setChecked(True)
+        w.peak_hold.spin.setValue(3)
+        w.normalize_window.spin.setValue(41)
+        w.brightness.spin.setValue(6)
+        w.display_gain.spin.setValue(1.5)
+        w.contrast.spin.setValue(20)
+        s = self.engine.settings()
+        self.assertEqual((s.min_range, s.threshold, s.steady_range_s), (12, 4, 0.5))
+        self.assertEqual((s.even_brightness, s.peak_hold_s, s.normalize_window),
+                         (True, 3, 41))
+        self.assertEqual((s.brightness, s.display_gain, s.contrast), (6, 1.5, 20))
+        self.queued()
+        w.calibrate_button.click()
+        self.assertIn(("calibrate_noise", {}), self.queued())
+        self.engine.events.put(("noise_calibrated", 17))
+        w._handle_events()
+        self.assertEqual(w.min_range.value(), 17)
+        w.scaling.setCurrentText("Fixed gain")
+        self.assertFalse(w.steady_range.isEnabled())
+        self.assertTrue(w.min_range.isEnabled())
+
+    def test_sections_collapse_and_are_remembered(self):
+        """A collapsed section hides its controls and stays collapsed next time.
+
+        Args: None.
+        Returns: None.
+        """
+        toggle = self.window._section_toggles["Display"]
+        toggle.setChecked(False)
+        self.assertTrue(self.window.gamma.isHidden() or not self.window.gamma.isVisible())
+        self.assertTrue(FakeSettings.store[qt_app.SECTION_SETTING_PREFIX + "Display"])
+        again = demo_window(self.engine, self.log, self.use_gl)
+        self.addCleanup(again.deleteLater)
+        self.assertFalse(again._section_toggles["Display"].isChecked())
+        self.assertTrue(again._section_toggles["Camera"].isChecked())
+        toggle.setChecked(True)
+        self.assertFalse(FakeSettings.store[qt_app.SECTION_SETTING_PREFIX + "Display"])
+
     def test_labview_controls_update_engine_and_enable_each_other(self):
         """The new sliders write settings; scaling enables only what it uses.
 

@@ -119,8 +119,9 @@ the user's own settings. It is on by default for the Sony XC-ST50. It sets
 Reference view and captures a reference at once (and whenever Reference view
 has none), full frames, Fixed gain 42 applied to each frame, the outlier
 filter off, Average N 1, Average multiplier 1, Frames back 1, Gray, and turns
-off everything the VI does not have (noise reduction, speckle filter, stretch,
-invert, gamma, CLAHE). Exposure, gain, frame rate, recording and the image
+off everything the VI does not have (noise reduction, noise threshold,
+beam-brightness correction, speckle filter, peak hold, local normalization,
+stretch, invert, gamma, display brightness, gain and contrast, CLAHE). Exposure, gain, frame rate, recording and the image
 flip are not changed.
 
 What it cannot reproduce:
