@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-15 — Record raw, processed and window streams together
+
+### Previous state
+
+- **Record AVI** wrote one MJPG file of the processed image. Changing the view mode or averaging started a new file, and the raw camera data, which the measurement depends on, was never saved.
+
+### Current state
+
+- Each recording is a timestamped folder in `output/recordings/` holding `raw.avi` (the source's frames as delivered, before field doubling and noise reduction, lossless FFV1, or MJPG with a log notice if this OpenCV build lacks FFV1), `processed_NN_<view>.avi`, `window.avi` (a 10 fps video of the main window) and a `session.txt` with the build, camera, raw codec and starting settings.
+- A **Recording** section in the Controls panel switches each stream off; all three are on by default, are remembered between launches and are locked while recording. Record is disabled when none is ticked.
+- Changing the view mode or averaging starts only the next `processed_NN_*.avi`; raw and window video run unbroken.
+- `raw.avi` never repeats a frame to hold a constant rate (unlike the processed and window files): frames the lossless encoder cannot keep up with are dropped and counted in the log, and stopping finishes within one encode. Lossless raw uses more CPU and disk than MJPG, so check the dropped-frame count on a slow PC.
+
 ## 2026-11-14 — Interface size slider
 
 ### Previous state
