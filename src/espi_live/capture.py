@@ -20,6 +20,7 @@ import numpy as np
 
 from .camera import CameraInfo
 from .capture_models import CaptureIdentity, adapter_for, fourcc_text, is_built_in
+from .diagnostics import colour_spread
 
 # OpenCV properties copied into camera reports: (label, cv2 attribute name).
 DETAIL_PROPERTIES = (
@@ -28,7 +29,8 @@ DETAIL_PROPERTIES = (
     ("Hue", "CAP_PROP_HUE"), ("Gain", "CAP_PROP_GAIN"),
     ("Exposure", "CAP_PROP_EXPOSURE"), ("Convert RGB", "CAP_PROP_CONVERT_RGB"),
     ("Format", "CAP_PROP_FORMAT"), ("Mode", "CAP_PROP_MODE"),
-    ("Buffer size", "CAP_PROP_BUFFERSIZE"),
+    ("Buffer size", "CAP_PROP_BUFFERSIZE"), ("Sharpness", "CAP_PROP_SHARPNESS"),
+    ("Gamma", "CAP_PROP_GAMMA"), ("Backlight", "CAP_PROP_BACKLIGHT"),
 )
 
 
@@ -105,6 +107,15 @@ def list_capture_devices(log):
             for position, device in enumerate(kept, start=1)]
 
 
+def is_bgr(frame):
+    """Tell whether a delivered frame is 8-bit BGR colour.
+
+    Args: frame is what VideoCapture.read() returned.
+    Returns: True for a 3-channel uint8 array.
+    """
+    return frame.ndim == 3 and frame.shape[2] == 3 and frame.dtype == np.uint8
+
+
 def to_mono8(frame):
     """Convert a captured frame to the viewer's Mono8 format.
 
@@ -116,7 +127,7 @@ def to_mono8(frame):
         return frame
     if frame.ndim == 2 and frame.dtype == np.uint16:
         return (frame >> 8).astype(np.uint8)
-    if frame.ndim == 3 and frame.shape[2] == 3 and frame.dtype == np.uint8:
+    if is_bgr(frame):
         return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     raise ValueError(f"cannot convert a {frame.shape} {frame.dtype} frame to Mono8")
 
@@ -139,6 +150,8 @@ class CaptureSession:
         self.interlaced = False
         self.first_frame = None  # Mono8 copy of the first frame, for reports
         self.raw_layout = ""     # shape and type of that frame as delivered
+        self.first_colour = None  # (B-G, R-G) spread of that frame, if BGR
+        self.last_colour = None  # the newest BGR frame as delivered, for checks
         self._frames = 0
         self._since = None
 
@@ -169,6 +182,7 @@ class CaptureSession:
                 f"Could not open {self.info.label}: {exc}. Close WinTV or Hauppauge "
                 "Capture if they are running, and check the video cable.") from exc
         self.raw_layout = " × ".join(str(size) for size in frame.shape) + f", {frame.dtype}"
+        self.first_colour = colour_spread(frame) if is_bgr(frame) else None
         fps = self.cap.get(cv2.CAP_PROP_FPS)
         height, width = self.first_frame.shape
         self.identity = CaptureIdentity(
@@ -201,6 +215,7 @@ class CaptureSession:
             image = to_mono8(frame)
         except ValueError as exc:
             return exc, "error"
+        self.last_colour = frame if is_bgr(frame) else None
         self._frames += 1
         return image, "ok"
 
@@ -278,6 +293,9 @@ class CaptureSession:
         rows += [("First frame (raw)", self.raw_layout),
                  ("First frame min / mean / max",
                   f"{frame.min()} / {frame.mean():.1f} / {frame.max()}")]
+        if self.first_colour is not None:
+            rows.append(("First frame colour (B−G / R−G)",
+                         f"{self.first_colour[0]:.2f} / {self.first_colour[1]:.2f}"))
         return tuple(rows)
 
     def close(self):

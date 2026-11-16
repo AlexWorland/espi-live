@@ -96,6 +96,35 @@ chroma filtering can remove speckle-sized detail near the 3.58 MHz colour
 subcarrier (about 3.8 pixels per cycle at 720 pixels per line). Processing
 cannot restore that detail.
 
+## Diagnosing weak or missing fringes
+
+The USB-Live2 is a consumer colour video decoder, not a monochrome frame
+grabber like the NI board this camera used before. A colour decoder can
+remove the detail speckle lives in, smooth frames together, or clip the
+brightest speckle. When fringes are weak, the stretched difference image is
+mostly pixel noise (it looks grainy), because stretch scales a small signal
+up to full contrast.
+
+The log shows which of these is happening. The `Capture device:` line at open
+gives the driver's settings (brightness, contrast, saturation, sharpness,
+gamma) and the video format. Every 10 seconds a `Frame check:` line describes
+the raw frame:
+
+| Field | Healthy | Points to |
+|-------|---------|-----------|
+| `levels p1/p50/p99`, `% at or above 235`, `% at 255` | Speckle spread over much of 16–235, little at the top | Low p99: a dim picture, so every difference is small. A large share at or above 235: the decoder or camera clips bright speckle |
+| `change to next frame` | A few levels with the plate still; much more when it is driven or the table is tapped | Barely more when driven: the capture path smooths frame-to-frame change |
+| `repeated frames` | 0 | Repeats: the driver hands back the same frame twice |
+| `speckle … contrast` | 0.5–1 on the lit object | Well below 0.5: speckle averaged by the pixels or the capture path |
+| `speckle … size` | About the same across and down, 2 px or more | About 1 px: the measurement sees noise, not speckle. Larger across than down: the analog line softens detail across |
+| `detail across/down` | Both near 1 | Low only at 0.22–0.31 c/px (about 3.8 px spacing): the decoder's colour notch or comb filter removes speckle detail. Both low: general softening |
+| `colour B−G R−G` | Near 0 (a monochrome camera decodes to grey) | Clearly above 0: the decoder reads fine detail as colour and moves it out of the brightness channel, the only one the viewer keeps |
+| `field mismatch` | 1 or less with a still scene | Well above 1: the two fields differ (motion between the 1/60 s exposures) |
+| `view … input` | The `Input:` range from the status bar | — |
+
+Compare a run with the plate still against one with it driven, and the
+same setup with a Blackfly, whose numbers serve as the baseline.
+
 ## Unrecognised video devices
 
 Every video device except a laptop's built-in camera is listed (see
