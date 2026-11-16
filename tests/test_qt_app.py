@@ -39,7 +39,7 @@ from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
 from espi_live.channels import Channel, demo_channels
-from espi_live.engine import Engine, FramePacket
+from espi_live.engine import ComparePacket, Engine, FramePacket
 from list_log import ListLog
 
 APP = QApplication.instance() or QApplication(sys.argv)
@@ -1946,6 +1946,150 @@ class MainWindowGlTests(WindowTestCase):
         self.engine._packet = make_packet()
         self.window._poll_frame()
         self.assertEqual(self.window.view.image_size, (64, 48))
+
+
+class ReferenceCompareTests(WindowTestCase):
+    """The reference comparison window and the Ref. frames control."""
+
+    def compare(self, sequence=1, reference=True, demo=False):
+        """Build a ComparePacket with small images.
+
+        Args: sequence is its number; reference adds a reference and a
+            difference; demo marks it synthetic.
+        Returns: The ComparePacket.
+        """
+        image = np.full((40, 60), 80, dtype=np.uint8)
+        part = FramePacket(sequence, image, "Gray", 1.0, "Current", demo)
+        diff = FramePacket(sequence, image, "Turbo", 1.0, "Reference", demo)
+        return ComparePacket(sequence, part, part if reference else None,
+                             diff if reference else None,
+                             "1 frame, noise reduction 0, 2 s old" if reference
+                             else "none yet", "the Reference view, no averaging", demo)
+
+    def open_dialog(self):
+        """Open the comparison window with the C key.
+
+        Args: None.
+        Returns: The ReferenceCompareDialog.
+        """
+        self.assertTrue(self.window.handle_key(Qt.Key_C))
+        dialog = self.window.compare_dialog
+        self.addCleanup(dialog.hide)
+        return dialog
+
+    def test_toolbar_button_and_key_open_one_window(self):
+        """Compare (C) opens the window once and asks the engine for comparisons.
+
+        Args: None.
+        Returns: None.
+        """
+        buttons = [b for b in self.window.actions_bar.findChildren(QPushButton)
+                   if b.text() == "Compare (C)"]
+        self.assertEqual(len(buttons), 1)
+        self.assertIn("side by side", buttons[0].toolTip())
+        dialog = self.open_dialog()
+        self.assertTrue(dialog.isVisible())
+        self.assertTrue(self.engine._compare.is_set())
+        buttons[0].click()
+        self.assertIs(self.window.compare_dialog, dialog)
+        self.assertEqual(sum("Reference comparison opened" in line
+                             for line in self.log.lines), 1)
+        dialog.reject()
+        self.assertFalse(self.engine._compare.is_set())
+        self.assertTrue(any("Reference comparison closed" in line for line in self.log.lines))
+
+    def test_panels_show_images_or_the_no_reference_message(self):
+        """With a reference all three images show; without one a message does.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertIsNone(self.engine.latest_compare())
+        dialog.poll()  # nothing yet
+        self.assertIsNone(dialog.shown)
+        self.engine._compare_packet = self.compare(1, reference=False)
+        dialog.poll()
+        self.assertIs(dialog.stacks["reference"].currentWidget(), dialog.messages["reference"])
+        self.assertIs(dialog.stacks["difference"].currentWidget(),
+                      dialog.messages["difference"])
+        self.assertIs(dialog.stacks["current"].currentWidget(), dialog.views["current"])
+        self.assertIn("Press Set reference (F)", dialog.messages["reference"].text())
+        self.assertEqual(dialog.captions["reference"].text(), "none yet")
+        packet = self.compare(2, demo=True)
+        self.engine._compare_packet = packet
+        dialog.poll()
+        for name in ("reference", "current", "difference"):
+            self.assertIs(dialog.stacks[name].currentWidget(), dialog.views[name])
+        self.assertIs(dialog.views["difference"].packet, packet.difference)
+        self.assertIn("2 s old", dialog.captions["reference"].text())
+        self.assertIn("DUMMY MODE", dialog.windowTitle())
+        self.assertFalse(dialog.demo_label.isHidden())
+        with mock.patch.object(dialog, "show_compare") as show:
+            dialog.poll()  # same sequence: not redrawn
+        show.assert_not_called()
+
+    def test_freeze_holds_and_save_sends_the_shown_set(self):
+        """Freeze stops updates; Save sends the shown packet with title and notes.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.save_button.click()
+        self.assertTrue(any("No comparison on screen" in line for line in self.log.lines))
+        first = self.compare(1)
+        self.engine._compare_packet = first
+        dialog.poll()
+        dialog.freeze_button.setChecked(True)
+        self.engine._compare_packet = self.compare(2)
+        dialog.poll()
+        self.assertIs(dialog.shown, first)
+        self.window.frame_title.setText("plate A")
+        self.window.frame_notes.setPlainText("before load")
+        dialog.save_button.click()
+        dialog.reference_button.click()
+        (save, payload), (reference, _) = self.queued()
+        self.assertEqual((save, reference), ("save_compare", "reference"))
+        self.assertEqual((payload["packet"], payload["title"], payload["notes"]),
+                         (first, "plate A", "before load"))
+        dialog.freeze_button.setChecked(False)
+        dialog.poll()
+        self.assertEqual(dialog.shown.sequence, 2)
+        self.assertTrue(any("comparison frozen" in line for line in self.log.lines))
+        self.assertTrue(any("comparison live again" in line for line in self.log.lines))
+
+    def test_window_follows_the_displayed_camera(self):
+        """When the displayed camera changes, the request moves with it.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        other = Engine(self.log)
+        dialog._follow(other)
+        self.assertFalse(self.engine._compare.is_set())
+        self.assertTrue(other._compare.is_set())
+        dialog.freeze_button.setChecked(True)
+        dialog.poll()  # the window still displays self.engine
+        self.assertIs(dialog.engine, self.engine)
+        self.assertFalse(other._compare.is_set())
+        self.assertFalse(dialog.freeze_button.isChecked())
+        dialog._follow(self.engine)  # already there: nothing changes
+        self.assertTrue(self.engine._compare.is_set())
+
+    def test_reference_frames_control(self):
+        """Ref. frames sends whole numbers and shows each camera's value.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.ref_frames.spin.setValue(12)
+        self.assertEqual(self.engine.settings().ref_frames, 12)
+        self.assertIn("Start at 1", self.window.ref_frames.toolTip())
+        self.window._load_settings(replace(self.engine.settings(), ref_frames=3), {})
+        self.assertEqual(self.window.ref_frames.spin.value(), 3)
+        self.assertEqual(self.engine.settings().ref_frames, 12)  # not sent back
 
 
 class KeyHandlingTests(WindowTestCase):

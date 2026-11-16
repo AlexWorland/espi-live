@@ -40,6 +40,20 @@
 - `docs/labview/` holds the VI, its block diagram and a decoded description of its flow, published with permission.
 - **Note for the Blackfly:** nothing changes until you pick Fixed gain or LabVIEW flow. A setting of the old "Stretch to 0–255" off now means Fixed gain; at a Difference gain of 1 it shows the raw difference, as before.
 
+## 2026-11-14 — Compare the reference, and average it over several frames
+
+### Previous state
+
+- The reference was the single frame on hand when `F` (Set reference) was pressed. With Noise reduction at 0 that frame's sensor noise was frozen into every later Reference difference, and Average N, which averages differences, could not remove it. On the analog XC-ST50, whose differences are only a few grey levels, that grain could be most of the picture.
+- Nobody could see the reference: it lived only inside the processing, and Save frame saved the difference. A bad reference (taken mid-drift, or before Noise reduction was raised) could not be told apart from a noisy measurement.
+- Pressing `F` and then raising Noise reduction compared smoothed frames with a noisy reference, leaving a fixed grain pattern, and the log did not show the order of the two.
+
+### Current state
+
+- **Compare** (toolbar, `C`) opens a window with three live images of the displayed camera side by side: the stored **Reference**, the **Current frame** (both as Raw view shows them: gamma, display tone and flip applied) and the processed **Difference** (in Reference view exactly the main image; in other views one difference from the reference with the same filters, without averaging). A line under each says how the reference was taken (frames, noise reduction, age) and how the difference was made; without a reference the panels say so. It has its own **Freeze**, **Set reference (F)** and **Save all three** (three PNGs exactly as shown, with one notes file carrying the title, notes and how the reference was taken). The images are made only while the window is open, at most 10 a second.
+- **Ref. frames** (ESPI measurement, 1–60, default 1) makes `F` average the next N frames into the reference, at the same point as before (after single field and noise reduction). The status bar counts them ("Capturing reference: 7/30 frames") and the old reference stays in use until the new one is complete; the log says "Captured reference frame (average of N)". 1 behaves exactly as before. **Ref. refresh** averages Ref. frames frames on each refresh, counted from the start of the last capture; when averaging outlasts the refresh, references are captured back to back and the log says so. A view change keeps a capture going; changing Single field or Noise reduction cancels it.
+- The log now records the noise reduction each reference was taken at. When Noise reduction changes while a reference is held, the log and the Reference view's hint say so ("Reference was taken at noise reduction 0; press F to retake"); the reference is not retaken by itself.
+
 ## 2026-11-14 — Interface size slider
 
 ### Previous state

@@ -475,7 +475,7 @@ class EngineDemoTests(unittest.TestCase):
         self.engine.request("reset_average")
         self.engine.request("reset_previous")
         self.assertTrue(wait_until(lambda: any(
-            "Captured reference frame." in line for line in self.log.lines)))
+            "Captured reference frame at noise reduction 0." in line for line in self.log.lines)))
         self.assertTrue(wait_until(lambda: (
             self.engine.latest_packet() is not None and
             self.engine.latest_packet().mode == "Reference")))

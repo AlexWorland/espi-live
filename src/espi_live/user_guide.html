@@ -915,9 +915,25 @@ python -m espi_live</code></pre>
             running average that still updates at the camera rate. Use it when
             you want to watch fringes move instead of waiting for each block of
             N frames.</li>
+          <li><strong>Ref. frames</strong> — how many camera frames
+            <kbd>F</kbd> averages into the reference (1–60; 1 is one frame, as
+            before). A one-frame reference keeps that frame's sensor noise, and
+            the noise then shows in every Reference difference as a fixed grain
+            that Average N cannot remove; averaging 8–30 frames of a still
+            object quiets it, which matters most for a noisy or analog camera.
+            The frames are taken at the same point as before (after single
+            field and noise reduction). While they are collected the status
+            bar counts them (<code>Capturing reference: 7/30 frames</code>) and
+            the old reference stays in use until the new one is complete. A
+            new view keeps the capture going; changing Single field or Noise
+            reduction cancels it, so frames of two kinds are never mixed.</li>
           <li><strong>Ref. refresh</strong> — Reference view recaptures the
             reference every N seconds so slow drift (air currents, heat)
-            cancels; 0 keeps one reference until you press <kbd>F</kbd>.</li>
+            cancels; 0 keeps one reference until you press <kbd>F</kbd>. Each
+            refresh averages <strong>Ref. frames</strong> frames, and the time
+            counts from the start of the last capture. When averaging takes
+            longer than the refresh (30 frames at 30 fps is 1 s), references
+            are captured back to back and the log says so.</li>
           <li><strong>Frames back</strong> — which earlier frame Previous view
             compares with: 1 is the frame just before. A larger number spans more
             time, so slow changes show instead of cancelling (the LabVIEW program
@@ -1084,10 +1100,35 @@ python -m espi_live</code></pre>
             name records the title, notes and whether the source was the camera
             or demo mode.</li>
           <li><strong>Set reference (F)</strong> — stores the current live
-            camera frame as the reference and resets averaging. This is the
+            camera frame as the reference and resets averaging, or, with
+            <strong>Ref. frames</strong> above 1, the average of the next that
+            many frames. This is the
             same reference used by <strong>Reference</strong> view; when the
             display is frozen, Set reference still captures the live camera
-            frame, not the frozen image.</li>
+            frame, not the frozen image. The log records the noise reduction
+            it was taken at. If <strong>Noise reduction</strong> is changed
+            afterwards, the log and the Reference view's hint say the
+            reference was taken at another setting
+            (<code>Reference was taken at noise reduction 0; press F to
+            retake</code>); it is not retaken by itself.</li>
+          <li><strong>Compare (C)</strong> — opens a window with three live
+            images of the displayed camera side by side: the stored
+            <strong>Reference</strong>, the <strong>Current frame</strong>
+            (both as Raw view shows them: gamma only, flip applied) and the
+            processed <strong>Difference</strong>. In Reference view the
+            difference is exactly the main image, averaging included; in other
+            views it is one difference from the reference with the same
+            filters, without averaging. Under each image a line says how the
+            reference was taken (frames, noise reduction, age) and how the
+            difference was made. Use it to check that the reference is clean
+            and was taken at the current settings. Without a reference the
+            two panels say so. Its <strong>Freeze</strong> holds the three
+            images (the main window stays live), <strong>Save all
+            three</strong> writes them as shown (PNG) with one notes file that
+            carries the main window's title and notes, and it has its own
+            <strong>Set reference (F)</strong>. It follows the displayed
+            camera, and the images are only made while it is open (at most
+            10 a second), so a closed window costs the camera nothing.</li>
           <li><strong>Reset last (R)</strong> — forgets the stored previous
             frame. <strong>Previous</strong> view then starts a fresh baseline
             on the next frame (with Average N = 1 that is one black frame before
@@ -1329,6 +1370,8 @@ python -m espi_live</code></pre>
               <td>Ignored in Raw view.</td></tr>
             <tr><td>Rolling average</td><td>Off</td><td>On / off</td>
               <td>Updates every frame instead of one per N.</td></tr>
+            <tr><td>Ref. frames</td><td>1</td><td>1–60, step 1</td>
+              <td>Frames averaged into each reference.</td></tr>
             <tr><td>Ref. refresh</td><td>0 s (never)</td>
               <td>0–10 s, step 0.1</td>
               <td>Recaptures the Reference periodically.</td></tr>
@@ -1433,9 +1476,14 @@ python -m espi_live</code></pre>
         <ol>
           <li>Put the specimen in its resting state.</li>
           <li>Select <strong>Reference</strong> view.</li>
+          <li>For a noisy or analog camera, set <strong>Ref. frames</strong>
+            to 8–30 first, and keep the specimen still while the frames are
+            collected.</li>
           <li>Press <kbd>F</kbd> or click <strong>Set reference</strong>. The
             log confirms the capture, and the hint changes from asking for a
             reference to showing the difference view.</li>
+          <li>To check the reference, press <kbd>C</kbd>: the comparison
+            window shows it beside the current frame and the difference.</li>
           <li>Load, heat or otherwise deform the specimen. The image now shows
             absolute differences from the resting state.</li>
           <li>If the pattern is too faint, raise <strong>Difference gain</strong>
@@ -1679,6 +1727,8 @@ python -m espi_live</code></pre>
               frame when frozen)</td></tr>
             <tr><td><kbd>F</kbd></td><td>Set the reference frame from the live
               camera</td></tr>
+            <tr><td><kbd>C</kbd></td><td>Compare: the reference, the current
+              frame and their difference side by side</td></tr>
             <tr><td><kbd>R</kbd></td><td>Reset the stored previous frame</td></tr>
             <tr><td><kbd>A</kbd></td><td>Reset partial averaging</td></tr>
             <tr><td><kbd>Q</kbd> or <kbd>Esc</kbd></td><td>Quit (Esc in a text

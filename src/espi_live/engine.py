@@ -41,7 +41,8 @@ from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
                                   local_normalize, reject_outliers,
                                   single_field, smooth_speckle, stretch_levels,
                                   watermark_demo)
-from espi_live.recording import AVIRecorder, recording_path, save_frame
+from espi_live.recording import (AVIRecorder, recording_path, save_frame,
+                                 save_frame_set)
 
 CAMERA_TIMEOUT_MS = 100
 SETTING_INTERVAL_S = 0.1
@@ -50,6 +51,9 @@ RANGE_INTERVAL_S = 0.5
 RECORDER_FINISH_TIMEOUT_S = 5.0
 PREDECESSOR_TIMEOUT_S = 10.0  # open_on_start waits this long for the old engine
 TIMING_LOG_INTERVAL_S = 5.0  # DEBUG frame-timing lines at most this often
+# The reference comparison window is refreshed at most this often, so three
+# extra full-size images do not slow a 6 MP camera's 30 fps.
+COMPARE_INTERVAL_S = 0.1
 
 
 @dataclass
@@ -64,6 +68,7 @@ class Settings:
     average: int = 1
     rolling: bool = False         # running average instead of one image per N frames
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
+    ref_frames: int = 1           # camera frames averaged into each reference
     smoothing: int = 0            # speckle filter width in pixels; 0 = off
     smoothing_method: str = "Gaussian"
     frames_back: int = 1          # Previous view compares with the frame N back
@@ -206,6 +211,167 @@ class FramePacket:
         return apply_palette(self.image, self.palette, self.gamma)
 
 
+@dataclass(frozen=True)
+class ComparePacket:
+    """The stored reference, the current frame and their difference, in step.
+
+    Each image is a FramePacket, so render() gives exactly what the
+    comparison window shows. reference and difference are None until a
+    reference of the current frame size exists.
+    """
+
+    sequence: int
+    current: FramePacket
+    reference: object      # FramePacket or None
+    difference: object     # FramePacket or None
+    reference_info: str    # how the reference was taken, or why there is none
+    difference_info: str   # how the difference was processed
+    demo: bool
+
+
+def present(image, flip, demo, tone=None):
+    """Apply the last steps every published image gets: tone, flip, watermark.
+
+    Args: image is a 2-D uint8 array; flip mirrors it left-right; demo
+        stamps the dummy-mode banner (after the flip, so its text reads
+        normally); tone is a display_lut table or None.
+    Returns: The image to publish (the input itself when none applies).
+    """
+    if tone is not None:  # a LUT makes a new array; the camera frame is untouched
+        image = cv2.LUT(image, tone)
+    if flip:
+        image = cv2.flip(image, 1)
+    if demo:
+        image = watermark_demo(image)
+    return image
+
+
+def condition_difference(difference, frame, s):
+    """Run the steps before averaging: threshold, even brightness, gain, outliers.
+
+    Args: difference is the uint8 difference image; frame is the Mono8 frame
+        it came from; s is the Settings snapshot.
+    Returns: (difference, labview_order): the conditioned image, and whether
+        the gain was applied already (LabVIEW order: Fixed gain only), so the
+        later steps must not apply it again.
+    """
+    if s.threshold > 0:  # raw differences below the threshold count as no change
+        difference = cv2.threshold(difference, int(s.threshold) - 1, 0,
+                                   cv2.THRESH_TOZERO)[1]
+    if s.even_brightness:
+        difference = even_out_brightness(difference, frame)
+    # LabVIEW order (Fixed gain only): gain and saturate each frame,
+    # then average and scale the mean by the multiplier.
+    labview_order = s.gain_before_average and not s.scale_range
+    if labview_order:
+        difference = apply_gain(difference, s.difference_gain)
+    return reject_outliers(difference, s.outlier_filter), labview_order
+
+
+def finish_difference(averaged, s, clahe, measure=True, peaks=None, ranges=None,
+                      now=0.0, sample=None, labview_order=False):
+    """Run the steps after averaging: speckle filter, peak hold, scaling, gamma/CLAHE.
+
+    Args: averaged is a uint8 difference image; s is the Settings snapshot;
+        clahe is the worker's CLAHE object; measure asks for the input range
+        when Fixed gain or Local normalization is on (it costs a pass over
+        the frame); peaks and ranges are the worker's PeakHold and
+        RangeTracker, or None to leave out peak hold and the steady range
+        (the comparison's single difference); now is the monotonic time;
+        sample is called with the filtered image and now (the noise
+        calibration); labview_order says the gain was applied before averaging.
+    Returns: (image, palette, gamma, levels): the processed image, the palette
+        and gamma still to apply on display, and (low, high, scaled_low,
+        scaled_high) for the status bar (scaled_low is None under Local
+        normalization), or None when not measured.
+    """
+    averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
+    if peaks is not None:
+        averaged = peaks.update(averaged, s.peak_hold_s, now)
+    if sample is not None:
+        sample(averaged, now)
+    levels = None
+    if s.normalize_window > 0:
+        image = local_normalize(averaged, s.normalize_window, s.min_range)
+        if measure:
+            low, high, _, _ = cv2.minMaxLoc(averaged)
+            levels = (int(low), int(high), None, None)
+    elif s.scale_range:
+        low, high = stretch_levels(averaged, s.clip_percent)
+        low, high = (ranges or RangeTracker()).update(
+            low, high, s.min_range, s.steady_range_s, now)
+        image = apply_levels(averaged, low, high)
+        levels = (low, high, *((0, 255) if high > low else (0, 0)))
+    else:
+        image = (averaged if labview_order
+                 else apply_gain(averaged, s.difference_gain))
+        if measure:
+            low, high, _, _ = cv2.minMaxLoc(averaged)
+            top, bottom, _, _ = cv2.minMaxLoc(image)
+            levels = (int(low), int(high), int(top), int(bottom))
+    if s.invert:
+        image = cv2.bitwise_not(image)
+    palette, gamma = s.palette, s.gamma
+    if s.clahe and s.palette != "Gray":
+        # CLAHE sits between gamma and the palette, so do both
+        # here; the display then applies only the palette.
+        lut = gamma_lut(s.gamma)
+        if lut is not None:
+            image = cv2.LUT(image, lut)
+        image = clahe.apply(image)
+        gamma = 1.0
+    return image, palette, gamma, levels
+
+
+def range_text(levels, s):
+    """Describe finish_difference's levels for the status bar.
+
+    Args: levels is its fourth result (not None); s is the Settings snapshot.
+    Returns: Text such as "Input: 0–12    Scaled: 0–255".
+    """
+    low, high, scaled_low, scaled_high = levels
+    if scaled_low is None:
+        return f"Input: {low}–{high}    Local normalization {s.normalize_window} px"
+    return f"Input: {low}–{high}    Scaled: {scaled_low}–{scaled_high}"
+
+
+def reference_text(processor, now):
+    """Describe the stored reference for the log and the comparison window.
+
+    Args: processor is the ESPIProcessor; now is the monotonic time.
+    Returns: Text such as "average of 8 frames, noise reduction 0, 3 s old",
+        or "none yet".
+    """
+    if processor.ref is None:
+        return "none yet"
+    frames = ("1 frame" if processor.ref_frames == 1 else
+              f"average of {processor.ref_frames} frames")
+    return (f"{frames}, noise reduction {processor.ref_noise:g}, "
+            f"{max(0.0, now - processor.ref_time):.0f} s old")
+
+
+def view_hint(s, processor):
+    """Choose the status-bar hint for the current view and reference state.
+
+    Args: s is the Settings snapshot; processor is the ESPIProcessor.
+    Returns: One short sentence (no longer than the Qt LONGEST_HINT).
+    """
+    capture = processor.ref_capture
+    if capture is not None:
+        kept = "; the old one stays in use" if processor.ref is not None else ""
+        return f"Capturing reference: {capture.count}/{capture.target} frames{kept}"
+    if s.mode == "Raw":
+        return "Raw view: camera pixels, with gamma; no stretch or palette"
+    if s.mode == "Reference" and processor.ref is None:
+        return "Reference: press F or Set reference to capture a baseline"
+    if s.mode == "Reference" and processor.ref_noise != s.noise_reduction:
+        return (f"Reference was taken at noise reduction {processor.ref_noise:g}; "
+                "press F to retake")
+    if s.mode == "Reference" and s.ref_refresh_s > 0:
+        return f"Reference refreshes every {s.ref_refresh_s:.1f} s to cancel slow drift"
+    return "ESPI difference view; min/max range is before gamma and palette"
+
+
 class WindowsPreviewTimer:
     """Temporarily request precise Windows sleeps for frame pacing."""
 
@@ -272,6 +438,8 @@ class Engine:
         self._saves_waiting = 0  # frame saves queued or being written
         self._saves_lock = threading.Lock()
         self._packet = None
+        self._compare_packet = None
+        self._compare = threading.Event()  # set while a comparison window is open
         self._packet_lock = threading.Lock()
         self._status = {
             "demo": False, "camera": "Camera values: waiting for connection",
@@ -451,14 +619,16 @@ class Engine:
 
         Args: action is "save" (payload title, notes; optionally packet, a
             frozen display's FramePacket to save instead of the newest one,
-            and frozen_at, its datetime), "reference", "reset_previous",
-            "reset_average", "calibrate_noise" (measure a still scene's
-            difference noise for 2 s, then set min_range and send a
-            "noise_calibrated" event) or "switch_live" (the "switched_live"
-            event then carries every detected CameraInfo).
+            and frozen_at, its datetime), "save_compare" (payload packet, a
+            ComparePacket, and title, notes), "reference" (captures the
+            current frame, or starts averaging the next ref_frames frames),
+            "reset_previous", "reset_average", "calibrate_noise" (measure a
+            still scene's difference noise for 2 s, then set min_range and
+            send a "noise_calibrated" event) or "switch_live" (the
+            "switched_live" event then carries every detected CameraInfo).
         Returns: None.
         """
-        if action == "save":
+        if action in ("save", "save_compare"):
             with self._saves_lock:
                 self._saves_waiting += 1
         self._actions.put((action, payload))
@@ -480,6 +650,32 @@ class Engine:
         """
         with self._packet_lock:
             return self._packet
+
+    def set_compare(self, on):
+        """Turn the reference comparison images on or off.
+
+        The worker builds them only while this is on, so a closed comparison
+        window costs the frame loop nothing.
+
+        Args: on is True while a comparison window shows this engine.
+        Returns: None.
+        """
+        if on:
+            self._compare.set()
+        else:
+            self._compare.clear()
+            with self._packet_lock:
+                self._compare_packet = None
+
+    def latest_compare(self):
+        """Return the newest reference comparison.
+
+        Args: None.
+        Returns: A ComparePacket, or None while comparison is off or before
+            the first one.
+        """
+        with self._packet_lock:
+            return self._compare_packet
 
     def status(self):
         """Return a snapshot of the status texts and counters.
@@ -583,6 +779,9 @@ class Engine:
         last_rolling = applied.rolling
         last_refresh = applied.ref_refresh_s
         last_single_field = applied.single_field
+        last_noise = applied.noise_reduction
+        last_ref_frames = applied.ref_frames
+        last_compare = 0.0
         last_readback = time.monotonic()
         last_error_log = 0.0
         last_valid = time.monotonic()
@@ -642,22 +841,22 @@ class Engine:
                 processor.reset_avg()  # field geometry changed: start over
                 peaks.reset()
                 processor.reset_previous()
-                processor.ref = None
+                processor.clear_reference()
                 self.log.write("Fields: single field (even rows, line-doubled)"
                                if s.single_field else "Fields: full interlaced frames")
                 last_single_field = s.single_field
-            if s.ref_refresh_s != last_refresh:
-                self.log.write(f"Reference auto-refresh: every {s.ref_refresh_s:.1f} s"
-                               if s.ref_refresh_s > 0 else "Reference auto-refresh: off")
-                last_refresh = s.ref_refresh_s
-            self._set_status(hint=(
-                "Raw view: camera pixels, with gamma; no stretch or palette"
-                if s.mode == "Raw" else
-                "Reference: press F or Set reference to capture a baseline"
-                if s.mode == "Reference" and processor.ref is None else
-                f"Reference refreshes every {s.ref_refresh_s:.1f} s to cancel slow drift"
-                if s.mode == "Reference" and s.ref_refresh_s > 0 else
-                "ESPI difference view; min/max range is before gamma and palette"))
+            if s.ref_refresh_s != last_refresh or s.ref_frames != last_ref_frames:
+                if s.ref_refresh_s != last_refresh:
+                    self.log.write(f"Reference auto-refresh: every {s.ref_refresh_s:.1f} s"
+                                   if s.ref_refresh_s > 0 else "Reference auto-refresh: off")
+                if s.ref_frames != last_ref_frames:
+                    self.log.write(f"Reference frames: {s.ref_frames}")
+                self._note_refresh_overlap(s, resulting_fps)
+                last_refresh, last_ref_frames = s.ref_refresh_s, s.ref_frames
+            if s.noise_reduction != last_noise:
+                self._noise_changed(processor, last_noise, s.noise_reduction)
+                last_noise = s.noise_reduction
+            self._set_status(hint=view_hint(s, processor))
 
             work_started = time.monotonic()
             if self.demo:
@@ -718,11 +917,18 @@ class Engine:
                 processor.reset_avg()
                 self.log.write("Captured reference frame (automatic).")
             if s.mode == "Reference" and s.ref_refresh_s > 0 and (
+                    processor.ref_capture is None) and (
                     processor.ref is None or
                     now - processor.ref_time >= s.ref_refresh_s):
-                processor.set_reference(frame, now)
-                if not s.rolling:  # keep each block average on one baseline
-                    processor.reset_avg()
+                if s.ref_frames <= 1:
+                    processor.set_reference(frame, now, s.noise_reduction)
+                    if not s.rolling:  # keep each block average on one baseline
+                        processor.reset_avg()
+                else:  # the old reference stays in use while the new one builds
+                    processor.start_reference(s.ref_frames, s.noise_reduction,
+                                              now, manual=False)
+            if processor.ref_capture is not None:
+                self._reference_frame(processor, frame, s)
 
             update_range = now - last_range_time >= RANGE_INTERVAL_S
             image = None
@@ -738,18 +944,8 @@ class Engine:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
             else:
-                difference = processor.difference(frame, s.mode, s.frames_back)
-                if s.threshold > 0:  # raw differences below the threshold count as no change
-                    difference = cv2.threshold(difference, int(s.threshold) - 1, 0,
-                                               cv2.THRESH_TOZERO)[1]
-                if s.even_brightness:
-                    difference = even_out_brightness(difference, frame)
-                # LabVIEW order (Fixed gain only): gain and saturate each frame,
-                # then average and scale the mean by the multiplier.
-                labview_order = s.gain_before_average and not s.scale_range
-                if labview_order:
-                    difference = apply_gain(difference, s.difference_gain)
-                difference = reject_outliers(difference, s.outlier_filter)
+                difference, labview_order = condition_difference(
+                    processor.difference(frame, s.mode, s.frames_back), frame, s)
                 count, scale = s.average, None
                 if labview_order:
                     scale = s.average_multiplier
@@ -761,58 +957,19 @@ class Engine:
                 averaged = (processor.rolling_average(difference, count, scale)
                             if s.rolling else processor.average(difference, count, scale))
                 if averaged is not None:
-                    averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
-                    averaged = peaks.update(averaged, s.peak_hold_s, now)
-                    self._sample_noise(averaged, now)
-                    if s.normalize_window > 0:
-                        image = local_normalize(averaged, s.normalize_window, s.min_range)
-                        if update_range:
-                            low, high, _, _ = cv2.minMaxLoc(averaged)
-                            self._set_status(range=(
-                                f"Input: {int(low)}–{int(high)}    Local normalization "
-                                f"{s.normalize_window} px"))
-                            last_range_time = now
-                        update_range = False  # status already written
-                    elif s.scale_range:
-                        low, high = stretch_levels(averaged, s.clip_percent)
-                        low, high = ranges.update(low, high, s.min_range,
-                                                  s.steady_range_s, now)
-                        image = apply_levels(averaged, low, high)
-                        scaled = (0, 255) if high > low else (0, 0)
-                    else:
-                        image = (averaged if labview_order
-                                 else apply_gain(averaged, s.difference_gain))
-                        low = high = scaled = None
-                        if update_range:
-                            low, high, _, _ = cv2.minMaxLoc(averaged)
-                            low, high = int(low), int(high)
-                            top, bottom, _, _ = cv2.minMaxLoc(image)
-                            scaled = (int(top), int(bottom))
+                    image, palette, gamma, levels = finish_difference(
+                        averaged, s, clahe, update_range, peaks=peaks,
+                        ranges=ranges, now=now, sample=self._sample_noise,
+                        labview_order=labview_order)
                     if update_range:
-                        self._set_status(range=(
-                            f"Input: {low}–{high}    Scaled: {scaled[0]}–{scaled[1]}"))
+                        self._set_status(range=range_text(levels, s))
                         last_range_time = now
-                    if s.invert:
-                        image = cv2.bitwise_not(image)
-                    palette, gamma = s.palette, s.gamma
-                    if s.clahe and s.palette != "Gray":
-                        # CLAHE sits between gamma and the palette, so do both
-                        # here; the display then applies only the palette.
-                        lut = gamma_lut(s.gamma)
-                        if lut is not None:
-                            image = cv2.LUT(image, lut)
-                        image = clahe.apply(image)
-                        gamma = 1.0
 
             if image is not None:
                 shown_sharpness.observe(image, now, context)
-                tone = display_lut(s.display_gain, s.contrast, s.brightness)
-                if tone is not None:  # every view; LUT makes a new array, camera frame untouched
-                    image = cv2.LUT(image, tone)
-                if s.flip_horizontal:  # every view; before the watermark so its text reads normally
-                    image = cv2.flip(image, 1)
-                if self.demo:
-                    image = watermark_demo(image)
+                # every view; before the watermark so its text reads normally
+                image = present(image, s.flip_horizontal, self.demo,
+                                display_lut(s.display_gain, s.contrast, s.brightness))
                 sequence += 1
                 packet = FramePacket(sequence, image, palette, gamma,
                                      s.mode, self.demo)
@@ -820,6 +977,10 @@ class Engine:
                     self._packet = packet
                 record_signature = self._feed_recorder(
                     s, signature, record_signature, packet, resulting_fps)
+                if (self._compare.is_set() and
+                        now - last_compare >= COMPARE_INTERVAL_S):
+                    self._publish_compare(processor, frame, s, packet, clahe, now)
+                    last_compare = now
             window_frames += 1
             window_work += time.monotonic() - work_started
 
@@ -848,6 +1009,107 @@ class Engine:
                 if demo_next < now - interval:
                     demo_next = now  # fell behind; restart the schedule
                 self._stop.wait(max(0.0, demo_next - now))
+
+    def _reference_frame(self, processor, frame, s):
+        """Add a frame to the reference capture in progress; log when it ends.
+
+        Args: processor is the ESPIProcessor holding the capture; frame is
+            the frame after single-field and noise reduction; s is the
+            Settings snapshot.
+        Returns: None.
+        """
+        done = processor.add_reference_frame(frame)
+        if done is None:
+            return
+        if done.manual or not s.rolling:  # keep each block average on one baseline
+            processor.reset_avg()
+        if done.manual:
+            self.log.write(f"Captured reference frame (average of {done.count}) "
+                           f"at noise reduction {done.noise_reduction:g}.")
+
+    def _note_refresh_overlap(self, s, resulting_fps):
+        """Log when an averaged reference takes longer than the refresh time.
+
+        Args: s is the Settings snapshot; resulting_fps is the camera's
+            measured rate, or None (the requested rate is used).
+        Returns: None.
+        """
+        if s.ref_refresh_s <= 0 or s.ref_frames <= 1:
+            return
+        seconds = s.ref_frames / max(1.0, resulting_fps or s.fps)
+        if seconds > s.ref_refresh_s:
+            self.log.write(
+                f"Reference note: averaging {s.ref_frames} frames takes about "
+                f"{seconds:.1f} s, longer than the {s.ref_refresh_s:.1f} s refresh; "
+                "references are captured back to back.")
+
+    def _noise_changed(self, processor, old, new):
+        """React to a Noise reduction change while a reference exists.
+
+        A capture in progress is cancelled, so frames taken at two settings
+        are never mixed. A stored reference is kept, but the log says it was
+        taken at another setting (once, when the settings first differ).
+
+        Args: processor is the ESPIProcessor; old and new are the slider values.
+        Returns: None.
+        """
+        capture = processor.ref_capture
+        if capture is not None:
+            processor.ref_capture = None
+            self.log.write("Reference capture cancelled: noise reduction changed "
+                           "while it was running. " + (
+                               "Press F to start again." if capture.manual else
+                               "The next refresh starts a new one."))
+        elif processor.ref is not None and processor.ref_noise == old:
+            self.log.write(f"Noise reduction is now {new:g}, but the reference was "
+                           f"taken at {old:g}. Press F to retake it.")
+
+    def _publish_compare(self, processor, frame, s, packet, clahe, now):
+        """Publish the reference, the current frame and their difference.
+
+        Args: processor is the ESPIProcessor; frame is this iteration's frame
+            (after single-field and noise reduction); s is the Settings
+            snapshot; packet is the FramePacket just published; clahe is the
+            worker's CLAHE object; now is the monotonic time.
+        Returns: None. In Reference view the difference is the published
+            packet itself (with its averaging); in other views it is one
+            difference from the reference, processed like Reference view
+            but without averaging.
+        """
+        flip = s.flip_horizontal
+        tone = display_lut(s.display_gain, s.contrast, s.brightness)
+        current = FramePacket(packet.sequence, present(frame, flip, self.demo, tone),
+                              "Gray", s.gamma, "Current", self.demo)
+        ref = processor.ref
+        info = reference_text(processor, now)
+        capture = processor.ref_capture
+        if capture is not None:
+            info = f"capturing {capture.count}/{capture.target}; in use: {info}"
+        reference = difference = None
+        if s.mode == "Reference":
+            averaging = (f"average {s.average}{' rolling' if s.rolling else ''}"
+                         if s.average > 1 else "no averaging")
+            detail = f"the Reference view, {averaging}"
+        else:
+            detail = f"one difference, no averaging (the view is {s.mode})"
+        if ref is not None and ref.shape == frame.shape:
+            reference = FramePacket(packet.sequence, present(ref, flip, self.demo, tone),
+                                    "Gray", s.gamma, "Reference frame", self.demo)
+            if s.mode == "Reference":
+                difference = packet
+            else:
+                single, labview_order = condition_difference(
+                    cv2.absdiff(frame, ref), frame, s)
+                image, palette, gamma, _ = finish_difference(
+                    single, s, clahe, measure=False, now=now,
+                    labview_order=labview_order)
+                difference = FramePacket(packet.sequence,
+                                         present(image, flip, self.demo, tone),
+                                         palette, gamma, "Reference", self.demo)
+        compare = ComparePacket(packet.sequence, current, reference, difference,
+                                info, detail, self.demo)
+        with self._packet_lock:
+            self._compare_packet = compare
 
     def _feed_recorder(self, s, signature, record_signature, packet, resulting_fps):
         """Start a recording or submit the newest frame to the active one.
@@ -955,18 +1217,49 @@ class Engine:
             elif action == "reset_average":
                 processor.reset_avg()
                 self.log.write("Reset averaging.")
+            elif action == "save_compare":
+                try:
+                    self._save_compare(payload)
+                finally:
+                    with self._saves_lock:
+                        self._saves_waiting -= 1
             elif action == "calibrate_noise":
                 self._calibration = NoiseCalibration(time.monotonic())
                 self.log.write("Noise calibration: keep the object still for 2 s.")
             elif action == "reference":
-                if frame is None:
+                s = self.settings()
+                if s.ref_frames > 1:
+                    processor.start_reference(s.ref_frames, s.noise_reduction,
+                                              time.monotonic())
+                    self.log.write(f"Capturing reference: averaging the next "
+                                   f"{s.ref_frames} frames.")
+                elif frame is None:
                     self.log.write("No frame available yet for a reference.")
                 else:
-                    processor.set_reference(frame, time.monotonic())
+                    processor.ref_capture = None
+                    processor.set_reference(frame, time.monotonic(), s.noise_reduction)
                     processor.reset_avg()
-                    self.log.write("Captured reference frame.")
+                    self.log.write("Captured reference frame at noise reduction "
+                                   f"{s.noise_reduction:g}.")
             elif action == "switch_live" and self.demo:
                 processor, frame = self._switch_live(processor, frame)
+
+    def _save_compare(self, payload):
+        """Save a comparison's images as PNGs plus one notes file.
+
+        Args: payload holds packet (a ComparePacket), title and notes.
+        Returns: None; the outcome is logged.
+        """
+        compare = payload["packet"]
+        images = [(name, part.render()) for name, part in (
+            ("reference", compare.reference), ("current", compare.current),
+            ("difference", compare.difference)) if part is not None]
+        if compare.reference is None:
+            self.log.write("No reference yet: saving the current frame only.")
+        save_frame_set(images, payload.get("title", ""), payload.get("notes", ""),
+                       compare.demo, self.log, self.tag,
+                       details=(f"Reference: {compare.reference_info}",
+                                f"Difference: {compare.difference_info}"))
 
     def _switch_live(self, processor, frame):
         """Try to replace synthetic video with the first FLIR camera.
