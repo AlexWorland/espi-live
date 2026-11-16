@@ -22,7 +22,7 @@ import os
 import queue
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 
 import cv2
 import numpy as np
@@ -41,7 +41,7 @@ from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
                                   local_normalize, reject_outliers,
                                   single_field, smooth_speckle, stretch_levels,
                                   watermark_demo)
-from espi_live.recording import AVIRecorder, recording_path, save_frame
+from espi_live.recording import RecordingSession, save_frame
 
 CAMERA_TIMEOUT_MS = 100
 SETTING_INTERVAL_S = 0.1
@@ -90,6 +90,8 @@ class Settings:
     record: bool = False
     single_field: bool = False    # interlaced sources: even rows only, line-doubled
     auto_reference: bool = False  # Reference view captures one when it has none
+    save_raw: bool = True         # record the camera's raw frames (read when recording opens)
+    save_processed: bool = True   # record the processed frames (read when recording opens)
 
 
 # The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
@@ -278,6 +280,7 @@ class Engine:
             "range": "Input: —    Scaled: —",
             "hint": "Raw view: camera pixels, with gamma; no stretch or palette",
             "processing": "Processing: —", "record": "Recording: off",
+            "recording_folder": "",
             "camera_fps": "Camera: — fps",
             "processed_fps": 0.0,
         }
@@ -287,6 +290,10 @@ class Engine:
         self.camera = None
         self.demo_source = None
         self.preview_timer = WindowsPreviewTimer()
+        self._recorder = None      # processed-stream AVIRecorder
+        self._raw_recorder = None  # raw-stream AVIRecorder
+        self._session = None       # RecordingSession while recording
+        self._retired = []         # stopped recorders still finishing their files
 
     # ----- setup (front-end thread, before start) -----------------------
 
@@ -511,6 +518,8 @@ class Engine:
             (message, fingerprint or None).
         """
         self._recorder = None
+        self._raw_recorder = None
+        self._session = None
         self._retired = []
         try:
             if self._open_after is not None and not self._open_deferred():
@@ -522,10 +531,7 @@ class Engine:
                                        report.fingerprint if report else None)))
         finally:
             try:
-                if self._recorder is not None:
-                    self._recorder.stop()
-                    self._retired.append(self._recorder)
-                    self._recorder = None
+                self._end_session()
                 deadline = time.monotonic() + RECORDER_FINISH_TIMEOUT_S
                 for old in self._retired:
                     old.done.wait(max(0.0, deadline - time.monotonic()))
@@ -615,18 +621,24 @@ class Engine:
             s = self.settings()
             self._reap_recorders()
             signature = (s.mode, s.average if s.mode != "Raw" else 1, s.rolling)
-            recorder = self._recorder
-            if recorder is not None and (
-                    not s.record or signature != record_signature
-                    or recorder.done.is_set()):
-                if recorder.error is not None or recorder.done.is_set():
-                    self.update_settings(record=False)
-                    self.events.put(("record_off", None))
-                recorder.stop()
-                self._retired.append(recorder)
-                self._recorder = None
-                record_signature = None
-                self._set_status(record="Recording: finishing file")
+            if self._session is not None:
+                failed = any(recorder is not None and recorder.done.is_set()
+                             for recorder in (self._recorder, self._raw_recorder))
+                if failed or not s.record:
+                    if failed:
+                        self.update_settings(record=False)
+                        self.events.put(("record_off", None))
+                        s = replace(s, record=False)
+                    self._end_session()
+                    record_signature = None
+                    self._set_status(record="Recording: finishing file")
+                elif self._recorder is not None and signature != record_signature:
+                    # A new view mode or averaging starts the next processed
+                    # file; the raw stream carries on in the same folder.
+                    self._recorder.stop()
+                    self._retired.append(self._recorder)
+                    self._recorder = None
+                    record_signature = None
             if s.mode != last_mode:
                 processor.reset_avg()
                 ranges.reset()
@@ -682,6 +694,7 @@ class Engine:
                 frame = grabbed
             if frame.ndim != 2 or frame.dtype != np.uint8:
                 raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
+            raw_frame = frame  # as the source delivered it: no field doubling, no noise filter
             if s.single_field and self.camera is not None and self.camera.interlaced:
                 frame = single_field(frame)
 
@@ -724,6 +737,9 @@ class Engine:
                 if not s.rolling:  # keep each block average on one baseline
                     processor.reset_avg()
 
+            self._feed_raw(s, raw_frame, resulting_fps)
+            if s.record and self._session is None:  # the session could not open
+                s = replace(s, record=False)
             update_range = now - last_range_time >= RANGE_INTERVAL_S
             image = None
             palette, gamma = "Gray", 1.0
@@ -849,8 +865,81 @@ class Engine:
                     demo_next = now  # fell behind; restart the schedule
                 self._stop.wait(max(0.0, demo_next - now))
 
+    def _session_details(self, s):
+        """Describe the camera and starting settings for session.txt.
+
+        Args: s is the settings snapshot recording starts with.
+        Returns: One text line per fact.
+        """
+        lines = []
+        if self.camera is not None:
+            lines.append("Camera: " + " | ".join(self.camera.identity.description()))
+        lines.extend(f"{name}: {value}" for name, value in asdict(s).items())
+        return "\n".join(lines)
+
+    def _ensure_session(self, s):
+        """Create the recording folder the first time a frame is recorded.
+
+        Args: s is the settings snapshot.
+        Returns: The RecordingSession, or None when the folder could not be
+            created (recording is then turned off and "record_off" is sent).
+        """
+        if self._session is None:
+            try:
+                self._session = RecordingSession(
+                    self.demo, self.tag, self._session_details(s))
+            except OSError as exc:
+                self.update_settings(record=False)
+                self.events.put(("record_off", None))
+                error_reports.caught(self.log, exc, "recorder", "Recording not started")
+                return None
+            self._set_status(record="Recording", recording_folder=self._session.folder)
+            self.log.write(f"Recording to folder: {self._session.folder}")
+        return self._session
+
+    def _end_session(self):
+        """Stop every recorder of the current session and forget it.
+
+        Args: None.
+        Returns: None; stopped recorders move to the retired list so their
+            summaries are logged when they finish.
+        """
+        for recorder in (self._recorder, self._raw_recorder):
+            if recorder is not None:
+                recorder.stop()
+                self._retired.append(recorder)
+        self._recorder = None
+        self._raw_recorder = None
+        self._session = None
+        self._set_status(recording_folder="")
+
+    def _feed_raw(self, s, raw_frame, resulting_fps):
+        """Start or feed the raw stream with the frame as the camera delivered it.
+
+        Args: s is the settings snapshot; raw_frame is the Mono8 frame before
+            noise reduction; resulting_fps is the camera's measured rate.
+        Returns: None.
+        """
+        if not s.record:
+            return
+        session = self._ensure_session(s)
+        if session is None or not s.save_raw:
+            return
+        frame = watermark_demo(raw_frame) if self.demo else raw_frame
+        if self._raw_recorder is not None:
+            self._raw_recorder.submit(frame)
+            return
+        fps = min(30.0, max(1.0, resulting_fps or s.fps))
+        try:
+            self._raw_recorder = session.open_raw(frame, fps, self.log)
+        except OSError as exc:
+            self.update_settings(record=False)
+            self.events.put(("record_off", None))
+            error_reports.caught(self.log, exc, "recorder", "Recording not started")
+            self._end_session()
+
     def _feed_recorder(self, s, signature, record_signature, packet, resulting_fps):
-        """Start a recording or submit the newest frame to the active one.
+        """Start a processed recording or submit the newest frame to the active one.
 
         Args: s is the settings snapshot; signature is (mode, average,
             rolling);
@@ -860,22 +949,27 @@ class Engine:
         """
         if not s.record:
             return record_signature
+        session = self._ensure_session(s)
+        if session is None:
+            return None
         if self._recorder is not None:
             self._recorder.submit(packet.render())
+            return record_signature
+        if not s.save_processed:
             return record_signature
         source_fps = resulting_fps or s.fps
         frames_per_image = 1 if signature[2] else signature[1]  # rolling: every frame
         fps = min(30.0, max(1.0, source_fps / frames_per_image))
         try:
-            path = recording_path(s.mode, self.demo, self.tag)
-            self._recorder = AVIRecorder(path, packet.render(), fps)
+            self._recorder = session.open_processed(s.mode, packet.render(), fps)
         except OSError as exc:
             self.update_settings(record=False)
             self.events.put(("record_off", None))
             error_reports.caught(self.log, exc, "recorder", "Recording not started")
+            self._end_session()
             return None
         self._set_status(record=f"Recording: {fps:.1f} fps")
-        self.log.write(f"Recording AVI: {path} at {fps:.1f} fps")
+        self.log.write(f"Recording processed stream at {fps:.1f} fps")
         return signature
 
     def _sample_noise(self, image, now):
@@ -909,7 +1003,7 @@ class Engine:
             if old.done.is_set():
                 self._recording_finished(old)
                 self._retired.remove(old)
-                if self._recorder is None:
+                if self._session is None:
                     self._set_status(record="Recording: off")
 
     def _recording_finished(self, recorder):
@@ -984,10 +1078,7 @@ class Engine:
             error_reports.caught(self.log, exc, "switch_live", "Still in dummy mode")
             self.events.put(("switch_failed", str(exc)))
             return processor, frame
-        if self._recorder is not None:
-            self._recorder.stop()
-            self._retired.append(self._recorder)
-            self._recorder = None
+        self._end_session()
         self.update_settings(record=False, mode="Raw")
         with self._packet_lock:
             self._packet = None

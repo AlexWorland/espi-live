@@ -6168,5 +6168,285 @@ class ScaledStyleTests(unittest.TestCase):
         self.assertEqual(qt_app._paint_status_icon("idea", qt_app.QColor("black")).width(), 16)
 
 
+class FakeWindowRecorder:
+    """Stand-in for the window-video AVIRecorder."""
+
+    def __init__(self, folder, frame, fps=10.0, error=None):
+        """Keep the first frame like the real recorder does.
+
+        Args: folder is the session folder; frame is the first grab; fps is
+            the rate; error is an encoder error to report.
+        Returns: None.
+        """
+        self.folder = folder
+        self.fps = fps
+        self.frames = [frame]
+        self.error = error
+        self.stopped = False
+        self.done = threading.Event()
+        self.path = os.path.join(folder, "window.avi")
+
+    def submit(self, frame):
+        """Keep a submitted frame.
+
+        Args: frame is the BGR window grab.
+        Returns: None.
+        """
+        self.frames.append(frame)
+
+    def stop(self):
+        """Finish at once.
+
+        Args: None.
+        Returns: None.
+        """
+        self.stopped = True
+        self.done.set()
+
+    def summary(self):
+        """Describe the recording.
+
+        Args: None.
+        Returns: A fixed summary string.
+        """
+        return "window summary"
+
+
+class RecordingControlsTests(WindowTestCase):
+    """Stream checkboxes and the window video."""
+
+    def setUp(self):
+        """Fake the window recorder and the engine's reported folder.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        self.recorders = []
+        self.folder = ""
+        self.open_error = None
+        real_status = self.engine.status
+
+        def status():
+            """Report the test's recording folder with the real status.
+
+            Args: None.
+            Returns: The engine status dict.
+            """
+            return {**real_status(), "recording_folder": self.folder}
+
+        def open_recorder(folder, frame, fps=10.0):
+            """Create a fake recorder unless the test asked for a failure.
+
+            Args: folder, frame and fps are the open_window_recorder arguments.
+            Returns: A FakeWindowRecorder.
+            """
+            if self.open_error:
+                raise OSError(self.open_error)
+            recorder = FakeWindowRecorder(folder, frame, fps)
+            self.recorders.append(recorder)
+            return recorder
+
+        for patcher in (mock.patch.object(self.engine, "status", status),
+                        mock.patch.object(qt_app, "open_window_recorder", open_recorder)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.window.window_timer.stop)
+
+    def test_stream_boxes_default_on_and_persist(self):
+        """All three boxes start ticked and a change survives a new window.
+
+        Args: None.
+        Returns: None.
+        """
+        boxes = (self.window.save_raw_check, self.window.save_processed_check,
+                 self.window.save_window_check)
+        self.assertEqual([box.text() for box in boxes],
+                         ["Raw stream", "Processed stream", "Window video"])
+        self.assertTrue(all(box.isChecked() for box in boxes))
+        self.window.save_raw_check.setChecked(False)
+        second_engine = Engine(self.log)
+        second_engine.use_demo()
+        second = demo_window(second_engine, self.log)
+        self.addCleanup(second_engine.wait, 5.0)
+        self.addCleanup(second_engine.stop)
+        self.addCleanup(second.close)
+        self.addCleanup(second.status_timer.stop)
+        self.addCleanup(second.frame_timer.stop)
+        self.addCleanup(second.window_timer.stop)
+        self.assertFalse(second.save_raw_check.isChecked())
+        self.assertTrue(second.save_processed_check.isChecked())
+        self.assertTrue(second.save_window_check.isChecked())
+
+    def test_record_sends_stream_flags(self):
+        """Pressing Record hands the ticked streams to the engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.save_raw_check.setChecked(False)
+        self.window.record_button.setChecked(True)
+        settings = self.engine.settings()
+        self.assertEqual((settings.record, settings.save_raw, settings.save_processed),
+                         (True, False, True))
+
+    def test_record_disabled_when_all_streams_off(self):
+        """With nothing ticked Record is disabled and explains why.
+
+        Args: None.
+        Returns: None.
+        """
+        for box in (self.window.save_raw_check, self.window.save_processed_check):
+            box.setChecked(False)
+        self.assertTrue(self.window.record_button.isEnabled())  # window video left
+        self.window.save_window_check.setChecked(False)
+        self.assertFalse(self.window.record_button.isEnabled())
+        self.assertIn("at least one stream", self.window.record_button.toolTip())
+        self.window.save_window_check.setChecked(True)
+        self.assertTrue(self.window.record_button.isEnabled())
+
+    def test_boxes_locked_while_recording(self):
+        """The boxes cannot change mid-recording and unlock when it ends.
+
+        Args: None.
+        Returns: None.
+        """
+        boxes = (self.window.save_raw_check, self.window.save_processed_check,
+                 self.window.save_window_check)
+        self.window.record_button.setChecked(True)
+        self.assertFalse(any(box.isEnabled() for box in boxes))
+        self.engine.events.put(("record_off", None))
+        self.window._handle_events()
+        self.assertTrue(all(box.isEnabled() for box in boxes))
+        self.window.record_button.setChecked(True)
+        self.window.record_button.setChecked(False)
+        self.assertTrue(all(box.isEnabled() for box in boxes))
+        self.assertFalse(self.engine.settings().record)
+
+    def test_window_video_follows_session(self):
+        """The video starts with the folder, records BGR grabs and stops with it.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._capture_window()
+        self.assertEqual(self.recorders, [])
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        self.window._capture_window()
+        (recorder,) = self.recorders
+        self.assertEqual(recorder.folder, "/tmp/session")
+        grab = self.window.grab()
+        self.assertEqual(recorder.frames[0].shape, (grab.height(), grab.width(), 3))
+        self.assertEqual(len(recorder.frames), 2)
+        self.folder = ""
+        self.window._capture_window()
+        self.assertTrue(recorder.stopped)
+        self.window._capture_window()
+        self.assertEqual(len(self.recorders), 1)
+        self.window._poll_status()
+        self.assertIn("window summary", self.log.lines)
+
+    def test_window_video_skipped_when_box_off(self):
+        """An unticked Window video box creates no file.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.save_window_check.setChecked(False)
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        self.assertEqual(self.recorders, [])
+
+    def test_window_video_ends_when_box_unticked(self):
+        """Unticking the box mid-recording stops the video.
+
+        Args: None.
+        Returns: None.
+        """
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        self.window.save_window_check.setChecked(False)
+        self.window._capture_window()
+        self.assertTrue(self.recorders[0].stopped)
+        self.window.save_window_check.setChecked(True)
+        self.window._capture_window()
+        self.assertEqual(len(self.recorders), 1)
+
+    def test_window_resize_keeps_frame_size(self):
+        """Grabs after a resize are scaled to the first frame's size.
+
+        Args: None.
+        Returns: None.
+        """
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        self.window.resize(self.window.width() + 100, self.window.height() + 80)
+        self.window._capture_window()
+        frames = self.recorders[0].frames
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frames[0].shape, frames[1].shape)
+
+    def test_window_video_stays_with_origin_after_display_switch(self):
+        """Showing another camera does not end or move the running video.
+
+        Args: None.
+        Returns: None.
+        """
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        original = self.window.current
+        other = SimpleNamespace(engine=SimpleNamespace(
+            status=lambda: {"recording_folder": ""}))
+        self.window.current = other
+        self.addCleanup(setattr, self.window, "current", original)
+        self.window._capture_window()
+        self.assertFalse(self.recorders[0].stopped)
+        self.assertEqual(len(self.recorders[0].frames), 2)
+        self.assertEqual(len(self.recorders), 1)
+
+    def test_window_video_open_failure_is_logged_once(self):
+        """A recorder that cannot open is reported and not retried every tick.
+
+        Args: None.
+        Returns: None.
+        """
+        self.open_error = "disk read-only"
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        self.window._capture_window()
+        self.assertEqual(
+            [line for line in self.log.lines if "disk read-only" in line].__len__(), 1)
+
+    def test_window_video_encoder_error_is_logged(self):
+        """A recorder that dies is retired, its error logged and not restarted.
+
+        Args: None.
+        Returns: None.
+        """
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        recorder = self.recorders[0]
+        recorder.error = OSError("encoder died")
+        recorder.done.set()
+        self.window._capture_window()
+        self.window._capture_window()
+        self.assertEqual(len(self.recorders), 1)
+        self.window._poll_status()
+        self.assertIn("Recording error: encoder died", self.log.lines)
+
+    def test_close_stops_window_video(self):
+        """Closing the window finishes the video and logs its summary.
+
+        Args: None.
+        Returns: None.
+        """
+        self.folder = "/tmp/session"
+        self.window._capture_window()
+        self.window.close()
+        self.assertTrue(self.recorders[0].stopped)
+        self.assertIn("window summary", self.log.lines)
+
+
 if __name__ == "__main__":
     unittest.main()

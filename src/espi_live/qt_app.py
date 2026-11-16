@@ -60,6 +60,7 @@ from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, MAX_DENOISE_PERCENT,
                                   MAX_FRAMES_BACK, PALETTES, SCALING_MODES,
                                   SMOOTHING_METHODS, VIEW_MODES, palette_rgb_table)
+from espi_live.recording import WINDOW_FPS, open_window_recorder
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
 # layout is kept; a narrower window keeps the badge and elides the tip. Either
@@ -555,6 +556,11 @@ TOOLTIP_CHROME = 18  # Qt's tooltip frame, so the estimated size is not smaller 
 SIMULATED_TIP = "Simulated in dummy mode"
 ZOOM_SLIDER_TIP = ("Drag, click or scroll to zoom. The mouse wheel and "
                    "drag-to-pan on the image still work.")
+RECORD_TIP = ("Record the ticked streams (Controls > Recording) into one timestamped "
+              "folder under output/recordings, one AVI per stream: the raw camera frames, "
+              "the displayed image and a video of this window. Changing the view or the averaging starts only "
+              "the next processed file. Frames are skipped when encoding falls behind; "
+              "the raw stream never repeats a frame and counts the ones it drops.")
 MODE_TIPS = {
     "Raw": ("Raw: the camera's Mono8 image, for aiming and focusing. "
             "Gamma applies; no difference, stretch or palette."),
@@ -2091,6 +2097,11 @@ class MainWindow(QMainWindow):
         self.source_folder = None  # set once the source copy is ready
         self.codex_when_ready = False  # open Codex when the download finishes
         self.retired_channels = []  # demo channels replaced by real cameras
+        self.window_video = None         # AVIRecorder of window.avi while recording
+        self.window_video_source = None  # engine whose session the video belongs to
+        self.window_video_folder = None  # last session folder a video was started for
+        self.window_video_size = None    # (width, height) of the first grabbed frame
+        self.window_retired = []         # stopped window recorders still finishing
         self.drawn_sequence = 0
         self.shown_packet = None  # the packet on screen; Freeze holds this one
         self.view_state = None  # last logged (view size, zoom, image size)
@@ -2152,6 +2163,9 @@ class MainWindow(QMainWindow):
         self.tip_timer.timeout.connect(self._rotate_tip)
         if not self.tips.hidden:
             self.tip_timer.start()
+        self.window_timer = QTimer(self)
+        self.window_timer.timeout.connect(self._capture_window)
+        self.window_timer.start(int(1000 / WINDOW_FPS))
         if check_updates and updater.unavailable_reason() is None:
             self._periodic_checks = True
             self.updates.check()
@@ -2422,13 +2436,8 @@ class MainWindow(QMainWindow):
 
         self.record_button = QPushButton("Record AVI")
         self.record_button.setCheckable(True)
-        set_tooltip(self.record_button,
-                    "Write the displayed image to an AVI at a steady rate. Changing "
-                    "the view or the averaging starts a new file. Frames are skipped "
-                    "when encoding falls behind, and the last frame is repeated when "
-                    "it is slower.")
-        self.record_button.toggled.connect(
-            lambda on: self.engine.update_settings(record=on))
+        set_tooltip(self.record_button, RECORD_TIP)
+        self.record_button.toggled.connect(self._set_record)
         bar.addWidget(self.record_button)
         bar.addSeparator()
         self.freeze_button = QPushButton("Freeze (Space)")
@@ -3002,6 +3011,26 @@ class MainWindow(QMainWindow):
             lambda: self.set_ui_scale(ui_scale.DEFAULT_PERCENT))
         add(self.ui_scale_reset)
 
+        heading("Recording")
+        settings = QSettings("ESPI", "espi_live")
+        self.save_raw_check = QCheckBox("Raw stream")
+        self.save_processed_check = QCheckBox("Processed stream")
+        self.save_window_check = QCheckBox("Window video")
+        for key, box, tip in (
+                ("save_raw", self.save_raw_check,
+                 "Lossless camera frames before noise reduction (raw.avi)"),
+                ("save_processed", self.save_processed_check,
+                 "The processed image as shown (processed_NN_<view>.avi)"),
+                ("save_window", self.save_window_check,
+                 "A video of this window, controls and log included (window.avi)")):
+            box.setChecked(bool(settings.value(key, True, bool)))
+            set_tooltip(box, tip)
+            box.toggled.connect(
+                lambda on, key=key: self._stream_choice_changed(key, on))
+            add(box)
+        note(QLabel("One Record press saves the ticked streams into one "
+                    "timestamped folder under output/recordings."))
+
         heading("Saved frame details")
         self.frame_title = QLineEdit()
         self.frame_title.setPlaceholderText("Title (optional)")
@@ -3571,6 +3600,119 @@ class MainWindow(QMainWindow):
             channel.stop()
         self._sync_cameras()
 
+    def _stream_choice_changed(self, key, on):
+        """Remember a stream checkbox and refresh the Record button.
+
+        Args: key is its QSettings name; on is the new state.
+        Returns: None.
+        """
+        QSettings("ESPI", "espi_live").setValue(key, on)
+        self._sync_record_controls()
+
+    def _sync_record_controls(self):
+        """Lock the stream boxes while recording; block Record with no stream.
+
+        Args: None.
+        Returns: None.
+        """
+        boxes = (self.save_raw_check, self.save_processed_check,
+                 self.save_window_check)
+        recording = self.record_button.isChecked()
+        any_stream = any(box.isChecked() for box in boxes)
+        self.record_button.setEnabled(recording or any_stream)
+        set_tooltip(self.record_button, RECORD_TIP, *(
+            () if any_stream else ("Tick at least one stream in the Recording "
+                                   "section of the Controls panel to record.",)))
+        for box in boxes:
+            box.setEnabled(not recording)
+
+    def _set_record(self, on):
+        """Start or stop recording on the displayed camera.
+
+        Args: on is the Record button's new state.
+        Returns: None.
+        """
+        if on:
+            self.engine.update_settings(
+                record=True, save_raw=self.save_raw_check.isChecked(),
+                save_processed=self.save_processed_check.isChecked())
+        else:
+            self.engine.update_settings(record=False)
+        self._sync_record_controls()
+
+    def _grab_window(self):
+        """Capture the window as a BGR image of the first frame's size.
+
+        Args: None.
+        Returns: A uint8 height x width x 3 array.
+        """
+        image = self.grab().toImage().convertToFormat(QImage.Format_RGB888)
+        width, height = image.width(), image.height()
+        rows = np.frombuffer(image.constBits(), np.uint8).reshape(
+            height, image.bytesPerLine())
+        frame = cv2.cvtColor(rows[:, :width * 3].reshape(height, width, 3),
+                             cv2.COLOR_RGB2BGR)
+        if self.window_video_size is None:
+            self.window_video_size = (width, height)
+        elif self.window_video_size != (width, height):
+            frame = cv2.resize(frame, self.window_video_size)
+        return frame
+
+    def _stop_window_video(self):
+        """Finish the running window video; its summary is logged when done.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window_video.stop()
+        self.window_retired.append(self.window_video)
+        self.window_video = None
+        self.window_video_source = None
+        self.window_video_size = None
+
+    def _capture_window(self):
+        """Start, feed or end window.avi to match the recording session.
+
+        The video belongs to the session it started in, so showing another
+        camera does not move it; it ends with that session.
+
+        Args: None.
+        Returns: None.
+        """
+        enabled = self.save_window_check.isChecked()
+        if self.window_video is not None:
+            session = self.window_video_source.status()["recording_folder"]
+            if (not enabled or session != self.window_video_folder
+                    or self.window_video.done.is_set()):
+                self._stop_window_video()
+        if self.window_video is not None:
+            self.window_video.submit(self._grab_window())
+            return
+        folder = self.engine.status()["recording_folder"]
+        if not enabled or not folder or folder == self.window_video_folder:
+            return
+        self.window_video_folder = folder  # one attempt per session
+        try:
+            self.window_video = open_window_recorder(folder, self._grab_window())
+        except OSError as exc:
+            self.window_video_size = None
+            self.log.write(f"Could not record the window: {exc}")
+            return
+        self.window_video_source = self.engine
+
+    def _reap_window_videos(self):
+        """Log and forget window recordings that have finished writing.
+
+        Args: None.
+        Returns: None.
+        """
+        for old in self.window_retired[:]:
+            if old.done.is_set():
+                self.log.write(old.summary())
+                if old.error is not None:
+                    self.log.write(f"Recording error: {old.error}")
+                self.window_retired.remove(old)
+
     def _load_settings(self, s, limits):
         """Show a camera's settings and limits without sending them back.
 
@@ -3613,6 +3755,7 @@ class MainWindow(QMainWindow):
             widget.setCurrentText(text)
         for widget, _ in toggles + combos:
             widget.blockSignals(False)
+        self._sync_record_controls()
         for button in self.mode_group.buttons():
             button.setChecked(button.text() == s.mode)
         self._sync_scaling_controls(s.scale_range, s.gain_before_average)
@@ -4034,6 +4177,7 @@ class MainWindow(QMainWindow):
         Args: None.
         Returns: None.
         """
+        self._reap_window_videos()
         text = self.log.drain()
         if text:
             self.log_view.appendPlainText(text.rstrip("\n"))
@@ -4618,6 +4762,7 @@ class MainWindow(QMainWindow):
             self.record_button.blockSignals(True)
             self.record_button.setChecked(False)
             self.record_button.blockSignals(False)
+            self._sync_record_controls()
         elif kind == "switched_live":
             # A held demo frame must not outlive the dummy-mode indicators.
             channel.frozen = channel.frozen_at = None
@@ -4628,6 +4773,7 @@ class MainWindow(QMainWindow):
             self.record_button.blockSignals(True)
             self.record_button.setChecked(False)
             self.record_button.blockSignals(False)
+            self._sync_record_controls()
             self._set_demo(False)
         elif kind == "switch_failed":
             QMessageBox.warning(self, "Camera unavailable",
@@ -4675,11 +4821,16 @@ class MainWindow(QMainWindow):
             self.tip_timer.stop()
             self.update_timer.stop()
             self.statusBar().showMessage("Finishing recordings and releasing the camera…")
+            self.window_timer.stop()
+            if self.window_video is not None:
+                self._stop_window_video()
             for engine in self._all_engines():
                 engine.stop()
             deadline = time.monotonic() + 8.0
             while not self.wait_for_engines(0.05) and time.monotonic() < deadline:
                 QApplication.processEvents()
+            for old in self.window_retired:
+                old.done.wait(max(0.0, deadline - time.monotonic()))
             self._poll_status()
             settings = QSettings("ESPI", "espi_live")
             settings.setValue("geometry", self.saveGeometry())
