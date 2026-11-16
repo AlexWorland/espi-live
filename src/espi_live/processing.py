@@ -8,6 +8,7 @@ import collections
 import functools
 import math
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -33,6 +34,16 @@ MAX_DENOISE_STRENGTH = 0.95
 # up, not the history weight: denoise_strength spreads the 20-frame memory
 # across the whole travel, so the low end is not a dead zone.
 MAX_DENOISE_PERCENT = 95
+# Previous view can compare with a frame up to this many frames back; each
+# remembered frame is a full copy (about 6 MB on the Blackfly).
+MAX_FRAMES_BACK = 30
+# Brightness scaling of the difference image: a fixed multiplier, as the
+# LabVIEW ESPI 1.5 VI did (IMAQ Multiply by "Constant"), or a stretch of each
+# frame's range to 0..255. Settings.scale_range is True for "Auto stretch".
+SCALING_MODES = ("Fixed gain", "Auto stretch")
+# Default fixed gain: the LabVIEW VI's "Constant" default (42.0, read from its
+# front-panel default data). Differences of 7 grey levels or more reach white.
+DEFAULT_DIFFERENCE_GAIN = 42.0
 # Noise calibration: each frame's level at the top 0.5% of pixels is its noise
 # peak, and the suggested sensitivity floor is the median peak times this.
 NOISE_PERCENTILE_CLIP = 0.5
@@ -356,6 +367,49 @@ def smooth_speckle(image, method, size):
     return cv2.GaussianBlur(image, (size, size), 0)
 
 
+def apply_gain(image, gain):
+    """Multiply a difference image by a fixed gain, saturating at 255.
+
+    This is the LabVIEW ESPI 1.5 VI's IMAQ Multiply by "Constant": a still
+    scene's few levels of noise stay dark while real changes reach white, and
+    the brightness does not follow each frame's range as a stretch does.
+
+    Args: image is a 2-D uint8 array; gain is the multiplier (1.0 = none).
+    Returns: The rounded, saturated uint8 product, or the input itself at 1.0.
+    """
+    if gain == 1.0:
+        return image
+    return cv2.convertScaleAbs(image, alpha=float(gain))
+
+
+def reject_outliers(image, size):
+    """Replace pixels that stand out from their neighbourhood by its mean.
+
+    The rule of NI Vision's Lowpass filter (IMAQ LowPass, used by the LabVIEW
+    ESPI 1.5 VI): with M the mean and S the standard deviation of a pixel and
+    its size x size neighbourhood, a pixel further than S from M becomes M and
+    every other pixel is kept. Unlike a blur it leaves smooth areas and
+    fringes alone and only pulls isolated spikes back (IMAQ Vision Concepts
+    Manual, "Lowpass Filter").
+
+    Args: image is a 2-D uint8 array; size is the neighbourhood width in
+        pixels (made odd), with 0 or 1 meaning off.
+    Returns: A new uint8 image, or the input itself when off.
+    """
+    size = int(size)
+    if size <= 1:
+        return image
+    size |= 1
+    values = image.astype(np.float32)
+    mean = cv2.blur(values, (size, size), borderType=cv2.BORDER_REFLECT)
+    mean_square = cv2.blur(values * values, (size, size), borderType=cv2.BORDER_REFLECT)
+    spread = np.sqrt(np.maximum(mean_square - mean * mean, 0.0))
+    outliers = np.abs(values - mean) > spread
+    result = image.copy()
+    result[outliers] = np.rint(mean[outliers]).astype(np.uint8)
+    return result
+
+
 def single_field(frame):
     """Show one field of an interlaced frame at full height.
 
@@ -478,7 +532,7 @@ class ESPIProcessor:
         Args: None.
         Returns: None.
         """
-        self.prev = None
+        self.history = deque(maxlen=1)  # earlier frames for Previous view
         self.ref = None
         self.ref_time = None
         self.avg_accum = None
@@ -522,6 +576,14 @@ class ESPIProcessor:
         cv2.accumulateWeighted(frame, self.denoised, weight)
         return cv2.convertScaleAbs(self.denoised)
 
+    def reset_previous(self):
+        """Forget the earlier frames that Previous view subtracts.
+
+        Args: None.
+        Returns: None.
+        """
+        self.history.clear()
+
     def set_reference(self, frame, now):
         """Store a copy of a frame as the Reference baseline.
 
@@ -532,31 +594,43 @@ class ESPIProcessor:
         self.ref = frame.copy()
         self.ref_time = now
 
-    def difference(self, frame, mode):
-        """Subtract the previous frame or the captured reference.
+    def difference(self, frame, mode, frames_back=1):
+        """Subtract an earlier frame or the captured reference.
 
-        Args: frame is the current Mono8 array; mode is Previous or Reference.
+        Args: frame is the current Mono8 array; mode is Previous or Reference;
+            frames_back is how many frames back Previous view looks (1 is the
+            frame just before; capped at MAX_FRAMES_BACK). Comparing further
+            back shows slower change, as the LabVIEW VI did by waiting between
+            grabs.
         Returns: A uint8 absolute-difference image, or zeros until a baseline
             frame exists.
         """
         if mode == "Previous":
-            if self.prev is None or self.prev.shape != frame.shape:
-                self.prev = frame.copy()
+            back = min(max(1, int(frames_back)), MAX_FRAMES_BACK)
+            if self.history and self.history[-1].shape != frame.shape:
+                self.history.clear()
+            if self.history.maxlen != back:
+                self.history = deque(self.history, maxlen=back)  # keeps the newest
+            if len(self.history) < back:
+                self.history.append(frame.copy())
                 return np.zeros_like(frame)
-            result = cv2.absdiff(frame, self.prev)
-            self.prev = frame.copy()
+            result = cv2.absdiff(frame, self.history[0])
+            self.history.append(frame.copy())
             return result
         if self.ref is None or self.ref.shape != frame.shape:
             return np.zeros_like(frame)
         return cv2.absdiff(frame, self.ref)
 
-    def average(self, image, count):
+    def average(self, image, count, scale=None):
         """Accumulate a requested number of difference frames.
 
         Args: image is a uint8 difference frame; count is the number of frames
-            per displayed average, with one disabling averaging.
-        Returns: A uint8 average when ready, or None while accumulating. The
-            mean is truncated toward zero, as in earlier versions.
+            per displayed average, with one disabling averaging; scale, when
+            given, multiplies the mean, which is then rounded and saturated
+            (the LabVIEW VI's sum x Multiplier / N to U8).
+        Returns: A uint8 average when ready, or None while accumulating.
+            Without scale the mean is truncated toward zero, as in earlier
+            versions. With count 1 the image is returned unscaled.
         """
         if count <= 1:
             self.reset_avg()
@@ -572,6 +646,10 @@ class ESPIProcessor:
             self.avg_count += 1
         if self.avg_count < count:
             return None
+        if scale is not None:
+            result = cv2.convertScaleAbs(self.avg_accum, alpha=scale / self.avg_count)
+            self.reset_avg()
+            return result
         # The mean of uint8 values already lies in 0..255, so no clip is needed;
         # dividing in place (not multiplying by 1/n) keeps results bit-identical.
         np.divide(self.avg_accum, self.avg_count, out=self.avg_accum)
@@ -579,15 +657,17 @@ class ESPIProcessor:
         self.reset_avg()
         return result
 
-    def rolling_average(self, image, count):
+    def rolling_average(self, image, count, scale=None):
         """Blend each difference frame into a running average.
 
         Unlike average(), this returns a frame every time, so the display
         keeps the camera's rate; older frames fade with weight 1/count.
 
         Args: image is a uint8 difference frame; count sets the effective
-            number of frames remembered, with one disabling averaging.
-        Returns: The rounded uint8 running average.
+            number of frames remembered, with one disabling averaging; scale,
+            when given, multiplies the average before rounding and saturation.
+        Returns: The rounded uint8 running average. With count 1 the image is
+            returned unscaled.
         """
         if count <= 1:
             self.reset_avg()
@@ -596,7 +676,7 @@ class ESPIProcessor:
             self.rolling = image.astype(np.float32)
         else:
             cv2.accumulateWeighted(image, self.rolling, 1.0 / count)
-        return cv2.convertScaleAbs(self.rolling)
+        return cv2.convertScaleAbs(self.rolling, alpha=1.0 if scale is None else scale)
 
 
 class DemoSource:

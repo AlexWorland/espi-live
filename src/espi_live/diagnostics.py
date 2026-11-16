@@ -79,8 +79,19 @@ def settings_summary(settings):
     averaging = f"{settings.average}{' rolling' if settings.rolling else ' block'}"
     smoothing = (f"{settings.smoothing_method} {settings.smoothing}"
                  if settings.smoothing > 1 else "off")
-    return (f"mode={settings.mode} noise_reduction={settings.noise_reduction:g} "
-            f"average={averaging} smoothing={smoothing} "
+    if settings.scale_range:
+        scaling = f"stretch clip {settings.clip_percent:g}%"
+    elif settings.gain_before_average:
+        scaling = (f"gain x{settings.difference_gain:g} before average, "
+                   f"multiplier x{settings.average_multiplier:g}")
+    else:
+        scaling = f"gain x{settings.difference_gain:g}"
+    outliers = (f"{settings.outlier_filter}px" if settings.outlier_filter > 1
+                else "off")
+    return (f"mode={settings.mode} frames_back={settings.frames_back} "
+            f"noise_reduction={settings.noise_reduction:g} "
+            f"outlier_filter={outliers} average={averaging} smoothing={smoothing} "
+            f"scaling={scaling} "
             f"exposure={settings.exposure_us:g}us gain={settings.gain_db:g}dB "
             f"fps={settings.fps:g} clahe={'on' if settings.clahe else 'off'}")
 

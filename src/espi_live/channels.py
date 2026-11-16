@@ -15,7 +15,9 @@ from dataclasses import asdict, replace
 
 from espi_live import error_reports, sources
 from espi_live.camera import CameraInfo
-from espi_live.engine import Engine, Settings
+from espi_live.engine import (ANALOG_MIN_RANGE, LABVIEW_FLOW, Engine, is_analog,
+                              own_settings)
+from espi_live.engine import default_settings as source_settings
 
 
 class PrefixedLog:
@@ -97,19 +99,15 @@ def demo_infos(count):
 # (cable, digitizer, YUV conversion) leaves about 15 levels of frame-to-frame
 # noise in a still scene, measured with a Sony XC-ST50 on a USB-Live2; twice
 # that keeps the noise dark. FLIR cameras start at 0, the original behaviour.
-ANALOG_MIN_RANGE = 30
-
-
 def default_settings(info, demo=False):
     """Choose the starting settings for a camera.
 
     Args: info is the camera's CameraInfo; demo is True for a synthetic source.
-    Returns: A Settings; analog capture devices get the ANALOG_MIN_RANGE
-        sensitivity floor, every other source the plain defaults.
+    Returns: A Settings: an analog camera starts in the LabVIEW flow, and
+        every capture device's own settings carry the ANALOG_MIN_RANGE
+        sensitivity floor (see engine.default_settings and own_settings).
     """
-    if not demo and getattr(info, "kind", "") == "capture":
-        return Settings(min_range=ANALOG_MIN_RANGE)
-    return Settings()
+    return source_settings(None if demo else info)
 
 
 class Channel:
@@ -137,6 +135,10 @@ class Channel:
         self.report = None  # last "camera_report" payload (camera_reports.Report)
         self.frozen = None  # FramePacket held on screen while the display is frozen
         self.frozen_at = None  # datetime the display was frozen
+        self.labview_saved = None  # the user's settings while the LabVIEW flow is on
+        if not demo and is_analog(info):  # analog cameras start in the LabVIEW flow
+            own = own_settings(info)
+            self.labview_saved = {key: getattr(own, key) for key in LABVIEW_FLOW}
         self.retired = []  # stopped engines that may still be finishing
 
     @property
