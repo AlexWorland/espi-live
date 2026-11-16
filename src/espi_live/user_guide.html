@@ -589,7 +589,8 @@
         <li>Load or deform the specimen. The difference image shows the ESPI
           fringe pattern.</li>
         <li>If the pattern is noisy, raise <a href="#measurement">Average N</a>.
-          If it is faint, leave <strong>Stretch to 0–255</strong> on and try a
+          If it is faint, raise <strong>Difference gain</strong> (Fixed gain) or
+          switch <strong>Scaling</strong> to Auto stretch, and try a
           color <a href="#display">Palette</a>.</li>
         <li>Press <kbd>S</kbd> (<strong>Save frame</strong>) to keep a still, or
           <a href="#capture">Record AVI</a> to capture a sequence. Add a title
@@ -727,6 +728,8 @@ python -m espi_live</code></pre>
 
     <section id="controls">
       <h2>Controls reference <a class="anchor" href="#controls" aria-label="Link to Controls reference">#</a></h2>
+      <p>Each Controls section can be collapsed: click its heading to hide or
+        show it. The choice is remembered between runs.</p>
 
       <section id="dummy-mode">
         <h3>Demo banner and Switch to live capture <a class="anchor" href="#dummy-mode" aria-label="Link to Demo banner and live switch">#</a></h3>
@@ -828,9 +831,10 @@ python -m espi_live</code></pre>
             <strong>Previous</strong>-view fringes; a Reference captured with
             it on is less noisy too.</li>
           <li><strong>Single field (interlaced camera)</strong> — shown for an
-            interlaced analog source; on by default. It keeps one field,
-            doubled to full height, removing the 1/60 s offset between fields
-            at the cost of half the vertical detail.</li>
+            interlaced analog source; off by default (full frames, as the
+            LabVIEW program used). On, it keeps one field, doubled to full
+            height, removing the 1/60 s offset between fields at the cost of
+            half the vertical detail.</li>
         </ul>
         <p>Each control has a slider for quick changes and a number box for
           exact entry: drag the slider, type a value and press Enter, or use the
@@ -882,12 +886,31 @@ python -m espi_live</code></pre>
           noise</strong> with the drive off to measure it. No preset changes
           exposure, gain, frame rate or recording, and each turns off the
           fringe-enhancement and display controls it does not use.</p>
+        <p><strong>LabVIEW flow</strong>, the toggle under them, switches the
+          displayed camera to the processing of the LabVIEW ESPI 1.5 program
+          with that program's saved defaults, the known-good flow for the Sony
+          XC-ST50. It is on by default for that camera. It sets Reference view
+          and captures a reference at once (and whenever Reference has none),
+          full frames, Fixed gain 42× applied to each frame before averaging,
+          and turns off noise reduction, the noise threshold, beam-brightness
+          correction, the speckle and outlier filters, peak hold, local
+          normalization, stretch, the display brightness, gain and contrast,
+          CLAHE and invert. If you turn averaging on, it sums N + 1
+          frames and divides by N, as the program did. Exposure, gain, frame
+          rate, recording and the flip keep their values. Turn it off to get
+          your own settings back; changes made while it is on are dropped. Each
+          camera keeps its own state.</p>
         <p><strong>Help → Which settings should I use?</strong> explains the
           presets and can apply them to the displayed camera. Reference refresh
           also hides motion slower than its interval; use 0 for a fixed before/after.</p>
-        <p>Processing order: noise reduction → difference → average → speckle filter →
-          peak hold → stretch or local normalization → invert → gamma/CLAHE → palette. Raw skips difference processing
-          and still applies noise reduction and display gamma.</p>
+        <p>Processing order: noise reduction → difference (N frames back) →
+          noise threshold → beam brightness → outlier filter → average →
+          speckle filter → peak hold → fixed gain, stretch or local
+          normalization → invert → gamma/CLAHE → brightness, gain and contrast
+          → palette. With <strong>Gain before averaging</strong>, the fixed
+          gain moves to just before the outlier filter. Raw skips difference
+          processing and still applies noise reduction, display gamma and the
+          display brightness, gain and contrast.</p>
         <ul>
           <li><strong>Average N</strong> — each displayed image becomes the
             mean of N consecutive difference frames. Averaging reduces random
@@ -903,12 +926,23 @@ python -m espi_live</code></pre>
           <li><strong>Ref. refresh</strong> — Reference view recaptures the
             reference every N seconds so slow drift (air currents, heat)
             cancels; 0 keeps one reference until you press <kbd>F</kbd>.</li>
+          <li><strong>Frames back</strong> — which earlier frame Previous view
+            compares with: 1 is the frame just before. A larger number spans more
+            time, so slow changes show instead of cancelling (the LabVIEW program
+            did this by waiting between grabs). Each step keeps one more frame in
+            memory. 1–30.</li>
         </ul>
       </section>
 
       <section id="fringe">
         <h3>Fringe enhancement <a class="anchor" href="#fringe" aria-label="Link to Fringe enhancement">#</a></h3>
         <ul>
+          <li><strong>Outlier filter</strong> — on every difference frame,
+            before averaging, a pixel further from its neighbourhood's mean than
+            the neighbourhood's spread (standard deviation) becomes that mean.
+            Isolated hot or dark pixels go; fringes and smooth areas stay. This
+            is NI Vision's Lowpass filter from the LabVIEW program. Width in
+            pixels, 0 = off; try 3 px.</li>
           <li><strong>Speckle filter</strong> — <strong>Gaussian</strong>, or
             edge-keeping <strong>Median</strong> (capped at 5 px to keep the
             frame rate). Use Median when a wide Gaussian blurs fringe
@@ -916,19 +950,65 @@ python -m espi_live</code></pre>
           <li><strong>Filter width</strong> — blur in pixels that removes
             pixel-scale speckle; keep it well below the fringe spacing. 0 = off.
             A typical start is 0, then a few pixels.</li>
-          <li><strong>Stretch to 0–255</strong> — maps each difference frame's
-            darkest and brightest pixels (after <strong>Stretch clip</strong>)
-            to 0 and 255, so fringes fill the display. The status bar shows the
-            input and scaled ranges, before gamma and palette. A constant
-            difference image maps to black.</li>
-          <li><strong>Stretch clip</strong> — lets this percentage of the
+          <li><strong>Scaling</strong> — how difference values become
+            brightness. <strong>Fixed gain</strong> multiplies every difference
+            by <strong>Difference gain</strong> and shows anything above 255 as
+            white, as the LabVIEW program did: a still scene's few levels of
+            noise stay dark and the brightness does not pump.
+            <strong>Auto stretch</strong> maps each difference frame's darkest
+            and brightest pixels (after <strong>Stretch clip</strong>) to 0 and
+            255, so fringes fill the display; a constant difference image maps
+            to black. The Sony XC-ST50 starts in Fixed gain, the Blackfly and
+            demo mode in Auto stretch. The status bar shows the input and scaled
+            ranges, before gamma and palette.</li>
+          <li><strong>Difference gain</strong> — Fixed gain's multiplier,
+            1–64×; 42× by default, the LabVIEW program's Constant, so any
+            difference of 7 grey levels or more is white. Lower it when noise
+            shows as grey grain.</li>
+          <li><strong>Gain before averaging (LabVIEW order)</strong> — Fixed
+            gain only. On: the gain is applied to each frame (saturating at 255)
+            and Average N averages those frames, then multiplies the mean by
+            <strong>Average multiplier</strong>, the LabVIEW program's averaging
+            maths. Off: the raw differences are averaged and the gain is applied
+            once.</li>
+          <li><strong>Average multiplier</strong> — scales the average in
+            LabVIEW order (with Average N above 1); 1 to start.</li>
+          <li><strong>Stretch clip</strong> — Auto stretch only. Lets this percentage of the
             darkest and brightest pixels saturate so a few stray speckles do
             not flatten the contrast; 0 = exact min/max, about 0.5% when a few
             speckles dominate.</li>
           <li><strong>Invert</strong> — swaps bright and dark fringes.</li>
+          <li><strong>Sensitivity floor</strong> — with Auto stretch or Local
+            normalization, white is never fewer than this many grey levels of
+            difference, so a still scene's camera noise stays dark while real
+            fringes use the full range. Video-capture devices start at 30; 0 =
+            off.</li>
+          <li><strong>Calibrate noise (object still)</strong> — in Previous or
+            Reference view, with the object at rest, measures the difference
+            noise for 2 s and sets the Sensitivity floor to twice its peak. In
+            Raw it logs a warning and does nothing.</li>
+          <li><strong>Noise threshold</strong> — right after the subtraction,
+            differences below this many grey levels become 0. Hides camera
+            noise; too high also hides faint fringes. 0 = off; try 3–8.</li>
+          <li><strong>Steady range</strong> — Auto stretch only: the range
+            shrinks only over this many seconds, so the contrast stops pumping;
+            a growing range is followed at once. 0 = every frame.</li>
+          <li><strong>Even out beam brightness</strong> — divides each
+            difference by the local illumination so the centre of the laser
+            spot no longer dominates; unlit areas go black. Off by default: it
+            can amplify noise at the beam's edge.</li>
+          <li><strong>Peak hold window</strong> — each pixel shows its largest
+            difference within the last N seconds (a sliding window). In
+            Previous view a steady vibration then builds up on screen. 0 =
+            off; try 3 s.</li>
+          <li><strong>Local normalization</strong> — window in pixels: each
+            pixel is compared with the mean and spread of the difference around
+            it, in place of Fixed gain or Auto stretch, so faint and strong
+            fringes get the same contrast. Mid-grey is the local average. Use a
+            window wider than the fringe spacing. 0 = off; try 41–81 px.</li>
         </ul>
-        <p>Stretch, clip and invert apply to difference views; Raw is never
-          stretched or inverted.</p>
+        <p>Scaling, clip and invert apply to difference views; Raw is never
+          scaled or inverted.</p>
       </section>
 
       <section id="display">
@@ -952,6 +1032,13 @@ python -m espi_live</code></pre>
             computed on the CPU, so it costs more processing time, and it is
             ignored when the palette is Gray. Gamma is applied before
             CLAHE.</li>
+          <li><strong>Brightness</strong>, <strong>Gain</strong> and
+            <strong>S-curve contrast</strong> — one lookup table applied in
+            every view before the palette: Gain multiplies the displayed image
+            (bright values saturate), the S-curve darkens values below mid-grey
+            and brightens those above, and Brightness adds grey levels. Saved
+            frames and recordings match the screen. All off by default (0, 1×,
+            0%).</li>
         </ul>
         <p>See <a href="#op-contrast">Get the best contrast</a>.</p>
       </section>
@@ -978,8 +1065,8 @@ python -m espi_live</code></pre>
                 <strong>Rolling average</strong> in Previous/Reference, closes
                 the current AVI and starts a new one.
                 <strong>Other changes do not split the file:</strong> palette,
-                gamma, CLAHE, Stretch to 0–255, Stretch clip, Speckle filter,
-                Invert, exposure, gain, FPS, noise reduction, Single field,
+                gamma, CLAHE, Scaling, Difference gain, Stretch clip, Outlier
+                filter, Speckle filter, Invert, Frames back, exposure, gain, FPS, noise reduction, Single field,
                 <strong>Set reference</strong>, <strong>Reset last</strong> and
                 <strong>Reset average</strong> all continue writing to the same
                 file. Stop and restart the recording after any of them, or the
@@ -1194,10 +1281,17 @@ python -m espi_live</code></pre>
         <li>Exposure, gain and frame rate are set by the camera's own switches,
           so those controls are disabled; the status line shows the measured
           capture rate.</li>
-        <li><strong>Single field (interlaced camera)</strong>, on by default,
-          shows one of the two interlaced fields, doubled to full height. This
-          removes the 1/60 s offset between fields at the cost of half the
-          vertical detail.</li>
+        <li>Full interlaced frames by default, as the LabVIEW program used.
+          <strong>Single field (interlaced camera)</strong> shows one of the two
+          fields, doubled to full height, removing the 1/60 s offset between
+          fields at the cost of half the vertical detail. Differences compare
+          rows woven the same way, so the offset rarely matters for ESPI.</li>
+        <li>It starts in the <strong>LabVIEW flow</strong>: the known-good
+          LabVIEW ESPI 1.5 processing with that program's saved defaults
+          (Fixed gain 42×, Reference view with an automatic reference, no
+          averaging or filters). Turn the toggle off for your own settings,
+          which also start in Fixed gain: Auto stretch would blow the capture
+          noise (3–5 grey levels) up to full-contrast grain.</li>
         <li>Images look about 12% wide because NTSC pixels are not square;
           they are not resampled. Expect coarser fringes than with the
           Blackfly.</li>
@@ -1237,7 +1331,7 @@ python -m espi_live</code></pre>
               <td>Full-frame Mono8 camera rating is 59 fps.</td></tr>
             <tr><td>Noise reduction</td><td>0% (off)</td><td>0–95%, step 1%</td>
               <td>Applies in every view, Raw included.</td></tr>
-            <tr><td>Single field</td><td>On (interlaced only)</td>
+            <tr><td>Single field</td><td>Off (interlaced only)</td>
               <td>On / off</td><td>Even rows only, doubled to full height.</td></tr>
             <tr><td>Average N</td><td>1 (off)</td><td>1–60, step 1</td>
               <td>Ignored in Raw view.</td></tr>
@@ -1250,8 +1344,37 @@ python -m espi_live</code></pre>
               <td>Gaussian / Median</td><td>Median is capped at 5 px.</td></tr>
             <tr><td>Filter width</td><td>0 px (off)</td>
               <td>0–31 px, step 1</td><td>Keep below the fringe spacing.</td></tr>
-            <tr><td>Stretch to 0–255</td><td>On</td><td>On / off</td>
-              <td>Maps each difference frame to 0–255.</td></tr>
+            <tr><td>Frames back</td><td>1</td><td>1–30, step 1</td>
+              <td>Previous view only.</td></tr>
+            <tr><td>Outlier filter</td><td>0 px (off)</td><td>0–15 px, step 1</td>
+              <td>Per difference frame, before averaging.</td></tr>
+            <tr><td>Scaling</td><td>Fixed gain (analog camera); Auto stretch
+              (others)</td><td>Fixed gain / Auto stretch</td>
+              <td>Fixed multiplier, or each frame mapped to 0–255.</td></tr>
+            <tr><td>Difference gain</td><td>42×</td><td>1–64×, step 0.5</td>
+              <td>Fixed gain only; saturates at 255.</td></tr>
+            <tr><td>Gain before averaging</td><td>Off</td><td>On / off</td>
+              <td>LabVIEW order.</td></tr>
+            <tr><td>Average multiplier</td><td>1.0×</td><td>0.1–10×, step 0.1</td>
+              <td>LabVIEW order with Average N above 1.</td></tr>
+            <tr><td>Sensitivity floor</td><td>0 (30 for video capture)</td>
+              <td>0–128 levels</td><td>Auto stretch and Local normalization.</td></tr>
+            <tr><td>Noise threshold</td><td>0 (off)</td><td>0–64 levels</td>
+              <td>Right after the subtraction.</td></tr>
+            <tr><td>Steady range</td><td>0 s</td><td>0–3 s, step 0.1</td>
+              <td>Auto stretch only.</td></tr>
+            <tr><td>Even out beam brightness</td><td>Off</td><td>On / off</td>
+              <td>Divides by the local illumination.</td></tr>
+            <tr><td>Peak hold window</td><td>0 s (off)</td><td>0–10 s, step 0.1</td>
+              <td>Maximum over the window.</td></tr>
+            <tr><td>Local normalization</td><td>0 px (off)</td><td>0–255 px</td>
+              <td>Replaces Fixed gain or Auto stretch.</td></tr>
+            <tr><td>Brightness</td><td>0</td><td>0–128 levels</td>
+              <td>Every view, before the palette.</td></tr>
+            <tr><td>Gain (display)</td><td>1×</td><td>1–8×, step 0.1</td>
+              <td>Every view, before the palette.</td></tr>
+            <tr><td>S-curve contrast</td><td>0%</td><td>0–100%</td>
+              <td>Every view, before the palette.</td></tr>
             <tr><td>Stretch clip</td><td>0%</td><td>0–10%, step 0.1%</td>
               <td>0 = exact min/max.</td></tr>
             <tr><td>Invert</td><td>Off</td><td>On / off</td>
@@ -1323,8 +1446,8 @@ python -m espi_live</code></pre>
             reference to showing the difference view.</li>
           <li>Load, heat or otherwise deform the specimen. The image now shows
             absolute differences from the resting state.</li>
-          <li>If the pattern is too faint, turn on
-            <strong>Stretch to 0–255</strong> and try a
+          <li>If the pattern is too faint, raise <strong>Difference gain</strong>
+            or switch <strong>Scaling</strong> to Auto stretch, and try a
             <a href="#display">color palette</a>.</li>
           <li>To start a new measurement from the current state, press
             <kbd>F</kbd> again.</li>
@@ -1382,7 +1505,9 @@ python -m espi_live</code></pre>
       <section id="op-contrast">
         <h3>Get the best contrast <a class="anchor" href="#op-contrast" aria-label="Link to Get the best contrast">#</a></h3>
         <ol>
-          <li>Keep <strong>Stretch to 0–255</strong> on for a first look; the
+          <li>Pick <strong>Scaling</strong>: Auto stretch for a first look on
+            the Blackfly; Fixed gain on the analog camera, raising
+            <strong>Difference gain</strong> until the fringes are bright. The
             status bar shows the true input range.</li>
           <li>Choose a color <a href="#display">Palette</a> for small
             differences.</li>
@@ -1397,9 +1522,9 @@ python -m espi_live</code></pre>
           <li>Enable <strong>CLAHE</strong> if one area is much dimmer than
             another; it boosts local contrast but costs processing time and only
             works with a color palette.</li>
-          <li>Turn <strong>Stretch to 0–255</strong> off when you need to judge
-            absolute difference values between frames; the status bar and pixel
-            readout then show the unscaled values.</li>
+          <li>Use Fixed gain at 1× when you need to judge absolute difference
+            values between frames; the status bar and pixel readout then show
+            the unscaled values.</li>
         </ol>
       </section>
 
@@ -1438,8 +1563,8 @@ python -m espi_live</code></pre>
         <div class="note">
           <p>Only the view mode, and <strong>Average N</strong> or
             <strong>Rolling average</strong> in Previous/Reference, start a new
-            file. Changing palette, gamma, CLAHE, Stretch to 0–255, Stretch
-            clip, Speckle filter, Invert, exposure, gain, FPS, noise reduction,
+            file. Changing palette, gamma, CLAHE, Scaling, Difference gain,
+            Stretch clip, Outlier filter, Speckle filter, Frames back, Invert, exposure, gain, FPS, noise reduction,
             Single field, <strong>Set reference</strong>,
             <strong>Reset last</strong> or <strong>Reset average</strong>
             continues the same file. Stop and restart the recording after any
@@ -1464,9 +1589,9 @@ python -m espi_live</code></pre>
           <li>Raise <strong>Noise reduction</strong> only as needed; it cleans
             sensor noise in every view but trails motion and weakens
             Previous-view fringes at high values.</li>
-          <li>For an interlaced analog camera, leave
-            <strong>Single field</strong> on unless you need the full vertical
-            detail and can accept the 1/60 s field offset.</li>
+          <li>For an interlaced analog camera, keep full frames (Single field
+            off) unless line-to-line texture appears when the scene changes
+            between fields.</li>
           <li>After changing camera settings, capture a new reference if you are
             measuring differences.</li>
         </ol>
@@ -1637,9 +1762,9 @@ python -m espi_live</code></pre>
         <ul>
           <li>Confirm a reference has been captured; the hint line says if one
             is missing.</li>
-          <li>With <strong>Stretch to 0–255</strong> on, a constant difference
-            image is all black by design. Disturb the specimen or turn
-            stretching off to inspect raw values.</li>
+          <li>With <strong>Scaling</strong> on Auto stretch, a constant
+            difference image is all black by design. Disturb the specimen or use
+            Fixed gain to inspect raw values.</li>
           <li>Check that the view is not <strong>Raw</strong> after a
             live-capture switch.</li>
         </ul>

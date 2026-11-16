@@ -129,6 +129,23 @@ class ChannelTests(ChannelTestCase):
         self.assertTrue(self.channel(CameraInfo("DEMO1"), demo=True).demo)
         self.assertEqual(idle.engines(), [])
 
+    def test_analog_channel_starts_in_the_labview_flow(self):
+        """An analog channel starts in the LabVIEW flow and keeps its own settings.
+
+        Args: None.
+        Returns: None.
+        """
+        analog = self.channel(CameraInfo("video 1", "Hauppauge USB-Live2",
+                                         kind="capture", vid=0x2040, pid=0xC200))
+        self.assertEqual(analog.settings.mode, "Reference")
+        self.assertTrue(analog.settings.auto_reference)
+        self.assertEqual(analog.labview_saved["mode"], "Raw")
+        self.assertFalse(analog.labview_saved["auto_reference"])
+        self.assertIsNone(self.channel(CameraInfo("1", "BFS")).labview_saved)
+        demo = self.channel(CameraInfo("video 1", "Hauppauge USB-Live2", kind="capture",
+                                       vid=0x2040, pid=0xC200), demo=True)
+        self.assertIsNone(demo.labview_saved)
+
     def test_adopted_engine_supplies_settings(self):
         """An engine passed in becomes the running engine with its settings.
 
