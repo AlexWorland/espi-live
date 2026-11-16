@@ -59,15 +59,25 @@ reports whether it is present.
 - **Exposure, gain, frame rate:** the camera's switches set them. Those
   controls are disabled for this source, and the status line shows the
   measured capture rate and the frame size.
-- **Single field** (on by default): each frame holds two fields exposed
-  1/60 s apart. Any motion between them shows up as line-to-line noise in
-  the difference images. Single-field mode keeps the even rows and repeats
-  each one, so the frame stays 720 × 480 and saved frames and recordings
-  match the screen. This halves the vertical detail. Changing the setting
-  clears the reference and the averages. Studies of interline-transfer
-  cameras in subtraction ESPI favour non-interlaced field and frame modes
-  (Optical Engineering 38(9), 1999). The camera's own field-integration
-  setting helps too.
+- **Full frames** (the default): both interlaced fields, as the LabVIEW
+  ESPI 1.5 VI used them. The fields are exposed 1/60 s apart, but Reference
+  and Previous differences compare rows woven the same way, so the offset
+  only shows when the scene changes between the two fields (a transient or
+  uneven drive), as faint line-to-line texture. **Single field** keeps the
+  even rows and repeats each one, so the frame stays 720 × 480 and saved
+  frames and recordings match the screen; it halves the vertical detail.
+  Changing the setting clears the reference and the averages. Studies of
+  interline-transfer cameras in subtraction ESPI favour non-interlaced field
+  and frame modes (Optical Engineering 38(9), 1999). The camera's own
+  field-integration setting helps too.
+- **LabVIEW flow** (on by default for this camera): the LabVIEW ESPI 1.5 VI's
+  processing with its saved defaults: Reference view with an automatic
+  reference, the difference multiplied by **Difference gain** 42 (the VI's
+  Constant) and saturated at 255, no averaging or filters. At 42× the
+  capture noise (3–5 grey levels) shows as mid-grey; lower the gain if it
+  hides the fringes. Turning the toggle off gives this camera's own settings,
+  which also use Fixed gain: Auto stretch would expand the noise to
+  full-contrast grain. See `docs/labview/README.md`.
 - **Aspect:** NTSC pixels are not square (720 × 480 carries a 4:3 picture),
   so images look about 12 % too wide. They are not resampled, because
   resampling would blur the speckle.
@@ -79,6 +89,12 @@ interlaced, digitized to 8 bits after an analog cable run, and has more noise
 and timing jitter than a USB3 Vision camera. Fringes will be visible but less
 sharp, and averaging matters more. Keep the camera and sample still between
 fields, or use single-field mode.
+
+The known-good LabVIEW flow used an NI frame grabber, which digitised the
+monochrome video directly. The USB-Live2 is a colour NTSC decoder, and its
+chroma filtering can remove speckle-sized detail near the 3.58 MHz colour
+subcarrier (about 3.8 pixels per cycle at 720 pixels per line). Processing
+cannot restore that detail.
 
 ## Diagnosing weak or missing fringes
 

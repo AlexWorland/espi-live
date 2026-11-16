@@ -1218,7 +1218,7 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertIn("grain stays", tip)
         self.assertIn("Speckle filter", tip)
         self.assertIn("Average N", tip)
-        self.assertIn("Stretch", tip)
+        self.assertIn("Auto stretch", tip)
         self.assertIn("Now: 60 %", tip)
         note = w.noise_note.text()
         self.assertIn("Grain stays", note)
@@ -1238,8 +1238,8 @@ class MainWindowBuildTests(WindowTestCase):
         self.assertTrue(gamma.isVisible())
         self.assertFalse(gamma.isHidden())
         tip = gamma.toolTip()
-        self.assertIn("Stretch", qt_app.GAMMA_TIP)
-        self.assertIn("Stretch", tip)
+        self.assertIn("Scaling", qt_app.GAMMA_TIP)
+        self.assertIn("Scaling", tip)
         self.assertIn("1.0", tip)
         self.assertIn("Now: 1.0", tip)
         self.assertEqual(gamma.slider.toolTip(), tip)
@@ -1247,7 +1247,7 @@ class MainWindowBuildTests(WindowTestCase):
         labels = [label for label in self.window.controls_dock.findChildren(QLabel)
                   if label.text() == "Gamma"]
         self.assertEqual([label.toolTip() for label in labels], [tip])
-        stretch = self.window.scale_range.toolTip()
+        stretch = self.window.scaling.toolTip()
         self.assertIn("Raw", stretch)
         self.assertIn("gamma", stretch.lower())
         self.assertNotIn("advanced", tip.lower())
@@ -1261,7 +1261,8 @@ class MainWindowBuildTests(WindowTestCase):
         w = self.window
         before = self.engine.settings()
         w.rolling.setChecked(not before.rolling)
-        w.scale_range.setChecked(not before.scale_range)
+        w.scaling.setCurrentText("Fixed gain" if before.scale_range else "Auto stretch")
+        w.gain_before_average.setChecked(not before.gain_before_average)
         w.invert.setChecked(not before.invert)
         w.flip_button.setChecked(not before.flip_horizontal)
         w.clahe.setChecked(not before.clahe)
@@ -1270,11 +1271,117 @@ class MainWindowBuildTests(WindowTestCase):
         after = self.engine.settings()
         self.assertEqual(after.rolling, not before.rolling)
         self.assertEqual(after.scale_range, not before.scale_range)
+        self.assertEqual(after.gain_before_average, not before.gain_before_average)
         self.assertEqual(after.invert, not before.invert)
         self.assertEqual(after.flip_horizontal, not before.flip_horizontal)
         self.assertEqual(after.clahe, not before.clahe)
         self.assertEqual(after.smoothing_method, w.smoothing_combo.currentText())
         self.assertEqual(after.palette, w.palette_combo.currentText())
+
+    def test_fringe_and_display_controls_update_engine(self):
+        """Sensitivity, threshold, steady range, peak hold, normalization, tone.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.min_range.spin.setValue(12)
+        w.threshold.spin.setValue(4)
+        w.steady_range.spin.setValue(0.5)
+        w.even_brightness.setChecked(True)
+        w.peak_hold.spin.setValue(3)
+        w.normalize_window.spin.setValue(41)
+        w.brightness.spin.setValue(6)
+        w.display_gain.spin.setValue(1.5)
+        w.contrast.spin.setValue(20)
+        s = self.engine.settings()
+        self.assertEqual((s.min_range, s.threshold, s.steady_range_s), (12, 4, 0.5))
+        self.assertEqual((s.even_brightness, s.peak_hold_s, s.normalize_window),
+                         (True, 3, 41))
+        self.assertEqual((s.brightness, s.display_gain, s.contrast), (6, 1.5, 20))
+        self.queued()
+        w.calibrate_button.click()
+        self.assertIn(("calibrate_noise", {}), self.queued())
+        self.engine.events.put(("noise_calibrated", 17))
+        w._handle_events()
+        self.assertEqual(w.min_range.value(), 17)
+        w.scaling.setCurrentText("Fixed gain")
+        self.assertFalse(w.steady_range.isEnabled())
+        self.assertTrue(w.min_range.isEnabled())
+
+    def test_sections_collapse_and_are_remembered(self):
+        """A collapsed section hides its controls and stays collapsed next time.
+
+        Args: None.
+        Returns: None.
+        """
+        toggle = self.window._section_toggles["Display"]
+        toggle.setChecked(False)
+        self.assertTrue(self.window.gamma.isHidden() or not self.window.gamma.isVisible())
+        self.assertTrue(FakeSettings.store[qt_app.SECTION_SETTING_PREFIX + "Display"])
+        again = demo_window(self.engine, self.log, self.use_gl)
+        self.addCleanup(again.deleteLater)
+        self.assertFalse(again._section_toggles["Display"].isChecked())
+        self.assertTrue(again._section_toggles["Camera"].isChecked())
+        toggle.setChecked(True)
+        self.assertFalse(FakeSettings.store[qt_app.SECTION_SETTING_PREFIX + "Display"])
+
+    def test_labview_controls_update_engine_and_enable_each_other(self):
+        """The new sliders write settings; scaling enables only what it uses.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.frames_back.spin.setValue(4)
+        w.outlier_filter.spin.setValue(3)
+        w.scaling.setCurrentText("Fixed gain")
+        w.difference_gain.spin.setValue(12)
+        self.assertFalse(w.average_multiplier.isEnabled())
+        w.gain_before_average.setChecked(True)
+        self.assertTrue(w.average_multiplier.isEnabled())
+        w.average_multiplier.spin.setValue(2.5)
+        s = self.engine.settings()
+        self.assertEqual((s.frames_back, s.outlier_filter), (4, 3))
+        self.assertEqual((s.scale_range, s.difference_gain), (False, 12))
+        self.assertEqual((s.gain_before_average, s.average_multiplier), (True, 2.5))
+        self.assertFalse(w.clip.isEnabled())
+        w.scaling.setCurrentText("Auto stretch")
+        self.assertTrue(w.clip.isEnabled())
+        for widget in (w.difference_gain, w.gain_before_average, w.average_multiplier):
+            self.assertFalse(widget.isEnabled())
+
+    def test_labview_flow_button_swaps_settings_and_restores_them(self):
+        """On applies the LabVIEW flow and a reference; off restores the user's.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.engine.update_settings(mode="Previous", noise_reduction=40, smoothing=5,
+                                    palette="Turbo", difference_gain=12, exposure_us=3000)
+        w._load_settings(self.engine.settings(), w.current.limits)
+        with mock.patch.object(self.engine, "request") as request:
+            w.labview_button.setChecked(True)
+        request.assert_called_once_with("reference")
+        s = self.engine.settings()
+        for key, value in qt_app.LABVIEW_FLOW.items():
+            self.assertEqual(getattr(s, key), value, key)
+        self.assertEqual((s.difference_gain, s.exposure_us), (42, 3000))
+        self.assertEqual(w.scaling.currentText(), "Fixed gain")
+        self.assertIn("LabVIEW flow on", " ".join(self.log.lines))
+        w.set_labview_flow(True)  # already on: nothing more is kept
+        w.smoothing.spin.setValue(7)  # a change made in the LabVIEW flow is dropped
+        w.labview_button.setChecked(False)
+        s = self.engine.settings()
+        self.assertEqual((s.mode, s.noise_reduction, s.smoothing, s.palette),
+                         ("Previous", 40, 5, "Turbo"))
+        self.assertEqual(s.difference_gain, 12)
+        self.assertIsNone(w.current.labview_saved)
+        self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
+        self.assertIn("LabVIEW flow off", " ".join(self.log.lines))
+        w.set_labview_flow(False)  # already off: settings stay
+        self.assertEqual(self.engine.settings().mode, "Previous")
 
     def test_zoom_slider_and_buttons_drive_the_view(self):
         """The zoom slider zooms the view and Fit and 1:1 buttons navigate.
@@ -1438,7 +1545,14 @@ class SettingsGuideTests(WindowTestCase):
             w.ref_refresh: ("drift", "Start at 0"),
             w.smoothing_combo: ("Gaussian", "Median", "5 px"),
             w.smoothing: ("fringe spacing", "Start at 3"),
-            w.scale_range: ("0 and 255", "Start on"),
+            w.scaling: ("Fixed gain", "Auto stretch", "0 and 255", "Start with Fixed gain"),
+            w.difference_gain: ("255", "Start at 42"),
+            w.gain_before_average: ("LabVIEW", "Start off"),
+            w.average_multiplier: ("Multiplier", "Start at 1"),
+            w.frames_back: ("Previous view", "Start at 1"),
+            w.outlier_filter: ("neighbourhood", "Start at 0"),
+            w.labview_button: ("LabVIEW ESPI 1.5", "Fixed gain", "your own settings",
+                               "analog camera"),
             w.invert: ("bright and dark", "Start off"),
             w.flip_button: ("left to right", "Start off"),
             w.clip: ("speckles", "Start at 0"),
@@ -4099,7 +4213,12 @@ class CaptureWindowTests(unittest.TestCase):
             self.assertIn(ANALOG_TIP, " ".join(widget.toolTip().split()))
             self.assertIn("Now:", widget.toolTip())
         self.assertFalse(window.single_field.isHidden())
-        self.assertTrue(window.single_field.isChecked())
+        self.assertFalse(window.single_field.isChecked())
+        self.assertEqual(window.scaling.currentText(), "Fixed gain")
+        self.assertTrue(window.difference_gain.isEnabled())
+        self.assertFalse(window.clip.isEnabled())
+        self.assertTrue(window.labview_button.isChecked())  # on by default
+        self.assertEqual(window.mode_group.checkedButton().text(), "Reference")
         self.assertTrue(window.report_label.isHidden())
         window.show_channel(self.flir)
         for widget in (window.exposure, window.gain, window.fps):
@@ -4108,6 +4227,14 @@ class CaptureWindowTests(unittest.TestCase):
             self.assertNotIn("Simulated", widget.toolTip())
             self.assertIn("Now:", widget.toolTip())
         self.assertTrue(window.single_field.isHidden())
+        self.assertEqual(window.scaling.currentText(), "Auto stretch")
+        self.assertFalse(window.difference_gain.isEnabled())
+        self.assertTrue(window.clip.isEnabled())
+        self.assertFalse(window.labview_button.isChecked())
+        window.show_channel(self.usb)
+        window.labview_button.setChecked(False)  # back to the analog camera's own
+        s = self.usb.engine.settings()
+        self.assertEqual((s.mode, s.scale_range, s.auto_reference), ("Raw", False, False))
 
     def test_single_field_checkbox_updates_engine(self):
         """Unticking the field toggle switches the engine to full frames.
@@ -4115,10 +4242,10 @@ class CaptureWindowTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        self.window.single_field.setChecked(False)
-        self.assertFalse(self.usb.engine.settings().single_field)
         self.window.single_field.setChecked(True)
         self.assertTrue(self.usb.engine.settings().single_field)
+        self.window.single_field.setChecked(False)
+        self.assertFalse(self.usb.engine.settings().single_field)
 
     def test_unsupported_marker_in_camera_list(self):
         """Only the unrecognised webcam is marked; the laptop's own camera is absent.

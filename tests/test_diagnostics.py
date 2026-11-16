@@ -57,15 +57,23 @@ class SummaryTests(unittest.TestCase):
         Returns: None.
         """
         plain = diagnostics.settings_summary(Settings())
-        self.assertIn("mode=Raw", plain)
+        self.assertIn("mode=Raw frames_back=1", plain)
+        self.assertIn("outlier_filter=off", plain)
+        self.assertIn("scaling=stretch clip 0%", plain)
         self.assertIn("noise_reduction=0", plain)
         self.assertIn("average=1 block", plain)
         self.assertIn("smoothing=off", plain)
         self.assertIn("exposure=8000us gain=0dB fps=30 clahe=on", plain)
         busy = diagnostics.settings_summary(Settings(
             mode="Previous", noise_reduction=40, average=8, rolling=True,
-            smoothing=5, smoothing_method="Median", clahe=False))
-        self.assertIn("mode=Previous noise_reduction=40", busy)
+            smoothing=5, smoothing_method="Median", clahe=False, frames_back=4,
+            outlier_filter=3, scale_range=False, difference_gain=6))
+        self.assertIn("mode=Previous frames_back=4 noise_reduction=40", busy)
+        self.assertIn("outlier_filter=3px", busy)
+        self.assertIn("scaling=gain x6 exposure", busy)
+        ordered = diagnostics.settings_summary(Settings(
+            scale_range=False, gain_before_average=True, average_multiplier=2.5))
+        self.assertIn("scaling=gain x42 before average, multiplier x2.5", ordered)
         self.assertIn("average=8 rolling", busy)
         self.assertIn("smoothing=Median 5", busy)
         self.assertIn("clahe=off", busy)

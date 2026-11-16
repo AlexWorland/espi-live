@@ -7,10 +7,16 @@ import unittest
 
 import numpy as np
 
-from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_DENOISE_STRENGTH,
-                                  DemoSource, ESPIProcessor, denoise_strength,
-                                  normalize_min_max, single_field,
-                                  stretch_contrast, watermark_demo)
+from espi_live.processing import (MAX_BRIGHTNESS_GAIN, MAX_DENOISE_PERCENT,
+                                  MAX_DENOISE_STRENGTH, MAX_FRAMES_BACK,
+                                  NOISE_MARGIN, PEAK_SLICES, DemoSource,
+                                  ESPIProcessor, NoiseCalibration, PeakHold,
+                                  RangeTracker, apply_gain, apply_levels,
+                                  denoise_strength, display_lut,
+                                  even_out_brightness, local_normalize,
+                                  normalize_min_max, reject_outliers,
+                                  single_field, stretch_contrast,
+                                  stretch_levels, watermark_demo)
 
 
 class NormalizeTests(unittest.TestCase):
@@ -320,6 +326,207 @@ class DemoTests(unittest.TestCase):
             marked = watermark_demo(image)
             self.assertFalse(image.any())
             self.assertTrue(marked.any())
+
+
+class LabviewFlowTests(unittest.TestCase):
+    """Fixed gain, the outlier filter, frames back and scaled averages."""
+
+    def test_apply_gain_saturates_and_leaves_unit_gain_alone(self):
+        """Gain multiplies, rounds and stops at 255; 1.0 returns the input.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.array([[0, 3, 40, 200]], dtype=np.uint8)
+        self.assertIs(apply_gain(image, 1.0), image)
+        self.assertEqual(apply_gain(image, 8).tolist(), [[0, 24, 255, 255]])
+        self.assertEqual(apply_gain(image, 1.5).tolist(), [[0, 4, 60, 255]])
+
+    def test_reject_outliers_replaces_only_spikes(self):
+        """A lone spike becomes the neighbourhood mean; flat and smooth areas stay.
+
+        Args: None.
+        Returns: None.
+        """
+        flat = np.full((9, 9), 20, dtype=np.uint8)
+        self.assertIs(reject_outliers(flat, 1), flat)
+        self.assertIs(reject_outliers(flat, 0), flat)
+        self.assertTrue(np.array_equal(reject_outliers(flat, 3), flat))
+        spiked = flat.copy()
+        spiked[4, 4] = 200
+        result = reject_outliers(spiked, 3)
+        self.assertEqual(int(result[4, 4]), 40)  # mean of eight 20s and one 200
+        self.assertEqual(int(result[0, 0]), 20)
+        self.assertEqual(int(spiked[4, 4]), 200)  # the input is not changed
+        ramp = np.tile(np.arange(0, 90, 10, dtype=np.uint8), (9, 1))
+        self.assertTrue(np.array_equal(reject_outliers(ramp, 4)[:, 2:-2],
+                                       ramp[:, 2:-2]))  # even width made odd
+
+    def test_previous_compares_with_the_frame_n_back(self):
+        """Frames back picks the earlier frame and refills after a change.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        frames = [np.full((2, 2), value, dtype=np.uint8) for value in (0, 10, 30, 60)]
+        outputs = [int(processor.difference(frame, "Previous", 2)[0, 0])
+                   for frame in frames]
+        self.assertEqual(outputs, [0, 0, 30, 50])
+        self.assertEqual(int(processor.difference(frames[0], "Previous", 1)[0, 0]), 60)
+        self.assertEqual(processor.history.maxlen, 1)
+        processor.difference(frames[0], "Previous", 99)
+        self.assertEqual(processor.history.maxlen, MAX_FRAMES_BACK)
+        processor.difference(np.zeros((3, 3), dtype=np.uint8), "Previous", 2)
+        self.assertEqual(len(processor.history), 1)  # a new size starts over
+        processor.reset_previous()
+        self.assertEqual(len(processor.history), 0)
+
+    def test_scaled_block_average_rounds_and_saturates(self):
+        """With a scale, the mean is multiplied, rounded and clipped to 255.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        one = np.full((2, 2), 1, dtype=np.uint8)
+        two = np.full((2, 2), 2, dtype=np.uint8)
+        self.assertIs(processor.average(one, 1, 3.0), one)
+        self.assertIsNone(processor.average(one, 2, 3.0))
+        self.assertEqual(int(processor.average(two, 2, 3.0)[0, 0]), 4)  # 1.5 x 3 = 4.5
+        self.assertIsNone(processor.average(two, 2, 200.0))
+        self.assertEqual(int(processor.average(two, 2, 200.0)[0, 0]), 255)
+
+    def test_scaled_rolling_average(self):
+        """A rolling average can be scaled; count 1 returns the input.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        image = np.full((2, 2), 10, dtype=np.uint8)
+        self.assertIs(processor.rolling_average(image, 1, 2.0), image)
+        self.assertEqual(int(processor.rolling_average(image, 4, 2.0)[0, 0]), 20)
+        self.assertEqual(int(processor.rolling_average(image, 4)[0, 0]), 10)
+
+
+class FringeEnhancementTests(unittest.TestCase):
+    """Sensitivity floor, steady range, noise calibration, peak hold and tone."""
+
+    def test_stretch_levels_and_apply_levels(self):
+        """Levels come from min/max or a clipped histogram; apply_levels maps them.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.arange(100, dtype=np.uint8).reshape(10, 10)
+        self.assertEqual(stretch_levels(image, 0), (0, 99))
+        low, high = stretch_levels(image, 5)
+        self.assertEqual((low, high), (5, 94))
+        mapped = apply_levels(image, 10, 20)
+        self.assertEqual((int(mapped[0, 5]), int(mapped[1, 5]), int(mapped[2, 5])),
+                         (0, 128, 255))
+        self.assertFalse(apply_levels(image, 20, 20).any())
+        self.assertEqual(int(apply_levels(image, 0, 510)[9, 9]), 50)  # floor above 255
+
+    def test_range_tracker_floor_and_slow_release(self):
+        """The floor widens a quiet range; a shrinking range is followed slowly.
+
+        Args: None.
+        Returns: None.
+        """
+        tracker = RangeTracker()
+        self.assertEqual(tracker.update(2, 5, 30, 0, 0.0), (2, 32))
+        self.assertEqual(tracker.update(0, 200, 0, 1.0, 1.0), (0, 200))  # grows at once
+        low, high = tracker.update(0, 100, 0, 1.0, 2.0)
+        self.assertTrue(100 < high < 200)  # shrinks part of the way
+        low, high = tracker.update(10, 100, 0, 1.0, 3.0)
+        self.assertTrue(0 < low < 10)
+        tracker.reset()
+        self.assertIsNone(tracker.high)
+        self.assertEqual(tracker.update(4, 8, 0, 1.0, 4.0), (4, 8))
+
+    def test_noise_calibration_suggests_a_floor(self):
+        """The floor is the median near-peak level times the margin.
+
+        Args: None.
+        Returns: None.
+        """
+        calibration = NoiseCalibration(now=0.0, duration_s=2.0)
+        self.assertIsNone(calibration.result())
+        self.assertFalse(calibration.done(1.0))
+        for level in (4, 6, 5):
+            calibration.add(np.full((10, 10), level, dtype=np.uint8))
+        self.assertTrue(calibration.done(2.0))
+        noise, floor = calibration.result()
+        self.assertEqual(noise, 5.0)
+        self.assertEqual(floor, int(5 * NOISE_MARGIN))
+
+    def test_peak_hold_keeps_the_maximum_within_the_window(self):
+        """A peak stays for the window, then drops out; 0 turns it off.
+
+        Args: None.
+        Returns: None.
+        """
+        hold = PeakHold()
+        quiet = np.zeros((4, 4), dtype=np.uint8)
+        spike = np.full((4, 4), 200, dtype=np.uint8)
+        self.assertIs(hold.update(quiet, 0, 0.0), quiet)
+        span = 3.0 / PEAK_SLICES
+        self.assertEqual(int(hold.update(spike, 3.0, 0.0)[0, 0]), 200)
+        self.assertEqual(int(hold.update(quiet, 3.0, span / 2)[0, 0]), 200)  # same slice
+        self.assertEqual(int(hold.update(quiet, 3.0, span * 2)[0, 0]), 200)  # closed slice
+        self.assertEqual(int(hold.update(quiet, 3.0, 4.0)[0, 0]), 0)  # aged out
+        self.assertEqual(int(hold.update(quiet, 3.0, 4.0 + span)[0, 0]), 0)
+        bigger = np.zeros((5, 5), dtype=np.uint8)
+        self.assertEqual(hold.update(bigger, 3.0, 5.0).shape, (5, 5))  # new size restarts
+
+    def test_local_normalize_centres_on_mid_grey(self):
+        """A flat image is mid-grey; a step is pushed apart; the floor limits gain.
+
+        Args: None.
+        Returns: None.
+        """
+        flat = np.full((20, 20), 40, dtype=np.uint8)
+        self.assertEqual(int(local_normalize(flat, 5)[10, 10]), 128)
+        step = np.zeros((20, 20), dtype=np.uint8)
+        step[:, 10:] = 20
+        result = local_normalize(step, 7)
+        self.assertLess(int(result[10, 9]), 128)
+        self.assertGreater(int(result[10, 10]), 128)
+        gentle = local_normalize(step, 7, floor=400)
+        self.assertLess(int(gentle[10, 10]) - 128, int(result[10, 10]) - 128)
+
+    def test_even_out_brightness_flattens_the_beam(self):
+        """Dim lit areas are boosted (capped); unlit areas go black.
+
+        Args: None.
+        Returns: None.
+        """
+        frame = np.full((64, 64), 200, dtype=np.uint8)
+        frame[:, :32] = 50
+        difference = np.full((64, 64), 10, dtype=np.uint8)
+        result = even_out_brightness(difference, frame, sigma=4)
+        self.assertGreater(int(result[32, 2]), int(result[32, 60]))
+        self.assertLessEqual(int(result.max()), int(10 * MAX_BRIGHTNESS_GAIN))
+        dark = np.zeros((16, 16), dtype=np.uint8)
+        self.assertFalse(even_out_brightness(np.full((16, 16), 9, dtype=np.uint8),
+                                             dark).any())
+
+    def test_display_lut_gain_contrast_and_brightness(self):
+        """Off returns None; gain, S-curve and brightness shape the table.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIsNone(display_lut())
+        self.assertEqual(int(display_lut(gain=2.0)[100]), 200)
+        self.assertEqual(int(display_lut(gain=2.0)[200]), 255)
+        curve = display_lut(contrast=50)
+        self.assertEqual((int(curve[0]), int(curve[255])), (0, 255))
+        self.assertLess(int(curve[64]), 64)
+        self.assertGreater(int(curve[192]), 192)
+        self.assertEqual(int(display_lut(brightness=10)[0]), 10)
 
 
 if __name__ == "__main__":
