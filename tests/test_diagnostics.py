@@ -113,6 +113,30 @@ class SettingsChangeLogTests(unittest.TestCase):
         self.assertIn("Noise reduction: off", log.lines)
         self.assertIn("Speckle filter: off", log.lines)
 
+    def test_every_measurement_and_tone_setting_has_a_line(self):
+        """The settings added with the sensitivity and LabVIEW work are followed too.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        changes = diagnostics.SettingsChangeLog(log, Settings(), settle_s=0.5)
+        busy = Settings(
+            frames_back=4, outlier_filter=3, difference_gain=6.0,
+            gain_before_average=True, average_multiplier=2.5, min_range=30,
+            threshold=4, steady_range_s=1.5, even_brightness=True,
+            peak_hold_s=0.5, normalize_window=31, brightness=10,
+            display_gain=1.5, contrast=20)
+        changes.observe(busy, 0.0)
+        changes.observe(busy, 1.0)
+        self.assertEqual(sorted(log.lines), sorted([
+            "Frames back: 4", "Outlier filter: 3 px", "Difference gain: x6",
+            "Gain before averaging: on", "Average multiplier: x2.5",
+            "Sensitivity floor: 30 levels", "Noise threshold: 4 levels",
+            "Steady range: 1.5 s", "Even out beam brightness: on",
+            "Peak hold: 0.5 s", "Local normalization: 31 px",
+            "Brightness: 10", "Display gain: x1.5", "S-curve contrast: 20%"]))
+
     def test_flush_writes_waiting_changes_and_mark_logged_drops_them(self):
         """flush() writes an unsettled change; mark_logged() forgets them.
 
@@ -143,15 +167,23 @@ class SummaryTests(unittest.TestCase):
         Returns: None.
         """
         plain = diagnostics.settings_summary(Settings())
-        self.assertIn("mode=Raw", plain)
+        self.assertIn("mode=Raw frames_back=1", plain)
+        self.assertIn("outlier_filter=off", plain)
+        self.assertIn("scaling=stretch clip 0%", plain)
         self.assertIn("noise_reduction=0", plain)
         self.assertIn("average=1 block", plain)
         self.assertIn("smoothing=off", plain)
         self.assertIn("exposure=8000us gain=0dB fps=30 clahe=on", plain)
         busy = diagnostics.settings_summary(Settings(
             mode="Previous", noise_reduction=40, average=8, rolling=True,
-            smoothing=5, smoothing_method="Median", clahe=False))
-        self.assertIn("mode=Previous noise_reduction=40", busy)
+            smoothing=5, smoothing_method="Median", clahe=False, frames_back=4,
+            outlier_filter=3, scale_range=False, difference_gain=6))
+        self.assertIn("mode=Previous frames_back=4 noise_reduction=40", busy)
+        self.assertIn("outlier_filter=3px", busy)
+        self.assertIn("scaling=gain x6 exposure", busy)
+        ordered = diagnostics.settings_summary(Settings(
+            scale_range=False, gain_before_average=True, average_multiplier=2.5))
+        self.assertIn("scaling=gain x42 before average, multiplier x2.5", ordered)
         self.assertIn("average=8 rolling", busy)
         self.assertIn("smoothing=Median 5", busy)
         self.assertIn("clahe=off", busy)
@@ -163,17 +195,22 @@ class SummaryTests(unittest.TestCase):
         Returns: None.
         """
         plain = diagnostics.settings_summary(Settings())
-        self.assertEqual(plain, (
-            "mode=Raw noise_reduction=0 average=1 block smoothing=off "
-            "exposure=8000us gain=0dB fps=30 clahe=on ref_refresh=0s stretch=on "
-            "clip=0% gamma=1 palette=Gray invert=off flip=off"))
+        self.assertTrue(plain.endswith(
+            "clahe=on ref_refresh=0s sensitivity_floor=0 noise_threshold=0 "
+            "steady_range=0s even_brightness=off peak_hold=0s local_norm=0px "
+            "gamma=1 brightness=0 display_gain=1 contrast=0% palette=Gray "
+            "invert=off flip=off"))
         busy = diagnostics.settings_summary(Settings(
             ref_refresh_s=2.0, scale_range=False, clip_percent=3.5, gamma=2.1,
             palette="Turbo", invert=True, flip_horizontal=True,
-            single_field=True), interlaced=True)
+            single_field=True, min_range=30, threshold=4, steady_range_s=1.5,
+            even_brightness=True, peak_hold_s=0.5, normalize_window=31,
+            brightness=10, display_gain=1.5, contrast=20), interlaced=True)
         self.assertTrue(busy.endswith(
-            "clahe=on ref_refresh=2s stretch=off clip=3.5% gamma=2.1 "
-            "palette=Turbo invert=on single_field=on flip=on"))
+            "clahe=on ref_refresh=2s sensitivity_floor=30 noise_threshold=4 "
+            "steady_range=1.5s even_brightness=on peak_hold=0.5s "
+            "local_norm=31px gamma=2.1 brightness=10 display_gain=1.5 "
+            "contrast=20% palette=Turbo invert=on single_field=on flip=on"))
         self.assertNotIn("single_field", diagnostics.settings_summary(
             Settings(single_field=True)))  # progressive sources: no meaning
         self.assertIn("single_field=off", diagnostics.settings_summary(

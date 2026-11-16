@@ -97,14 +97,32 @@ def settings_summary(settings, interlaced=False):
     averaging = f"{settings.average}{' rolling' if settings.rolling else ' block'}"
     smoothing = (f"{settings.smoothing_method} {settings.smoothing}"
                  if settings.smoothing > 1 else "off")
+    if settings.scale_range:
+        scaling = f"stretch clip {settings.clip_percent:g}%"
+    elif settings.gain_before_average:
+        scaling = (f"gain x{settings.difference_gain:g} before average, "
+                   f"multiplier x{settings.average_multiplier:g}")
+    else:
+        scaling = f"gain x{settings.difference_gain:g}"
+    outliers = (f"{settings.outlier_filter}px" if settings.outlier_filter > 1
+                else "off")
     fields = (f"ref_refresh={settings.ref_refresh_s:g}s "
-              f"stretch={on_off(settings.scale_range)} "
-              f"clip={settings.clip_percent:g}% gamma={settings.gamma:g} "
+              f"sensitivity_floor={settings.min_range} "
+              f"noise_threshold={settings.threshold} "
+              f"steady_range={settings.steady_range_s:g}s "
+              f"even_brightness={on_off(settings.even_brightness)} "
+              f"peak_hold={settings.peak_hold_s:g}s "
+              f"local_norm={settings.normalize_window}px "
+              f"gamma={settings.gamma:g} brightness={settings.brightness} "
+              f"display_gain={settings.display_gain:g} "
+              f"contrast={settings.contrast:g}% "
               f"palette={settings.palette} invert={on_off(settings.invert)} ")
     if interlaced:
         fields += f"single_field={on_off(settings.single_field)} "
-    return (f"mode={settings.mode} noise_reduction={settings.noise_reduction:g} "
-            f"average={averaging} smoothing={smoothing} "
+    return (f"mode={settings.mode} frames_back={settings.frames_back} "
+            f"noise_reduction={settings.noise_reduction:g} "
+            f"outlier_filter={outliers} average={averaging} smoothing={smoothing} "
+            f"scaling={scaling} "
             f"exposure={settings.exposure_us:g}us gain={settings.gain_db:g}dB "
             f"fps={settings.fps:g} clahe={on_off(settings.clahe)} "
             f"{fields}flip={on_off(settings.flip_horizontal)}")
@@ -133,12 +151,30 @@ def change_texts(settings):
                                    if settings.ref_refresh_s > 0 else "off"),
         "Speckle filter": (f"{settings.smoothing_method} {settings.smoothing} px"
                            if settings.smoothing > 1 else "off"),
+        "Frames back": f"{settings.frames_back}",
+        "Outlier filter": (f"{settings.outlier_filter} px"
+                           if settings.outlier_filter > 1 else "off"),
         "Stretch": on_off(settings.scale_range),
         "Stretch clip": f"{settings.clip_percent:g}%",
+        "Difference gain": f"x{settings.difference_gain:g}",
+        "Gain before averaging": on_off(settings.gain_before_average),
+        "Average multiplier": f"x{settings.average_multiplier:g}",
+        "Sensitivity floor": f"{settings.min_range} levels",
+        "Noise threshold": f"{settings.threshold} levels",
+        "Steady range": (f"{settings.steady_range_s:g} s"
+                         if settings.steady_range_s > 0 else "off"),
+        "Even out beam brightness": on_off(settings.even_brightness),
+        "Peak hold": (f"{settings.peak_hold_s:g} s"
+                      if settings.peak_hold_s > 0 else "off"),
+        "Local normalization": (f"{settings.normalize_window} px"
+                                if settings.normalize_window > 0 else "off"),
         "Invert": on_off(settings.invert),
         "Flip horizontal": on_off(settings.flip_horizontal),
         "Palette": settings.palette,
         "Gamma": f"{settings.gamma:g}",
+        "Brightness": f"{settings.brightness}",
+        "Display gain": f"x{settings.display_gain:g}",
+        "S-curve contrast": f"{settings.contrast:g}%",
         "CLAHE": on_off(settings.clahe),
     }
 

@@ -1,19 +1,59 @@
 # Changelog
 
-## 2026-11-14 — The log records every display setting
+## 2026-11-15 — The log records every display setting
 
 ### Previous state
 
-- Diagnostic lines (blur, frame gaps, lost frames) ended with the settings in force, but only mode, noise reduction, averaging, speckle filter, exposure, gain, frame rate and CLAHE. Reference auto-refresh, stretch and its clip, gamma, palette, invert, flip and the single-field option were missing, so a log could not say whether the reference was being retaken while the plate vibrated.
-- Nothing recorded the settings a session started with, and stretch, clip, gamma, palette, invert, flip, CLAHE, noise reduction, averaging and the speckle filter were logged only at DEBUG level when they changed.
+- Diagnostic lines (blur, frame gaps, lost frames) ended with the settings in force, but only some of the settings. Reference auto-refresh, gamma, palette, invert, flip, the single-field option and the settings added since (sensitivity floor, noise threshold, steady range, beam evening, peak hold, local normalization, display brightness, gain and contrast) were missing, so a log could not say whether the reference was being retaken while the plate vibrated.
+- Nothing recorded the settings a session started with, and the display settings were logged only at DEBUG level when they changed.
 - Dragging the Ref. refresh slider wrote a `Reference auto-refresh:` line for every step, twenty or more per drag.
 
 ### Current state
 
-- The settings suffix on diagnostic lines lists every setting that changes the displayed image. The existing fields keep their names and order; the new ones follow them: `... clahe=on ref_refresh=0s stretch=on clip=3.5% gamma=2.1 palette=Gray invert=off flip=off`. `single_field=on|off` appears before `flip` only for an interlaced source (the analog camera through the USB-Live2), the only case in which it changes the image.
+- The settings suffix on diagnostic lines lists every setting that changes the displayed image. The fields that were already there (mode, frames back, noise reduction, outlier filter, averaging, speckle filter, scaling, exposure, gain, frame rate, CLAHE) keep their names and order; the others follow them: `... clahe=on ref_refresh=0s sensitivity_floor=30 noise_threshold=0 steady_range=0s even_brightness=off peak_hold=0s local_norm=0px gamma=2.1 brightness=0 display_gain=1 contrast=0% palette=Gray invert=off flip=off`. Stretch and its clip are part of `scaling=`. `single_field=on|off` appears before `flip` only for an interlaced source (the analog camera through the USB-Live2), the only case in which it changes the image.
 - One `Settings at start:` line with every setting is written when a camera or the demo starts streaming, `Settings at live start:` after switching from demo to a camera, and `Settings after preset <name>:` after **Live preview** or **Measurement** is applied.
-- A changed setting gets one INFO line (`Gamma: 2.1`, `Stretch clip: 3.5%`, `Reference auto-refresh: every 2.0 s`, `Palette: Turbo`, `Exposure: 12000 us`, ...) once its value has stayed the same for 0.75 s, so a slider drag writes its final value only. A change still settling is written at once when a frame is saved or a recording starts, so the log always shows what they were made with. `View:` and `Fields:` lines are written immediately as before.
+- A changed setting gets one INFO line (`Gamma: 2.1`, `Stretch clip: 3.5%`, `Peak hold: 0.5 s`, `Sensitivity floor: 30 levels`, `Frames back: 4`, `Reference auto-refresh: every 2.0 s`, `Palette: Turbo`, `Exposure: 12000 us`, ...) once its value has stayed the same for 0.75 s, so a slider drag writes its final value only. A change still settling is written at once when a frame is saved or a recording starts, so the log always shows what they were made with. `View:` and `Fields:` lines are written immediately as before.
 - Processing and defaults are unchanged; only the log is.
+
+## 2026-11-15 — Sensitivity, peak hold and display tone controls (PR #61)
+
+### Previous state
+
+- With the analog XC-ST50, Previous and Reference looked like full-contrast grain: a still scene's few grey levels of noise were stretched to 0–255, and the stretch range jumped from frame to frame.
+- A driven drum barely showed in Previous view, because each frame's exposure averages many vibration cycles.
+- The Controls panel was one long column.
+
+### Current state
+
+- **Sensitivity floor** (grey levels): Auto stretch and Local normalization never span fewer, so noise stays dark. Video-capture devices start at 30; other sources at 0, as before. **Calibrate noise (object still)** measures a still scene for 2 s and sets the floor to twice its peak.
+- **Noise threshold**: raw differences below it become 0 right after the subtraction.
+- **Steady range**: Auto stretch's range shrinks only gradually, so the contrast stops pumping.
+- **Peak hold window**: each pixel shows its largest difference within the last N seconds, which makes a steady vibration build up in Previous view.
+- **Local normalization** and **Even out beam brightness** (both off by default).
+- **Display**: **Brightness**, **Gain** and **S-curve contrast** in one lookup table, in every view, before the palette; saved frames and recordings match.
+- Each Controls section collapses from its heading, and the state is remembered.
+- Everything new is off by default except the analog sensitivity floor.
+
+## 2026-11-15 — The LabVIEW flow for the Sony XC-ST50
+
+### Previous state
+
+- The analog Sony XC-ST50 showed one interlaced field doubled to full height, which threw away half of the rows.
+- Previous and Reference were always scaled by **Stretch to 0–255**, or not at all. With the XC-ST50's 3–5 grey levels of capture noise, the stretch turned a still scene into full-contrast grain.
+- Previous always compared with the frame just before. Smoothing (Gaussian or Median) ran only after averaging.
+- The LabVIEW program the lab used with this camera (ESPI 1.5) was not in the repository.
+
+### Current state
+
+- **Full frames by default** for interlaced cameras, as the LabVIEW VI used them. **Single field** is still there, now off.
+- **Scaling** chooses **Fixed gain** (each difference × **Difference gain**, 1–64, saturating at 255, as the VI's IMAQ Multiply did) or **Auto stretch** (the old stretch, with Stretch clip). The default Difference gain is 42×, the VI's saved Constant. The XC-ST50's own settings use Fixed gain; the Blackfly and demo mode keep Auto stretch.
+- **Gain before averaging (LabVIEW order)** applies the fixed gain to every frame and averages those, then multiplies the mean by **Average multiplier**, as the VI did. Off, the raw differences are averaged and the gain is applied once.
+- **Frames back** (ESPI measurement): Previous compares with the frame N back, so slow changes show instead of cancelling. The VI got the same effect by waiting between grabs.
+- **Outlier filter** (Fringe enhancement): on every difference frame before averaging, a pixel further from its neighbourhood's mean than the neighbourhood's spread becomes that mean (NI Vision's Lowpass rule, from the VI). Off by default.
+- **LabVIEW flow** (a toggle beside the presets) switches the displayed camera to the VI's processing with its saved defaults (decoded from the VI: Constant 42, Multiplier 1, BY FRAME, Average and Low Pass Filter off, no wait) and captures a reference, as the VI did at start; Reference view then captures one whenever it has none. With averaging on it sums N + 1 frames and divides by N, as the VI's loop does. **It is on by default for the XC-ST50.** Turning it off restores your own settings. Exposure, gain, frame rate, recording and the flip are left alone.
+- The log's settings line names the scaling, frames back and outlier filter.
+- `docs/labview/` holds the VI, its block diagram and a decoded description of its flow, published with permission.
+- **Note for the Blackfly:** nothing changes until you pick Fixed gain or LabVIEW flow. A setting of the old "Stretch to 0–255" off now means Fixed gain; at a Difference gain of 1 it shows the raw difference, as before.
 
 ## 2026-11-14 — Interface size slider
 
