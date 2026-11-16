@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-15 — The log records every display setting
+
+### Previous state
+
+- Diagnostic lines (blur, frame gaps, lost frames) ended with the settings in force, but only some of the settings. Reference auto-refresh, gamma, palette, invert, flip, the single-field option and the settings added since (sensitivity floor, noise threshold, steady range, beam evening, peak hold, local normalization, display brightness, gain and contrast) were missing, so a log could not say whether the reference was being retaken while the plate vibrated.
+- Nothing recorded the settings a session started with, and the display settings were logged only at DEBUG level when they changed.
+- Dragging the Ref. refresh slider wrote a `Reference auto-refresh:` line for every step, twenty or more per drag.
+
+### Current state
+
+- The settings suffix on diagnostic lines lists every setting that changes the displayed image. The fields that were already there (mode, frames back, noise reduction, outlier filter, averaging, speckle filter, scaling, exposure, gain, frame rate, CLAHE) keep their names and order; the others follow them: `... clahe=on ref_refresh=0s sensitivity_floor=30 noise_threshold=0 steady_range=0s even_brightness=off peak_hold=0s local_norm=0px gamma=2.1 brightness=0 display_gain=1 contrast=0% palette=Gray invert=off flip=off`. Stretch and its clip are part of `scaling=`. `single_field=on|off` appears before `flip` only for an interlaced source (the analog camera through the USB-Live2), the only case in which it changes the image.
+- One `Settings at start:` line with every setting is written when a camera or the demo starts streaming, `Settings at live start:` after switching from demo to a camera, and `Settings after preset <name>:` after **Live preview** or **Measurement** is applied.
+- A changed setting gets one INFO line (`Gamma: 2.1`, `Stretch clip: 3.5%`, `Peak hold: 0.5 s`, `Sensitivity floor: 30 levels`, `Frames back: 4`, `Reference auto-refresh: every 2.0 s`, `Palette: Turbo`, `Exposure: 12000 us`, ...) once its value has stayed the same for 0.75 s, so a slider drag writes its final value only. A change still settling is written at once when a frame is saved or a recording starts, so the log always shows what they were made with. `View:` and `Fields:` lines are written immediately as before.
+- Processing and defaults are unchanged; only the log is.
+
 ## 2026-11-15 — Sensitivity, peak hold and display tone controls (PR #61)
 
 ### Previous state

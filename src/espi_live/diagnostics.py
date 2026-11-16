@@ -9,7 +9,10 @@ a short episode can be told apart afterwards:
 - StreamCounterMonitor: the transport layer's own lost/dropped frame counters.
 - SharpnessMonitor: a cheap sharpness value, measured on the camera frame and
   again on the frame that is displayed, with the start and end of every drop.
-- settings_summary: the settings in force, attached to every episode line.
+- settings_summary: the settings in force, attached to every episode line
+  and written in full when streaming starts and when a preset is applied.
+- SettingsChangeLog: one line per changed setting once its value has
+  settled, so dragging a slider writes the final value, not every step.
 
 Everything here is GUI-free and camera-free. Each monitor is told the time by
 its caller, never reads a clock, and writes only WARNING lines for episodes
@@ -31,6 +34,7 @@ SHARPNESS_MIN_SAMPLES = 20  # no verdict before this many samples
 SHARPNESS_DROP = 0.6       # an episode starts below this share of typical
 SHARPNESS_RECOVER = 0.8    # and ends at or above this share
 DELIVERED_COUNTER = "StreamDeliveredFrameCount"
+SETTLE_S = 0.75            # a changed setting is logged once unchanged this long
 
 
 class Throttle:
@@ -70,10 +74,24 @@ class Throttle:
         return f" (+{held} more since the last line)" if held else ""
 
 
-def settings_summary(settings):
-    """Describe the settings that decide how a frame is filtered and shown.
+def on_off(flag):
+    """Spell a switch the way the log writes it.
 
-    Args: settings is an engine.Settings (any object with its fields).
+    Args: flag is any truthy or falsy value.
+    Returns: "on" or "off".
+    """
+    return "on" if flag else "off"
+
+
+def settings_summary(settings, interlaced=False):
+    """Describe every setting that decides how a frame is filtered and shown.
+
+    The first fields keep their names and order so older logs read the same;
+    later ones are appended after them.
+
+    Args: settings is an engine.Settings (any object with its fields);
+        interlaced is True when the source delivers interlaced frames, the
+        only case in which single_field changes the image and is listed.
     Returns: One line of text for the log.
     """
     averaging = f"{settings.average}{' rolling' if settings.rolling else ' block'}"
@@ -88,12 +106,143 @@ def settings_summary(settings):
         scaling = f"gain x{settings.difference_gain:g}"
     outliers = (f"{settings.outlier_filter}px" if settings.outlier_filter > 1
                 else "off")
+    fields = (f"ref_refresh={settings.ref_refresh_s:g}s "
+              f"sensitivity_floor={settings.min_range} "
+              f"noise_threshold={settings.threshold} "
+              f"steady_range={settings.steady_range_s:g}s "
+              f"even_brightness={on_off(settings.even_brightness)} "
+              f"peak_hold={settings.peak_hold_s:g}s "
+              f"local_norm={settings.normalize_window}px "
+              f"gamma={settings.gamma:g} brightness={settings.brightness} "
+              f"display_gain={settings.display_gain:g} "
+              f"contrast={settings.contrast:g}% "
+              f"palette={settings.palette} invert={on_off(settings.invert)} ")
+    if interlaced:
+        fields += f"single_field={on_off(settings.single_field)} "
     return (f"mode={settings.mode} frames_back={settings.frames_back} "
             f"noise_reduction={settings.noise_reduction:g} "
             f"outlier_filter={outliers} average={averaging} smoothing={smoothing} "
             f"scaling={scaling} "
             f"exposure={settings.exposure_us:g}us gain={settings.gain_db:g}dB "
-            f"fps={settings.fps:g} clahe={'on' if settings.clahe else 'off'}")
+            f"fps={settings.fps:g} clahe={on_off(settings.clahe)} "
+            f"{fields}flip={on_off(settings.flip_horizontal)}")
+
+
+def change_texts(settings):
+    """Describe each setting the change log follows, as it would be logged.
+
+    View and Fields are left out: the engine logs those at once, because
+    they reset the processing.
+
+    Args: settings is an engine.Settings (any object with its fields).
+    Returns: A dict from the line's label to its value text; two settings
+        with the same texts look the same on screen.
+    """
+    return {
+        "Exposure": f"{settings.exposure_us:g} us",
+        "Gain": f"{settings.gain_db:g} dB",
+        "Frame rate": f"{settings.fps:g} fps",
+        "Noise reduction": (f"{settings.noise_reduction:g}"
+                            if settings.noise_reduction > 0 else "off"),
+        "Averaging": (f"{settings.average} frames, "
+                      f"{'rolling' if settings.rolling else 'block'}"
+                      if settings.average > 1 else "off"),
+        "Reference auto-refresh": (f"every {settings.ref_refresh_s:.1f} s"
+                                   if settings.ref_refresh_s > 0 else "off"),
+        "Speckle filter": (f"{settings.smoothing_method} {settings.smoothing} px"
+                           if settings.smoothing > 1 else "off"),
+        "Frames back": f"{settings.frames_back}",
+        "Outlier filter": (f"{settings.outlier_filter} px"
+                           if settings.outlier_filter > 1 else "off"),
+        "Stretch": on_off(settings.scale_range),
+        "Stretch clip": f"{settings.clip_percent:g}%",
+        "Difference gain": f"x{settings.difference_gain:g}",
+        "Gain before averaging": on_off(settings.gain_before_average),
+        "Average multiplier": f"x{settings.average_multiplier:g}",
+        "Sensitivity floor": f"{settings.min_range} levels",
+        "Noise threshold": f"{settings.threshold} levels",
+        "Steady range": (f"{settings.steady_range_s:g} s"
+                         if settings.steady_range_s > 0 else "off"),
+        "Even out beam brightness": on_off(settings.even_brightness),
+        "Peak hold": (f"{settings.peak_hold_s:g} s"
+                      if settings.peak_hold_s > 0 else "off"),
+        "Local normalization": (f"{settings.normalize_window} px"
+                                if settings.normalize_window > 0 else "off"),
+        "Invert": on_off(settings.invert),
+        "Flip horizontal": on_off(settings.flip_horizontal),
+        "Palette": settings.palette,
+        "Gamma": f"{settings.gamma:g}",
+        "Brightness": f"{settings.brightness}",
+        "Display gain": f"x{settings.display_gain:g}",
+        "S-curve contrast": f"{settings.contrast:g}%",
+        "CLAHE": on_off(settings.clahe),
+    }
+
+
+class SettingsChangeLog:
+    """Log each changed setting once, after its value has settled.
+
+    A slider sends every step of a drag; logging each one buried the log
+    (twenty lines per drag). A change is written only when its value has
+    stayed the same for settle_s, or at once by flush() when something is
+    about to depend on it (a saved frame, a recording).
+    """
+
+    def __init__(self, log, settings, settle_s=SETTLE_S):
+        """Start from settings that need no line.
+
+        Args: log is an AppLog or PrefixedLog; settings is the starting
+            engine.Settings; settle_s is how long a value must stay unchanged.
+        Returns: None.
+        """
+        self.log = log
+        self.settle_s = settle_s
+        self.logged = change_texts(settings)
+        self.pending = {}  # label -> (value text, time it took that value)
+
+    def observe(self, settings, now):
+        """Compare the settings with what was logged, writing settled changes.
+
+        Args: settings is the engine.Settings in force; now is a monotonic
+            time in seconds.
+        Returns: None.
+        """
+        for label, text in change_texts(settings).items():
+            waiting = self.pending.get(label)
+            if text == self.logged[label]:
+                self.pending.pop(label, None)  # changed back: nothing to say
+            elif waiting is None or waiting[0] != text:
+                self.pending[label] = (text, now)  # still moving: restart
+            elif now - waiting[1] >= self.settle_s:
+                self._write(label, text)
+
+    def flush(self):
+        """Write every change still waiting to settle.
+
+        Args: None.
+        Returns: None.
+        """
+        for label, (text, _since) in list(self.pending.items()):
+            self._write(label, text)
+
+    def mark_logged(self, settings):
+        """Treat settings as already logged, after a full settings line.
+
+        Args: settings is the engine.Settings that line described.
+        Returns: None; changes still waiting are dropped.
+        """
+        self.logged = change_texts(settings)
+        self.pending.clear()
+
+    def _write(self, label, text):
+        """Write one change and remember it as logged.
+
+        Args: label and text are an entry of change_texts.
+        Returns: None.
+        """
+        self.log.write(f"{label}: {text}")
+        self.logged[label] = text
+        self.pending.pop(label, None)
 
 
 def sharpness(image):

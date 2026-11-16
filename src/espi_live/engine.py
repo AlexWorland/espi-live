@@ -28,8 +28,9 @@ import cv2
 import numpy as np
 
 from espi_live import error_reports, sources
-from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
-                                   StreamCounterMonitor, settings_summary)
+from espi_live.diagnostics import (FrameGapMonitor, SettingsChangeLog,
+                                   SharpnessMonitor, StreamCounterMonitor,
+                                   settings_summary)
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.capture_models import adapter_for
@@ -267,6 +268,7 @@ class Engine:
         self.events = queue.SimpleQueue()
         self._settings = default_settings(info)
         self._settings_lock = threading.Lock()
+        self._changes = SettingsChangeLog(log, self._settings)  # worker only
         self._actions = queue.SimpleQueue()
         self._calibration = None  # a running NoiseCalibration (worker thread only)
         self._saves_waiting = 0  # frame saves queued or being written
@@ -454,8 +456,10 @@ class Engine:
             and frozen_at, its datetime), "reference", "reset_previous",
             "reset_average", "calibrate_noise" (measure a still scene's
             difference noise for 2 s, then set min_range and send a
-            "noise_calibrated" event) or "switch_live" (the "switched_live"
-            event then carries every detected CameraInfo).
+            "noise_calibrated" event), "switch_live" (the "switched_live"
+            event then carries every detected CameraInfo) or "log_settings"
+            (payload label: writes "<label>: <every setting>" once the worker
+            has the settings changed before this call, as after a preset).
         Returns: None.
         """
         if action == "save":
@@ -581,7 +585,6 @@ class Engine:
         resulting_fps = None
         last_range_time = 0.0
         last_rolling = applied.rolling
-        last_refresh = applied.ref_refresh_s
         last_single_field = applied.single_field
         last_readback = time.monotonic()
         last_error_log = 0.0
@@ -607,9 +610,10 @@ class Engine:
             Returns: One line of text.
             """
             rate = "n/a" if resulting_fps is None else f"{resulting_fps:.1f}"
-            return f"{settings_summary(s)} camera_fps={rate}"
+            return f"{self._summary(s)} camera_fps={rate}"
         self.log.write("Streaming. Raw shows camera pixels with gamma only; "
                        "Previous and Reference show ESPI differences.")
+        self._log_settings("Settings at start")
 
         while not self._stop.is_set():
             s = self.settings()
@@ -646,10 +650,7 @@ class Engine:
                 self.log.write("Fields: single field (even rows, line-doubled)"
                                if s.single_field else "Fields: full interlaced frames")
                 last_single_field = s.single_field
-            if s.ref_refresh_s != last_refresh:
-                self.log.write(f"Reference auto-refresh: every {s.ref_refresh_s:.1f} s"
-                               if s.ref_refresh_s > 0 else "Reference auto-refresh: off")
-                last_refresh = s.ref_refresh_s
+            self._changes.observe(s, time.monotonic())
             self._set_status(hint=(
                 "Raw view: camera pixels, with gamma; no stretch or palette"
                 if s.mode == "Raw" else
@@ -848,6 +849,27 @@ class Engine:
                 if demo_next < now - interval:
                     demo_next = now  # fell behind; restart the schedule
                 self._stop.wait(max(0.0, demo_next - now))
+        self._changes.flush()  # a change made just before closing still counts
+
+    def _summary(self, settings):
+        """Describe the settings for this engine's source.
+
+        Args: settings is an engine Settings.
+        Returns: The diagnostics.settings_summary line; single_field is listed
+            only while the source is interlaced.
+        """
+        camera = self.camera
+        return settings_summary(settings, camera is not None and camera.interlaced)
+
+    def _log_settings(self, label):
+        """Write every setting in one line; worker thread only.
+
+        Args: label starts the line, for example "Settings at start".
+        Returns: None; the change log then counts these values as logged.
+        """
+        settings = self.settings()
+        self.log.write(f"{label}: {self._summary(settings)}")
+        self._changes.mark_logged(settings)
 
     def _feed_recorder(self, s, signature, record_signature, packet, resulting_fps):
         """Start a recording or submit the newest frame to the active one.
@@ -863,6 +885,7 @@ class Engine:
         if self._recorder is not None:
             self._recorder.submit(packet.render())
             return record_signature
+        self._changes.flush()  # the log shows what the recording was made with
         source_fps = resulting_fps or s.fps
         frames_per_image = 1 if signature[2] else signature[1]  # rolling: every frame
         fps = min(30.0, max(1.0, source_fps / frames_per_image))
@@ -936,6 +959,7 @@ class Engine:
             except queue.Empty:
                 return processor, frame
             if action == "save":
+                self._changes.flush()  # the log shows what the frame was made with
                 try:
                     packet = payload.get("packet")  # a frozen display's packet
                     if packet is None:
@@ -967,6 +991,8 @@ class Engine:
                     self.log.write("Captured reference frame.")
             elif action == "switch_live" and self.demo:
                 processor, frame = self._switch_live(processor, frame)
+            elif action == "log_settings":
+                self._log_settings(payload["label"])
 
     def _switch_live(self, processor, frame):
         """Try to replace synthetic video with the first FLIR camera.
@@ -998,4 +1024,5 @@ class Engine:
         self.events.put(("switched_live", sources.detect_cameras(self.log)))
         self.log.write("LIVE CAPTURE ACTIVE: camera connected; demo ended.")
         self.log.write("Recording stopped for the source change; restart it if needed.")
+        self._log_settings("Settings at live start")
         return ESPIProcessor(), None

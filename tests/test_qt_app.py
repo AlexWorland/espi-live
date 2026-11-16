@@ -1595,6 +1595,11 @@ class SettingsGuideTests(WindowTestCase):
         self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
         self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
         self.assertIn("Preset applied: Live preview", self.log.lines)
+        queued = []
+        while not self.engine._actions.empty():
+            queued.append(self.engine._actions.get_nowait())
+        self.assertIn(("log_settings", {"label": "Settings after preset Live preview"}),
+                      queued)  # the worker writes every setting it then uses
         self.assertIn("exposure", buttons["Live preview"].toolTip())
 
     def test_guide_lists_the_pipeline_and_applies_a_preset(self):

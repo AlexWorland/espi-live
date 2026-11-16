@@ -3128,6 +3128,8 @@ class MainWindow(QMainWindow):
         self.engine.update_settings(**PROCESSING_PRESETS[name])
         self._load_settings(self.engine.settings(), self.current.limits)
         self.log.write(f"Preset applied: {name}")
+        # the worker writes every setting it now runs with, in one line
+        self.engine.request("log_settings", label=f"Settings after preset {name}")
 
     def _show_settings_guide(self):
         """Open the guide to the processing controls and the two presets.
