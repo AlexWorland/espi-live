@@ -27,6 +27,7 @@ import sys
 import textwrap
 import time
 import traceback
+from dataclasses import asdict
 from datetime import datetime
 
 import cv2
@@ -46,15 +47,19 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
                                QMessageBox,
                                QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
-                               QSizePolicy, QSlider, QStackedWidget, QStyle, QTextBrowser, QTextEdit, QToolBar, QToolTip,
+                               QSizePolicy, QSlider, QStackedWidget, QStyle, QTextBrowser,
+                               QTextEdit, QToolBar, QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
                        source_code, tips, ui_scale, updater)
 from espi_live.channels import Channel, demo_channels, open_camera_channels
+from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
-from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_REFERENCE_FRAMES, PALETTES,
+from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, MAX_DENOISE_PERCENT,
+                                  MAX_FRAMES_BACK, MAX_REFERENCE_FRAMES, PALETTES,
+                                  SCALING_MODES,
                                   SMOOTHING_METHODS, VIEW_MODES, palette_rgb_table)
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
@@ -67,17 +72,21 @@ QWIDGETSIZE_MAX = 16777215  # Qt's "no maximum size" (not exported by PySide6)
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
 # Gamma stays its own Display control: it is a curve, not a second stretch.
 GAMMA_TIP = (
-    "Shifts mid-tones after Stretch to 0–255, in Raw, Previous and Reference. "
-    "Stretch is a straight remap of this frame's dark-to-bright range "
-    "(contrast); gamma is a curve on top of that. Below 1.0 darkens mid-tones, "
+    "Shifts mid-tones after Scaling (Fixed gain or Auto stretch), in Raw, "
+    "Previous and Reference. Scaling is a straight remap of the difference "
+    "values (contrast); gamma is a curve on top of that. Below 1.0 darkens mid-tones, "
     "above 1.0 brightens them. With a good stretch, start at 1.0."
 )
-STRETCH_TIP = (
-    "Map each difference frame's darkest and brightest pixels, after Stretch "
-    "clip, to 0 and 255 so fringes fill the display. This is a straight "
-    "remap (contrast), not gamma. Off keeps the difference values as they "
-    "are. The status bar shows both ranges. On by default. Previous and "
-    "Reference only; Raw is not stretched."
+SCALING_TIP = (
+    "How difference values become screen brightness. Fixed gain multiplies "
+    "every difference by Difference gain and shows anything above 255 as "
+    "white, as the LabVIEW VI did: a still scene's few levels of noise stay "
+    "dark and the brightness does not pump. Auto stretch maps each frame's "
+    "darkest and brightest pixels, after Stretch clip, to 0 and 255, which "
+    "fills the display but also blows a quiet frame's noise up to full "
+    "contrast. Both are straight remaps (contrast), not gamma. The status bar "
+    "shows the input and scaled ranges. Analog cameras start in Fixed gain, "
+    "others in Auto stretch. Previous and Reference only; Raw is not scaled."
 )
 GL_TEXTURE_2D = 0x0DE1
 GL_R8 = 0x8229
@@ -276,10 +285,15 @@ FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 # least width the tip keeps beside it. The hint is information and gets its whole
 # sentence; the tip takes what is left and is shortened with an ellipsis.
 LONGEST_HINT = "ESPI difference view; min/max range is before gamma and palette"
+# QSettings key prefix; "<prefix><section heading>" is true while that
+# Controls section is collapsed.
+SECTION_SETTING_PREFIX = "controls/collapsed/"
 MESSAGE_TIP_WIDTH = 120
 # Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
-PIPELINE = ("noise reduction → difference → average → speckle filter → "
-            "stretch → invert → gamma/CLAHE → palette")
+PIPELINE = ("noise reduction → difference (N frames back) → noise threshold → "
+            "beam brightness → outlier filter → average → speckle filter → "
+            "peak hold → fixed gain, stretch or local normalization → invert → "
+            "gamma/CLAHE → brightness, gain and contrast → palette")
 # Opt-in processing setups. Exposure, gain, frame rate and recording stay put.
 PROCESSING_PRESETS = {
     "Live preview": {
@@ -290,7 +304,10 @@ PROCESSING_PRESETS = {
         "ref_refresh_s": 0.0,
         "smoothing": 0,
         "smoothing_method": "Gaussian",
+        "frames_back": 1,
+        "outlier_filter": 0,
         "scale_range": True,
+        "gain_before_average": False,
         "clip_percent": 0.0,
         "invert": False,
         "palette": "Gray",
@@ -305,7 +322,10 @@ PROCESSING_PRESETS = {
         "ref_refresh_s": 2.0,
         "smoothing": 3,
         "smoothing_method": "Median",
+        "frames_back": 1,
+        "outlier_filter": 0,
         "scale_range": True,
+        "gain_before_average": False,
         "clip_percent": 0.5,
         "invert": False,
         "palette": "Gray",
@@ -313,6 +333,15 @@ PROCESSING_PRESETS = {
         "clahe": True,
     },
 }
+LABVIEW_FLOW_TIP = (
+    "Switch between your own settings and the LabVIEW ESPI 1.5 flow: Reference "
+    "view with a reference captured now (and again whenever Reference view has "
+    "none), full frames, Fixed gain applied to each frame before averaging, and "
+    "no noise reduction, speckle filter, CLAHE or invert. Difference gain, "
+    "exposure, gain, frame rate and recording stay as they are. On by default "
+    "for an analog camera. Turning it off puts back your own settings; changes "
+    "made while it is on are dropped."
+)
 PRESET_TIPS = {
     "Live preview": "Watch fringes form while you align the setup: Previous view, "
                     "no averaging, no noise reduction, speckle filter off. "
@@ -326,7 +355,8 @@ SETTINGS_GUIDE = f"""A typical ESPI measurement starts with one of the two prese
 Live preview — while you aim the camera and check that fringes form.
   View: Previous. Average N: 1 (off). Rolling average: off.
   Noise reduction: 0. Speckle filter: off. Ref. refresh: 0.
-  Stretch to 0–255: on. Palette: Gray. Gamma: 1.0. CLAHE: off.
+  Frames back: 1. Outlier filter: off.
+  Scaling: Auto stretch. Palette: Gray. Gamma: 1.0. CLAHE: off.
   Switch the view to Raw to frame the object. Raw skips difference processing but still applies display gamma.
 
 Measurement — a still object, compared with one reference.
@@ -336,13 +366,15 @@ Measurement — a still object, compared with one reference.
   Ref. frames: 1 for a quiet camera; 8–30 for a noisy or analog one, so the reference's own noise is not frozen into every difference. Press C to see the reference beside the current frame and the difference.
   Ref. refresh: 2 s. That cancels slow drift (air, heat). Motion slower than the refresh disappears; use 0 and press F when you need one fixed before/after.
   Noise reduction: 0. Raise it only when the camera is noisy and the object is still, and set it before pressing F: the reference keeps the setting it was taken at, and a change afterwards leaves a frozen grain until you press F again.
-  Stretch to 0–255: on, clip 0.5% so a few speckles don't flatten the contrast.
+  Scaling: Auto stretch, clip 0.5% so a few speckles don't flatten the contrast.
   Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
 
 Processing order (Previous and Reference views):
   {PIPELINE}
 
-Raw view applies noise reduction and display gamma, without stretch or palette.
+Raw view applies noise reduction and display gamma, without scaling or palette.
+
+Analog camera (Sony XC-ST50): it starts in the LabVIEW flow, the LabVIEW ESPI 1.5 VI's processing with its saved defaults: Reference view with an automatic reference, Fixed gain 42× (the VI's Constant) on each frame, no averaging or filters. Turn LabVIEW flow off for your own settings, which also use Fixed gain: Auto stretch would blow the camera's few grey levels of noise up to full-contrast grain. Lower Difference gain when noise shows as grey grain. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths, including its N + 1 frames divided by N.
 
 Three controls that are easy to mix up:
   Noise reduction blends camera frames over time, before the difference. It removes sensor noise and keeps the speckle. It trails motion and weakens Previous-view fringes.
@@ -2516,6 +2548,7 @@ class MainWindow(QMainWindow):
             _arm_status_button(button, *button.arm)
         for dock in (self.controls_dock, self.log_dock):
             dock.setFont(nudged_font(QApplication.font()))  # else its title keeps the old size
+        self._align_sections()
         self._fit_controls_width()
         self._fit_status_bar()
 
@@ -2740,27 +2773,57 @@ class MainWindow(QMainWindow):
             lambda: self.engine.request("switch_live"))
         column.addWidget(self.switch_live_button)
 
-        # One grid for every section keeps labels, sliders and values in the
-        # same three columns; headings replace group-box frames.
-        grid = QGridLayout()
-        self._sized(grid.setHorizontalSpacing, 8)
-        self._sized(grid.setVerticalSpacing, 4)
-        grid.setColumnStretch(1, 1)
-        column.addLayout(grid)
+        # Each section is a heading button over its own grid, so a section can
+        # be collapsed without touching the visibility its widgets manage
+        # themselves. _align_sections gives every grid the same label column,
+        # so labels, sliders and values still line up across sections.
+        self._section_grids = []
+        self._section_names = []  # the label in each labeled row, for alignment
+        self._section_toggles = {}  # heading text -> its toggle button
+        grid = None
         row = 0
 
         def heading(text):
-            """Add a section heading row.
+            """Start a collapsible section.
 
-            Args: text is the section name.
+            Args: text is the section name; clicking it hides or shows the
+                section, and the choice is remembered between runs.
             Returns: None.
             """
-            nonlocal row
-            label = QLabel(text)
-            label.setStyleSheet("font-weight:bold;")
-            self._sized(label.setContentsMargins, 0, 0 if row == 0 else 10, 0, 2)
-            grid.addWidget(label, row, 0, 1, 2)
-            row += 1
+            nonlocal grid, row
+            toggle = QToolButton()
+            toggle.setText(text)
+            toggle.setCheckable(True)
+            toggle.setChecked(True)
+            toggle.setArrowType(Qt.DownArrow)
+            toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            toggle.setAutoRaise(True)
+            set_tooltip(toggle, f"Show or hide the {text} controls.")
+            self._styled(toggle, "QToolButton { font-weight:bold; border:none; "
+                         f"padding-top:{0 if not self._section_grids else 8}px; }}")
+            body = QWidget()
+            grid = QGridLayout(body)
+            grid.setContentsMargins(0, 0, 0, 0)
+            self._sized(grid.setHorizontalSpacing, 8)
+            self._sized(grid.setVerticalSpacing, 4)
+            grid.setColumnStretch(1, 1)
+            row = 0
+            column.addWidget(toggle)
+            column.addWidget(body)
+            self._section_grids.append(grid)
+            self._section_toggles[text] = toggle
+
+            def show_section(on, body=body, toggle=toggle, text=text):
+                """Show or hide one section and remember the choice.
+
+                Args: on is True to show the section.
+                Returns: None.
+                """
+                body.setVisible(on)
+                toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+                QSettings("ESPI", "espi_live").setValue(
+                    f"{SECTION_SETTING_PREFIX}{text}", not on)
+            toggle.toggled.connect(show_section)
 
         def add(widget, label=None):
             """Add a labeled setting, or a full-width widget when unlabeled.
@@ -2776,6 +2839,7 @@ class MainWindow(QMainWindow):
                 name.setToolTip(widget.toolTip())
                 grid.addWidget(name, row, 0)
                 grid.addWidget(widget, row, 1)
+                self._section_names.append(name)
             row += 1
 
         def note(label):
@@ -2837,9 +2901,11 @@ class MainWindow(QMainWindow):
         self.single_field = QCheckBox("Single field (interlaced camera)")
         set_tooltip(self.single_field,
                     "Show only the even rows of each interlaced frame, doubled to full "
-                    "height: removes the 1/60 s offset between the two fields (cleaner "
-                    "fringes) at half the vertical detail. Changing it clears the "
-                    "reference and the averages. On by default for an interlaced camera.")
+                    "height: removes the 1/60 s offset between the two fields at half "
+                    "the vertical detail. Reference and Previous differences compare "
+                    "rows woven the same way, so the offset rarely matters for ESPI. "
+                    "Changing it clears the reference and the averages. Off by "
+                    "default: full frames, as the LabVIEW VI used.")
         self.single_field.setChecked(s.single_field)
         self.single_field.toggled.connect(
             lambda on: self.engine.update_settings(single_field=on))
@@ -2851,9 +2917,9 @@ class MainWindow(QMainWindow):
             "Settle flickering sensor noise in Raw, Previous and Reference by "
             "blending each camera frame with the ones before it. The speckle "
             "grain stays, so a still speckle image looks almost the same: "
-            "watch for less boiling and a trail when something moves. Stretch "
-            "to 0–255 repaints a quieter difference at full brightness; judge "
-            "it with stretch off, or by the status bar's Input range. This is "
+            "watch for less boiling and a trail when something moves. Auto "
+            "stretch repaints a quieter difference at full brightness; judge "
+            "it with Fixed gain, or by the status bar's Input range. This is "
             "not the Speckle filter (that blurs the grain) or Average N (that "
             "smooths the fringe picture). 0 = off. The number is how far the "
             "control is turned up, not the share of the previous frame kept: "
@@ -2865,8 +2931,8 @@ class MainWindow(QMainWindow):
         add(self.noise_reduction, "Noise reduction")
         self.noise_note = QLabel(
             "Grain stays. Look for less flicker and a motion trail, not a "
-            "smoother still image. Stretch hides a quieter difference. Not "
-            "the Speckle filter or Average N.")
+            "smoother still image. Auto stretch hides a quieter difference; "
+            "Fixed gain shows it. Not the Speckle filter or Average N.")
         note(self.noise_note)
         self.camera_label = QLabel()
         note(self.camera_label)
@@ -2914,8 +2980,29 @@ class MainWindow(QMainWindow):
         self.ref_refresh.valueChanged.connect(
             lambda v: self.engine.update_settings(ref_refresh_s=v))
         add(self.ref_refresh, "Ref. refresh")
+        self.frames_back = SliderSpin(1, MAX_FRAMES_BACK, 1, 0, s.frames_back)
+        self.frames_back.set_description(
+            "In Previous view, which earlier frame each one is compared with: 1 "
+            "is the frame just before. A larger number spans more time, so "
+            "slow changes show up instead of cancelling, as the LabVIEW VI did "
+            "by waiting between grabs. Each step back keeps one more frame in "
+            "memory. Start at 1.")
+        self.frames_back.valueChanged.connect(
+            lambda v: self.engine.update_settings(frames_back=int(v)))
+        add(self.frames_back, "Frames back")
 
         heading("Fringe enhancement")
+        self.outlier_filter = SliderSpin(0, 15, 1, 0, s.outlier_filter, " px")
+        self.outlier_filter.set_description(
+            "Pulls isolated bright or dark pixels back to their neighbourhood's "
+            "mean, on every difference frame before averaging (NI Vision's "
+            "Lowpass filter, from the LabVIEW VI). A pixel is replaced only when "
+            "it is further from the mean than the neighbourhood's spread, so "
+            "fringes and smooth areas stay untouched. 0 turns it off. Start at 0; "
+            "try 3 px when single hot pixels sparkle.")
+        self.outlier_filter.valueChanged.connect(
+            lambda v: self.engine.update_settings(outlier_filter=int(v)))
+        add(self.outlier_filter, "Outlier filter")
         self.smoothing_combo = QComboBox()
         self.smoothing_combo.addItems(SMOOTHING_METHODS)
         self.smoothing_combo.setCurrentText(s.smoothing_method)
@@ -2937,13 +3024,45 @@ class MainWindow(QMainWindow):
             lambda v: self.engine.update_settings(smoothing=int(v)))
         add(self.smoothing_combo, "Speckle filter")
         add(self.smoothing, "Filter width")
-        self.scale_range = QCheckBox("Stretch to 0–255")
-        set_tooltip(self.scale_range, STRETCH_TIP,
-                    "Gamma is a separate curve applied afterwards and does not "
-                    "replace this stretch. Start on.")
-        self.scale_range.setChecked(s.scale_range)
-        self.scale_range.toggled.connect(
-            lambda on: self.engine.update_settings(scale_range=on))
+        self.scaling = QComboBox()
+        self.scaling.addItems(SCALING_MODES)
+        self.scaling.setCurrentText(SCALING_MODES[1] if s.scale_range else SCALING_MODES[0])
+        set_tooltip(self.scaling, SCALING_TIP,
+                    "Gamma is a separate curve applied afterwards and replaces "
+                    "neither. Start with Fixed gain on an analog camera, Auto "
+                    "stretch on the Blackfly.")
+        self.scaling.currentTextChanged.connect(self._scaling_changed)
+        add(self.scaling, "Scaling")
+        self.difference_gain = SliderSpin(1, 64, 0.5, 1, s.difference_gain, " ×")
+        self.difference_gain.set_description(
+            "Fixed gain: each difference is multiplied by this and anything "
+            "above 255 shows white, as in the LabVIEW VI (IMAQ Multiply by "
+            "Constant). At the VI's default of 42, any difference of 7 grey "
+            "levels or more is white. Lower it when noise shows as grey grain; "
+            f"raise it when fringes are dim. Start at {DEFAULT_DIFFERENCE_GAIN:g}.")
+        self.difference_gain.valueChanged.connect(
+            lambda v: self.engine.update_settings(difference_gain=v))
+        add(self.difference_gain, "Difference gain")
+        self.gain_before_average = QCheckBox("Gain before averaging (LabVIEW order)")
+        set_tooltip(self.gain_before_average,
+            "Fixed gain only. On: the gain is applied to every difference frame "
+            "(saturating at 255) and the outlier filter runs on that; Average N "
+            "then averages those frames and multiplies the mean by the Average "
+            "multiplier, as the LabVIEW VI did (it sums N + 1 frames and divides "
+            "by N, so each block is one frame longer and (N+1)/N brighter). Off: "
+            "the raw differences are "
+            "averaged and the gain is applied once at the end. Start off.")
+        self.gain_before_average.setChecked(s.gain_before_average)
+        self.gain_before_average.toggled.connect(self._gain_order_changed)
+        add(self.gain_before_average)
+        self.average_multiplier = SliderSpin(0.1, 10, 0.1, 1, s.average_multiplier, " ×")
+        self.average_multiplier.set_description(
+            "With Gain before averaging on and Average N above 1, the mean is "
+            "multiplied by this before it is shown (the LabVIEW VI's Multiplier). "
+            "As in the VI, N + 1 frames are summed and divided by N. Start at 1.")
+        self.average_multiplier.valueChanged.connect(
+            lambda v: self.engine.update_settings(average_multiplier=v))
+        add(self.average_multiplier, "Average multiplier")
         self.invert = QCheckBox("Invert")
         set_tooltip(self.invert,
             "Swaps bright and dark fringes. Use it when the pattern is easier to "
@@ -2953,19 +3072,86 @@ class MainWindow(QMainWindow):
         toggles = QWidget()
         toggles_row = QHBoxLayout(toggles)
         toggles_row.setContentsMargins(0, 0, 0, 0)
-        toggles_row.addWidget(self.scale_range)
         toggles_row.addWidget(self.invert)
         toggles_row.addStretch(1)
         add(toggles)
         self.clip = SliderSpin(0, 10, 0.1, 1, s.clip_percent, " %")
         self.clip.set_description(
-            "With Stretch on, lets this share of the darkest and brightest pixels "
+            "With Auto stretch, lets this share of the darkest and brightest pixels "
             "saturate so a few stray speckles don't flatten the contrast. 0 uses "
             "the exact minimum and maximum. Start at 0; try 0.5% when speckles "
             "wash the image out.")
         self.clip.valueChanged.connect(
             lambda v: self.engine.update_settings(clip_percent=v))
         add(self.clip, "Stretch clip")
+        self.min_range = SliderSpin(0, 128, 1, 0, s.min_range, " lv")
+        self.min_range.set_description(
+            "Sensitivity floor: with Auto stretch (or Local normalization), white "
+            "is never fewer than this "
+            "many grey levels of difference. A still scene's camera noise (a few "
+            "levels) then stays dark instead of filling the screen, while real "
+            "fringes, which change far more, still use the full range. 0 = off. "
+            "Use Calibrate noise with the object still to set it.")
+        self.min_range.valueChanged.connect(
+            lambda v: self.engine.update_settings(min_range=int(v)))
+        add(self.min_range, "Sensitivity floor")
+        self.threshold = SliderSpin(0, 64, 1, 0, s.threshold, " lv")
+        self.threshold.set_description(
+            "Noise threshold: right after the subtraction, any pixel whose "
+            "difference is below this many grey levels is set to 0 (no change), "
+            "before averaging, smoothing, peak hold and the stretch. Hides camera "
+            "noise; too high also hides faint fringes. 0 = off. Try 3–8.")
+        self.threshold.valueChanged.connect(
+            lambda v: self.engine.update_settings(threshold=int(v)))
+        add(self.threshold, "Noise threshold")
+        self.calibrate_button = QPushButton("Calibrate noise (object still)")
+        set_tooltip(self.calibrate_button,
+            "In Previous or Reference view, with the object at rest, measures "
+            "the difference noise for 2 s and sets the Sensitivity floor to "
+            "twice its peak.")
+        self.calibrate_button.clicked.connect(
+            lambda: self.engine.request("calibrate_noise"))
+        add(self.calibrate_button)
+        self.steady_range = SliderSpin(0, 3, 0.1, 1, s.steady_range_s, " s")
+        self.steady_range.set_description(
+            "With Auto stretch, lets the stretch range shrink only over this many "
+            "seconds, so the contrast stops pumping from frame to frame. A range "
+            "that grows (new fringes) is followed at once. 0 = recompute every "
+            "frame. Try 0.5 s.")
+        self.steady_range.valueChanged.connect(
+            lambda v: self.engine.update_settings(steady_range_s=v))
+        add(self.steady_range, "Steady range")
+        self.even_brightness = QCheckBox("Even out beam brightness")
+        set_tooltip(self.even_brightness,
+            "Divides each difference by the local illumination, so the bright "
+            "middle of the laser spot no longer dominates and fringes near its "
+            "edge stay visible. Unlit areas go black. Start off.")
+        self.even_brightness.setChecked(s.even_brightness)
+        self.even_brightness.toggled.connect(
+            lambda on: self.engine.update_settings(even_brightness=on))
+        add(self.even_brightness)
+        self.peak_hold = SliderSpin(0, 10, 0.1, 1, s.peak_hold_s, " s")
+        self.peak_hold.set_description(
+            "Shows each pixel's largest difference in the last this-many seconds "
+            "(a sliding window: older peaks drop out). In Previous view a "
+            "vibration only shows in the frames where the motion happens to "
+            "change; peak hold keeps those moments on screen so the pattern "
+            "builds up. 0 = off. Try 3 s.")
+        self.peak_hold.valueChanged.connect(
+            lambda v: self.engine.update_settings(peak_hold_s=v))
+        add(self.peak_hold, "Peak hold window")
+        self.normalize_window = SliderSpin(0, 255, 1, 0, s.normalize_window, " px")
+        self.normalize_window.set_description(
+            "Local normalization, in place of Stretch: each pixel is compared with "
+            "the average and spread of the difference within this window, so faint "
+            "and strong fringes get the same contrast everywhere. Mid-grey is the "
+            "local average. Use a window wider than the fringe spacing; the "
+            "Sensitivity floor still keeps camera noise from being boosted. "
+            "0 = off. Try 41–81 px.")
+        self.normalize_window.valueChanged.connect(
+            lambda v: self.engine.update_settings(normalize_window=int(v)))
+        add(self.normalize_window, "Local normalization")
+        self._sync_scaling_controls(s.scale_range, s.gain_before_average)
 
         heading("Display")
         self.flip_button = QPushButton("Flip horizontally")
@@ -2990,6 +3176,28 @@ class MainWindow(QMainWindow):
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
         self.gamma.set_description(GAMMA_TIP + " Start at 1.0.")
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
+        self.brightness = SliderSpin(0, 128, 1, 0, s.brightness, " lv")
+        self.brightness.set_description(
+            "Adds this many grey levels to every pixel in every view, so the whole "
+            "image is brighter. Values near white stay white, and black becomes "
+            "grey, so contrast drops a little. Saved frames and recordings match "
+            "the screen. 0 = off. Try 30–60.")
+        self.brightness.valueChanged.connect(
+            lambda v: self.engine.update_settings(brightness=int(v)))
+        self.display_gain = SliderSpin(1, 8, 0.1, 1, s.display_gain, " ×")
+        self.display_gain.set_description(
+            "Multiplies every pixel, so bright areas get brighter while black stays "
+            "black. Pixels pushed past white saturate. 1 = off. Try 2–3.")
+        self.display_gain.valueChanged.connect(
+            lambda v: self.engine.update_settings(display_gain=v))
+        self.contrast = SliderSpin(0, 100, 1, 0, s.contrast, " %")
+        self.contrast.set_description(
+            "S-curve contrast: darkens values below mid-grey and brightens those "
+            "above it, keeping black and white fixed, so bright features stand out "
+            "from a dim background. Very faint features can be pushed toward "
+            "black. 0 = off. Try 30–60%.")
+        self.contrast.valueChanged.connect(
+            lambda v: self.engine.update_settings(contrast=v))
         self.clahe = QCheckBox("CLAHE (color palettes only)")
         set_tooltip(self.clahe,
             "Boosts local contrast so faint fringes show up in a color palette. "
@@ -3000,6 +3208,9 @@ class MainWindow(QMainWindow):
         self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
         add(self.palette_combo, "Palette")
         add(self.gamma, "Gamma")
+        add(self.brightness, "Brightness")
+        add(self.display_gain, "Gain")
+        add(self.contrast, "S-curve contrast")
         add(self.clahe)
         self.ui_scale_row = SliderSpin(
             ui_scale.MIN_PERCENT, ui_scale.MAX_PERCENT, ui_scale.STEP_PERCENT, 0,
@@ -3049,12 +3260,30 @@ class MainWindow(QMainWindow):
         self.controls_scroll.setWidgetResizable(True)
         self.controls_scroll.setFrameShape(QFrame.NoFrame)
         self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._fit_controls_width()
+        self._align_sections()
+        self._fit_controls_width()  # measured with every section open
+        saved = QSettings("ESPI", "espi_live")
+        for text, toggle in self._section_toggles.items():
+            if str(saved.value(f"{SECTION_SETTING_PREFIX}{text}", False)).lower() == "true":
+                toggle.setChecked(False)
         self.controls_dock = QDockWidget("Controls", self)
         self.controls_dock.setObjectName("controls")
         self.controls_dock.setWidget(self.controls_scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self._tip_dock_buttons(self.controls_dock)
+
+    def _align_sections(self):
+        """Give every controls section the same label-column width.
+
+        Runs at build time and whenever the interface size changes, so the
+        sliders of all sections start at the same x position.
+
+        Args: None.
+        Returns: None.
+        """
+        width = max((name.sizeHint().width() for name in self._section_names), default=0)
+        for grid in self._section_grids:
+            grid.setColumnMinimumWidth(0, width)
 
     def _fit_controls_width(self):
         """Give the controls panel the width its widest row needs, plus the scroll bar.
@@ -3085,7 +3314,37 @@ class MainWindow(QMainWindow):
             button.clicked.connect(
                 lambda _checked=False, name=name: self.apply_preset(name))
             row.addWidget(button)
+        self.labview_button = QPushButton("LabVIEW flow")
+        self.labview_button.setCheckable(True)
+        set_tooltip(self.labview_button, LABVIEW_FLOW_TIP)
+        self.labview_button.setChecked(self.current.labview_saved is not None)
+        self.labview_button.toggled.connect(self.set_labview_flow)
+        row.addWidget(self.labview_button)
         add(row_widget)
+
+    def set_labview_flow(self, on):
+        """Swap the displayed camera between the user's and the LabVIEW settings.
+
+        Turning it on keeps the user's values of every LABVIEW_FLOW setting on
+        the channel, applies the LabVIEW flow and captures a reference, as the
+        VI did when it started. Turning it off restores the kept values.
+
+        Args: on is True to use the LabVIEW flow.
+        Returns: None.
+        """
+        channel = self.current
+        if on and channel.labview_saved is None:
+            settings = asdict(self.engine.settings())
+            channel.labview_saved = {key: settings[key] for key in LABVIEW_FLOW}
+            self.engine.update_settings(**LABVIEW_FLOW)
+            self.engine.request("reference")
+            self.log.write("LabVIEW flow on: your settings are kept and come back "
+                           "when you turn it off.")
+        elif not on and channel.labview_saved is not None:
+            self.engine.update_settings(**channel.labview_saved)
+            channel.labview_saved = None
+            self.log.write("LabVIEW flow off: your settings are back.")
+        self._load_settings(self.engine.settings(), channel.limits)
 
     def apply_preset(self, name):
         """Apply a processing preset to the displayed camera.
@@ -3210,8 +3469,9 @@ class MainWindow(QMainWindow):
         self.range_status = FixedLabel("Input: 255–255    Scaled: 255–255",
                                        "Raw Mono8: no brightness scaling")
         set_tooltip(self.range_status,
-                    "Brightness before and after stretch to 0–255, measured before "
-                    "gamma and the palette. Raw view is not scaled.")
+                    "Brightness before and after Scaling (Fixed gain or Auto "
+                    "stretch), measured before gamma and the palette. Raw view is "
+                    "not scaled.")
         self.camera_fps_status = FixedLabel(  # sensor rate, then what the app keeps up with
             "Camera: 999.9 fps (simulated)")
         set_tooltip(self.camera_fps_status,
@@ -3556,14 +3816,27 @@ class MainWindow(QMainWindow):
                               (self.ref_frames, s.ref_frames),
                               (self.ref_refresh, s.ref_refresh_s),
                               (self.smoothing, s.smoothing), (self.clip, s.clip_percent),
-                              (self.gamma, s.gamma)):
+                              (self.gamma, s.gamma), (self.frames_back, s.frames_back),
+                              (self.outlier_filter, s.outlier_filter),
+                              (self.difference_gain, s.difference_gain),
+                              (self.average_multiplier, s.average_multiplier),
+                              (self.min_range, s.min_range),
+                              (self.threshold, s.threshold),
+                              (self.steady_range, s.steady_range_s),
+                              (self.peak_hold, s.peak_hold_s),
+                              (self.normalize_window, s.normalize_window),
+                              (self.brightness, s.brightness),
+                              (self.display_gain, s.display_gain),
+                              (self.contrast, s.contrast)):
             widget.set_value(value)
-        toggles = ((self.rolling, s.rolling), (self.scale_range, s.scale_range),
+        toggles = ((self.rolling, s.rolling),
+                   (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
-                   (self.clahe, s.clahe),
+                   (self.clahe, s.clahe), (self.even_brightness, s.even_brightness),
                    (self.record_button, s.record), (self.single_field, s.single_field))
         combos = ((self.smoothing_combo, s.smoothing_method),
-                  (self.palette_combo, s.palette))
+                  (self.palette_combo, s.palette),
+                  (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
         for widget, _ in toggles + combos:
             widget.blockSignals(True)
         for widget, on in toggles:
@@ -3574,6 +3847,44 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
         for button in self.mode_group.buttons():
             button.setChecked(button.text() == s.mode)
+        self._sync_scaling_controls(s.scale_range, s.gain_before_average)
+        self.labview_button.blockSignals(True)
+        self.labview_button.setChecked(self.current is not None and
+                                       self.current.labview_saved is not None)
+        self.labview_button.blockSignals(False)
+
+    def _scaling_changed(self, name):
+        """Send a Scaling choice to the engine and match the related controls.
+
+        Args: name is a SCALING_MODES entry.
+        Returns: None.
+        """
+        stretch = name == SCALING_MODES[1]
+        self.engine.update_settings(scale_range=stretch)
+        self._sync_scaling_controls(stretch, self.gain_before_average.isChecked())
+
+    def _gain_order_changed(self, on):
+        """Send the Gain before averaging choice and match the multiplier.
+
+        Args: on is the checkbox state.
+        Returns: None.
+        """
+        self.engine.update_settings(gain_before_average=on)
+        self._sync_scaling_controls(
+            self.scaling.currentText() == SCALING_MODES[1], on)
+
+    def _sync_scaling_controls(self, stretch, before_average):
+        """Enable only the controls that the chosen scaling uses.
+
+        Args: stretch is True for Auto stretch; before_average is the Gain
+            before averaging choice.
+        Returns: None.
+        """
+        self.clip.setEnabled(stretch)
+        self.steady_range.setEnabled(stretch)
+        self.difference_gain.setEnabled(not stretch)
+        self.gain_before_average.setEnabled(not stretch)
+        self.average_multiplier.setEnabled(not stretch and before_average)
 
     def _apply_limits(self, limits):
         """Set the camera sliders to device limits.
@@ -4550,6 +4861,8 @@ class MainWindow(QMainWindow):
             channel.limits = payload
             if displayed:
                 self._apply_limits(payload)
+        elif kind == "noise_calibrated" and displayed:
+            self.min_range.set_value(payload)
         elif kind == "record_off" and displayed:
             self.record_button.blockSignals(True)
             self.record_button.setChecked(False)

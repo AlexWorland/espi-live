@@ -17,9 +17,10 @@ import numpy as np
 
 from espi_live import paths, recording
 from espi_live.engine import (ComparePacket, Engine, FramePacket, Settings,
-                              finish_difference, present, reference_text,
-                              view_hint)
-from espi_live.processing import ESPIProcessor, ReferenceCapture, watermark_demo
+                              condition_difference, finish_difference, present,
+                              range_text, reference_text, view_hint)
+from espi_live.processing import (ESPIProcessor, PeakHold, RangeTracker,
+                                  ReferenceCapture, watermark_demo)
 from list_log import ListLog
 from test_engine import wait_until
 
@@ -160,7 +161,7 @@ class ReferenceHelperTests(unittest.TestCase):
         image, _, _, levels = finish_difference(
             flat(3), Settings(clahe=False), clahe)
         self.assertEqual(levels, (3, 3, 0, 0))
-        raw = Settings(scale_range=False, invert=True, clahe=False)
+        raw = Settings(scale_range=False, difference_gain=1.0, invert=True, clahe=False)
         image, _, _, levels = finish_difference(diff, raw, clahe)
         self.assertEqual(levels, (0, 5, 0, 5))
         np.testing.assert_array_equal(image, cv2.bitwise_not(diff))
@@ -169,6 +170,70 @@ class ReferenceHelperTests(unittest.TestCase):
             _, palette, gamma, _ = finish_difference(
                 diff, Settings(palette="Turbo", gamma=gamma_in), clahe)
             self.assertEqual((palette, gamma), ("Turbo", 1.0))
+
+    def test_finish_difference_main_steps(self):
+        """Fixed gain, local normalization, peak hold, the sampler and the steady range.
+
+        Args: None.
+        Returns: None.
+        """
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        diff = np.tile(np.arange(0, 6, dtype=np.uint8), (64, 16))
+        gained = Settings(scale_range=False, difference_gain=10.0, clahe=False)
+        image, _, _, levels = finish_difference(diff, gained, clahe)
+        self.assertEqual(levels, (0, 5, 0, 50))
+        self.assertEqual(int(image.max()), 50)
+        image, _, _, levels = finish_difference(diff, gained, clahe, labview_order=True)
+        np.testing.assert_array_equal(image, diff)  # gain was applied before averaging
+        normalized = Settings(normalize_window=15, clahe=False)
+        image, _, _, levels = finish_difference(diff, normalized, clahe)
+        self.assertEqual(levels, (0, 5, None, None))
+        self.assertIsNone(finish_difference(diff, normalized, clahe, measure=False)[3])
+        self.assertEqual(image.shape, diff.shape)
+        seen = []
+        peaks = PeakHold()
+        finish_difference(diff, Settings(peak_hold_s=1.0), clahe, peaks=peaks,
+                          now=1.0, sample=lambda img, now: seen.append((img.shape, now)))
+        self.assertEqual(seen, [(diff.shape, 1.0)])
+        ranges = RangeTracker()
+        loud = np.full((8, 8), 100, np.uint8)
+        loud[0, 0] = 0
+        finish_difference(loud, Settings(steady_range_s=10.0), clahe, ranges=ranges, now=0.0)
+        _, _, _, levels = finish_difference(
+            diff, Settings(steady_range_s=10.0), clahe, ranges=ranges, now=0.1)
+        self.assertGreater(levels[1], 5)  # the range shrinks only slowly
+
+    def test_range_text(self):
+        """The status text names the scaled range or the normalization window.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(range_text((1, 9, 0, 255), Settings()),
+                         "Input: 1–9    Scaled: 0–255")
+        self.assertEqual(range_text((1, 9, None, None), Settings(normalize_window=15)),
+                         "Input: 1–9    Local normalization 15 px")
+
+    def test_condition_difference(self):
+        """Threshold, even brightness, LabVIEW-order gain and outliers run before averaging.
+
+        Args: None.
+        Returns: None.
+        """
+        diff = np.array([[1, 5], [9, 3]], np.uint8)
+        frame = flat(100, (2, 2))
+        out, labview = condition_difference(diff, frame, Settings())
+        self.assertFalse(labview)
+        np.testing.assert_array_equal(out, diff)
+        out, _ = condition_difference(diff, frame, Settings(threshold=4))
+        np.testing.assert_array_equal(out, [[0, 5], [9, 0]])
+        out, labview = condition_difference(
+            diff, frame, Settings(scale_range=False, gain_before_average=True,
+                                  difference_gain=2.0))
+        self.assertTrue(labview)
+        np.testing.assert_array_equal(out, diff * 2)
+        out, _ = condition_difference(diff, frame, Settings(even_brightness=True))
+        self.assertEqual(out.shape, diff.shape)
 
     def test_present_flips_then_watermarks(self):
         """present mirrors first, so the watermark text is never mirrored.
@@ -181,6 +246,8 @@ class ReferenceHelperTests(unittest.TestCase):
         np.testing.assert_array_equal(present(ramp, True, False), ramp[:, ::-1])
         np.testing.assert_array_equal(present(ramp, True, True),
                                       watermark_demo(ramp[:, ::-1]))
+        tone = np.arange(256, dtype=np.uint8)[::-1].copy()
+        np.testing.assert_array_equal(present(ramp, False, False, tone), 255 - ramp)
 
 
 class EngineReferenceTests(unittest.TestCase):
