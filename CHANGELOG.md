@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-15 — Peak hold preset for the analog camera
+
+### Previous state
+
+- Seeing the drum's vibration pattern on the Sony XC-ST50 (through the USB-Live2) meant setting about ten controls by hand: Previous view, a noise threshold, the speckle filter, peak hold, steady range and contrast. Pressing **Live preview** or **Measurement** afterwards left peak hold and the other fringe-enhancement controls on, because those presets only set the controls they had always set.
+
+### Current state
+
+- A **Peak hold** button sits beside **Live preview** and **Measurement** (top of **ESPI measurement**, and in **Help > Which settings should I use?**). It selects Previous view, noise threshold 6 levels, a Median speckle filter at 3 px, a 1 s peak hold window, stretch with a 0.5% clip and a 1 s steady range, and S-curve contrast 30%, with noise reduction, averaging, reference refresh, local normalization and CLAHE off. The threshold and filter run before peak hold, so the noise is cut before peak hold can keep it.
+- It leaves the **Sensitivity floor** as it is: analog cameras start at 30, and **Calibrate noise** (drive off) measures your own. Exposure, gain, frame rate and recording are unchanged too.
+- Peak hold uses Auto stretch, Previous compared with the frame just before (frames back 1) and no outlier filter, like the other presets; none of the three touches the **LabVIEW flow** toggle.
+- Every preset now sets the fringe-enhancement and display controls it does not use back to off (threshold, steady range, even brightness, peak hold, local normalization, brightness, gain, S-curve contrast), so nothing carries over from the last preset.
+
 ## 2026-11-15 — Sensitivity, peak hold and display tone controls (PR #61)
 
 ### Previous state

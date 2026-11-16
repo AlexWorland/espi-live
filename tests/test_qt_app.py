@@ -1529,7 +1529,7 @@ def _dock_controls_missing_tooltips(dock):
 
 
 class SettingsGuideTests(WindowTestCase):
-    """Tooltips, the settings guide and the two processing presets."""
+    """Tooltips, the settings guide and the processing presets."""
 
     def test_processing_controls_explain_use_and_a_starting_value(self):
         """Each processing control says what it does and where to start.
@@ -1597,6 +1597,39 @@ class SettingsGuideTests(WindowTestCase):
         self.assertIn("Preset applied: Live preview", self.log.lines)
         self.assertIn("exposure", buttons["Live preview"].toolTip())
 
+    def test_peak_hold_preset_cuts_noise_first_and_keeps_the_floor(self):
+        """Peak hold turns on the analog fringe tools; other presets turn them off.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.min_range.spin.setValue(42)  # a calibrated floor the preset must keep
+        w.exposure.spin.setValue(1234)
+        buttons = {b.text(): b for b in w.controls_dock.findChildren(qt_app.QPushButton)}
+        buttons["Peak hold"].click()
+        s = self.engine.settings()
+        self.assertEqual(s.mode, "Previous")
+        self.assertEqual((s.peak_hold_s, s.threshold, s.steady_range_s), (1.0, 6, 1.0))
+        self.assertEqual((s.smoothing, s.smoothing_method), (3, "Median"))
+        self.assertEqual((s.scale_range, s.clip_percent, s.contrast), (True, 0.5, 30.0))
+        self.assertEqual((s.noise_reduction, s.average, s.ref_refresh_s), (0.0, 1, 0.0))
+        self.assertEqual((s.normalize_window, s.even_brightness), (0, False))
+        self.assertEqual((s.min_range, s.exposure_us), (42, 1234))
+        self.assertEqual((w.peak_hold.value(), w.threshold.value()), (1.0, 6))
+        self.assertIn("Preset applied: Peak hold", self.log.lines)
+        tip = " ".join(buttons["Peak hold"].toolTip().split())
+        for phrase in ("peak hold 1 s", "sensitivity floor", "exposure"):
+            self.assertIn(phrase, tip)
+        for name in ("Live preview", "Measurement"):
+            buttons["Peak hold"].click()
+            buttons[name].click()
+            s = self.engine.settings()
+            for field, off in qt_app.FRINGE_TOOLS_OFF.items():
+                self.assertEqual(getattr(s, field), off, f"{name} left {field} on")
+            self.assertEqual(s.min_range, 42)
+        self.assertEqual(w.peak_hold.value(), 0.0)
+
     def test_guide_lists_the_pipeline_and_applies_a_preset(self):
         """The Help guide matches the README and its buttons apply a preset.
 
@@ -1623,8 +1656,49 @@ class SettingsGuideTests(WindowTestCase):
         self.assertEqual(self.engine.settings().average, 8)
         buttons["Apply Live preview"].click()
         self.assertEqual(self.engine.settings().mode, "Previous")
+        buttons["Apply Peak hold"].click()
+        self.assertEqual(self.engine.settings().peak_hold_s, 1.0)
+        self.assertIn("Peak hold", qt_app.SETTINGS_GUIDE)
         buttons["Close"].click()
         self.assertFalse(dialog.isVisible())
+
+
+class FringeControlsTests(WindowTestCase):
+    """Collapsible Controls sections and the Calibrate noise result."""
+
+    def test_collapsed_section_is_remembered_for_the_next_window(self):
+        """Collapsing a heading hides it, saves it, and a new window starts collapsed.
+
+        Args: None.
+        Returns: None.
+        """
+        toggle = self.window._section_toggles["Fringe enhancement"]
+        toggle.setChecked(False)
+        self.assertEqual(toggle.arrowType(), qt_app.Qt.RightArrow)
+        key = f"{qt_app.SECTION_SETTING_PREFIX}Fringe enhancement"
+        self.assertIs(FakeSettings.store[key], True)
+        toggle.setChecked(True)
+        self.assertIs(FakeSettings.store[key], False)
+        self.assertEqual(toggle.arrowType(), qt_app.Qt.DownArrow)
+        FakeSettings.store[key] = "true"  # QSettings reads booleans back as text
+        window = demo_window(self.engine, self.log)
+        self.addCleanup(window.deleteLater)
+        for timer in (window.frame_timer, window.status_timer, window.tip_timer):
+            timer.stop()
+        self.assertFalse(window._section_toggles["Fringe enhancement"].isChecked())
+        self.assertTrue(window._section_toggles["Display"].isChecked())
+        window.close()
+
+    def test_noise_calibration_result_updates_the_floor_slider(self):
+        """noise_calibrated shows the measured floor without sending it back.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.events.put(("noise_calibrated", 17))
+        self.window._handle_events()
+        self.assertEqual(self.window.min_range.value(), 17)
+        self.assertEqual(self.engine.settings().min_range, 0)  # the engine set its own
 
 
 class TooltipCoverageTests(WindowTestCase):

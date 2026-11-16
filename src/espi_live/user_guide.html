@@ -877,8 +877,16 @@ python -m espi_live</code></pre>
           For a still-object measurement, <strong>Measurement</strong> selects
           Reference view, an 8-frame block average, Median at 3 px, reference
           refresh 2 s and stretch clip 0.5%. Press <kbd>F</kbd> when the object
-          is still. Neither preset changes exposure, gain, frame rate or recording.</p>
-        <p><strong>LabVIEW flow</strong>, the toggle beside them, switches the
+          is still. For a vibrating object through the analog camera,
+          <strong>Peak hold</strong> selects Previous view, a noise threshold of
+          6 levels, Median at 3 px, a 1 s peak hold window, a 1 s steady range,
+          stretch clip 0.5% and S-curve contrast 30%: each pixel keeps its
+          largest change over the last second, so a driven drum's ring pattern
+          builds up. It keeps your sensitivity floor; press <strong>Calibrate
+          noise</strong> with the drive off to measure it. No preset changes
+          exposure, gain, frame rate or recording, and each turns off the
+          fringe-enhancement and display controls it does not use.</p>
+        <p><strong>LabVIEW flow</strong>, the toggle under them, switches the
           displayed camera to the processing of the LabVIEW ESPI 1.5 program
           with that program's saved defaults, the known-good flow for the Sony
           XC-ST50. It is on by default for that camera. It sets Reference view
@@ -892,7 +900,7 @@ python -m espi_live</code></pre>
           rate, recording and the flip keep their values. Turn it off to get
           your own settings back; changes made while it is on are dropped. Each
           camera keeps its own state.</p>
-        <p><strong>Help → Which settings should I use?</strong> explains both
+        <p><strong>Help → Which settings should I use?</strong> explains the
           presets and can apply them to the displayed camera. Reference refresh
           also hides motion slower than its interval; use 0 for a fixed before/after.</p>
         <p>Processing order: noise reduction → difference (N frames back) →
