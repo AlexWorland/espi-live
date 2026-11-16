@@ -52,7 +52,9 @@ class GuideTest(unittest.TestCase):
         text = guide_html()
         self.assertGreater(len(text), 20000)
         for phrase in ("Raw", "Previous", "Reference", "Exposure", "Gain",
-                       "Requested FPS", "Average N", "Stretch to 0–255",
+                       "Requested FPS", "Average N", "Scaling", "Fixed gain",
+                       "Auto stretch", "Difference gain", "Frames back",
+                       "Outlier filter", "LabVIEW flow",
                        "Palette", "Gamma", "CLAHE", "Record AVI",
                        "Save frame", "Set reference", "Reset last",
                        "Reset average", "Switch to live capture",

@@ -32,12 +32,15 @@ from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
                                    StreamCounterMonitor, settings_summary)
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
-from espi_live.processing import (DemoSource, ESPIProcessor, NoiseCalibration,
-                                  PeakHold, RangeTracker, apply_levels,
+from espi_live.capture_models import adapter_for
+from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
+                                  ESPIProcessor, NoiseCalibration, PeakHold,
+                                  RangeTracker, apply_gain, apply_levels,
                                   apply_palette, denoise_strength, display_lut,
                                   even_out_brightness, gamma_lut,
-                                  local_normalize, single_field, smooth_speckle,
-                                  stretch_levels, watermark_demo)
+                                  local_normalize, reject_outliers,
+                                  single_field, smooth_speckle, stretch_levels,
+                                  watermark_demo)
 from espi_live.recording import AVIRecorder, recording_path, save_frame
 
 CAMERA_TIMEOUT_MS = 100
@@ -63,7 +66,12 @@ class Settings:
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
     smoothing: int = 0            # speckle filter width in pixels; 0 = off
     smoothing_method: str = "Gaussian"
-    scale_range: bool = True
+    frames_back: int = 1          # Previous view compares with the frame N back
+    outlier_filter: int = 0       # IMAQ LowPass-style width in px, per frame; 0 = off
+    scale_range: bool = True      # True: Auto stretch; False: Fixed gain
+    difference_gain: float = DEFAULT_DIFFERENCE_GAIN  # Fixed gain multiplier
+    gain_before_average: bool = False  # LabVIEW order: gain each frame, then average
+    average_multiplier: float = 1.0    # scales the average in LabVIEW order
     clip_percent: float = 0.0     # stretch ignores this % of pixels at each end
     min_range: int = 0            # sensitivity floor: stretch never spans fewer levels; 0 = off
     threshold: int = 0            # raw differences below this many levels become 0; 0 = off
@@ -80,7 +88,96 @@ class Settings:
     contrast: float = 0.0         # S-curve contrast strength, 0–100 %; 0 = off
     clahe: bool = True
     record: bool = False
-    single_field: bool = True     # interlaced sources: even rows only, line-doubled
+    single_field: bool = False    # interlaced sources: even rows only, line-doubled
+    auto_reference: bool = False  # Reference view captures one when it has none
+
+
+# The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
+# defaults (the known-good flow for the Sony XC-ST50, docs/labview/README.md):
+# a reference grabbed at the start and never refreshed (BY FRAME off), full
+# frames, each difference multiplied by Constant = 42 and saturated, Low Pass
+# Filter off, Average off (block averaging, Multiplier 1, when turned on), no
+# wait between grabs, Gray palette, and nothing the VI lacks (noise
+# reduction, noise threshold, beam-brightness correction, speckle filter, peak
+# hold, local normalization, stretch, invert, gamma, display brightness, gain
+# and contrast, CLAHE). The Auto-stretch-only sensitivity floor and steady
+# range are left as they are, since Fixed gain ignores them. Exposure, gain,
+# frame rate, recording and the image flip are left alone.
+LABVIEW_FLOW = {
+    "mode": "Reference",
+    "noise_reduction": 0.0,
+    "frames_back": 1,
+    "outlier_filter": 0,
+    "average": 1,
+    "rolling": False,
+    "ref_refresh_s": 0.0,
+    "smoothing": 0,
+    "threshold": 0,
+    "even_brightness": False,
+    "peak_hold_s": 0.0,
+    "normalize_window": 0,
+    "scale_range": False,
+    "difference_gain": DEFAULT_DIFFERENCE_GAIN,
+    "gain_before_average": True,
+    "average_multiplier": 1.0,
+    "invert": False,
+    "palette": "Gray",
+    "gamma": 1.0,
+    "brightness": 0,
+    "display_gain": 1.0,
+    "contrast": 0.0,
+    "clahe": False,
+    "single_field": False,
+    "auto_reference": True,
+}
+
+
+def is_analog(info):
+    """Tell whether a camera is an analog camera behind a capture adapter.
+
+    Args: info is a CameraInfo, or None for a demo or not-yet-chosen source.
+    Returns: True for a recognised capture adapter (the Sony XC-ST50 through
+        a Hauppauge USB-Live2).
+    """
+    return (info is not None and info.kind == "capture"
+            and adapter_for(info.vid, info.pid, info.model) is not None)
+
+
+# Video-capture devices start with this sensitivity floor: Auto stretch never
+# spans fewer grey levels, so their few levels of noise stay dark.
+ANALOG_MIN_RANGE = 30
+
+
+def own_settings(info):
+    """Choose a camera's own starting settings, without the LabVIEW flow.
+
+    An analog camera uses Fixed gain, as the LabVIEW ESPI 1.5 VI showed it:
+    its few levels of capture noise stay dark instead of being stretched to
+    full contrast. Other cameras and demo sources use Auto stretch. Every
+    video-capture device gets the ANALOG_MIN_RANGE sensitivity floor for when
+    Auto stretch is chosen. These are what turning the LabVIEW flow off
+    returns to.
+
+    Args: info is a CameraInfo, or None for a demo source.
+    Returns: A new Settings.
+    """
+    capture = info is not None and info.kind == "capture"
+    return Settings(scale_range=not is_analog(info),
+                    min_range=ANALOG_MIN_RANGE if capture else 0)
+
+
+def default_settings(info):
+    """Choose the settings a camera starts with.
+
+    An analog camera starts in the LabVIEW flow (LABVIEW_FLOW on top of its
+    own settings), the known-good processing for the Sony XC-ST50. Other
+    cameras and demo sources start with their own settings.
+
+    Args: info is a CameraInfo, or None for a demo source.
+    Returns: A new Settings.
+    """
+    settings = own_settings(info)
+    return replace(settings, **LABVIEW_FLOW) if is_analog(info) else settings
 
 
 @dataclass(frozen=True)
@@ -168,7 +265,7 @@ class Engine:
         self.camera_info = None  # CameraInfo of the opened camera
         self._open_after = None  # (predecessor engine,) when opening on the worker
         self.events = queue.SimpleQueue()
-        self._settings = Settings()
+        self._settings = default_settings(info)
         self._settings_lock = threading.Lock()
         self._actions = queue.SimpleQueue()
         self._calibration = None  # a running NoiseCalibration (worker thread only)
@@ -535,7 +632,7 @@ class Engine:
                 ranges.reset()
                 peaks.reset()
                 if s.mode == "Previous":
-                    processor.prev = None
+                    processor.reset_previous()
                 self.log.write(f"View: {s.mode}")
                 last_mode = s.mode
             if s.rolling != last_rolling:
@@ -544,7 +641,7 @@ class Engine:
             if s.single_field != last_single_field:
                 processor.reset_avg()  # field geometry changed: start over
                 peaks.reset()
-                processor.prev = None
+                processor.reset_previous()
                 processor.ref = None
                 self.log.write("Fields: single field (even rows, line-doubled)"
                                if s.single_field else "Fields: full interlaced frames")
@@ -616,6 +713,10 @@ class Engine:
                     applied = s
                     last_setting_time = now
 
+            if s.mode == "Reference" and s.auto_reference and processor.ref is None:
+                processor.set_reference(frame, now)  # as the LabVIEW VI did at start
+                processor.reset_avg()
+                self.log.write("Captured reference frame (automatic).")
             if s.mode == "Reference" and s.ref_refresh_s > 0 and (
                     processor.ref is None or
                     now - processor.ref_time >= s.ref_refresh_s):
@@ -637,14 +738,28 @@ class Engine:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
             else:
-                difference = processor.difference(frame, s.mode)
+                difference = processor.difference(frame, s.mode, s.frames_back)
                 if s.threshold > 0:  # raw differences below the threshold count as no change
                     difference = cv2.threshold(difference, int(s.threshold) - 1, 0,
                                                cv2.THRESH_TOZERO)[1]
                 if s.even_brightness:
                     difference = even_out_brightness(difference, frame)
-                averaged = (processor.rolling_average(difference, s.average)
-                            if s.rolling else processor.average(difference, s.average))
+                # LabVIEW order (Fixed gain only): gain and saturate each frame,
+                # then average and scale the mean by the multiplier.
+                labview_order = s.gain_before_average and not s.scale_range
+                if labview_order:
+                    difference = apply_gain(difference, s.difference_gain)
+                difference = reject_outliers(difference, s.outlier_filter)
+                count, scale = s.average, None
+                if labview_order:
+                    scale = s.average_multiplier
+                    if s.average > 1 and not s.rolling:
+                        # The VI's loop stops after iteration N, so it sums N + 1
+                        # frames and divides by N: one frame more, (N+1)/N brighter.
+                        count = s.average + 1
+                        scale = s.average_multiplier * count / s.average
+                averaged = (processor.rolling_average(difference, count, scale)
+                            if s.rolling else processor.average(difference, count, scale))
                 if averaged is not None:
                     averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
                     averaged = peaks.update(averaged, s.peak_hold_s, now)
@@ -665,12 +780,14 @@ class Engine:
                         image = apply_levels(averaged, low, high)
                         scaled = (0, 255) if high > low else (0, 0)
                     else:
-                        image = averaged
+                        image = (averaged if labview_order
+                                 else apply_gain(averaged, s.difference_gain))
                         low = high = scaled = None
                         if update_range:
                             low, high, _, _ = cv2.minMaxLoc(averaged)
                             low, high = int(low), int(high)
-                            scaled = (low, high)
+                            top, bottom, _, _ = cv2.minMaxLoc(image)
+                            scaled = (int(top), int(bottom))
                     if update_range:
                         self._set_status(range=(
                             f"Input: {low}–{high}    Scaled: {scaled[0]}–{scaled[1]}"))
@@ -833,7 +950,7 @@ class Engine:
                     with self._saves_lock:
                         self._saves_waiting -= 1
             elif action == "reset_previous":
-                processor.prev = None
+                processor.reset_previous()
                 self.log.write("Reset previous frame.")
             elif action == "reset_average":
                 processor.reset_avg()
