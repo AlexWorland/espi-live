@@ -12,8 +12,10 @@ Devices are listed with the optional cv2_enumerate_cameras package, imported
 lazily: OpenCV alone cannot report device names or USB IDs. No GUI imports.
 """
 
+import os
 import sys
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -58,17 +60,57 @@ def backend_name(backend):
         return str(backend)
 
 
-def load_enumerator():
-    """Import cv2_enumerate_cameras on first use.
+_dll_directory_handles = []  # kept so the added search folders stay registered
+
+
+def bundled_dll_directories():
+    """Find the `*.libs` folders of a frozen build.
+
+    Wheels built with delvewheel (cv2_enumerate_cameras, pandas, ...) keep their
+    renamed runtime DLLs in a `<package>.libs` folder next to the package and
+    look for them only there. PyInstaller may keep a single copy of a DLL that
+    several packages share, under one of those folders, so a package can be
+    left without its own.
 
     Args: None.
-    Returns: The module, or None when it is not installed.
+    Returns: The `*.libs` folders inside the frozen program's library folder;
+        empty outside a frozen Windows build.
+    """
+    root = getattr(sys, "_MEIPASS", None)
+    if not root or not hasattr(os, "add_dll_directory"):
+        return []
+    return sorted(path for path in Path(root).glob("*.libs") if path.is_dir())
+
+
+def import_enumerator():
+    """Import cv2_enumerate_cameras on first use.
+
+    An ImportError that is not "the package is missing" (for example "DLL load
+    failed" from its native module) is reported as such, and in a frozen build
+    the import is retried once with every bundled `*.libs` folder on the DLL
+    search path. The DLL names carry a content hash, so any copy is the right one.
+
+    Args: None.
+    Returns: (module, problem): the module and "", or None and a short reason
+        for the log ("is not installed", or "could not be loaded: ...").
     """
     try:
         import cv2_enumerate_cameras
-    except ImportError:
-        return None
-    return cv2_enumerate_cameras
+        return cv2_enumerate_cameras, ""
+    except ImportError as exc:
+        error = exc
+    folders = bundled_dll_directories()
+    if folders:
+        for folder in folders:
+            _dll_directory_handles.append(os.add_dll_directory(str(folder)))
+        try:
+            import cv2_enumerate_cameras
+            return cv2_enumerate_cameras, ""
+        except ImportError as exc:
+            error = exc
+    if isinstance(error, ModuleNotFoundError) and error.name == "cv2_enumerate_cameras":
+        return None, "is not installed"
+    return None, f"could not be loaded: {error}"
 
 
 def list_capture_devices(log):
@@ -82,9 +124,9 @@ def list_capture_devices(log):
         2", ... in enumeration order of the devices kept; empty when listing
         is unavailable.
     """
-    enumerator = load_enumerator()
+    enumerator, problem = import_enumerator()
     if enumerator is None:
-        log.write("Video devices are not listed: cv2_enumerate_cameras is not installed.")
+        log.write(f"Video devices are not listed: cv2_enumerate_cameras {problem}.")
         return []
     try:
         devices = enumerator.enumerate_cameras(capture_backend())

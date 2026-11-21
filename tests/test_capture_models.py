@@ -33,6 +33,7 @@ class AdapterTests(unittest.TestCase):
         Returns: None.
         """
         self.assertIs(adapter_for(0x2040, 0xC200, ""), USB_LIVE2)
+        self.assertIs(adapter_for(0x2040, 0xC220, ""), USB_LIVE2)  # Windows 11 camera PC
         self.assertIs(adapter_for(None, None, "Hauppauge USB-Live2 Video"), USB_LIVE2)
         self.assertIs(adapter_for(None, None, "USB Live 2"), USB_LIVE2)
         self.assertEqual((USB_LIVE2.width, USB_LIVE2.height, USB_LIVE2.channel),
