@@ -762,7 +762,7 @@ python -m espi_live</code></pre>
           <li><strong>Save frame (S)</strong>, <strong>Set reference (F)</strong>,
             <strong>Reset last (R)</strong>, <strong>Reset average (A)</strong>
             — the same actions as the measurement and capture sections.</li>
-          <li><strong>Zoom</strong> — drag, click or scroll the slider to zoom
+          <li><strong>Zoom</strong> — drag, click or use the arrow keys on the slider to zoom
             from fit (100%) up to 64×; <strong>Fit</strong> (<kbd>0</kbd>) and
             <strong>1:1</strong> (<kbd>1</kbd>) jump to those levels. The mouse
             wheel zooms around the cursor and dragging pans.</li>
@@ -1119,17 +1119,29 @@ python -m espi_live</code></pre>
             <strong>Reference</strong>, the <strong>Current frame</strong>
             (both as Raw view shows them: gamma only, flip applied) and the
             processed <strong>Difference</strong>. In Reference view the
-            difference is exactly the main image, averaging included; in other
-            views it is one difference from the reference with the same
-            filters, without averaging. Under each image a line says how the
-            reference was taken (frames, noise reduction, age) and how the
-            difference was made. Use it to check that the reference is clean
-            and was taken at the current settings. Without a reference the
-            two panels say so. Its <strong>Freeze</strong> holds the three
+            difference is exactly the main image, averaging included; in Raw
+            view it is one difference from the reference with the same
+            filters, without averaging. In <strong>Previous</strong> view the
+            first panel becomes <strong>Previous (N frames back)</strong>: the
+            exact earlier frame that view subtracted (after single field and
+            noise reduction, like the current frame), and the difference is
+            again exactly the main image. With Average N above 1, the first
+            average is waited for (the Difference panel says how many frames
+            are in so far); after that all three update together each time an
+            average completes. Changing the view while the window is open
+            switches what it shows. Under each image a line says how the
+            reference or previous frame was taken and how the difference was
+            made. Use it to check that the reference is clean and was taken at
+            the current settings. Without a reference (or earlier frame) the
+            panels say so. Its <strong>Freeze</strong> holds the three
             images (the main window stays live), <strong>Save all
             three</strong> writes them as shown (PNG) with one notes file that
-            carries the main window's title and notes, and it has its own
-            <strong>Set reference (F)</strong>. It follows the displayed
+            carries the main window's title and notes (the files are named
+            <code>reference</code> or <code>previous</code>, <code>current</code>
+            and <code>difference</code>), and it has its own
+            <strong>Set reference (F)</strong>, which is greyed out in
+            Previous view because that view takes its earlier frame by
+            itself. It follows the displayed
             camera, and the images are only made while it is open (at most
             10 a second), so a closed window costs the camera nothing.</li>
           <li><strong>Reset last (R)</strong> — forgets the stored previous
@@ -1793,8 +1805,9 @@ python -m espi_live</code></pre>
               frame when frozen)</td></tr>
             <tr><td><kbd>F</kbd></td><td>Set the reference frame from the live
               camera</td></tr>
-            <tr><td><kbd>C</kbd></td><td>Compare: the reference, the current
-              frame and their difference side by side</td></tr>
+            <tr><td><kbd>C</kbd></td><td>Compare: the reference (or, in Previous view,
+              the earlier frame), the current frame and their difference side
+              by side</td></tr>
             <tr><td><kbd>R</kbd></td><td>Reset the stored previous frame</td></tr>
             <tr><td><kbd>A</kbd></td><td>Reset partial averaging</td></tr>
             <tr><td><kbd>Q</kbd> or <kbd>Esc</kbd></td><td>Quit (Esc in a text
@@ -1804,6 +1817,8 @@ python -m espi_live</code></pre>
               pixel</td></tr>
             <tr><td>Mouse wheel / trackpad</td><td>Zoom around the cursor, up to
               64×</td></tr>
+            <tr><td>Mouse wheel over a slider or number box</td><td>Scrolls the
+              Controls panel; the value does not change</td></tr>
             <tr><td>Drag</td><td>Pan while zoomed</td></tr>
             <tr><td>Double-click</td><td>Toggle between fit and 4× zoom</td></tr>
             <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd> (or <kbd>Ctrl</kbd>+<kbd>=</kbd>),

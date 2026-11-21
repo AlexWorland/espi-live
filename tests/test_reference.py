@@ -387,26 +387,26 @@ class EngineReferenceTests(unittest.TestCase):
         compare = self.engine.latest_compare()
         self.assertIs(compare.difference, packet)
         self.assertEqual(compare.sequence, 7)
-        np.testing.assert_array_equal(compare.reference.image, flat(20))
+        np.testing.assert_array_equal(compare.baseline.image, flat(20))
         np.testing.assert_array_equal(compare.current.image, flat(30))
-        self.assertEqual((compare.reference.gamma, compare.current.gamma), (1.5, 1.5))
-        self.assertEqual(compare.reference_info, "capturing 0/8; in use: average "
+        self.assertEqual((compare.baseline.gamma, compare.current.gamma), (1.5, 1.5))
+        self.assertEqual(compare.baseline_info, "capturing 0/8; in use: average "
                          "of 8 frames, noise reduction 0, 4 s old")
         self.assertEqual(compare.difference_info, "the Reference view, average 4")
         self.engine.set_compare(False)
         self.assertIsNone(self.engine.latest_compare())
 
     def test_compare_in_other_views_computes_one_difference(self):
-        """Outside Reference view the difference is processed without averaging.
+        """In Raw view the difference from the reference is processed without averaging.
 
         Args: None.
         Returns: None.
         """
         ramp = np.tile(np.arange(0, 120, dtype=np.uint8), (80, 1))
-        s = Settings(mode="Previous", flip_horizontal=True)
+        s = Settings(mode="Raw", flip_horizontal=True)
         self.processor.set_reference(flat(10), 0.0, 0.0)
         self.engine.demo_source = object()  # demo: watermark every image
-        packet = FramePacket(3, flat(0), 1.0, "Previous", True)
+        packet = FramePacket(3, flat(0), 1.0, "Raw", True)
         self.engine._publish_compare(self.processor, ramp, s, packet, 1.0)
         compare = self.engine.latest_compare()
         expected, _ = finish_difference(cv2.absdiff(ramp, flat(10)), s)
@@ -414,19 +414,202 @@ class EngineReferenceTests(unittest.TestCase):
                                       watermark_demo(expected[:, ::-1]))
         np.testing.assert_array_equal(compare.current.image, watermark_demo(ramp[:, ::-1]))
         self.assertTrue(compare.demo and compare.difference.demo)
-        self.assertIn("no averaging (the view is Previous)", compare.difference_info)
+        self.assertIn("no averaging (the view is Raw)", compare.difference_info)
         s = Settings(mode="Reference", average=3, rolling=True)
         self.processor.set_reference(flat(10, (40, 120)), 0.0, 0.0)  # other size
         self.engine._publish_compare(self.processor, ramp, s, packet, 1.0)
         compare = self.engine.latest_compare()
-        self.assertIsNone(compare.reference)
+        self.assertIsNone(compare.baseline)
         self.assertIsNone(compare.difference)
         self.assertEqual(compare.difference_info, "the Reference view, average 3 rolling")
         self.processor.clear_reference()
         self.engine._publish_compare(self.processor, ramp, Settings(mode="Reference"),
                                      packet, 1.0)
-        self.assertEqual(self.engine.latest_compare().reference_info, "none yet")
+        self.assertEqual(self.engine.latest_compare().baseline_info, "none yet")
         self.assertIn("no averaging", self.engine.latest_compare().difference_info)
+
+    def feed_previous(self, s, frames, average=False):
+        """Run frames through Previous view like the worker, publishing after each.
+
+        Args: s is the Settings snapshot; frames are the Mono8 frames in order;
+            average also feeds each difference to the block average, as the
+            worker does, and does not publish while it returns None.
+        Returns: The newest ComparePacket (None when nothing was published).
+        """
+        for number, frame in enumerate(frames, 1):
+            difference = self.processor.difference(frame, "Previous", s.frames_back)
+            if average and self.processor.average(difference, s.average) is None:
+                continue
+            packet = FramePacket(number, difference, 1.0, "Previous", False)
+            self.engine._publish_compare(self.processor, frame, s, packet,
+                                         float(number))
+        return self.engine.latest_compare()
+
+    def test_previous_compare_shows_the_frame_the_difference_used(self):
+        """The previous panel is the exact frame subtracted, 1 or more frames back.
+
+        Args: None.
+        Returns: None.
+        """
+        rng = np.random.default_rng(11)
+        frames = [rng.integers(0, 256, (40, 60), dtype=np.uint8) for _ in range(8)]
+        for back, flip in ((1, False), (3, True)):
+            self.processor = ESPIProcessor()
+            s = Settings(mode="Previous", frames_back=back, flip_horizontal=flip)
+            compare = self.feed_previous(s, frames)
+            earlier = frames[-1 - back]
+            mirror = (lambda image: image[:, ::-1]) if flip else (lambda image: image)
+            np.testing.assert_array_equal(compare.baseline.image, mirror(earlier))
+            np.testing.assert_array_equal(compare.current.image, mirror(frames[-1]))
+            np.testing.assert_array_equal(  # the published packet, as given
+                compare.difference.image, cv2.absdiff(frames[-1], earlier))
+            self.assertEqual((compare.view, compare.baseline.mode, compare.sequence),
+                             ("Previous", "Previous frame", len(frames)))
+            self.assertEqual(compare.baseline_label,
+                             f"Previous ({back} {'frame' if back == 1 else 'frames'} back)")
+            self.assertEqual(compare.baseline_info, "the frame the view subtracts, "
+                             f"{back} {'frame' if back == 1 else 'frames'} back")
+            self.assertEqual(compare.difference_info, "the Previous view, no averaging")
+
+    def test_previous_compare_uses_the_conditioned_frame(self):
+        """The previous panel is the history entry itself, never a re-derived frame.
+
+        Args: None.
+        Returns: None.
+        """
+        frames = [flat(10), flat(20), flat(30)]
+        s = Settings(mode="Previous", frames_back=2)
+        for frame in frames:
+            self.processor.difference(frame, "Previous", 2)
+        np.testing.assert_array_equal(self.processor.previous, frames[0])
+        self.assertIsNone(ESPIProcessor().previous)
+        self.processor.difference(flat(40), "Reference", 2)  # not a Previous difference
+        self.assertIsNone(self.processor.previous)
+        self.processor.difference(flat(50), "Previous", 2)
+        self.assertIsNotNone(self.processor.previous)
+        self.processor.reset_previous()
+        self.assertIsNone(self.processor.previous)
+        self.assertEqual(s.frames_back, 2)
+
+    def test_previous_compare_without_history_has_no_baseline_or_difference(self):
+        """Until the history is deep enough both panels are None, with the reason.
+
+        Args: None.
+        Returns: None.
+        """
+        compare = self.feed_previous(Settings(mode="Previous", frames_back=3),
+                                     [flat(10), flat(20)])
+        self.assertIsNone(compare.baseline)
+        self.assertIsNone(compare.difference)
+        self.assertEqual(compare.baseline_info,
+                         "none yet: the view needs 3 frames of history")
+        self.assertEqual(compare.baseline_label, "Previous (3 frames back)")
+        np.testing.assert_array_equal(compare.current.image, flat(20))
+        self.processor = ESPIProcessor()
+        compare = self.feed_previous(Settings(mode="Previous"), [flat(10)])
+        self.assertEqual(compare.baseline_info, "none yet: the view needs 1 frame of history")
+        self.assertEqual(compare.baseline_label, "Previous (1 frame back)")
+
+    def test_previous_compare_with_averaging_pairs_the_last_frames(self):
+        """A completed average is published with the last pair of frames.
+
+        Args: None.
+        Returns: None.
+        """
+        frames = [flat(10 * n) for n in range(1, 9)]
+        s = Settings(mode="Previous", frames_back=2, average=3, rolling=False)
+        compare = self.feed_previous(s, frames, average=True)
+        self.assertEqual(compare.sequence, 6)  # the last full block of 3 differences
+        np.testing.assert_array_equal(compare.current.image, flat(60))
+        np.testing.assert_array_equal(compare.baseline.image, flat(40))
+        self.assertEqual(compare.difference_info, "the Previous view, average 3")
+        s = replace(s, rolling=True)
+        compare = self.feed_previous(s, frames)
+        self.assertEqual(compare.difference_info, "the Previous view, average 3 rolling")
+
+    def test_previous_compare_while_the_average_fills(self):
+        """Live frames, no difference and a count, until the first average completes.
+
+        Args: None.
+        Returns: None.
+        """
+        s = Settings(mode="Previous", frames_back=2, average=4)
+        frames = [flat(10 * n) for n in range(1, 5)]
+        self.assertIsNone(self.feed_previous(s, frames[:3], average=True))
+        self.assertTrue(self.engine._publish_compare_filling(
+            self.processor, frames[2], s, 9))
+        waiting = self.engine.latest_compare()
+        self.assertEqual((waiting.view, waiting.sequence), ("Previous", 9))
+        self.assertIsNone(waiting.difference)
+        np.testing.assert_array_equal(waiting.baseline.image, flat(10))
+        np.testing.assert_array_equal(waiting.current.image, flat(30))
+        self.assertEqual(waiting.difference_info, "averaging: 3 of 4 frames; the "
+                         "difference appears when the average is complete")
+        self.assertTrue(self.engine._publish_compare_filling(
+            self.processor, frames[2], s, 9))  # still waiting: kept live
+        self.assertIsNot(self.engine.latest_compare(), waiting)
+        complete = self.feed_previous(s, [flat(50), flat(60), flat(70), flat(80)],
+                                      average=True)
+        self.assertIsNotNone(complete.difference)
+        self.assertFalse(self.engine._publish_compare_filling(
+            self.processor, frames[2], s, 10))  # a complete set stays on screen
+        self.assertIs(self.engine.latest_compare(), complete)
+        self.engine._compare_packet = replace(complete, view="Reference")
+        self.assertTrue(self.engine._publish_compare_filling(
+            self.processor, frames[2], s, 11))  # another view's set does not count
+        self.engine._compare_packet = complete
+        for changed in (replace(s, frames_back=3), replace(s, average=5)):
+            self.assertTrue(self.engine._publish_compare_filling(
+                self.processor, frames[2], changed, 12))  # a set from other settings
+            self.engine._compare_packet = complete
+
+    def test_saving_a_previous_comparison_names_the_previous_frame(self):
+        """Save all three in Previous view writes previous/current/difference.
+
+        Args: None.
+        Returns: None.
+        """
+        diff = FramePacket(1, np.tile(np.arange(0, 256, 4, dtype=np.uint8), (8, 1)),
+                           1.0, "Previous", False)
+        prev = FramePacket(1, flat(50, (8, 64)), 2.0, "Previous frame", False)
+        cur = FramePacket(1, flat(60, (8, 64)), 2.0, "Current", False)
+        compare = ComparePacket(1, cur, prev, diff, "the frame the view subtracts, "
+                                "2 frames back", "the Previous view, average 3", False,
+                                "Previous", "Previous (2 frames back)")
+        self.engine.request("save_compare", packet=compare, title="run 3", notes="n")
+        self.engine._handle_actions(self.processor, None)
+        folder = os.path.join(self.tmp.name, "frames")
+        names = sorted(os.listdir(folder))
+        self.assertEqual(len(names), 4)
+        self.assertFalse(any("reference" in name for name in names))
+        for name, part in (("current", cur), ("difference", diff), ("previous", prev)):
+            path = os.path.join(folder, next(n for n in names if f"_{name}_run_3" in n))
+            np.testing.assert_array_equal(cv2.imread(path, cv2.IMREAD_UNCHANGED),
+                                          part.render())
+        with open(os.path.join(folder, next(n for n in names if n.endswith(".txt"))),
+                  encoding="utf-8") as info:
+            text = info.read()
+        self.assertIn("Previous (2 frames back): the frame the view subtracts, "
+                      "2 frames back", text)
+        self.assertIn("Difference: the Previous view, average 3", text)
+
+    def test_saving_a_comparison_without_a_baseline_saves_the_current_frame(self):
+        """With no reference or previous frame, only the current frame is saved.
+
+        Args: None.
+        Returns: None.
+        """
+        cur = FramePacket(1, flat(60, (8, 64)), 2.0, "Current", False)
+        for view, label, said in (("Reference", "Reference", "No reference yet"),
+                                  ("Previous", "Previous (1 frame back)",
+                                   "No previous frame yet")):
+            compare = ComparePacket(1, cur, None, None, "none yet", "-", False, view, label)
+            self.engine.request("save_compare", packet=compare, title=view, notes="")
+            self.engine._handle_actions(self.processor, None)
+            self.assertTrue(any(f"{said}: saving the current frame only." in line
+                                for line in self.log.lines))
+        names = os.listdir(os.path.join(self.tmp.name, "frames"))
+        self.assertEqual(sum(name.endswith(".png") for name in names), 2)
 
     def test_saving_a_comparison_writes_exactly_what_is_shown(self):
         """Save all three writes each rendered image and one notes file.
@@ -573,18 +756,18 @@ class EngineLoopReferenceTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
         self.engine.set_compare(True)
         self.assertTrue(wait_until(lambda: self.engine.latest_compare() is not None))
-        self.assertIsNone(self.engine.latest_compare().reference)
+        self.assertIsNone(self.engine.latest_compare().baseline)
         self.engine.update_settings(ref_frames=4)
         self.assertTrue(wait_until(lambda: self.logged("Reference frames: 4")))
         self.engine.request("reference")
-        self.engine.update_settings(mode="Previous")  # a view change does not stop it
+        self.engine.update_settings(mode="Raw")  # a view change does not stop it
         self.assertTrue(wait_until(lambda: self.logged(
             "Captured reference frame (average of 4) at noise reduction 0.")))
         self.assertTrue(wait_until(lambda: (
-            self.engine.latest_compare().reference is not None)))
+            self.engine.latest_compare().baseline is not None)))
         compare = self.engine.latest_compare()
-        np.testing.assert_array_equal(compare.reference.image[60:], flat(25)[60:])
-        self.assertEqual(compare.reference.mode, "Reference frame")
+        np.testing.assert_array_equal(compare.baseline.image[60:], flat(25)[60:])
+        self.assertEqual(compare.baseline.mode, "Reference frame")
         self.engine.update_settings(noise_reduction=10, mode="Reference")
         self.assertTrue(wait_until(lambda: self.logged("but the reference was taken at 0")))
         self.assertTrue(wait_until(lambda: "taken at noise reduction 0" in
@@ -602,11 +785,94 @@ class EngineLoopReferenceTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: self.logged("references are captured back to back")))
         self.assertTrue(wait_until(lambda: (
             self.engine.latest_compare() is not None and
-            self.engine.latest_compare().reference is not None)))
+            self.engine.latest_compare().baseline is not None)))
         compare = self.engine.latest_compare()
-        np.testing.assert_array_equal(compare.reference.image[60:], flat(25)[60:])
-        self.assertIn("average of 4 frames", compare.reference_info)
+        np.testing.assert_array_equal(compare.baseline.image[60:], flat(25)[60:])
+        self.assertIn("average of 4 frames", compare.baseline_info)
         self.assertFalse(self.logged("Captured reference"))  # refreshes are quiet
+
+
+    def await_compare(self, accept):
+        """Wait for a published comparison that satisfies a test.
+
+        Args: accept is called with each ComparePacket and returns True to take it.
+        Returns: The accepted ComparePacket, or None after the timeout.
+        """
+        found = []
+
+        def check():
+            """Look at the newest comparison.
+
+            Args: None.
+            Returns: True once one was accepted.
+            """
+            compare = self.engine.latest_compare()
+            if compare is not None and accept(compare):
+                found.append(compare)
+            return bool(found)
+
+        return found[0] if wait_until(check) else None
+
+    def test_previous_view_compare_is_live_and_in_step(self):
+        """Previous, current and difference come from one iteration, 2 and 1 back.
+
+        The cycle 10, 20, 30, 40 makes the frame n back differ from the current
+        one by 10 n modulo 40.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        self.engine.update_settings(mode="Previous", frames_back=2)
+        self.engine.set_compare(True)
+        compare = self.await_compare(lambda c: c.view == "Previous" and
+                                     c.difference is not None)
+        self.assertEqual(compare.baseline_label, "Previous (2 frames back)")
+        current, previous = int(compare.current.image[70, 10]), int(compare.baseline.image[70, 10])
+        self.assertEqual((current - previous) % 40, 20)
+        self.assertEqual(compare.difference.mode, "Previous")
+        self.assertEqual(compare.difference_info, "the Previous view, no averaging")
+        self.engine.update_settings(frames_back=1)
+        compare = self.await_compare(lambda c: c.baseline_label == "Previous (1 frame back)"
+                                     and c.difference is not None)
+        current, previous = int(compare.current.image[70, 10]), int(compare.baseline.image[70, 10])
+        self.assertEqual((current - previous) % 40, 10)
+
+    def test_previous_view_compare_waits_for_the_average(self):
+        """While the average fills the window gets live frames and no difference.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.set_compare(True)
+        self.engine.update_settings(mode="Previous", average=100000)  # never completes
+        compare = self.await_compare(lambda c: c.view == "Previous" and
+                                     c.baseline is not None)
+        self.assertIsNone(compare.difference)
+        self.assertIn("averaging:", compare.difference_info)
+        self.engine.update_settings(average=2)
+        compare = self.await_compare(lambda c: c.difference is not None and
+                                     c.view == "Previous")
+        self.assertEqual(compare.difference_info, "the Previous view, average 2")
+
+    def test_changing_the_view_changes_what_the_comparison_shows(self):
+        """Reference, Previous and Raw each publish their own kind of comparison.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.set_compare(True)
+        compare = self.await_compare(lambda c: c.view == "Reference")
+        self.assertEqual(compare.baseline_label, "Reference")
+        self.engine.update_settings(mode="Previous")
+        compare = self.await_compare(lambda c: c.view == "Previous")
+        self.assertEqual(compare.baseline_label, "Previous (1 frame back)")
+        self.engine.update_settings(mode="Reference")
+        compare = self.await_compare(lambda c: c.view == "Reference")
+        self.assertEqual(compare.baseline_info, "none yet")
+        self.engine.update_settings(mode="Raw")
+        compare = self.await_compare(lambda c: "the view is Raw" in c.difference_info)
+        self.assertEqual((compare.view, compare.baseline_label), ("Reference", "Reference"))
 
 
 if __name__ == "__main__":

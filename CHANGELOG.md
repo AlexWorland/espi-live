@@ -29,6 +29,43 @@
 - The display is always grayscale, with the display gamma. **Palette** and **CLAHE** are gone from the controls, the presets, the guide and the settings, and the diagnostics line no longer reports CLAHE.
 - Saved PNGs and AVI recordings are unchanged: they hold the same gray values as the screen, written as before. `processing.apply_palette` and `palette_rgb_table` became `apply_display(image, gamma)` and `display_rgb_table(gamma)`.
 - The guide and help text now give the display order as brightness, gain and contrast, then gamma, which is what the program does.
+## 2026-11-21 — Quick release is offered to installed copies
+
+### Previous state
+
+- **Quick release** always made a pre-release tagged `vX.Y.Z-dev.N`, which installed copies are never offered, so a quick build had to be downloaded and unpacked by hand.
+- Each workflow numbered its builds with its own run number. The updater orders builds by that number, so a quick build could not simply be made a full release: its number (for example 3) was far below the installed copies' (the newest release was build 33), and no copy would have updated to it. A copy installed from one workflow's build could also rank above the other workflow's next build and never be offered it.
+
+### Current state
+
+- **Actions > Quick release** publishes like **Release**: a full release tagged `vX.Y.Z` (the version the draft proposes, else the next patch), marked latest, with GitHub's generated notes. Installed copies are offered it through **Check for updates** and the status-bar button, and the draft release is refreshed afterwards. The tests are still skipped, and the notes say so.
+- A new **Pre-release** checkbox keeps the old behavior: a `vX.Y.Z-dev.N` pre-release that installed copies are not offered. **Publish** still builds without releasing.
+- The `version` job of **Release** and **Quick release** now picks the build number: the run number, or one above the newest build any published release's notes name, whichever is higher. Both workflows share one sequence, so every build, tested or not, is newer than the ones before it. Pre-release tags (`-pre.N`, `-dev.N`) use this number, so they skip ahead of the old run numbers. Both workflows also share a concurrency group, so a run waits for the other's.
+- Installed copies, `build-info.json` and the release notes' build line are unchanged.
+
+## 2026-11-21 — Compare works in Previous view
+
+### Previous state
+
+- **Compare** (`C`) always showed the stored reference, even in Previous view, which does not use one. The window gave no way to see the two frames Previous view actually subtracts.
+
+### Current state
+
+- In Previous view the Compare window shows **Previous (N frames back)**, the **Current frame** and the **Difference**, live and together. The previous panel is the exact frame the difference subtracted (the processor keeps it as `ESPIProcessor.previous`), after single field and noise reduction like the current frame, so Frames back above 1 is shown correctly. The difference is the main window's image, averaging included.
+- With Average N above 1 the window shows the live previous and current frames and a count ("averaging: 3 of 10 frames") until the first average completes; after that all three images update together each time one does. Without an earlier frame yet the panels say so.
+- **Freeze** holds all three, **Save all three** writes `previous`, `current` and `difference` PNGs with the notes file naming how many frames back, and **Set reference** is greyed out in Previous view. Changing the view while the window is open switches between the reference and Previous panels. Reference and Raw view behave as before.
+- `ComparePacket.reference` and `reference_info` are now `baseline` and `baseline_info`, with `view` and `baseline_label` added.
+
+## 2026-11-21 — The mouse wheel scrolls the panel, not the sliders
+
+### Previous state
+
+- Scrolling the Controls panel with the mouse wheel changed any slider or number box under the pointer, so exposure or gain could change by accident. The toolbar's Zoom slider also zoomed on a wheel notch.
+
+### Current state
+
+- The mouse wheel over a slider or a number box in the Controls panel scrolls the panel and never changes the value. Dragging, clicking, the arrow keys and typing a number still change it, and a wheel no longer moves keyboard focus into a number box.
+- The toolbar's **Zoom** slider ignores the wheel too. Zoom is still set by dragging, clicking, the arrow keys, the **Fit** and **1:1** buttons, and the wheel or trackpad on the image.
 
 ## 2026-11-21 — Basic controls only, and a quick release
 

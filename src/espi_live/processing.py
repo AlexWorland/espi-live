@@ -569,6 +569,7 @@ class ESPIProcessor:
         Returns: None.
         """
         self.history = deque(maxlen=1)  # earlier frames for Previous view
+        self.previous = None           # the earlier frame the last difference() used
         self.ref = None
         self.ref_time = None
         self.ref_frames = 0            # frames averaged into ref
@@ -622,6 +623,7 @@ class ESPIProcessor:
         Returns: None.
         """
         self.history.clear()
+        self.previous = None
 
     def set_reference(self, frame, now, noise_reduction=0.0, frames=1):
         """Store a copy of a frame as the Reference baseline.
@@ -688,8 +690,11 @@ class ESPIProcessor:
             back shows slower change, as the LabVIEW VI did by waiting between
             grabs.
         Returns: A uint8 absolute-difference image, or zeros until a baseline
-            frame exists.
+            frame exists. For Previous view, self.previous afterwards holds
+            the earlier frame that was subtracted (None while there was
+            none), which the comparison window shows as its Previous panel.
         """
+        self.previous = None
         if mode == "Previous":
             back = min(max(1, int(frames_back)), MAX_FRAMES_BACK)
             if self.history and self.history[-1].shape != frame.shape:
@@ -699,7 +704,8 @@ class ESPIProcessor:
             if len(self.history) < back:
                 self.history.append(frame.copy())
                 return np.zeros_like(frame)
-            result = cv2.absdiff(frame, self.history[0])
+            self.previous = self.history[0]  # the deque drops it on the append
+            result = cv2.absdiff(frame, self.previous)
             self.history.append(frame.copy())
             return result
         if self.ref is None or self.ref.shape != frame.shape:

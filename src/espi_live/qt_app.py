@@ -1419,6 +1419,48 @@ class CpuImageView(ViewNavigation, QWidget):
         painter.drawImage(QPointF(x + left * scale, y + top * scale), qimage)
 
 
+class WheelIgnoringSlider(QSlider):
+    """A slider that leaves the mouse wheel to the widgets around it.
+
+    A wheel notch over the slider is ignored, so it reaches the parent and a
+    scrolling panel scrolls instead of the value changing. Dragging, clicking
+    and the keyboard still set the value.
+    """
+
+    def wheelEvent(self, event):
+        """Ignore the wheel so the parent widget gets it.
+
+        Args: event is the Qt wheel event.
+        Returns: None.
+        """
+        event.ignore()
+
+
+class WheelIgnoringSpinBox(QDoubleSpinBox):
+    """A number box that leaves the mouse wheel to the widgets around it.
+
+    It also takes focus only by a click or Tab: Qt's default is to take focus
+    on a wheel event, which would move the keyboard focus while scrolling.
+    """
+
+    def __init__(self):
+        """Create the number box with click-and-Tab focus only.
+
+        Args: None.
+        Returns: None.
+        """
+        super().__init__()
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        """Ignore the wheel so the parent widget gets it.
+
+        Args: event is the Qt wheel event.
+        Returns: None.
+        """
+        event.ignore()
+
+
 class SliderSpin(QWidget):
     """A slider and exact-entry spin box sharing one numeric value."""
 
@@ -1436,8 +1478,8 @@ class SliderSpin(QWidget):
         self.step = step
         self._description = ""
         self._note = ""
-        self.slider = QSlider(Qt.Horizontal)
-        self.spin = QDoubleSpinBox()
+        self.slider = WheelIgnoringSlider(Qt.Horizontal)
+        self.spin = WheelIgnoringSpinBox()
         self.spin.setDecimals(decimals)
         self.spin.setSingleStep(step)
         self.spin.setSuffix(suffix)
@@ -1727,31 +1769,51 @@ class SettingsGuideDialog(QDialog):
         layout.addWidget(buttons)
 
 
-# The three images of the reference comparison window: packet attribute,
-# heading and tooltip.
+# The three images of the comparison window: packet attribute, heading and
+# tooltip. The first is the baseline (the reference, or in Previous view the
+# earlier frame); COMPARE_BASELINES names it per view.
 COMPARE_PANELS = (
-    ("reference", "Reference",
-     "The stored reference frame, as Raw view would show it: gamma only, no "
-     "stretch. F or Set reference retakes it; Ref. frames averages "
-     "several frames into it."),
+    ("baseline", "Reference", ""),
     ("current", "Current frame",
      "The camera frame being compared, after single field and noise reduction, "
-     "the same point the reference is taken at. Gamma only."),
+     "the same point the baseline is taken at. Gamma only."),
     ("difference", "Difference",
-     "The processed difference between the two. In Reference view it is exactly "
-     "the main window's image, averaging included; in other views it is one "
-     "difference from the reference with the same filters, without averaging."),
+     "The processed difference between the two. In Reference and Previous views "
+     "it is exactly the main window's image, averaging included; in Raw view it "
+     "is one difference from the reference with the same filters, without "
+     "averaging."),
 )
-NO_REFERENCE_TEXT = ("No reference yet.\n\nPress Set reference (F) to capture one; "
-                     "Ref. frames sets how many frames it averages.")
+# Per view: the baseline panel's tooltip, the text when there is none, and the
+# Set reference button's tooltip.
+COMPARE_BASELINES = {
+    "Reference": (
+        "The stored reference frame, as Raw view would show it: gamma only, no "
+        "stretch. F or Set reference retakes it; Ref. frames averages "
+        "several frames into it.",
+        "No reference yet.\n\nPress Set reference (F) to capture one; "
+        "Ref. frames sets how many frames it averages.",
+        "Retake the displayed camera's reference, averaging Ref. frames frames."),
+    "Previous": (
+        "The earlier frame that Previous view subtracted to make the difference "
+        "(Frames back sets how far), after single field and noise reduction. "
+        "Gamma only.",
+        "No previous frame yet.\n\nIt appears once the camera has delivered "
+        "enough frames to look back; Frames back sets how many.",
+        "Not used in Previous view: the earlier frame is taken automatically."),
+}
+NO_REFERENCE_TEXT = COMPARE_BASELINES["Reference"][1]
+AVERAGING_TEXT = ("Averaging...\n\nThe difference appears when the average is "
+                  "complete; Average N sets how many it sums.")
 COMPARE_POLL_MS = 50
 
 
 class ReferenceCompareDialog(QDialog):
-    """Show the displayed camera's reference, current frame and difference live.
+    """Show the displayed camera's baseline, current frame and difference live.
 
-    The images come from the engine's ComparePacket, so all three belong to
-    the same moment. The engine builds them only while this window is open.
+    The baseline is the stored reference, or in Previous view the earlier
+    frame that view subtracts. The images come from the engine's
+    ComparePacket, so all three belong to the same moment. The engine builds
+    them only while this window is open.
     """
 
     def __init__(self, window):
@@ -1765,17 +1827,20 @@ class ReferenceCompareDialog(QDialog):
         self.window = window
         self.engine = None  # the engine currently asked for comparisons
         self.shown = None  # the ComparePacket on screen (Freeze keeps it)
+        self.view = "Reference"  # the view whose baseline the panels are named for
         self.tables = {}
         self.setWindowTitle("Reference comparison")
         self.resize(ui_scale.px(1200), ui_scale.px(480))
         grid = QGridLayout()
         self.views, self.stacks, self.messages, self.captions = {}, {}, {}, {}
+        self.titles = {}
         for column, (name, heading, tip) in enumerate(COMPARE_PANELS):
             title = QLabel(heading)
             font = title.font()
             font.setBold(True)
             title.setFont(font)
-            set_tooltip(title, tip)
+            if tip:  # the baseline's tooltip depends on the view: set_view
+                set_tooltip(title, tip)
             view = CpuImageView()
             view.setMinimumSize(ui_scale.px(200), ui_scale.px(150))
             message = QLabel(NO_REFERENCE_TEXT)
@@ -1793,6 +1858,7 @@ class ReferenceCompareDialog(QDialog):
             grid.setColumnStretch(column, 1)
             self.views[name], self.stacks[name] = view, stack
             self.messages[name], self.captions[name] = message, caption
+            self.titles[name] = title
         grid.setRowStretch(1, 1)
         self.demo_label = QLabel("DUMMY MODE — synthetic video, not camera data")
         self.demo_label.setAlignment(Qt.AlignCenter)
@@ -1803,9 +1869,6 @@ class ReferenceCompareDialog(QDialog):
         buttons = QDialogButtonBox()
         self.reference_button = buttons.addButton("Set reference (F)",
                                                   QDialogButtonBox.ActionRole)
-        set_tooltip(self.reference_button,
-                    "Retake the displayed camera's reference, averaging Ref. frames "
-                    "frames.")
         self.freeze_button = buttons.addButton("Freeze", QDialogButtonBox.ActionRole)
         self.freeze_button.setCheckable(True)
         self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
@@ -1815,8 +1878,8 @@ class ReferenceCompareDialog(QDialog):
         self.save_button = buttons.addButton("Save all three", QDialogButtonBox.ActionRole)
         set_tooltip(self.save_button,
                     "Save the three images as shown (PNG) plus one notes file with "
-                    "the main window's title and notes and how the reference was "
-                    "taken.")
+                    "the main window's title and notes and how the reference or "
+                    "previous frame was taken.")
         close = buttons.addButton(QDialogButtonBox.Close)
         for button in buttons.buttons():
             button.setAutoDefault(False)  # Enter must not press Save or Close
@@ -1831,6 +1894,7 @@ class ReferenceCompareDialog(QDialog):
         layout.addWidget(buttons)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
+        self.set_view("Reference", "Reference")
 
     def showEvent(self, event):
         """Ask the displayed camera for comparisons while the window is open.
@@ -1867,6 +1931,13 @@ class ReferenceCompareDialog(QDialog):
         self.shown = None
         if engine is not None:
             engine.set_compare(True)
+            settings = engine.settings()
+            if settings.mode == "Previous":
+                back = settings.frames_back
+                self.set_view("Previous", f"Previous ({back} "
+                              f"{'frame' if back == 1 else 'frames'} back)")
+            else:
+                self.set_view("Reference", "Reference")
 
     def poll(self):
         """Show the newest comparison of the displayed camera.
@@ -1882,10 +1953,26 @@ class ReferenceCompareDialog(QDialog):
         if self.freeze_button.isChecked():
             return
         packet = self.engine.latest_compare()
-        if packet is None or (self.shown is not None and
-                              packet.sequence == self.shown.sequence):
+        if packet is None or packet is self.shown:
             return
         self.show_compare(packet)
+
+    def set_view(self, view, label):
+        """Name the panels for a view, and enable Set reference only where it applies.
+
+        Args: view is "Reference" (also Raw view) or "Previous"; label is the
+            baseline panel's heading, for example "Previous (2 frames back)".
+        Returns: None.
+        """
+        self.view = view
+        tip, _, button_tip = COMPARE_BASELINES[view]
+        self.titles["baseline"].setText(label)
+        set_tooltip(self.titles["baseline"], tip)
+        self.setWindowTitle(f"{view} comparison")
+        self.reference_button.setEnabled(view == "Reference")
+        set_tooltip(self.reference_button, button_tip)
+        self.messages["baseline"].setText(COMPARE_BASELINES[view][1])
+        self.messages["difference"].setText(COMPARE_BASELINES[view][1])
 
     def show_compare(self, packet):
         """Put a ComparePacket's three images and captions on screen.
@@ -1894,10 +1981,13 @@ class ReferenceCompareDialog(QDialog):
         Returns: None.
         """
         self.shown = packet
+        self.set_view(packet.view, packet.baseline_label)
         self.demo_label.setVisible(packet.demo)
-        self.setWindowTitle("Reference comparison — DUMMY MODE" if packet.demo
-                            else "Reference comparison")
-        captions = {"reference": packet.reference_info,
+        self.setWindowTitle(f"{packet.view} comparison" + (" — DUMMY MODE" if packet.demo
+                                                          else ""))
+        if packet.view == "Previous" and packet.baseline is not None:
+            self.messages["difference"].setText(AVERAGING_TEXT)
+        captions = {"baseline": packet.baseline_info,
                     "current": "live, after single field and noise reduction",
                     "difference": packet.difference_info}
         for name, _, _ in COMPARE_PANELS:
@@ -1918,8 +2008,8 @@ class ReferenceCompareDialog(QDialog):
         Args: on is the Freeze button state.
         Returns: None.
         """
-        self.window.log.write("Reference comparison frozen." if on else
-                              "Reference comparison live again.")
+        self.window.log.write(f"{self.view} comparison frozen." if on else
+                              f"{self.view} comparison live again.")
 
     def save(self):
         """Save the three shown images through the engine.
@@ -2784,10 +2874,10 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         bar.addWidget(spacer)
 
-        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider = WheelIgnoringSlider(Qt.Horizontal)
         self.zoom_slider.setRange(0, ZOOM_TICKS)
-        # A wheel notch scrolls three single steps; make that one 1.25x step,
-        # matching wheel zoom on the image.
+        # The wheel no longer moves this slider. Arrow keys still step a third
+        # of a 1.25x zoom step, the size a wheel notch used to scroll in three.
         self.zoom_slider.setSingleStep(round(
             ZOOM_TICKS * math.log(1.25) / math.log(MAX_ZOOM) / 3))
         self.zoom_slider.setPageStep(ZOOM_TICKS // 6)

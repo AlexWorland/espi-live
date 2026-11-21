@@ -34,7 +34,8 @@ from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.capture_models import adapter_for
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
-                                  ESPIProcessor, NoiseCalibration, PeakHold,
+                                  ESPIProcessor, MAX_FRAMES_BACK,
+                                  NoiseCalibration, PeakHold,
                                   RangeTracker, apply_display, apply_gain,
                                   apply_levels, denoise_strength, display_lut,
                                   even_out_brightness, local_normalize,
@@ -207,20 +208,38 @@ class FramePacket:
 
 @dataclass(frozen=True)
 class ComparePacket:
-    """The stored reference, the current frame and their difference, in step.
+    """The baseline, the current frame and their difference, in step.
 
-    Each image is a FramePacket, so render() gives exactly what the
-    comparison window shows. reference and difference are None until a
-    reference of the current frame size exists.
+    The baseline is the stored reference (Reference and Raw views) or the
+    earlier frame that Previous view subtracts. Each image is a FramePacket,
+    so render() gives exactly what the comparison window shows. baseline and
+    difference are None until a baseline of the current frame size exists
+    (and, in Previous view, while the average is still filling).
     """
 
     sequence: int
     current: FramePacket
-    reference: object      # FramePacket or None
+    baseline: object       # FramePacket or None
     difference: object     # FramePacket or None
-    reference_info: str    # how the reference was taken, or why there is none
+    baseline_info: str     # how the baseline was taken, or why there is none
     difference_info: str   # how the difference was processed
     demo: bool
+    view: str = "Reference"             # "Reference" or "Previous": the baseline kind
+    baseline_label: str = "Reference"   # the panel's name, e.g. "Previous (2 frames back)"
+
+
+def previous_wording(s):
+    """Word the Previous comparison's labels from the settings in force.
+
+    Args: s is the Settings snapshot.
+    Returns: (frames, label, averaging): "2 frames", "Previous (2 frames back)"
+        and "average 4 rolling" (or "no averaging").
+    """
+    back = min(max(1, int(s.frames_back)), MAX_FRAMES_BACK)
+    frames = f"{back} {'frame' if back == 1 else 'frames'}"
+    averaging = (f"average {s.average}{' rolling' if s.rolling else ''}"
+                 if s.average > 1 else "no averaging")
+    return frames, f"Previous ({frames} back)", averaging
 
 
 def present(image, flip, demo, tone=None):
@@ -963,6 +982,10 @@ class Engine:
                         now - last_compare >= COMPARE_INTERVAL_S):
                     self._publish_compare(processor, frame, s, packet, now)
                     last_compare = now
+            elif (s.mode == "Previous" and self._compare.is_set() and
+                    now - last_compare >= COMPARE_INTERVAL_S and
+                    self._publish_compare_filling(processor, frame, s, sequence)):
+                last_compare = now  # the average is still filling
             window_frames += 1
             window_work += time.monotonic() - work_started
 
@@ -1047,21 +1070,29 @@ class Engine:
                            f"taken at {old:g}. Press F to retake it.")
 
     def _publish_compare(self, processor, frame, s, packet, now):
-        """Publish the reference, the current frame and their difference.
+        """Publish the baseline, the current frame and their difference.
 
         Args: processor is the ESPIProcessor; frame is this iteration's frame
             (after single-field and noise reduction); s is the Settings
             snapshot; packet is the FramePacket just published; now is the
             monotonic time.
-        Returns: None. In Reference view the difference is the published
-            packet itself (with its averaging); in other views it is one
-            difference from the reference, processed like Reference view
-            but without averaging.
+        Returns: None. In Reference and Previous views the difference is the
+            published packet itself (with its averaging) and, in Previous
+            view, the baseline is the earlier frame that difference
+            subtracted. In Raw view the baseline is the reference and the
+            difference is one difference from it, processed like Reference
+            view but without averaging.
         """
         flip = s.flip_horizontal
         tone = display_lut(s.display_gain, s.contrast, s.brightness)
         current = FramePacket(packet.sequence, present(frame, flip, self.demo, tone),
                               s.gamma, "Current", self.demo)
+        if s.mode == "Previous":
+            compare = self._previous_compare(processor, s, packet.sequence, packet,
+                                             current, flip, tone)
+            with self._packet_lock:
+                self._compare_packet = compare
+            return
         ref = processor.ref
         info = reference_text(processor, now)
         capture = processor.ref_capture
@@ -1092,6 +1123,74 @@ class Engine:
                                 info, detail, self.demo)
         with self._packet_lock:
             self._compare_packet = compare
+
+    def _publish_compare_filling(self, processor, frame, s, sequence):
+        """Publish the Previous comparison while its first average is filling.
+
+        Block averaging produces no difference until N frames have been
+        summed, so the window would stay empty. This publishes the live
+        previous and current frames with no difference and a count, but only
+        until a complete set exists under the current Frames back and Average
+        settings: after that the last complete set stays on screen, still in
+        step, until the next average is done.
+
+        Args: processor is the ESPIProcessor; frame is this iteration's frame
+            (after single-field and noise reduction); s is the Settings
+            snapshot; sequence is the newest published frame's number.
+        Returns: True when a packet was published.
+        """
+        newest = self.latest_compare()
+        _, label, averaging = previous_wording(s)
+        if (newest is not None and newest.view == "Previous" and
+                newest.difference is not None and newest.baseline_label == label and
+                newest.difference_info == f"the Previous view, {averaging}"):
+            return False  # a complete set under these settings
+        flip = s.flip_horizontal
+        tone = display_lut(s.display_gain, s.contrast, s.brightness)
+        current = FramePacket(sequence, present(frame, flip, self.demo, tone),
+                              s.gamma, "Current", self.demo)
+        compare = self._previous_compare(processor, s, sequence, None, current,
+                                         flip, tone)
+        with self._packet_lock:
+            self._compare_packet = compare
+        return True
+
+    def _previous_compare(self, processor, s, sequence, packet, current, flip, tone):
+        """Build the Previous view's comparison from what its difference used.
+
+        The previous panel is the exact frame the processor subtracted in
+        this iteration (ESPIProcessor.previous), which already went through
+        single field and noise reduction like the current frame.
+
+        Args: processor is the ESPIProcessor; s is the Settings snapshot;
+            sequence numbers the images; packet is the Previous view's
+            published FramePacket, or None while the average is still
+            filling; current is the Current panel's FramePacket; flip and
+            tone are the display flip and display_lut table.
+        Returns: The ComparePacket. The difference is the published packet
+            itself (with its averaging); it and the previous frame are None
+            while no earlier frame exists, and the difference is None while
+            the average fills.
+        """
+        frames, label, averaging = previous_wording(s)
+        previous = processor.previous
+        baseline = difference = None
+        if previous is None:
+            info = f"none yet: the view needs {frames} of history"
+        else:
+            baseline = FramePacket(sequence, present(previous, flip, self.demo, tone),
+                                   s.gamma, "Previous frame", self.demo)
+            info = f"the frame the view subtracts, {frames} back"
+            if packet is not None:
+                difference = packet
+        if packet is None:
+            target = processor.avg_target or s.average
+            detail = (f"averaging: {processor.avg_count} of {target} frames; the "
+                      "difference appears when the average is complete")
+        else:
+            detail = f"the Previous view, {averaging}"
+        return ComparePacket(sequence, current, baseline, difference, info, detail,
+                             self.demo, "Previous", label)
 
     def _feed_recorder(self, s, signature, record_signature, packet, resulting_fps):
         """Start a recording or submit the newest frame to the active one.
@@ -1229,18 +1328,22 @@ class Engine:
     def _save_compare(self, payload):
         """Save a comparison's images as PNGs plus one notes file.
 
+        The files are named for the baseline: reference or previous.
+
         Args: payload holds packet (a ComparePacket), title and notes.
         Returns: None; the outcome is logged.
         """
         compare = payload["packet"]
-        images = [(name, part.render()) for name, part in (
-            ("reference", compare.reference), ("current", compare.current),
+        name = compare.view.lower()
+        images = [(part_name, part.render()) for part_name, part in (
+            (name, compare.baseline), ("current", compare.current),
             ("difference", compare.difference)) if part is not None]
-        if compare.reference is None:
-            self.log.write("No reference yet: saving the current frame only.")
+        if compare.baseline is None:
+            self.log.write(f"No {'reference' if name == 'reference' else 'previous frame'}"
+                           " yet: saving the current frame only.")
         save_frame_set(images, payload.get("title", ""), payload.get("notes", ""),
                        compare.demo, self.log, self.tag,
-                       details=(f"Reference: {compare.reference_info}",
+                       details=(f"{compare.baseline_label}: {compare.baseline_info}",
                                 f"Difference: {compare.difference_info}"))
 
     def _switch_live(self, processor, frame):
