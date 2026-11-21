@@ -498,11 +498,13 @@
             <li><a href="#status-bar">Status bar</a></li>
             <li><a href="#log">Log panel</a></li>
             <li><a href="#view-menu">View menu</a></li>
+            <li><a href="#devices-menu">Devices menu</a></li>
             <li><a href="#help-menu">Help menu</a></li>
           </ol>
         </li>
         <li><a href="#several-cameras">Several cameras</a></li>
         <li><a href="#analog">Analog camera</a></li>
+        <li><a href="#daq">Frequency generator and piezo (NI DAQ)</a></li>
         <li><a href="#defaults">Defaults and limits</a></li>
         <li><a href="#operations">Common operations</a>
           <ol>
@@ -1272,6 +1274,16 @@ python -m espi_live</code></pre>
           saved on exit. The menu also lists the shortcut keys.</p>
       </section>
 
+      <section id="devices-menu">
+        <h3>Devices menu <a class="anchor" href="#devices-menu" aria-label="Link to Devices menu">#</a></h3>
+        <ul>
+          <li><strong>Frequency generator and piezo (NI DAQ)…</strong> — assign
+            an NI DAQ's outputs to the specimen drive and the reference piezo,
+            and run them; see
+            <a href="#daq">Frequency generator and piezo (NI DAQ)</a>.</li>
+        </ul>
+      </section>
+
       <section id="help-menu">
         <h3>Help menu <a class="anchor" href="#help-menu" aria-label="Link to Help menu">#</a></h3>
         <ul>
@@ -1361,6 +1373,59 @@ python -m espi_live</code></pre>
         token saves the report to
         <code>output/logs/camera-report-*.md</code> and shows a
         <strong>Report this camera</strong> button instead.</p>
+    </section>
+
+    <section id="daq">
+      <h2>Frequency generator and piezo (NI DAQ) <a class="anchor" href="#daq" aria-label="Link to Frequency generator and piezo">#</a></h2>
+      <p><strong>Devices → Frequency generator and piezo (NI DAQ)…</strong>
+        drives two signals from an NI multifunction DAQ such as the
+        USB-6251: the <strong>frequency generator</strong>, which excites the
+        specimen through its shaker or PZT amplifier, and the <strong>piezo
+        driver</strong>, which sets the reference piezo through its amplifier.
+        The camera is not involved: frames are not synchronised to the drive.</p>
+      <ul>
+        <li><strong>Device</strong> — the NI devices NI-DAQmx can see, plus a
+          <strong>Simulated device (no hardware)</strong> for trying the
+          controls; it drives nothing and is marked in red. <strong>Rescan</strong>
+          looks again after plugging a device in.</li>
+        <li><strong>Assign outputs</strong> — give each role its own output.
+          The frequency generator can use an analog output (<strong>AO 0</strong>
+          or <strong>AO 1</strong>, a sine) or a counter
+          (<strong>Counter 0</strong> or <strong>Counter 1</strong>, a 0–5 V
+          square wave on the <strong>PFI</strong> terminal you pick; on the
+          USB-6251 BNC, PFI 0–7 have BNC sockets). The piezo driver uses an
+          analog output. Choose <strong>Off</strong> to leave a role
+          unassigned.</li>
+        <li><strong>Frequency generator</strong> — <strong>Frequency</strong>,
+          <strong>Amplitude</strong> (peak) and <strong>Offset</strong>. The
+          line below says exactly what the device will produce: the sine is
+          built from whole samples of a 20 MHz clock, so the frequency can be
+          a few parts per million off what you typed.</li>
+        <li><strong>Piezo driver</strong> — <strong>Hold a voltage</strong>
+          (with <strong>Step −</strong> and <strong>Step +</strong> to move it
+          by a set amount, for manual phase steps), or <strong>Sine at the
+          generator's frequency</strong> with its own amplitude, centre voltage
+          and <strong>Phase</strong>. The sine shares the generator's clock, so
+          the phase between them is exact.</li>
+        <li><strong>Safety limit</strong> — each role refuses any setting that
+          would go beyond this many volts either way. Set it to your
+          amplifier's largest safe input before switching anything on.</li>
+        <li><strong>Apply</strong> sends the settings; <strong>All outputs to
+          0 V</strong> stops the generator and sets every assigned output to
+          0 V. An assigned output that is switched off is held at 0 V.</li>
+      </ul>
+      <p>All volts are at the DAQ, before your amplifiers. The DAQ cannot
+        drive a shaker or piezo itself (±10 V, ±5 mA). Closing the window
+        leaves the outputs running; they go to 0 V on an error and when ESPI
+        live closes. Switch your amplifiers on after the DAQ is powered and
+        ESPI live is running, and off before you unplug the DAQ: its outputs
+        are undefined for a moment while it powers up.</p>
+      <p>NI support needs <code>pylablib-lightweight</code> and
+        <code>nidaqmx</code> (the setup script installs them) and NI's
+        NI-DAQmx driver from ni.com, on Windows or Linux. Without them only
+        the simulated device is offered, and the window says what is
+        missing. The log records every setting applied, including the
+        frequency the device really produces.</p>
     </section>
 
     <section id="defaults">

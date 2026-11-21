@@ -180,6 +180,12 @@ A laptop's built-in camera (USB IDs in `capture_models.BUILT_IN_CAMERAS`, or nam
 
 Other video devices (webcams, other capture sticks) are listed as **not yet supported** and are never opened unless you choose one. When you switch one on, it runs as delivered, and the viewer files a GitHub issue (label `camera-support`) with what the device reports, once per device type. A copy without a feedback token saves the report to `output/logs/camera-report-*.md` and shows a **Report this camera** button instead.
 
+### Frequency generator and piezo (NI DAQ)
+
+**Devices → Frequency generator and piezo (NI DAQ)…** drives the specimen excitation and the reference piezo from an NI multifunction DAQ such as the USB-6251. Assign each role its own output: the frequency generator to an analog output (a sine) or to a counter (a 0–5 V square wave on a chosen PFI terminal), and the piezo driver to an analog output. The piezo either holds a voltage, with **Step −/+** buttons for manual phase steps, or follows the generator with a sine at the same frequency and a set phase; the two analog outputs share one sample clock, so that phase is exact. Each role has a **Safety limit** in volts that no setting may exceed. **All outputs to 0 V** stops everything, and the outputs also go to 0 V on an error and when the program closes. Volts are at the DAQ, before your amplifiers: the DAQ cannot drive a shaker or piezo directly. Frames are not synchronised to the drive yet.
+
+The device work goes through [pyLabLib](https://pylablib.readthedocs.io/en/latest/devices/nidaq.html)'s `NIDAQ` class (`pylablib-lightweight`, without its Qt and other extras) on NI's `nidaqmx` package, both in `requirements.txt`. The NI-DAQmx driver comes from ni.com and runs on Windows and Linux only. Without it, or on a Mac, the window offers only a **Simulated device (no hardware)**, marked in red, for trying the controls. Hardware research and the synchronisation design are in `docs/notes/ni-usb-6251-integration.md` (PR #68).
+
 ### Demo mode
 
 If no FLIR camera or recognised capture adapter is detected (or PySpin is unavailable and no adapter is connected), startup offers **dummy/demo mode**, and `--demo` starts it directly without touching a camera. It opens the same windows with a moving synthetic grayscale pattern; exposure, gain and FPS are simulated. A persistent **DUMMY MODE ACTIVE** banner appears in the viewer and in saved frames and recordings, which also get `dummy_` filename prefixes. **Switch to live capture** retries camera detection without restarting: if no camera is available, demo continues; if one connects, measurement baselines reset to Raw view and any demo recording stops so synthetic and live frames never share a file. Demo mode is for interface and processing checks, not camera-performance measurements.
@@ -190,7 +196,7 @@ The app temporarily requests 1 ms timer resolution while running so demo pacing 
 
 ## Camera-PC setup
 
-Double-click `scripts/windows/SETUP AND START ESPI.bat`. It checks for Python 3.10, OpenCV, NumPy, PySide6, PySpin and the FLIR Spinnaker SDK, and asks before installing or launching anything. After it installs or repairs a dependency, close any installers and run the same file once more; a clean validation run launches the app. The individual helpers (`install_spinnaker_sdk.bat`, `install_pyspin.bat`, `run_pyspin_example.bat`) remain for troubleshooting. Point VS Code at the Python 3.10 interpreter that contains PySpin.
+Double-click `scripts/windows/SETUP AND START ESPI.bat`. It checks for Python 3.10, OpenCV, NumPy, PySide6, pyLabLib and nidaqmx (for the NI DAQ outputs), PySpin and the FLIR Spinnaker SDK, and asks before installing or launching anything. After it installs or repairs a dependency, close any installers and run the same file once more; a clean validation run launches the app. The individual helpers (`install_spinnaker_sdk.bat`, `install_pyspin.bat`, `run_pyspin_example.bat`) remain for troubleshooting. Point VS Code at the Python 3.10 interpreter that contains PySpin.
 
 ## Other variants
 
