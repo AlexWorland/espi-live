@@ -42,6 +42,10 @@ struct StatusCard: View {
                         snapshot.sentFps, snapshot.megabytesPerSecond, snapshot.cameraFps))
             Text("Skipped while USB was busy: \(snapshot.droppedFrames)")
                 .foregroundStyle(.secondary)
+            if !snapshot.lens.isEmpty {
+                Text("Back camera: \(snapshot.lens) (chosen in ESPI Live)")
+                    .foregroundStyle(.secondary)
+            }
             Text(String(format: "%d × %d%@ · %.0f µs · ISO %.0f · focus %@",
                         s.width, s.height, cropText(s), s.exposureUs, s.iso,
                         snapshot.focusLocked ? String(format: "%.2f locked", s.lensPosition)
