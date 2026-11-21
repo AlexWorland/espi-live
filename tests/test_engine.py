@@ -19,7 +19,8 @@ from espi_live.engine import (LABVIEW_FLOW, Engine, default_settings, is_analog,
 from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
                                   NoiseCalibration,
                                   apply_palette, normalize_min_max,
-                                  palette_rgb_table, smooth_speckle,
+                                  palette_rgb_table, raw_difference,
+                                  smooth_speckle,
                                   stretch_contrast)
 from list_log import ListLog
 
@@ -305,6 +306,97 @@ class EngineDemoTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: "Scaled:" in self.engine.status()["range"]))
         self.engine.update_settings(mode="Raw")  # a view change resets the trackers
         self.assertTrue(wait_until(lambda: "Raw Mono8" in self.engine.status()["range"]))
+
+    def test_raw_difference_bypasses_every_processing_step(self):
+        """Raw difference publishes |live - previous| of raw frames, nothing else.
+
+        The source alternates a black frame and one whose pixels equal their
+        column, so every raw difference equals the column number. Noise
+        reduction, Fixed gain, stretch, palette, gamma, flip and display tone
+        are all set and would each change that; Raw difference ignores them.
+        The comparison window shows the two raw frames. Turning it off brings
+        the processed view back.
+
+        Args: None.
+        Returns: None.
+        """
+        state = {"n": 0}
+        columns = np.tile(np.arange(60, dtype=np.uint8), (80, 1))
+
+        def next_frame(exposure_us, gain_db, now):
+            """Return the next frame, alternating black and the column ramp.
+
+            Args: exposure_us, gain_db and now are the demo source arguments.
+            Returns: A Mono8 frame.
+            """
+            state["n"] += 1
+            return columns.copy() if state["n"] % 2 else np.zeros_like(columns)
+
+        self.engine.demo_source.next_frame = next_frame
+        self.engine.update_settings(
+            fps=120, mode="Reference", auto_reference=True, noise_reduction=80,
+            scale_range=False, difference_gain=42.0, palette="Turbo", gamma=0.5,
+            flip_horizontal=True, display_gain=2.0, contrast=30, brightness=5,
+            smoothing=7, average=4, raw_difference=True)
+        self.engine.set_compare(True)
+
+        def raw_packet():
+            """Wait for a Raw difference packet.
+
+            Args: None.
+            Returns: True when one arrived.
+            """
+            return wait_until(lambda: (
+                (packet := self.engine.latest_packet()) is not None and
+                packet.mode == engine_module.RAW_DIFFERENCE))
+
+        self.assertTrue(raw_packet())
+        packet = self.engine.latest_packet()
+        np.testing.assert_array_equal(packet.image[50:], columns[50:])
+        self.assertEqual((packet.palette, packet.gamma), ("Gray", 1.0))
+        self.assertTrue(wait_until(lambda: "Raw difference: |live - previous|"
+                                   in self.engine.status()["range"]))
+        self.assertTrue(wait_until(lambda: self.engine.status()["hint"].startswith(
+            "Raw difference")))
+        self.assertTrue(self.log.has("Raw difference on"))
+        self.assertTrue(wait_until(lambda: (
+            (compare := self.engine.latest_compare()) is not None and
+            compare.baseline_label == "Previous raw frame")))
+        compare = self.engine.latest_compare()
+        self.assertEqual({int(compare.current.image[60, 30]),
+                          int(compare.baseline.image[60, 30])}, {0, 30})
+        self.assertEqual(compare.difference.mode, engine_module.RAW_DIFFERENCE)
+        self.engine.request("calibrate_noise")  # nothing to sample here
+        self.assertTrue(wait_until(lambda: self.log.has("not Raw difference")))
+
+        self.engine.update_settings(raw_difference=False)
+        self.assertTrue(wait_until(lambda: (
+            (packet := self.engine.latest_packet()) is not None and
+            packet.mode == "Reference")))
+        self.assertTrue(self.log.has("Raw difference off"))
+
+    def test_raw_difference_records_under_its_own_name(self):
+        """A Raw difference recording gets its own file, one frame per image.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(mode="Previous", average=4, raw_difference=True,
+                                    record=True)
+        self.assertTrue(wait_until(lambda: self.log.has("espi_rawdiff_")))
+        self.engine.update_settings(record=False)
+
+    def test_raw_difference_waits_for_a_second_frame_of_the_same_size(self):
+        """No previous frame, or one of another size, gives no difference.
+
+        Args: None.
+        Returns: None.
+        """
+        frame = np.full((4, 6), 9, np.uint8)
+        self.assertIsNone(raw_difference(frame, None))
+        self.assertIsNone(raw_difference(frame, np.zeros((6, 4), np.uint8)))
+        np.testing.assert_array_equal(
+            raw_difference(frame, np.full((4, 6), 12, np.uint8)), np.full((4, 6), 3))
 
     def test_default_settings_choose_fixed_gain_for_analog_cameras(self):
         """Only a recognised capture adapter starts in Fixed gain, full frames.

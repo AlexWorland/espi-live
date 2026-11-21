@@ -1170,6 +1170,25 @@ class MainWindowBuildTests(WindowTestCase):
         button.click()
         self.assertEqual(self.engine.settings().mode, button.text())
 
+    def test_raw_difference_button_overrides_the_view(self):
+        """Raw difference turns on in the engine and greys out the view buttons.
+
+        Loading settings (for example on a camera switch) keeps the button
+        and the view buttons in step; turning it off gives the views back.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.raw_difference_button.setChecked(True)
+        self.assertTrue(self.engine.settings().raw_difference)
+        self.assertFalse(any(b.isEnabled() for b in w.mode_group.buttons()))
+        self.engine.update_settings(raw_difference=False)
+        w._load_settings(self.engine.settings(), w.current.limits)
+        self.assertFalse(w.raw_difference_button.isChecked())
+        self.assertTrue(all(b.isEnabled() for b in w.mode_group.buttons()))
+        self.assertIn("|live - previous|", w.raw_difference_button.toolTip())
+
     def test_record_button_toggles_engine_recording(self):
         """Toggling the record button sets the engine's record flag.
 
@@ -1568,6 +1587,23 @@ class SimpleUiTests(WindowTestCase):
                       "1:1", "Freeze (Space)"):
             self.assertFalse(buttons[label].isVisibleTo(w), label)
 
+    def test_placing_or_parking_a_row_twice_does_nothing(self):
+        """A row already parked stays parked; one already placed stays placed.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        entry = w._advanced_rows[0]
+        self.assertFalse(entry.placed)
+        w._park_row(entry)
+        self.assertFalse(entry.placed)
+        w._place_row(entry)
+        name = entry.name
+        w._place_row(entry)
+        self.assertTrue(entry.placed)
+        self.assertIs(entry.name, name)
+
     def test_help_tips_stay_hidden(self):
         """Tips advertise hidden controls, so neither the tip nor its menu item shows.
 
@@ -1625,22 +1661,6 @@ class SimpleUiTests(WindowTestCase):
                                  toggle.text())
         self.assertFalse(w.tips_action.isVisible())
         self.assertIs(FakeSettings.store["ui/simple"], True)
-
-    def test_switching_to_the_current_mode_changes_nothing(self):
-        """Asking for the mode already shown neither duplicates nor loses a row.
-
-        Args: None.
-        Returns: None.
-        """
-        w = self.window
-        w.show()
-        w.set_simple_ui(True)  # already simple: every extra row is already parked
-        self.assertFalse(w.fps.isVisibleTo(w))
-        w.set_simple_ui(False)
-        w.set_simple_ui(False)  # already full: every extra row is already placed
-        QApplication.processEvents()
-        self.assertTrue(w.fps.isVisibleTo(w))
-        self.assertEqual(len(w._section_names), len(set(w._section_names)))
 
     def test_toggle_keeps_values_and_collapsed_sections(self):
         """Switching modes changes nothing about the settings or collapsed sections.
