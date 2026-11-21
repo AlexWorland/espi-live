@@ -13,6 +13,19 @@
 - The link protocol is unchanged for video: a RAW frame uses pixel format Mono16 and a 16-byte extension after the frame metadata (see `docs/iphone/README.md`).
 - Limits: rolling shutter, uneven frame timing and a lower frame rate make RAW unsuitable for pulsed lasers or phase-stepped capture. The RAW path has not been run on a phone yet.
 
+## 2026-11-21 — iPhone back cameras listed one by one
+
+### Previous state
+
+- A plugged-in iPhone was one camera, **iPhone (USB)**, and the ESPI Camera app always used its wide back camera. The ultra wide and telephoto cameras could not be used.
+
+### Current state
+
+- **Each back camera of an iPhone is its own entry in the Display drop-down**: an iPhone 16 Pro Max lists **iPhone Wide 1× (USB)**, **iPhone Ultra Wide 0.5× (USB)** and **iPhone Telephoto 5× (USB)**; a phone with one back camera still shows **iPhone (USB)**. Choosing a lens switches the phone to that camera and reads its formats and limits again.
+- The phone streams **one camera at a time**: choosing another lens of the same phone turns the lens that was showing off (settings kept, logged), and the Process boxes of the phone's other lenses are unavailable. Only the wide camera opens at startup or on **Switch to live capture**.
+- Each lens has its own saved profile; the wide camera keeps its old serial, so its saved settings carry over.
+- **Needs the new ESPI Camera app build** (TestFlight): the app reports its back cameras in HELLO and switches on a new `lens` command. With an older app the phone is listed as before, as one **iPhone (USB)**.
+
 ## 2026-11-21 — Pixel values window
 
 ### Previous state

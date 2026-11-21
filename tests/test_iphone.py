@@ -8,8 +8,9 @@ import numpy as np
 
 from espi_live import iphone, usbmux
 from espi_live.camera import CameraInfo
-from fake_iphone import (FakeSocket, commands, frame_bytes, hello, phone_limits,
-                         phone_settings, phone_socket, status)
+from fake_iphone import (FakeSocket, commands, frame_bytes, hello, lens_hello,
+                         lens_socket, phone_limits, phone_settings, phone_socket,
+                         status)
 from list_log import ListLog
 
 UDID = "00008110-001A2B3C4D5E801E"
@@ -29,13 +30,14 @@ def wait_until(predicate, timeout=5.0):
     return predicate()
 
 
-def phone_info():
+def phone_info(lens=""):
     """Describe the test phone as list_iphones would.
 
-    Args: None.
+    Args: lens is the back camera's id, empty for a phone that has not said.
     Returns: A CameraInfo of kind "iphone".
     """
-    return CameraInfo("iphone-4d5e801e", "iPhone (USB)", kind="iphone", path=UDID)
+    return CameraInfo("iphone-4d5e801e", "iPhone (USB)", kind="iphone", path=UDID,
+                      lens=lens)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -141,6 +143,15 @@ class ProtocolTests(unittest.TestCase):
 class IdentityAndListingTests(unittest.TestCase):
     """Phone identity, listing and the USB connector."""
 
+    def setUp(self):
+        """Forget which cameras any phone reported earlier.
+
+        Args: None.
+        Returns: None.
+        """
+        iphone._lens_cache.clear()
+        self.addCleanup(iphone._lens_cache.clear)
+
     def test_identity_text(self):
         """Before HELLO there is nothing to say; afterwards model, size and a caution.
 
@@ -168,13 +179,116 @@ class IdentityAndListingTests(unittest.TestCase):
         """
         log = ListLog()
         device = usbmux.MuxDevice(3, UDID)
-        with mock.patch.object(usbmux, "list_devices", return_value=[device]):
+        with mock.patch.object(usbmux, "list_devices", return_value=[device]), \
+                mock.patch.object(iphone, "probe_lenses", return_value=None):
             infos = iphone.list_iphones(log)
         self.assertEqual(infos, [phone_info()])
         with mock.patch.object(usbmux, "list_devices",
                                side_effect=usbmux.UsbmuxError("no service")):
             self.assertEqual(iphone.list_iphones(log), [])
         self.assertIn("iPhones are not listed: no service", log.lines)
+
+    def test_parse_lenses(self):
+        """HELLO's cameras are read in order; anything unreadable is skipped.
+
+        Args: None.
+        Returns: None.
+        """
+        found = iphone.parse_lenses(lens_hello())
+        self.assertEqual([lens.id for lens in found], ["ultra_wide", "wide", "telephoto"])
+        self.assertEqual(found[0], iphone.Lens("ultra_wide", "Ultra Wide 0.5×"))
+        self.assertEqual(iphone.parse_lenses(hello()), ())
+        self.assertEqual(iphone.parse_lenses(hello(lenses="wide")), ())
+        messy = hello(lenses=["wide", {"name": "no id"}, {"id": "wide"}])
+        self.assertEqual(iphone.parse_lenses(messy), (iphone.Lens("wide", "wide"),))
+
+    def test_lens_infos(self):
+        """Each back camera is listed, the main one first under the old serial.
+
+        Args: None.
+        Returns: None.
+        """
+        found = iphone.parse_lenses(lens_hello())
+        infos = iphone.lens_infos(UDID, found)
+        self.assertEqual([info.lens for info in infos], ["wide", "ultra_wide", "telephoto"])
+        self.assertEqual([info.serial for info in infos],
+                         ["iphone-4d5e801e", "iphone-4d5e801e-ultra-wide",
+                          "iphone-4d5e801e-telephoto"])
+        self.assertEqual(infos[1].label,
+                         "iPhone Ultra Wide 0.5× (USB) (iphone-4d5e801e-ultra-wide)")
+        self.assertEqual({info.path for info in infos}, {UDID})
+        self.assertEqual({info.kind for info in infos}, {"iphone"})
+        only = iphone.lens_infos(UDID, found[1:2])
+        self.assertEqual(only, [phone_info("wide")])
+        self.assertEqual(iphone.lens_infos(UDID, ()), [phone_info()])
+
+    def test_main_lenses_keep_one_camera_per_phone(self):
+        """Only the first-listed camera of each phone is kept.
+
+        Args: None.
+        Returns: None.
+        """
+        mine = iphone.lens_infos(UDID, iphone.parse_lenses(lens_hello()))
+        other = iphone.lens_infos("OTHER-PHONE-0001", iphone.parse_lenses(lens_hello()))
+        kept = iphone.main_lenses(mine + other)
+        self.assertEqual([(info.path, info.lens) for info in kept],
+                         [(UDID, "wide"), ("OTHER-PHONE-0001", "wide")])
+
+    def test_probe_lenses(self):
+        """A running app is asked once and hung up on; anything else gives None.
+
+        Args: None.
+        Returns: None.
+        """
+        device = usbmux.MuxDevice(3, UDID)
+        sock = phone_socket(lens_hello())
+        with mock.patch.object(usbmux, "connect", return_value=sock) as connect:
+            found = iphone.probe_lenses(device)
+        connect.assert_called_once_with(3, iphone.PORT, timeout=iphone.PROBE_TIMEOUT_S)
+        self.assertEqual(len(found), 3)
+        self.assertTrue(sock.closed)
+        self.assertEqual(bytes(sock.sent), b"")  # it only listens
+        failures = [usbmux.UsbmuxError("refused"), OSError("timed out")]
+        for failure in failures:
+            with self.subTest(failure=failure), \
+                    mock.patch.object(usbmux, "connect", side_effect=failure):
+                self.assertIsNone(iphone.probe_lenses(device))
+        for link in (FakeSocket(iphone.encode_json(iphone.KIND_STATUS, status())),
+                     FakeSocket(b"not the app's greeting")):
+            with self.subTest(link=bytes(link.incoming[:6])), \
+                    mock.patch.object(usbmux, "connect", return_value=link):
+                self.assertIsNone(iphone.probe_lenses(device))
+            self.assertTrue(link.closed)
+
+    def test_list_iphones_lists_every_lens_and_asks_a_phone_once(self):
+        """A phone is asked for its cameras the first time; the answer is kept.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        device = usbmux.MuxDevice(3, UDID)
+        answer = iphone.parse_lenses(lens_hello())
+        with mock.patch.object(usbmux, "list_devices", return_value=[device]), \
+                mock.patch.object(iphone, "probe_lenses", return_value=answer) as probe:
+            first = iphone.list_iphones(log)
+            second = iphone.list_iphones(log)
+        self.assertEqual(first, second)
+        self.assertEqual([info.lens for info in first], ["wide", "ultra_wide", "telephoto"])
+        probe.assert_called_once_with(device)
+
+    def test_list_iphones_asks_again_after_no_answer(self):
+        """A phone whose app was closed is listed once, and asked again next time.
+
+        Args: None.
+        Returns: None.
+        """
+        device = usbmux.MuxDevice(3, UDID)
+        with mock.patch.object(usbmux, "list_devices", return_value=[device]), \
+                mock.patch.object(iphone, "probe_lenses",
+                                  side_effect=[None, iphone.parse_lenses(lens_hello())]):
+            self.assertEqual(iphone.list_iphones(ListLog()), [phone_info()])
+            self.assertEqual(len(iphone.list_iphones(ListLog())), 3)
 
     def test_usb_connector(self):
         """The phone is found by UDID, since its device id changes on replug.
@@ -219,6 +333,8 @@ class SessionCase(unittest.TestCase):
         self.session = iphone.IPhoneSession(self.log, phone_info(), 8000.0, 6.0, 25.0,
                                             connector=self.connect)
         self.addCleanup(self.session.close)
+        iphone._lens_cache.clear()
+        self.addCleanup(iphone._lens_cache.clear)
 
     def connect(self, info):
         """Hand out the next socket, or raise a queued exception.
@@ -261,6 +377,64 @@ class SessionOpenTests(SessionCase):
         self.assertEqual((self.session.identity.width, self.session.identity.height),
                          (1920, 1080))
         self.assertTrue(any("iPhone link open" in line for line in self.log.lines))
+
+    def test_open_asks_for_the_camera_and_waits_for_it(self):
+        """A back camera is requested in the starting command and described by the
+        HELLO that answers it, before open() returns.
+
+        Args: None.
+        Returns: None.
+        """
+        self.session = iphone.IPhoneSession(
+            self.log, phone_info("ultra_wide"), 8000.0, 6.0, 25.0, connector=self.connect)
+        self.addCleanup(self.session.close)
+        self.sockets = [lens_socket("ultra_wide")]
+        sock = self.open()
+        self.assertEqual(commands(sock)[0]["lens"], "ultra_wide")
+        self.assertEqual(self.session.hello["lens"], "ultra_wide")
+        self.assertEqual(self.session.identity.camera, "Back Ultra Wide 0.5×")
+        self.assertEqual([lens.id for lens in iphone._lens_cache[UDID]],
+                         ["ultra_wide", "wide", "telephoto"])
+
+    def test_open_with_the_camera_already_in_use_does_not_wait(self):
+        """When the app is already on the camera asked for, its first HELLO is enough.
+
+        Args: None.
+        Returns: None.
+        """
+        self.session = iphone.IPhoneSession(
+            self.log, phone_info("wide"), connector=self.connect)
+        self.addCleanup(self.session.close)
+        self.sockets = [lens_socket("wide")]
+        started = time.monotonic()
+        sock = self.open()
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(commands(sock)[0]["lens"], "wide")
+
+    def test_open_without_a_lens_does_not_ask_for_one(self):
+        """A phone that has not said which cameras it has is left on its own.
+
+        Args: None.
+        Returns: None.
+        """
+        sock = self.open()
+        self.assertNotIn("lens", commands(sock)[0])
+
+    def test_open_fails_when_the_phone_never_switches(self):
+        """Frames from another camera are never shown under this one's name.
+
+        Args: None.
+        Returns: None.
+        """
+        self.session = iphone.IPhoneSession(
+            self.log, phone_info("telephoto"), connector=self.connect)
+        self.addCleanup(self.session.close)
+        sock = phone_socket(lens_hello("wide", lenses=[{"id": "wide", "name": "Wide 1×"}]))
+        self.sockets = [sock]
+        with mock.patch.object(iphone, "LENS_TIMEOUT_S", 0.05), \
+                self.assertRaisesRegex(RuntimeError, "did not switch to its telephoto"):
+            self.session.open()
+        self.assertTrue(sock.closed)
 
     def test_open_without_iso_limits_skips_iso(self):
         """Without the phone's ISO range the gain cannot be converted yet.

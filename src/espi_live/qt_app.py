@@ -5432,7 +5432,8 @@ class MainWindow(QMainWindow):
             check.blockSignals(True)
             check.setChecked(channel.active)
             check.blockSignals(False)
-            check.setEnabled(channel is not self.current)
+            check.setEnabled(channel is not self.current
+                             and not channel.shares_device(self.current))
 
     def _camera_chosen(self, index):
         """Display the camera picked in the drop-down.
@@ -5455,7 +5456,7 @@ class MainWindow(QMainWindow):
         self.profiles.save_profile(self.current.profile_key, self.current.profile())
         if not channel.active:
             self.log.write(f"Processing on: {channel.label}")
-            channel.start()
+            channel.start(self._release_shared_device(channel))
         self.current = channel
         self.drawn_sequence = 0
         self.shown_packet = None
@@ -5468,6 +5469,26 @@ class MainWindow(QMainWindow):
         self._sync_cameras()
         self.log.write(f"Displaying {channel.label}")
 
+    def _release_shared_device(self, channel):
+        """Stop the other cameras of the phone a channel is about to open.
+
+        An iPhone streams one back camera at a time, so choosing another
+        lens of the same phone turns the one it was showing off (its
+        settings are kept).
+
+        Args: channel is the channel about to start.
+        Returns: The Engine the new one should wait for, or None when no
+            other camera shares its device.
+        """
+        after = None
+        for other in self.channels:
+            if other.active and other.shares_device(channel):
+                self.log.write(f"Processing off: {other.label} "
+                               f"(the phone streams one camera at a time)")
+                other.stop()
+                after = other.retired[-1]
+        return after
+
     def _set_processing(self, channel, on):
         """Start or stop a camera that is not displayed.
 
@@ -5475,8 +5496,11 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         if on and not channel.active:
+            if channel.shares_device(self.current):
+                self._sync_cameras()  # the displayed lens of this phone keeps it
+                return
             self.log.write(f"Processing on: {channel.label}")
-            channel.start()
+            channel.start(self._release_shared_device(channel))
         elif not on and channel.active and channel is not self.current:
             self.log.write(f"Processing off: {channel.label} (settings kept)")
             channel.stop()

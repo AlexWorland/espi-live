@@ -157,6 +157,8 @@ struct LinkCommand: Codable, Sendable, Equatable {
     var refocus: Bool?
     var raw: Bool?
     var rawChannel: String?
+    /// A back camera's id (see `LensInfo`); the phone switches to it and sends a new HELLO.
+    var lens: String?
 }
 
 /// What the camera is set to now.
@@ -190,6 +192,32 @@ struct CameraFormatInfo: Codable, Sendable, Hashable, Identifiable {
     var id: String { "\(width)x\(height)" }
 }
 
+/// One back camera the phone offers, as listed in HELLO.
+struct LensInfo: Codable, Sendable, Hashable {
+    /// "ultra_wide", "wide" or "telephoto".
+    var id: String
+    /// The name ESPI Live shows, for example "Ultra Wide 0.5×".
+    var name: String
+}
+
+/// Names a back camera by how much it magnifies compared with the main one.
+enum LensMath {
+    /// Zoom factor of a camera against the main (wide) camera, from their fields of view.
+    ///
+    /// Both angles are horizontal and in degrees, taken at the same frame size. The result is
+    /// rounded to the nearest half, which is how the cameras are sold (0.5×, 1×, 2×, 3×, 5×).
+    static func zoom(lensFieldOfView: Double, mainFieldOfView: Double) -> Double {
+        guard lensFieldOfView > 0, mainFieldOfView > 0 else { return 1 }
+        let ratio = tan(mainFieldOfView * .pi / 360) / tan(lensFieldOfView * .pi / 360)
+        return max(0.5, (ratio * 2).rounded() / 2)
+    }
+
+    /// "0.5×", "1×", "2.5×".
+    static func zoomText(_ zoom: Double) -> String {
+        zoom == zoom.rounded() ? "\(Int(zoom))×" : String(format: "%.1f×", zoom)
+    }
+}
+
 struct LinkHello: Codable, Sendable {
     var protocolVersion = Int(Link.version)
     var app = "ESPI Camera"
@@ -197,6 +225,9 @@ struct LinkHello: Codable, Sendable {
     var deviceModel: String
     var systemVersion: String
     var camera: String
+    /// The back camera in use, and every back camera the phone has.
+    var lens: String = ""
+    var lenses: [LensInfo] = []
     var pixelFormat = "mono8"
     var formats: [CameraFormatInfo]
     var limits: CaptureLimits

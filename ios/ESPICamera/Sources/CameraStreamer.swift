@@ -52,6 +52,14 @@ struct StreamerSnapshot: Sendable {
     var thermal = "nominal"
     var interrupted: String?
     var error: String?
+    var lens = ""  // the back camera in use, for example "Wide 1×"
+}
+
+/// One back camera: its id and menu name as sent to ESPI Live, and the device.
+struct LensChoice {
+    let id: String
+    let name: String
+    let device: AVCaptureDevice
 }
 
 /// A camera format that delivers Bayer RAW stills at about 12 MP.
@@ -76,6 +84,8 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     // Everything below is touched only on `queue`.
     private var device: AVCaptureDevice?
+    private var lenses: [LensChoice] = []
+    private var lensId = ""
     private var configured = false
     private var settings = CaptureSettings()
     private var limits = CaptureLimits()
@@ -141,21 +151,13 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     private func configureSession() {
-        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video,
-                                                   position: .back) else {
+        lenses = Self.discoverLenses()
+        guard let first = lenses.first(where: { $0.id == "wide" }) ?? lenses.first else {
             lastError = "No back camera found"
             return
         }
-        device = camera
-        formats = Self.formatList(camera)
         session.beginConfiguration()
         session.sessionPreset = .inputPriority
-        do {
-            let input = try AVCaptureDeviceInput(device: camera)
-            if session.canAddInput(input) { session.addInput(input) }
-        } catch {
-            lastError = "Camera input: \(error.localizedDescription)"
-        }
         output.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String:
                 kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -165,7 +167,62 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         if session.canAddOutput(output) { session.addOutput(output) }
         if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
         session.commitConfiguration()
+        selectLens(first)
+    }
+
+    /// The back cameras this phone has, narrowest first: ultra wide, wide, telephoto.
+    static func discoverLenses() -> [LensChoice] {
+        let kinds: [(type: AVCaptureDevice.DeviceType, id: String, name: String)] = [
+            (.builtInUltraWideCamera, "ultra_wide", "Ultra Wide"),
+            (.builtInWideAngleCamera, "wide", "Wide"),
+            (.builtInTelephotoCamera, "telephoto", "Telephoto"),
+        ]
+        let found = AVCaptureDevice.DiscoverySession(
+            deviceTypes: kinds.map(\.type), mediaType: .video, position: .back).devices
+        let present = kinds.compactMap { kind in
+            found.first { $0.deviceType == kind.type }.map { (kind: kind, device: $0) }
+        }
+        let main = present.first { $0.kind.id == "wide" } ?? present.first
+        let mainAngle = main.map { fieldOfView($0.device) } ?? 0
+        return present.map { entry in
+            let zoom = entry.kind.id == "wide" ? 1.0 : LensMath.zoom(
+                lensFieldOfView: fieldOfView(entry.device), mainFieldOfView: mainAngle)
+            return LensChoice(id: entry.kind.id,
+                              name: "\(entry.kind.name) \(LensMath.zoomText(zoom))",
+                              device: entry.device)
+        }
+    }
+
+    /// Horizontal field of view at 1920 × 1080, so cameras are compared at one frame size.
+    private static func fieldOfView(_ camera: AVCaptureDevice) -> Double {
+        let format = camera.formats.first { format in
+            let size = format.formatDescription.dimensions
+            return isFullRangeYUV(format) && size.width == 1920 && size.height == 1080
+        } ?? camera.activeFormat
+        return Double(format.videoFieldOfView)
+    }
+
+    /// Points the session at one back camera and reads that camera's formats.
+    private func selectLens(_ choice: LensChoice) {
+        session.beginConfiguration()
+        for input in session.inputs { session.removeInput(input) }
+        do {
+            let input = try AVCaptureDeviceInput(device: choice.device)
+            if session.canAddInput(input) { session.addInput(input) }
+        } catch {
+            lastError = "Camera input: \(error.localizedDescription)"
+        }
+        session.commitConfiguration()
+        device = choice.device
+        lensId = choice.id
+        rawChoice = nil  // each camera has its own RAW formats
+        rawSearched = false
+        formats = Self.formatList(choice.device)
         applyCameraSettings()
+    }
+
+    private var lensName: String {
+        lenses.first { $0.id == lensId }?.name ?? ""
     }
 
     /// One entry per frame size, preferring unbinned formats and then the highest rate.
@@ -364,6 +421,20 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private func applyOnQueue(_ command: LinkCommand) {
         var reconfigure = false
+        var switched = false
+        // The camera first, so the other values in the same command are clamped to its limits.
+        if let id = command.lens, id != lensId {
+            if let choice = lenses.first(where: { $0.id == id }) {
+                focusWork?.cancel()
+                settings.lensPosition = -1  // the focus of one camera means nothing on another
+                selectLens(choice)
+                refocusOnQueue()
+                switched = true
+            } else {
+                send(Link.json(kind: .error,
+                               LinkErrorMessage(message: "This phone has no \(id) camera")))
+            }
+        }
         if let value = command.exposureUs { settings.exposureUs = value; reconfigure = true }
         if let value = command.iso { settings.iso = value; reconfigure = true }
         if let value = command.fps, value > 0 { settings.fps = value; reconfigure = true }
@@ -395,6 +466,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             if settings.raw { scheduleRawCapture(after: 0.3) }  // let the format settle
         }
         if command.refocus == true { refocusOnQueue() }
+        if switched { sendHello() }  // formats and limits belong to the camera
         sendStatus()
         publish()
     }
@@ -773,7 +845,9 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private func sendHello() {
         send(Link.json(kind: .hello, LinkHello(
             appVersion: deviceInfo.appVersion, deviceModel: deviceInfo.model,
-            systemVersion: deviceInfo.systemVersion, camera: "Back wide camera",
+            systemVersion: deviceInfo.systemVersion,
+            camera: lensName.isEmpty ? "Back camera" : "Back \(lensName)",
+            lens: lensId, lenses: lenses.map { LensInfo(id: $0.id, name: $0.name) },
             formats: formats, limits: limits, settings: settings)))
     }
 
@@ -816,7 +890,8 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             megabytesPerSecond: megabytesPerSecond, cameraFps: cameraFps,
             sentFrames: sentFrames, droppedFrames: droppedFrames, settings: settings,
             limits: limits, formats: formats, focusLocked: focusLocked,
-            thermal: Self.thermalText(), interrupted: interrupted, error: lastError))
+            thermal: Self.thermalText(), interrupted: interrupted, error: lastError,
+            lens: lensName))
     }
 
     static func thermalText() -> String {

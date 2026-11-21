@@ -71,6 +71,43 @@ final class LinkProtocolTests: XCTestCase {
         XCTAssertEqual(command, LinkCommand(exposureUs: 500, lensPosition: 0.25, maxSendFps: 15))
     }
 
+    func testLensCommandDecodes() throws {
+        let json = #"{"lens":"telephoto","exposure_us":500}"#
+        let command = try Link.decoder.decode(LinkCommand.self, from: Data(json.utf8))
+        XCTAssertEqual(command, LinkCommand(exposureUs: 500, lens: "telephoto"))
+    }
+
+    func testHelloListsTheBackCameras() throws {
+        let hello = LinkHello(appVersion: "1", deviceModel: "iPhone17,2", systemVersion: "27.0",
+                              camera: "Back Wide 1×", lens: "wide",
+                              lenses: [LensInfo(id: "ultra_wide", name: "Ultra Wide 0.5×"),
+                                       LensInfo(id: "wide", name: "Wide 1×")],
+                              formats: [], limits: CaptureLimits(), settings: CaptureSettings())
+        let body = Link.json(kind: .hello, hello).dropFirst(Link.headerSize)
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        XCTAssertEqual(object?["lens"] as? String, "wide")
+        let lenses = object?["lenses"] as? [[String: String]]
+        XCTAssertEqual(lenses?.map { $0["id"] }, ["ultra_wide", "wide"])
+        XCTAssertEqual(lenses?.first?["name"], "Ultra Wide 0.5×")
+    }
+
+    /// Fields of view of an iPhone 16 Pro Max's cameras at 1920 × 1080 (horizontal, degrees),
+    /// from the 13, 24 and 120 mm equivalents on a 36 mm-wide frame.
+    func testZoomIsRoundedToTheCameraNames() {
+        func angle(_ mm: Double) -> Double { 2 * atan(18 / mm) * 180 / .pi }
+        XCTAssertEqual(LensMath.zoom(lensFieldOfView: angle(13), mainFieldOfView: angle(24)), 0.5)
+        XCTAssertEqual(LensMath.zoom(lensFieldOfView: angle(24), mainFieldOfView: angle(24)), 1)
+        XCTAssertEqual(LensMath.zoom(lensFieldOfView: angle(77), mainFieldOfView: angle(24)), 3)
+        XCTAssertEqual(LensMath.zoom(lensFieldOfView: angle(120), mainFieldOfView: angle(24)), 5)
+        XCTAssertEqual(LensMath.zoom(lensFieldOfView: 0, mainFieldOfView: 70), 1)
+    }
+
+    func testZoomText() {
+        XCTAssertEqual(LensMath.zoomText(0.5), "0.5×")
+        XCTAssertEqual(LensMath.zoomText(1), "1×")
+        XCTAssertEqual(LensMath.zoomText(5), "5×")
+    }
+
     func testHelloKeys() throws {
         let hello = LinkHello(appVersion: "1", deviceModel: "iPhone16,1", systemVersion: "27.0",
                               camera: "Back", formats: [], limits: CaptureLimits(),

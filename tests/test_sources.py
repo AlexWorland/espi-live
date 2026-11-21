@@ -144,6 +144,55 @@ class ChoiceTests(SourcesTestCase):
                          ["spinnaker", "capture", "iphone"])
 
 
+LENS_PHONES = [CameraInfo("iphone-4d5e801e", "iPhone Wide 1× (USB)", kind="iphone",
+                          path=PHONE.path, lens="wide"),
+               CameraInfo("iphone-4d5e801e-ultra-wide", "iPhone Ultra Wide 0.5× (USB)",
+                          kind="iphone", path=PHONE.path, lens="ultra_wide"),
+               CameraInfo("iphone-4d5e801e-telephoto", "iPhone Telephoto 5× (USB)",
+                          kind="iphone", path=PHONE.path, lens="telephoto")]
+
+
+class PhoneLensTests(SourcesTestCase):
+    """A phone with several back cameras opens only its main one unasked."""
+
+    def test_startup_order_keeps_one_camera_per_phone(self):
+        """Every lens is listed, but only the main one may open without being asked.
+
+        Args: None.
+        Returns: None.
+        """
+        self.phones = LENS_PHONES
+        infos = sources.detect_cameras(self.log)
+        self.assertEqual([info.lens for info in infos if info.kind == "iphone"],
+                         ["wide", "ultra_wide", "telephoto"])
+        self.assertEqual([info.serial for info in sources.auto_open_order(infos)
+                          if info.kind == "iphone"], ["iphone-4d5e801e"])
+
+    def test_leaving_demo_mode_tries_only_the_main_camera(self):
+        """A failed phone is not retried once per lens.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.clear()
+        self.phones = LENS_PHONES
+        tried = []
+
+        def refuse(session):
+            """Record the camera tried, then fail as an app that is closed would.
+
+            Args: session is the IPhoneSession.
+            Returns: None. Raises RuntimeError.
+            """
+            tried.append(session.info.lens)
+            raise RuntimeError("app is not open")
+
+        with mock.patch.object(IPhoneSession, "open", refuse), \
+                self.assertRaisesRegex(RuntimeError, "app is not open"):
+            sources.open_first_live(self.log)
+        self.assertEqual(tried, ["wide"])
+
+
 class OpenFirstLiveTests(SourcesTestCase):
     """Switching from demo mode to the first usable camera."""
 

@@ -231,6 +231,50 @@ class ChannelTests(ChannelTestCase):
         self.assertIs(deferred.call_args.args[1], old)
         self.assertTrue(wait_until(lambda: cam.engine.latest_packet() is not None))
 
+    def test_start_waits_for_the_engine_it_is_told_to(self):
+        """A camera that takes over a device waits for the engine releasing it,
+        not for its own (older) one.
+
+        Args: None.
+        Returns: None.
+        """
+        cam = self.channel(CameraInfo("1", "BFS"))
+        releasing = mock.Mock()
+        with mock.patch.object(Engine, "open_on_start", autospec=True) as deferred:
+            deferred.side_effect = lambda engine, after=None: setattr(
+                engine, "_open_after", (after,))
+            cam.start(releasing)
+        self.assertIs(deferred.call_args.args[1], releasing)
+        releasing.wait.assert_called_once()
+        self.assertTrue(wait_until(lambda: cam.engine.latest_packet() is not None))
+        cam.stop()
+        self.assertTrue(cam.wait(10))
+
+    def test_lenses_of_one_phone_share_a_device(self):
+        """Only cameras of the same iPhone exclude each other.
+
+        Args: None.
+        Returns: None.
+        """
+        def phone(serial, path, lens):
+            """Describe one back camera of a phone.
+
+            Args: serial and path name the camera and the phone; lens is the camera.
+            Returns: A Channel.
+            """
+            return self.channel(CameraInfo(serial, "iPhone (USB)", kind="iphone",
+                                           path=path, lens=lens))
+
+        wide, ultra = phone("a", "UDID-1", "wide"), phone("a-ultra", "UDID-1", "ultra_wide")
+        other = phone("b", "UDID-2", "wide")
+        flir = self.channel(CameraInfo("1", "BFS"))
+        demo = self.channel(CameraInfo("DEMO1"), demo=True)
+        self.assertTrue(wide.shares_device(ultra) and ultra.shares_device(wide))
+        self.assertFalse(wide.shares_device(wide))
+        self.assertFalse(wide.shares_device(other))
+        self.assertFalse(wide.shares_device(flir) or flir.shares_device(wide))
+        self.assertFalse(wide.shares_device(demo) or demo.shares_device(wide))
+
     def test_wait_reports_engines_still_running(self):
         """wait() keeps engines that have not finished.
 

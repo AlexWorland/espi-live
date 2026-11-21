@@ -260,10 +260,12 @@ class Channel:
             engine.open_camera()
         self.engine = engine
 
-    def start(self):
+    def start(self, after=None):
         """Turn processing on; a camera is opened on the engine's own thread.
 
-        Args: None.
+        Args: after is the Engine of another channel that is releasing the
+            same device (see shares_device), which the new engine waits for;
+            by default it waits for this channel's own last engine.
         Returns: None. An open failure arrives later as an "open_failed"
             engine event.
         """
@@ -273,7 +275,7 @@ class Channel:
         if self.demo_source:
             engine.use_demo(self.info.serial)
         else:
-            engine.open_on_start(self.retired[-1] if self.retired else None)
+            engine.open_on_start(after or (self.retired[-1] if self.retired else None))
         self.engine = engine
         engine.start()
 
@@ -293,6 +295,19 @@ class Channel:
         self.engine.stop()
         self.retired.append(self.engine)
         self.engine = None
+
+    def shares_device(self, other):
+        """Report whether another channel is the same phone on a different lens.
+
+        An iPhone's app serves one link at a time, so two of its back cameras
+        cannot stream together; opening one ends the other.
+
+        Args: other is another Channel.
+        Returns: True when both are cameras of the same iPhone.
+        """
+        return (self is not other and not self.demo_source and not other.demo_source
+                and self.info.kind == other.info.kind == "iphone"
+                and self.info.path == other.info.path)
 
     def engines(self):
         """List every engine this channel owns, running or stopping.

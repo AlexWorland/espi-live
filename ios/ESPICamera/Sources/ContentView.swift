@@ -42,6 +42,10 @@ struct StatusCard: View {
                         snapshot.sentFps, snapshot.megabytesPerSecond, snapshot.cameraFps))
             Text("Skipped while USB was busy: \(snapshot.droppedFrames)")
                 .foregroundStyle(.secondary)
+            if !snapshot.lens.isEmpty {
+                Text("Back camera: \(snapshot.lens) (chosen in ESPI Live)")
+                    .foregroundStyle(.secondary)
+            }
             if s.raw {
                 Text("Bayer RAW · \(s.rawChannel) plane · 16-bit, no video processing")
             }

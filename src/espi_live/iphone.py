@@ -11,9 +11,11 @@ has the full description):
 
 - Every message is a 16-byte header (magic b"ESPC", version, kind, payload
   length, reserved) followed by the payload.
-- The phone sends HELLO (JSON: device, app, formats, limits, settings) as
-  soon as the computer connects, then FRAME messages (a 48-byte FRAME_META
-  plus width × height Mono8 bytes) and a STATUS (JSON) every second.
+- The phone sends HELLO (JSON: device, app, the back camera in use ("lens")
+  and every back camera it has ("lenses": id and name), formats, limits,
+  settings) as soon as the computer connects, then FRAME messages (a 48-byte
+  FRAME_META plus width × height Mono8 bytes) and a STATUS (JSON) every
+  second.
 - In RAW mode a FRAME carries one colour plane of the sensor's Bayer data
   instead: pixel format MONO16, and after FRAME_META a 16-byte RAW_META (black
   level, white level, colour, pattern) and then width × height little-endian
@@ -23,7 +25,9 @@ has the full description):
   difference and averaging steps before rounding to 8 bits for display.
 - The computer sends COMMAND (JSON with any of exposure_us, iso, fps,
   lens_position, width, height, crop_width, crop_height, max_send_fps,
-  refocus, raw, raw_channel); the phone applies it and answers with a STATUS.
+  refocus, lens, raw, raw_channel); the phone applies it and answers with a
+  STATUS. A "lens" command switches the camera and is answered with a new
+  HELLO, because the formats and limits belong to the camera.
 
 IPhoneSession has the CameraSession interface (open, grab, set_float,
 limits, read_values, read_stream_counters, describe, close, identity,
@@ -34,7 +38,9 @@ phone-only settings (focus, frame size, crop, send-rate cap) go through
 send_command(), and take_settings_update() hands back what changed on the
 phone, so every control works from the computer and both screens agree. A
 reader thread owned by the session receives frames, so grab() honours its
-timeout; a lost link is re-opened from grab(). No GUI imports.
+timeout; a lost link is re-opened from grab(). A phone with several back
+cameras is listed once per camera (list_iphones), each a CameraInfo whose
+lens the session asks the app for. No GUI imports.
 """
 
 import json
@@ -68,6 +74,9 @@ MAX_JSON = 1 << 20
 MAX_FRAME = 64 << 20  # 48 MP of Mono8 with room to spare
 
 HELLO_TIMEOUT_S = 3.0      # the app greets at once; longer means it is not there
+PROBE_TIMEOUT_S = 1.5      # listing asks a phone for its cameras; longer means skip it
+LENS_TIMEOUT_S = 5.0       # the app re-introduces itself after switching camera
+MAIN_LENS = "wide"         # the camera a phone opens with, listed first
 STALL_S = 5.0              # the app sends a status every second; silence = lost link
 RECONNECT_INTERVAL_S = 2.0
 QUIET_S = 1.5              # ignore the phone's echo of a setting the viewer just sent
@@ -86,6 +95,20 @@ OPEN_HINT = ("Open the ESPI Camera app on the iPhone and keep it on screen, "
 
 class LinkError(RuntimeError):
     """The phone sent something this version cannot read."""
+
+
+# What each phone's app last said its back cameras are, by UDID. Listing fills
+# it by asking a phone that has not been heard from; every HELLO refreshes it.
+# An empty tuple means an app that predates camera choice.
+_lens_cache = {}
+
+
+@dataclass(frozen=True)
+class Lens:
+    """One back camera of a phone: its id and the name shown in menus."""
+
+    id: str
+    name: str
 
 
 @dataclass(frozen=True)
@@ -365,22 +388,109 @@ def clip_range(pair, name):
     return (low, high) if low < high else None
 
 
+def parse_lenses(hello):
+    """Read the back cameras a HELLO offers.
+
+    Args: hello is the decoded HELLO dict.
+    Returns: A tuple of Lens in the app's order (narrowest zoom first); empty
+        when the app predates camera choice.
+    """
+    entries = hello.get("lenses")
+    if not isinstance(entries, list):
+        return ()
+    return tuple(Lens(str(entry["id"]), str(entry.get("name") or entry["id"]))
+                 for entry in entries if isinstance(entry, dict) and entry.get("id"))
+
+
+def probe_lenses(device):
+    """Ask a phone's app which back cameras it has, then hang up.
+
+    The app serves one link at a time and a new connection replaces the old
+    one, so this is only for a phone nobody is using.
+
+    Args: device is a usbmux.MuxDevice.
+    Returns: A tuple of Lens (see parse_lenses), or None when the app did not
+        answer (not open, phone locked, or an unreadable greeting).
+    """
+    sock = None
+    try:
+        sock = usbmux.connect(device.device_id, PORT, timeout=PROBE_TIMEOUT_S)
+        sock.settimeout(PROBE_TIMEOUT_S)
+        kind, payload = read_message(sock)
+        return parse_lenses(decode_json(payload)) if kind == KIND_HELLO else None
+    except (OSError, usbmux.UsbmuxError, LinkError):
+        return None
+    finally:
+        if sock is not None:
+            shut_down(sock)
+
+
+def lens_infos(udid, lenses):
+    """Make the camera-list entries for one phone.
+
+    The main (wide) camera keeps the phone's original serial, so a camera
+    saved before phones listed every lens keeps its settings.
+
+    Args: udid is the phone's UDID; lenses is a tuple of Lens (empty when the
+        app has not said).
+    Returns: A list of CameraInfo, main camera first. One entry named just
+        "iPhone (USB)" for a phone with no more than one camera; its lens is
+        empty until the app has said which it is.
+    """
+    base = f"iphone-{udid[-8:].lower()}"
+    if len(lenses) < 2:
+        return [CameraInfo(base, "iPhone (USB)", kind="iphone", path=udid,
+                           lens=lenses[0].id if lenses else "")]
+    ordered = sorted(lenses, key=lambda lens: lens.id != MAIN_LENS)  # stable
+    return [CameraInfo(base if lens.id == MAIN_LENS
+                       else f"{base}-{lens.id.replace('_', '-')}",
+                       f"iPhone {lens.name} (USB)", kind="iphone", path=udid,
+                       lens=lens.id)
+            for lens in ordered]
+
+
 def list_iphones(log):
     """List the iPhones (and iPads) plugged in over USB, without opening any.
 
+    A phone whose app has not yet said which back cameras it has is asked
+    once (see probe_lenses); one that does not answer is listed as a single
+    entry, so it still appears and opens its default camera.
+
     Args: log has a write(message) method.
     Returns: A list of CameraInfo of kind "iphone" whose path is the
-        device's UDID; empty when the USB device service is unavailable
-        (logged once per call).
+        device's UDID, one per back camera of each phone; empty when the USB
+        device service is unavailable (logged once per call).
     """
     try:
         devices = usbmux.list_devices(timeout=1.0)
     except usbmux.UsbmuxError as exc:
         log.write(f"iPhones are not listed: {exc}")
         return []
-    return [CameraInfo(f"iphone-{device.serial[-8:].lower()}", "iPhone (USB)",
-                       kind="iphone", path=device.serial)
-            for device in devices]
+    infos = []
+    for device in devices:
+        lenses = _lens_cache.get(device.serial)
+        if lenses is None:
+            lenses = probe_lenses(device)
+            if lenses is not None:
+                _lens_cache[device.serial] = lenses
+        infos += lens_infos(device.serial, lenses or ())
+    return infos
+
+
+def main_lenses(infos):
+    """Keep one camera per phone: the first listed, which is the main one.
+
+    Args: infos is a list of CameraInfo from list_iphones().
+    Returns: The list with every phone's other cameras removed. Two cameras
+        of one phone cannot stream at once, so only one is ever opened
+        without being asked.
+    """
+    seen, kept = set(), []
+    for info in infos:
+        if info.path not in seen:
+            seen.add(info.path)
+            kept.append(info)
+    return kept
 
 
 def usb_connector(info, port=PORT):
@@ -491,6 +601,34 @@ class IPhoneSession:
         self._reader = threading.Thread(target=self._read_loop, args=(sock,),
                                         name="espi-iphone", daemon=True)
         self._reader.start()
+        self._await_lens()
+
+    def _await_lens(self):
+        """Wait for the app to switch to this session's back camera.
+
+        The app answers a lens command with a new HELLO describing that
+        camera, so identity, formats and limits are the camera's own before
+        the session opens.
+
+        Args: None.
+        Returns: None. Closes the link and raises LinkError when the app does
+            not report the camera in LENS_TIMEOUT_S, so frames from another
+            camera are never shown under this one's name.
+        """
+        wanted = self.info.lens
+        if not wanted:
+            return
+        deadline = time.monotonic() + LENS_TIMEOUT_S
+        with self._cond:
+            while self.hello.get("lens") != wanted and self._error is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cond.wait(remaining)
+            switched = self.hello.get("lens") == wanted
+        if not switched:
+            self.close()
+            raise LinkError(f"the iPhone did not switch to its {wanted} camera")
 
     def _starting_command(self):
         """Build the command that sends every requested setting.
@@ -500,6 +638,8 @@ class IPhoneSession:
         """
         command = {"exposure_us": self.requested["exposure_us"],
                    "fps": self.requested["fps"]}
+        if self.info.lens:
+            command["lens"] = self.info.lens
         iso = self._iso_for(self.requested["gain_db"])
         if iso is not None:
             command["iso"] = iso
@@ -564,6 +704,7 @@ class IPhoneSession:
         elif kind == KIND_HELLO:
             with self._cond:
                 self._apply_hello(decode_json(payload))
+                self._cond.notify_all()
         elif kind == KIND_ERROR:
             message = decode_json(payload).get("message", "unknown error")
             self.log.warning(f"iPhone reports: {message}")
@@ -576,6 +717,7 @@ class IPhoneSession:
         Returns: None.
         """
         self.hello = hello
+        _lens_cache[self.info.path] = parse_lenses(hello)
         settings = hello.get("settings", {})
         formats = tuple((int(entry.get("width", 0)), int(entry.get("height", 0)),
                          float(entry.get("max_fps", 0)))
