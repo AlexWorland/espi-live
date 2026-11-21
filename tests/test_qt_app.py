@@ -1610,8 +1610,11 @@ class SimpleUiTests(WindowTestCase):
         QApplication.processEvents()
         for shown in extras:
             self.assertTrue(shown.isVisibleTo(w), shown)
-        for toggle in w._section_toggles.values():
+        # Only the sections the simple UI leaves out: the iPhone section is a basic
+        # one that shows just while a phone is displayed.
+        for toggle, body in w._extra_sections:
             self.assertTrue(toggle.isVisibleTo(w), toggle.text())
+            self.assertTrue(body.isVisibleTo(w), toggle.text())
         buttons = {b.text(): b for b in bar.findChildren(qt_app.QPushButton)}
         for label in ("Compare (C)", "Reset last (R)", "Reset average (A)", "Fit",
                       "1:1", "Freeze (Space)", "All controls"):
@@ -1624,9 +1627,10 @@ class SimpleUiTests(WindowTestCase):
         self.assertTrue(w.simple_ui)
         for hidden in extras:
             self.assertFalse(hidden.isVisibleTo(w), hidden)
-        for toggle in w._section_toggles.values():
-            self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
-                             toggle.text())
+        for toggle, body in w._extra_sections:
+            self.assertFalse(toggle.isVisibleTo(w), toggle.text())
+            self.assertFalse(body.isVisibleTo(w), toggle.text())
+        self.assertTrue(w._section_toggles["Camera"].isVisibleTo(w))
         for label in ("Compare (C)", "Reset last (R)", "Freeze (Space)", "Fit"):
             self.assertEqual(toolbar_item_shown(buttons[label]), label == "Compare (C)",
                              label)
@@ -1644,7 +1648,7 @@ class SimpleUiTests(WindowTestCase):
         w = self.window
         w.show()
         w.noise_reduction.set_value(7)
-        toggle = next(t for name, t in w._section_toggles.items() if name != "Camera")
+        toggle, _ = w._extra_sections[0]
         toggle.setChecked(False)
         w.set_simple_ui(False)
         self.assertTrue(toggle.isVisibleTo(w))
