@@ -55,6 +55,47 @@ PEAK_SLICES = 12
 FLOOR_MIN_S = 2.0
 FLOOR_MIN_IMAGES = 16
 FLOOR_SD_MARGIN = 1.0
+# Deep frames: a source with more than 8 bits (the iPhone's RAW mode) hands the
+# pipeline float32 frames in 8-bit-equivalent grey levels (0 is black, 255 the
+# sensor's full scale, fractions kept). Every step up to the final scaling keeps
+# that precision; only the image that is shown, saved or recorded becomes uint8.
+DEEP_DTYPE = np.float32
+FULL_SCALE = 255.0
+DEEP_BINS = 1024  # histogram bins for a deep image's percentile levels
+
+
+def is_deep(image):
+    """Tell whether an image carries more than 8 bits (float32 grey levels).
+
+    Args: image is a NumPy array.
+    Returns: True for a deep frame, False for uint8.
+    """
+    return image.dtype != np.uint8
+
+
+def to_uint8(image):
+    """Round an image to the 8-bit picture that is shown, saved or recorded.
+
+    Args: image is a 2-D uint8 or float32 array in 8-bit-equivalent grey
+        levels; values outside 0..255 saturate.
+    Returns: A uint8 array (the input itself when it already is one).
+    """
+    if image.dtype == np.uint8:
+        return image
+    return cv2.convertScaleAbs(np.maximum(image, 0.0, dtype=np.float32))
+
+
+def saturate(values, like):
+    """Limit a product to the top of the scale of the frames it came from.
+
+    Args: values is a float32 array; like is an array whose dtype decides the
+        result.
+    Returns: For uint8 `like`, values rounded and saturated to uint8; for a
+        deep one, values capped at FULL_SCALE and kept as float32.
+    """
+    if like.dtype == np.uint8:
+        return cv2.convertScaleAbs(values)
+    return np.minimum(values, FULL_SCALE, out=values)
 
 
 def normalize_min_max(image):
@@ -97,14 +138,39 @@ def stretch_contrast(image, clip_percent):
     return cv2.LUT(image, np.clip(np.rint(levels), 0, 255).astype(np.uint8)), low, high
 
 
+def deep_levels(image, clip_percent):
+    """Find a deep image's stretch levels, to a fraction of a grey level.
+
+    A RAW difference is often well under one 8-bit grey level, so the levels
+    are kept as floats and found with a fine histogram.
+
+    Args: image is a nonempty float32 array; clip_percent is as in
+        stretch_levels.
+    Returns: A (low, high) tuple of float grey levels.
+    """
+    low, high, _, _ = cv2.minMaxLoc(image)
+    if clip_percent <= 0 or high <= low:
+        return float(low), float(high)
+    width = (high - low) / DEEP_BINS
+    counts = np.cumsum(cv2.calcHist([image], [0], None, [DEEP_BINS],
+                                    [low, high + width]).ravel())
+    clipped = counts[-1] * min(clip_percent, 50.0) / 100.0
+    first = int(np.searchsorted(counts, clipped, side="right"))
+    last = int(np.searchsorted(counts, counts[-1] - clipped, side="left"))
+    return float(low + first * width), float(low + last * width)
+
+
 def stretch_levels(image, clip_percent):
     """Find the input levels a contrast stretch maps to black and white.
 
-    Args: image is a nonempty, single-channel uint8 array; clip_percent is
-        the share of pixels (0..50) allowed to saturate at each end, where 0
-        means the exact minimum and maximum.
-    Returns: A (low, high) tuple of integer grey levels.
+    Args: image is a nonempty, single-channel uint8 or deep (float32) array;
+        clip_percent is the share of pixels (0..50) allowed to saturate at
+        each end, where 0 means the exact minimum and maximum.
+    Returns: A (low, high) tuple: integer grey levels for uint8, floats for a
+        deep image.
     """
+    if is_deep(image):
+        return deep_levels(image, clip_percent)
     if clip_percent <= 0:
         low, high, _, _ = cv2.minMaxLoc(image)
         return int(low), int(high)
@@ -121,11 +187,16 @@ def apply_levels(image, low, high):
     high may lie above 255: a sensitivity floor widens the range so that
     small differences stay dark instead of filling the scale.
 
-    Args: image is a single-channel uint8 array; low and high are levels.
-    Returns: The stretched uint8 image, or zeros when high <= low.
+    Args: image is a single-channel uint8 or deep (float32) array; low and
+        high are levels.
+    Returns: The stretched uint8 image, or zeros when high <= low. A deep
+        image keeps its fractional levels until this rounding to 8 bits.
     """
     if high <= low:
-        return np.zeros_like(image)
+        return np.zeros(image.shape, np.uint8)
+    if is_deep(image):
+        scale = 255.0 / (high - low)
+        return to_uint8((image - np.float32(low)) * np.float32(scale))
     levels = (np.arange(256, dtype=np.float32) - low) * (255.0 / (high - low))
     return cv2.LUT(image, np.clip(np.rint(levels), 0, 255).astype(np.uint8))
 
@@ -158,14 +229,15 @@ class RangeTracker:
         """
         self.low = self.high = self.time = None
 
-    def update(self, low, high, min_range, steady_s, now):
+    def update(self, low, high, min_range, steady_s, now, fine=False):
         """Combine this frame's levels with the floor and the history.
 
         Args: low and high are this frame's stretch levels; min_range is the
             sensitivity floor in grey levels (0 = off); steady_s is the
             release time in seconds (0 = follow every frame); now is the
-            monotonic time.
-        Returns: The (low, high) integer levels to stretch with.
+            monotonic time; fine keeps fractional levels (deep images).
+        Returns: The (low, high) levels to stretch with: integers, or floats
+            when fine.
         """
         low, high = float(low), float(high)
         if self.high is None or steady_s <= 0:
@@ -175,6 +247,11 @@ class RangeTracker:
             self.high = high if high > self.high else self.high + alpha * (high - self.high)
             self.low = low if low < self.low else self.low + alpha * (low - self.low)
         self.time = now
+        if fine:
+            low, high = self.low, self.high
+            if min_range > 0:
+                high = max(high, low + float(min_range))
+            return low, high
         low, high = int(round(self.low)), int(round(self.high))
         if min_range > 0:
             high = max(high, low + int(min_range))
@@ -197,13 +274,15 @@ class NoiseCalibration:
         """
         self.until = now + duration_s
         self.peaks = []
+        self.deep = False  # the frames are deep: a floor under one level is allowed
 
     def add(self, image):
         """Record one processed difference frame.
 
-        Args: image is a uint8 difference image (before the stretch).
+        Args: image is a uint8 or deep difference image (before the stretch).
         Returns: None.
         """
+        self.deep = is_deep(image)
         self.peaks.append(stretch_levels(image, NOISE_PERCENTILE_CLIP)[1])
 
     def done(self, now):
@@ -224,7 +303,10 @@ class NoiseCalibration:
         if not self.peaks:
             return None
         noise = float(np.median(self.peaks))
-        return noise, int(min(255, max(1, math.ceil(noise * NOISE_MARGIN))))
+        floor = math.ceil(noise * NOISE_MARGIN)
+        if self.deep and floor <= 1 and noise * NOISE_MARGIN <= 1.0:
+            return noise, 0  # a RAW still scene's noise is under one grey level
+        return noise, int(min(255, max(1, floor)))
 
 
 class PeakHold:
@@ -314,7 +396,7 @@ def local_normalize(image, window, floor=0.0):
     mean = cv2.blur(data, (size, size))
     spread = cv2.blur(data * data, (size, size)) - mean * mean
     std = np.sqrt(np.maximum(spread, 0.0))
-    np.maximum(std, max(1.0, floor / 4.0), out=std)
+    np.maximum(std, max(1e-3 if is_deep(image) else 1.0, floor / 4.0), out=std)
     out = 128.0 + (data - mean) * (63.75 / std)
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -329,10 +411,10 @@ def even_out_brightness(difference, frame, sigma=BEAM_SIGMA_PX):
     boost is capped at MAX_BRIGHTNESS_GAIN so the beam's edge is not
     amplified into noise.
 
-    Args: difference is a uint8 difference image; frame is the camera frame
-        it came from (same shape); sigma is the blur width in pixels used to
-        estimate the illumination.
-    Returns: A uint8 image of the same shape.
+    Args: difference is a uint8 or deep difference image; frame is the camera
+        frame it came from (same shape); sigma is the blur width in pixels
+        used to estimate the illumination.
+    Returns: An image of the same shape and type as difference.
     """
     height, width = frame.shape
     shrink = max(1, int(sigma // 4))
@@ -346,7 +428,8 @@ def even_out_brightness(difference, frame, sigma=BEAM_SIGMA_PX):
     target = float(local[lit].mean())
     gain = np.where(lit, target / np.maximum(local, DARK_LEVEL), 0.0)
     gain = np.minimum(gain, MAX_BRIGHTNESS_GAIN).astype(np.float32)
-    return np.clip(difference.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+    boosted = np.clip(difference.astype(np.float32) * gain, 0, 255)
+    return boosted.astype(np.uint8) if difference.dtype == np.uint8 else boosted
 
 
 def smooth_speckle(image, method, size):
@@ -373,11 +456,15 @@ def apply_gain(image, gain):
     scene's few levels of noise stay dark while real changes reach white, and
     the brightness does not follow each frame's range as a stretch does.
 
-    Args: image is a 2-D uint8 array; gain is the multiplier (1.0 = none).
-    Returns: The rounded, saturated uint8 product, or the input itself at 1.0.
+    Args: image is a 2-D uint8 or deep array; gain is the multiplier (1.0 =
+        none).
+    Returns: The saturated product (rounded for uint8, fractions kept for a
+        deep image), or the input itself at 1.0.
     """
     if gain == 1.0:
         return image
+    if is_deep(image):
+        return saturate(image * np.float32(gain), image)
     return cv2.convertScaleAbs(image, alpha=float(gain))
 
 
@@ -391,9 +478,9 @@ def reject_outliers(image, size):
     fringes alone and only pulls isolated spikes back (IMAQ Vision Concepts
     Manual, "Lowpass Filter").
 
-    Args: image is a 2-D uint8 array; size is the neighbourhood width in
-        pixels (made odd), with 0 or 1 meaning off.
-    Returns: A new uint8 image, or the input itself when off.
+    Args: image is a 2-D uint8 or deep array; size is the neighbourhood width
+        in pixels (made odd), with 0 or 1 meaning off.
+    Returns: A new image of the same type, or the input itself when off.
     """
     size = int(size)
     if size <= 1:
@@ -405,7 +492,9 @@ def reject_outliers(image, size):
     spread = np.sqrt(np.maximum(mean_square - mean * mean, 0.0))
     outliers = np.abs(values - mean) > spread
     result = image.copy()
-    result[outliers] = np.rint(mean[outliers]).astype(np.uint8)
+    replacement = mean[outliers]
+    result[outliers] = (np.rint(replacement).astype(np.uint8)
+                        if image.dtype == np.uint8 else replacement)
     return result
 
 
@@ -604,14 +693,15 @@ class NoiseFloorMap:
 def subtract_floor(image, floor):
     """Take a measured noise floor off a difference image.
 
-    Args: image is a uint8 difference image; floor is a float32 map of the
-        same shape (NoiseFloorMap.result).
-    Returns: A new uint8 image, image minus floor, rounded and never below 0.
+    Args: image is a uint8 or deep difference image; floor is a float32 map of
+        the same shape (NoiseFloorMap.result).
+    Returns: A new image, image minus floor, never below 0 (rounded to uint8,
+        or float32 for a deep image).
     """
     out = image.astype(np.float32)
     out -= floor
     np.maximum(out, 0.0, out=out)
-    return cv2.convertScaleAbs(out)
+    return out if is_deep(image) else cv2.convertScaleAbs(out)
 
 
 class ReferenceCapture:
@@ -644,10 +734,10 @@ class ReferenceCapture:
         A frame of a different size than the ones before it starts the sum
         over, so frames of two sizes are never mixed.
 
-        Args: frame is a Mono8 array taken after single-field and noise
-            reduction.
-        Returns: The rounded uint8 mean once target frames are summed,
-            otherwise None.
+        Args: frame is a Mono8 (or deep) array taken after single-field and
+            noise reduction.
+        Returns: The mean once target frames are summed (rounded to uint8, or
+            float32 for deep frames), otherwise None.
         """
         if self.accum is None or self.accum.shape != frame.shape:
             self.accum = frame.astype(np.float32)
@@ -657,6 +747,8 @@ class ReferenceCapture:
             self.count += 1
         if self.count < self.target:
             return None
+        if is_deep(frame):
+            return self.accum / np.float32(self.count)
         return cv2.convertScaleAbs(self.accum, alpha=1.0 / self.count)
 
 
@@ -735,7 +827,11 @@ class ESPIProcessor:
             self.frame_count += 1
         if self.frame_count < count:
             return None
-        result = cv2.convertScaleAbs(self.frame_accum, alpha=1.0 / self.frame_count)
+        if is_deep(frame):
+            result = self.frame_accum / np.float32(self.frame_count)
+        else:
+            result = cv2.convertScaleAbs(self.frame_accum,
+                                         alpha=1.0 / self.frame_count)
         self.reset_frame_average()
         return result
 
@@ -746,12 +842,13 @@ class ESPIProcessor:
         averages out random shot and read noise; a spatial blur would erase
         the speckle. Moving objects leave a trail that grows with strength.
 
-        Args: frame is the current Mono8 array; strength is the share (0..1)
-            of the running history kept in each output frame, with 0 meaning
-            off. Values are capped at MAX_DENOISE_STRENGTH so the feed still
-            follows changes.
-        Returns: The rounded uint8 filtered frame, or the input itself when off
-            or on the first frame of a new size.
+        Args: frame is the current Mono8 (or deep) array; strength is the
+            share (0..1) of the running history kept in each output frame,
+            with 0 meaning off. Values are capped at MAX_DENOISE_STRENGTH so
+            the feed still follows changes.
+        Returns: The filtered frame (rounded for uint8, fractions kept for a
+            deep frame), or the input itself when off or on the first frame
+            of a new size.
         """
         if strength <= 0:
             self.denoised = None
@@ -761,6 +858,8 @@ class ESPIProcessor:
             return frame
         weight = 1.0 - min(strength, MAX_DENOISE_STRENGTH)
         cv2.accumulateWeighted(frame, self.denoised, weight)
+        if is_deep(frame):
+            return self.denoised.copy()  # the sum keeps changing; hand out a copy
         return cv2.convertScaleAbs(self.denoised)
 
     def reset_previous(self):
@@ -844,7 +943,8 @@ class ESPIProcessor:
         self.previous = None
         if mode == "Previous":
             back = min(max(1, int(frames_back)), MAX_FRAMES_BACK)
-            if self.history and self.history[-1].shape != frame.shape:
+            if self.history and (self.history[-1].shape != frame.shape
+                                 or self.history[-1].dtype != frame.dtype):
                 self.history.clear()
             if self.history.maxlen != back:
                 self.history = deque(self.history, maxlen=back)  # keeps the newest
@@ -855,18 +955,20 @@ class ESPIProcessor:
             result = cv2.absdiff(frame, self.previous)
             self.history.append(frame.copy())
             return result
-        if self.ref is None or self.ref.shape != frame.shape:
+        if (self.ref is None or self.ref.shape != frame.shape
+                or self.ref.dtype != frame.dtype):
             return np.zeros_like(frame)
         return cv2.absdiff(frame, self.ref)
 
     def average(self, image, count, scale=None):
         """Accumulate a requested number of difference frames.
 
-        Args: image is a uint8 difference frame; count is the number of frames
-            per displayed average, with one disabling averaging; scale, when
-            given, multiplies the mean, which is then rounded and saturated
-            (the LabVIEW VI's sum x Multiplier / N to U8).
-        Returns: A uint8 average when ready, or None while accumulating.
+        Args: image is a uint8 or deep difference frame; count is the number of
+            frames per displayed average, with one disabling averaging; scale,
+            when given, multiplies the mean, which is then rounded and
+            saturated (the LabVIEW VI's sum x Multiplier / N to U8).
+        Returns: An average of the same type when ready (a deep frame keeps
+            its fractions), or None while accumulating.
             Without scale the mean is truncated toward zero, as in earlier
             versions. With count 1 the image is returned unscaled.
         """
@@ -884,14 +986,20 @@ class ESPIProcessor:
             self.avg_count += 1
         if self.avg_count < count:
             return None
+        deep = is_deep(image)
         if scale is not None:
-            result = cv2.convertScaleAbs(self.avg_accum, alpha=scale / self.avg_count)
+            if deep:
+                result = saturate(self.avg_accum * np.float32(scale / self.avg_count),
+                                  image)
+            else:
+                result = cv2.convertScaleAbs(self.avg_accum,
+                                             alpha=scale / self.avg_count)
             self.reset_avg()
             return result
         # The mean of uint8 values already lies in 0..255, so no clip is needed;
         # dividing in place (not multiplying by 1/n) keeps results bit-identical.
         np.divide(self.avg_accum, self.avg_count, out=self.avg_accum)
-        result = self.avg_accum.astype(np.uint8)
+        result = self.avg_accum.copy() if deep else self.avg_accum.astype(np.uint8)
         self.reset_avg()
         return result
 
@@ -901,11 +1009,12 @@ class ESPIProcessor:
         Unlike average(), this returns a frame every time, so the display
         keeps the camera's rate; older frames fade with weight 1/count.
 
-        Args: image is a uint8 difference frame; count sets the effective
-            number of frames remembered, with one disabling averaging; scale,
-            when given, multiplies the average before rounding and saturation.
-        Returns: The rounded uint8 running average. With count 1 the image is
-            returned unscaled.
+        Args: image is a uint8 or deep difference frame; count sets the
+            effective number of frames remembered, with one disabling
+            averaging; scale, when given, multiplies the average before
+            rounding and saturation.
+        Returns: The running average (rounded uint8, or float32 for a deep
+            frame). With count 1 the image is returned unscaled.
         """
         if count <= 1:
             self.reset_avg()
@@ -914,6 +1023,9 @@ class ESPIProcessor:
             self.rolling = image.astype(np.float32)
         else:
             cv2.accumulateWeighted(image, self.rolling, 1.0 / count)
+        if is_deep(image):
+            return saturate(self.rolling * np.float32(1.0 if scale is None else scale),
+                            image)
         return cv2.convertScaleAbs(self.rolling, alpha=1.0 if scale is None else scale)
 
 

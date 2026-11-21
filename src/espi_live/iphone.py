@@ -14,9 +14,16 @@ has the full description):
 - The phone sends HELLO (JSON: device, app, formats, limits, settings) as
   soon as the computer connects, then FRAME messages (a 48-byte FRAME_META
   plus width × height Mono8 bytes) and a STATUS (JSON) every second.
+- In RAW mode a FRAME carries one colour plane of the sensor's Bayer data
+  instead: pixel format MONO16, and after FRAME_META a 16-byte RAW_META (black
+  level, white level, colour, pattern) and then width × height little-endian
+  16-bit values the phone's image pipeline has not touched. decode_frame turns
+  them into a deep frame (float32, 8-bit-equivalent grey levels: black level
+  0, white level 255, fractions kept), which the engine carries through its
+  difference and averaging steps before rounding to 8 bits for display.
 - The computer sends COMMAND (JSON with any of exposure_us, iso, fps,
   lens_position, width, height, crop_width, crop_height, max_send_fps,
-  refocus); the phone applies it and answers with a STATUS.
+  refocus, raw, raw_channel); the phone applies it and answers with a STATUS.
 
 IPhoneSession has the CameraSession interface (open, grab, set_float,
 limits, read_values, read_stream_counters, describe, close, identity,
@@ -35,12 +42,13 @@ import math
 import struct
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from . import usbmux
 from .camera import CAMERA_RANGES, CameraInfo
+from .processing import FULL_SCALE
 
 PORT = 47820
 MAGIC = b"ESPC"
@@ -51,6 +59,11 @@ HEADER = struct.Struct("<4sHHII")  # magic, version, kind, payload length, reser
 FRAME_META = struct.Struct("<IIIIQqfffI")
 KIND_HELLO, KIND_STATUS, KIND_FRAME, KIND_COMMAND, KIND_ERROR = 1, 2, 3, 4, 5
 PIXEL_MONO8 = 1
+PIXEL_MONO16 = 2   # RAW mode: one Bayer colour plane, 16-bit values, RAW_META follows
+# black level, white level (sensor counts), colour (RAW_CHANNELS index), pattern
+RAW_META = struct.Struct("<ffII")
+RAW_CHANNELS = ("red", "green", "blue")
+RAW_PATTERNS = ("RGGB", "GRBG", "GBRG", "BGGR")
 MAX_JSON = 1 << 20
 MAX_FRAME = 64 << 20  # 48 MP of Mono8 with room to spare
 
@@ -61,6 +74,7 @@ QUIET_S = 1.5              # ignore the phone's echo of a setting the viewer jus
 CROP_SIZES = (0, 2048, 1024, 512)       # 0 = full frame; square centre crops
 SEND_CAPS = (0.0, 30.0, 15.0, 10.0, 5.0)  # 0 = every frame USB can carry
 # Phone setting (COMMAND key) -> decimals kept when reporting it to the viewer.
+RAW_SETTINGS = ("raw", "raw_channel")  # COMMAND keys that are not numbers
 SETTING_DECIMALS = {"exposure_us": 1, "gain_db": 2, "fps": 2, "lens_position": 3,
                     "width": 0, "height": 0, "crop_width": 0, "crop_height": 0,
                     "max_send_fps": 2}
@@ -85,6 +99,10 @@ class FrameMeta:
     exposure_us: float
     iso: float
     lens_position: float
+    raw: bool = False        # a RAW plane (deep frame), not the video luma
+    channel: int = 0         # RAW_CHANNELS index of the plane
+    black_level: float = 0.0
+    white_level: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -105,6 +123,8 @@ class IPhoneIdentity:
     formats: tuple = ()  # (width, height, max fps) the phone can send
     supported: bool = True
     interlaced: bool = False
+    raw: bool = False        # the phone sends Bayer RAW planes, not video luma
+    raw_channel: str = "red"
 
     def short_name(self):
         """Name the source for the badge and window title.
@@ -124,7 +144,10 @@ class IPhoneIdentity:
             return []
         lines = [f"{self.short_name()} · iOS {self.system_version} · "
                  f"ESPI Camera {self.app_version}"]
-        if self.width and self.height:
+        if self.raw:  # the plane is half the sensor's size; the frame reports it
+            lines.append(f"{self.camera or 'Camera'}: Bayer RAW {self.raw_channel} "
+                         "plane, 16-bit, no image processing, uncompressed over USB")
+        elif self.width and self.height:
             lines.append(f"{self.camera or 'Camera'}: {self.width} × {self.height} "
                          "Mono8 (luma), uncompressed over USB")
         if self.serial:
@@ -139,6 +162,11 @@ class IPhoneIdentity:
         """
         if not self.device_model:
             return []
+        if self.raw:
+            return ["Phone camera, RAW mode: rolling shutter and one colour plane "
+                    "of the colour filter; the phone's image pipeline is bypassed, "
+                    "so the noise is the sensor's own. Check results against the "
+                    "FLIR camera"]
         return ["Phone camera: rolling shutter, colour filter and the phone's "
                 "own noise reduction; check results against the FLIR camera"]
 
@@ -172,6 +200,23 @@ def encode_frame(image, sequence=0, timestamp_ns=0, exposure_us=0.0, iso=0.0,
     meta = FRAME_META.pack(width, height, width, PIXEL_MONO8, sequence, timestamp_ns,
                            exposure_us, iso, lens_position, 0)
     return encode_message(KIND_FRAME, meta + np.ascontiguousarray(image).tobytes())
+
+
+def encode_raw_frame(plane, black_level, white_level, channel=0, pattern=0, sequence=0,
+                     timestamp_ns=0, exposure_us=0.0, iso=0.0, lens_position=0.0):
+    """Frame one RAW colour plane the way the phone sends it (tests and tools).
+
+    Args: plane is a 2-D uint16 array of sensor counts; black_level and
+        white_level are the counts for black and full scale; channel indexes
+        RAW_CHANNELS and pattern RAW_PATTERNS; the rest fill FRAME_META.
+    Returns: The FRAME message bytes.
+    """
+    height, width = plane.shape
+    meta = FRAME_META.pack(width, height, width, PIXEL_MONO16, sequence, timestamp_ns,
+                           exposure_us, iso, lens_position, 0)
+    raw = RAW_META.pack(black_level, white_level, channel, pattern)
+    body = np.ascontiguousarray(plane, dtype="<u2").tobytes()
+    return encode_message(KIND_FRAME, meta + raw + body)
 
 
 def recv_into_exact(sock, buffer):
@@ -216,13 +261,19 @@ def decode_frame(payload):
     """Unpack a FRAME payload.
 
     Args: payload is the bytearray from read_message().
-    Returns: (FrameMeta, image) with image a writable 2-D uint8 array that
-        shares the payload's memory. Raises LinkError when it is malformed.
+    Returns: (FrameMeta, image). For Mono8, image is a writable 2-D uint8 array
+        that shares the payload's memory. For a RAW plane (Mono16) it is a
+        float32 array in 8-bit-equivalent grey levels: (count - black level)
+        scaled so the white level is 255, negative below black. Raises
+        LinkError when the payload is malformed.
     """
     if len(payload) < FRAME_META.size:
         raise LinkError("frame header is truncated")
     (width, height, stride, pixel_format, sequence, timestamp_ns, exposure_us, iso,
      lens_position, _reserved) = FRAME_META.unpack_from(payload)
+    if pixel_format == PIXEL_MONO16:
+        return decode_raw_frame(payload, width, height, stride, sequence, timestamp_ns,
+                                exposure_us, iso, lens_position)
     if pixel_format != PIXEL_MONO8:
         raise LinkError(f"pixel format {pixel_format} is not Mono8")
     if stride < width or len(payload) != FRAME_META.size + stride * height:
@@ -234,6 +285,34 @@ def decode_frame(payload):
         image = np.ascontiguousarray(image[:, :width])
     meta = FrameMeta(width, height, sequence, timestamp_ns, exposure_us, iso,
                      lens_position)
+    return meta, image
+
+
+def decode_raw_frame(payload, width, height, stride, sequence, timestamp_ns,
+                     exposure_us, iso, lens_position):
+    """Unpack a RAW colour plane into a deep frame.
+
+    Args: payload is the FRAME payload; the other arguments are FRAME_META's
+        fields (stride counts 16-bit values).
+    Returns: (FrameMeta, image) with image a float32 array of 8-bit-equivalent
+        grey levels. Raises LinkError when the payload is malformed.
+    """
+    start = FRAME_META.size + RAW_META.size
+    if len(payload) < start:
+        raise LinkError("RAW frame header is truncated")
+    black, white, channel, _pattern = RAW_META.unpack_from(payload, FRAME_META.size)
+    if stride < width or len(payload) != start + 2 * stride * height:
+        raise LinkError(f"a {width} × {height} RAW frame arrived with "
+                        f"{len(payload) - start} bytes")
+    span = float(white) - float(black)
+    if not span > 0 or channel >= len(RAW_CHANNELS):
+        raise LinkError(f"RAW frame has black level {black:g}, white level "
+                        f"{white:g}, colour {channel}")
+    counts = np.frombuffer(payload, "<u2", stride * height, start).reshape(height, stride)
+    image = np.subtract(counts[:, :width], np.float32(black), dtype=np.float32)
+    image *= np.float32(FULL_SCALE / span)
+    meta = FrameMeta(width, height, sequence, timestamp_ns, exposure_us, iso,
+                     lens_position, True, int(channel), float(black), float(white))
     return meta, image
 
 
@@ -338,6 +417,7 @@ class IPhoneSession:
         self.connector = connector
         self.requested = {"exposure_us": float(exposure_us), "gain_db": float(gain_db),
                           "fps": float(fps)}
+        self.raw_request = {}  # "raw" and "raw_channel" the viewer chose, resent on reconnect
         self.identity = IPhoneIdentity(serial=info.path)
         self.hello = {}
         self.status = {}
@@ -423,6 +503,7 @@ class IPhoneSession:
         iso = self._iso_for(self.requested["gain_db"])
         if iso is not None:
             command["iso"] = iso
+        command.update(self.raw_request)
         return command
 
     def close(self):
@@ -506,7 +587,8 @@ class IPhoneSession:
             camera=str(hello.get("camera", "")),
             width=int(settings.get("crop_width") or settings.get("width") or 0),
             height=int(settings.get("crop_height") or settings.get("height") or 0),
-            formats=formats)
+            formats=formats, raw=bool(settings.get("raw", False)),
+            raw_channel=str(settings.get("raw_channel", "red")))
 
     def _apply_status(self, status):
         """Keep a STATUS message and log what changed for the worse.
@@ -520,6 +602,10 @@ class IPhoneSession:
             self.status = status
             changed_thermal = thermal != self._thermal
             self._thermal = thermal
+            phone = status.get("settings") or {}
+            raw, channel = bool(phone.get("raw", False)), str(phone.get("raw_channel", "red"))
+            if (raw, channel) != (self.identity.raw, self.identity.raw_channel):
+                self.identity = replace(self.identity, raw=raw, raw_channel=channel)
         if changed_thermal and thermal in THERMAL_WARNINGS:
             self.log.warning(f"The iPhone is getting hot ({thermal}); it may lower its "
                              "frame rate. Give it air or lower the frame rate.")
@@ -616,13 +702,15 @@ class IPhoneSession:
 
         Args: fields are COMMAND keys and values, for example
             lens_position=0.4, width=1920 and height=1080, crop_width and
-            crop_height, max_send_fps, or refocus=True.
+            crop_height, max_send_fps, refocus=True, raw=True (Bayer RAW
+            planes instead of video luma) or raw_channel="green".
         Returns: None. Raises OSError when the link fails.
         """
         now = time.monotonic()
         for key in fields:
             if key != "refocus":  # a refocus should report the new lens position
                 self._requested_at[key] = now
+        self.raw_request.update({key: fields[key] for key in RAW_SETTINGS if key in fields})
         self._send(fields)
 
     def take_settings_update(self):
@@ -636,8 +724,9 @@ class IPhoneSession:
         Args: None.
         Returns: A dict of changed settings in the viewer's units
             (exposure_us, gain_db, fps, lens_position, width, height,
-            crop_width, crop_height, max_send_fps), or None when nothing
-            changed or the phone has not reported yet.
+            crop_width, crop_height, max_send_fps, and raw and raw_channel as
+            the phone has them), or None when nothing changed or the phone
+            has not reported yet.
         """
         with self._cond:
             phone = dict(self.status.get("settings") or self.hello.get("settings") or {})
@@ -660,6 +749,12 @@ class IPhoneSession:
                 value = int(value)
             if self._reported.get(key) != value:
                 changes[key] = value
+        for key in RAW_SETTINGS:
+            value = phone.get(key)
+            if (value is None or now - self._requested_at.get(key, -QUIET_S) < QUIET_S
+                    or self._reported.get(key) == value):
+                continue
+            changes[key] = value
         self._reported.update(changes)
         return changes or None
 
@@ -767,6 +862,8 @@ class IPhoneSession:
             return f"iPhone link lost: reconnecting. {OPEN_HINT}"
         rate = values["resulting"]
         size = f"{meta.width} × {meta.height}" if meta else "waiting for frames"
+        if meta and meta.raw:
+            size += f" RAW {RAW_CHANNELS[meta.channel]}"
         received = (f"{rate:.1f} fps received ({byte_rate / 1e6:.0f} MB/s)" if rate
                     else "no frames yet")
         parts = [f"{self.identity.short_name()} {size} over USB: {received}"]
@@ -776,6 +873,8 @@ class IPhoneSession:
         dropped = status.get("dropped_frames")
         if dropped:
             parts.append(f"{int(dropped)} skipped on the phone while USB was busy")
+        if meta and meta.raw:
+            parts.append(f"black {meta.black_level:g}, white {meta.white_level:g} counts")
         if values["exposure"] is not None and meta:
             gain = values["gain"]
             parts.append(f"exposure {values['exposure']:.0f} µs, ISO {meta.iso:.0f}"

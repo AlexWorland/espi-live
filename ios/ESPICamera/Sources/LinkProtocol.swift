@@ -3,7 +3,10 @@
 // Every message is a 16-byte little-endian header (magic "ESPC", version,
 // kind, payload length, reserved) and a payload. The phone sends HELLO and
 // STATUS as JSON and FRAME as a 48-byte FrameMeta followed by Mono8 rows; the
-// computer sends COMMAND as JSON. Keep this file and iphone.py in step.
+// computer sends COMMAND as JSON. In RAW mode a FRAME is instead pixel format
+// Mono16: the FrameMeta, a 16-byte RawMeta (black level, white level, colour,
+// pattern) and then one Bayer colour plane of little-endian 16-bit sensor
+// values. Keep this file and iphone.py in step.
 
 import Foundation
 
@@ -13,8 +16,10 @@ enum Link {
     static let version: UInt16 = 1
     static let headerSize = 16
     static let frameMetaSize = 48
+    static let rawMetaSize = 16
     static let maxIncoming = 1 << 20
     static let pixelMono8: UInt32 = 1
+    static let pixelMono16: UInt32 = 2
 
     enum Kind: UInt16 {
         case hello = 1, status = 2, frame = 3, command = 4, error = 5
@@ -54,6 +59,34 @@ enum Link {
         data.appendLE(iso.bitPattern)
         data.appendLE(lensPosition.bitPattern)
         data.appendLE(UInt32(0))
+        return data
+    }
+
+    /// The FRAME header, metadata and RAW metadata for one Bayer colour plane;
+    /// the caller appends width × height little-endian UInt16 values.
+    /// `channel` is 0 red, 1 green, 2 blue; `pattern` is 0 RGGB, 1 GRBG,
+    /// 2 GBRG, 3 BGGR (the sensor's layout).
+    static func rawFrameStart(width: Int, height: Int, sequence: UInt64, timestampNs: Int64,
+                              exposureUs: Float, iso: Float, lensPosition: Float,
+                              blackLevel: Float, whiteLevel: Float,
+                              channel: UInt32, pattern: UInt32) -> Data {
+        let length = frameMetaSize + rawMetaSize + width * height * 2
+        var data = header(kind: .frame, length: length)
+        data.reserveCapacity(headerSize + length)
+        data.appendLE(UInt32(width))
+        data.appendLE(UInt32(height))
+        data.appendLE(UInt32(width))  // stride in values: rows are always sent unpadded
+        data.appendLE(pixelMono16)
+        data.appendLE(sequence)
+        data.appendLE(timestampNs)
+        data.appendLE(exposureUs.bitPattern)
+        data.appendLE(iso.bitPattern)
+        data.appendLE(lensPosition.bitPattern)
+        data.appendLE(UInt32(0))
+        data.appendLE(blackLevel.bitPattern)
+        data.appendLE(whiteLevel.bitPattern)
+        data.appendLE(channel)
+        data.appendLE(pattern)
         return data
     }
 
@@ -122,6 +155,8 @@ struct LinkCommand: Codable, Sendable, Equatable {
     var cropHeight: Int?
     var maxSendFps: Double?
     var refocus: Bool?
+    var raw: Bool?
+    var rawChannel: String?
 }
 
 /// What the camera is set to now.
@@ -135,6 +170,8 @@ struct CaptureSettings: Codable, Sendable, Equatable {
     var cropWidth = 0                 // 0 = full frame
     var cropHeight = 0
     var maxSendFps: Double = 0        // 0 = send every frame USB can carry
+    var raw = false                   // Bayer RAW stills instead of the video luma
+    var rawChannel = "red"            // which colour sites RAW keeps: red, green, blue
 }
 
 struct CaptureLimits: Codable, Sendable, Equatable {
