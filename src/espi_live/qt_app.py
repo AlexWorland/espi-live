@@ -18,6 +18,7 @@ the displayed camera's own engine and settings.
 
 import faulthandler
 import html
+import json
 import logging
 import math
 import os
@@ -44,6 +45,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, QButtonGroup,
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
+                               QGroupBox,
                                QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
                                QMessageBox,
                                QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
@@ -51,8 +53,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QTextEdit, QToolBar, QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
-from espi_live import (camera, camera_reports, codex, error_reports, feedback, log_uploads, paths,
-                       source_code, tips, ui_scale, updater)
+from espi_live import (camera, camera_reports, codex, daq, error_reports, feedback, log_uploads,
+                       paths, source_code, tips, ui_scale, updater)
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
@@ -1997,6 +1999,518 @@ class ReferenceCompareDialog(QDialog):
                             notes=self.window.frame_notes.toPlainText())
 
 
+DAQ_POLL_MS = 100
+DAQ_SHUTDOWN_S = 5.0  # longest wait for the DAQ to reach 0 V at exit
+DAQ_SETTINGS_KEY = "daq/settings"
+DAQ_TITLE = "Frequency generator and piezo (NI DAQ)"
+GENERATOR_KINDS = {"ao": "sine", "ctr": "square, 5 V TTL"}
+PIEZO_MODE_TEXT = ((daq.HOLD, "Hold a voltage"),
+                   (daq.SINE, "Sine at the generator's frequency"))
+
+
+def daq_spin(minimum, maximum, decimals, suffix, step):
+    """Build a number box for the DAQ window.
+
+    Args: minimum and maximum bound the value; decimals and step set its
+        resolution; suffix is the unit shown after the number.
+    Returns: A WheelIgnoringSpinBox.
+    """
+    spin = WheelIgnoringSpinBox()
+    spin.setRange(minimum, maximum)
+    spin.setDecimals(decimals)
+    spin.setSingleStep(step)
+    spin.setSuffix(suffix)
+    spin.setKeyboardTracking(False)
+    return spin
+
+
+def generator_choice_text(output):
+    """Describe a frequency-generator output choice.
+
+    Args: output is "ao0", "ctr1" and so on, or daq.OFF.
+    Returns: Text such as "AO 0 (sine)" or "Counter 1 (square, 5 V TTL)".
+    """
+    if output == daq.OFF:
+        return "Off (not assigned)"
+    kind = GENERATOR_KINDS["ctr" if output.startswith("ctr") else "ao"]
+    return f"{daq.output_label(output)} ({kind})"
+
+
+class DaqDialog(QDialog):
+    """Assign NI DAQ outputs to the frequency generator and the piezo driver.
+
+    The window edits DaqSettings and sends them to the window's
+    DaqController, which owns the device on its own thread. Closing the
+    window leaves the outputs running; they go to 0 V with "All outputs to
+    0 V", on an error, and when ESPI live closes.
+    """
+
+    def __init__(self, window, controller):
+        """Build the form from the saved settings.
+
+        Args: window is the MainWindow; controller is its daq.DaqController.
+        Returns: None.
+        """
+        super().__init__(window)
+        self.window = window
+        self.controller = controller
+        self.outputs = None  # DeviceOutputs of the connected device
+        self.scanned = False
+        self.scan_note = ""  # why no real device is listed, from the last scan
+        self.setWindowTitle(DAQ_TITLE)
+        self.resize(ui_scale.px(620), ui_scale.px(640))
+        saved = self._saved_settings()
+
+        self.device_box = QComboBox()
+        set_tooltip(self.device_box,
+                    "The NI device to drive. The simulated device drives nothing: "
+                    "use it to try the controls without hardware.")
+        self.rescan_button = QPushButton("Rescan")
+        set_tooltip(self.rescan_button, "Look for NI devices again (after plugging one in).")
+        self.device_status = QLabel("Looking for NI devices…")
+        self.device_status.setWordWrap(True)
+        device_row = QHBoxLayout()
+        device_row.addWidget(self.device_box, 1)
+        device_row.addWidget(self.rescan_button)
+
+        self.generator_output = QComboBox()
+        set_tooltip(self.generator_output,
+                    "Which output produces the frequency generator's signal. An analog "
+                    "output gives a sine for the shaker or PZT amplifier; a counter gives a "
+                    "5 V square wave on a PFI terminal.")
+        self.generator_terminal = QComboBox()
+        set_tooltip(self.generator_terminal,
+                    "The PFI terminal a counter's square wave comes out on. On the "
+                    "USB-6251 BNC, PFI 0–7 have BNC sockets.")
+        self.piezo_output = QComboBox()
+        set_tooltip(self.piezo_output,
+                    "Which analog output drives the reference piezo's amplifier.")
+        generator_row = QHBoxLayout()
+        generator_row.addWidget(self.generator_output, 1)
+        generator_row.addWidget(self.generator_terminal)
+        assign = QGroupBox("Assign outputs")
+        assign_form = QFormLayout(assign)
+        assign_form.addRow("Frequency generator", generator_row)
+        assign_form.addRow("Piezo driver", self.piezo_output)
+
+        self.generator_on = QCheckBox("Generator on")
+        set_tooltip(self.generator_on,
+                    "Produce the signal after Apply. Off holds the output at 0 V.")
+        self.frequency = daq_spin(daq.MIN_FREQUENCY_HZ, daq.MAX_SQUARE_HZ, 3, " Hz", 10.0)
+        set_tooltip(self.frequency,
+                    f"Drive frequency. Sine: up to {daq.MAX_SINE_HZ:,.0f} Hz; square: up "
+                    f"to {daq.MAX_SQUARE_HZ:,.0f} Hz. The device rounds it slightly; "
+                    "the value it produces is shown below.")
+        self.amplitude = daq_spin(0.0, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.amplitude, "Sine amplitude (peak) at the DAQ, before the amplifier.")
+        self.offset = daq_spin(-daq.MAX_VOLTS, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.offset, "DC offset added to the sine.")
+        self.generator_limit = daq_spin(0.01, daq.MAX_VOLTS, 2, " V", 0.1)
+        set_tooltip(self.generator_limit,
+                    "Safety limit: the generator never exceeds this many volts either "
+                    "way. Set it to the amplifier's largest safe input.")
+        self.generator_result = QLabel()
+        self.generator_result.setWordWrap(True)
+        generator = QGroupBox("Frequency generator")
+        generator_form = QFormLayout(generator)
+        generator_form.addRow(self.generator_on)
+        generator_form.addRow("Frequency", self.frequency)
+        generator_form.addRow("Amplitude", self.amplitude)
+        generator_form.addRow("Offset", self.offset)
+        generator_form.addRow("Safety limit", self.generator_limit)
+        generator_form.addRow(self.generator_result)
+
+        self.piezo_on = QCheckBox("Piezo on")
+        set_tooltip(self.piezo_on, "Drive the piezo after Apply. Off holds it at 0 V.")
+        self.piezo_mode = QComboBox()
+        for mode, text in PIEZO_MODE_TEXT:
+            self.piezo_mode.addItem(text, mode)
+        set_tooltip(self.piezo_mode,
+                    "Hold a voltage (step it by hand for phase steps), or follow the "
+                    "generator with a sine at the same frequency and a set phase.")
+        self.piezo_voltage = daq_spin(-daq.MAX_VOLTS, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.piezo_voltage,
+                    "The held voltage, or the centre of the sine, at the DAQ.")
+        self.piezo_amplitude = daq_spin(0.0, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.piezo_amplitude, "Sine amplitude (peak). Sine mode only.")
+        self.piezo_phase = daq_spin(-360.0, 360.0, 1, "°", 5.0)
+        set_tooltip(self.piezo_phase,
+                    "Phase of the piezo sine relative to the generator. Sine mode only.")
+        self.piezo_step = daq_spin(0.0001, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.piezo_step,
+                    "How far one Step press moves the held voltage (for example the "
+                    "voltage of a quarter-wave phase step).")
+        self.step_down = QPushButton("Step −")
+        set_tooltip(self.step_down, "Lower the held voltage by one step and apply it.")
+        self.step_up = QPushButton("Step +")
+        set_tooltip(self.step_up, "Raise the held voltage by one step and apply it.")
+        step_row = QHBoxLayout()
+        step_row.addWidget(self.piezo_step, 1)
+        step_row.addWidget(self.step_down)
+        step_row.addWidget(self.step_up)
+        self.piezo_limit = daq_spin(0.01, daq.MAX_VOLTS, 2, " V", 0.1)
+        set_tooltip(self.piezo_limit,
+                    "Safety limit: the piezo driver never exceeds this many volts either "
+                    "way. Set it to the piezo amplifier's largest safe input.")
+        piezo = QGroupBox("Piezo driver")
+        piezo_form = QFormLayout(piezo)
+        piezo_form.addRow(self.piezo_on)
+        piezo_form.addRow("Mode", self.piezo_mode)
+        piezo_form.addRow("Voltage", self.piezo_voltage)
+        piezo_form.addRow("Amplitude", self.piezo_amplitude)
+        piezo_form.addRow("Phase", self.piezo_phase)
+        piezo_form.addRow("Step", step_row)
+        piezo_form.addRow("Safety limit", self.piezo_limit)
+
+        self.problem_label = QLabel()
+        self.problem_label.setWordWrap(True)
+        self.problem_label.setStyleSheet("color:#c00000;")
+        self.state_label = QLabel("Outputs: not connected")
+        self.state_label.setWordWrap(True)
+        note = QLabel("Volts are at the DAQ, before your amplifiers. Closing this window "
+                      "leaves the outputs running; they go to 0 V when ESPI live closes.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        buttons = QDialogButtonBox()
+        self.apply_button = buttons.addButton("Apply", QDialogButtonBox.ApplyRole)
+        set_tooltip(self.apply_button, "Send these settings to the device.")
+        self.zero_button = buttons.addButton("All outputs to 0 V",
+                                             QDialogButtonBox.ActionRole)
+        set_tooltip(self.zero_button,
+                    "Stop the generator and set every assigned output to 0 V.")
+        close = buttons.addButton(QDialogButtonBox.Close)
+        set_tooltip(close, "Hide this window. The outputs keep running.")
+        for button in buttons.buttons():
+            button.setAutoDefault(False)  # Enter in a number box must not apply
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(device_row)
+        layout.addWidget(self.device_status)
+        layout.addWidget(assign)
+        layout.addWidget(generator)
+        layout.addWidget(piezo)
+        layout.addWidget(self.problem_label)
+        layout.addWidget(self.state_label)
+        layout.addStretch(1)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+
+        self.rescan_button.clicked.connect(self.scan)
+        self.device_box.activated.connect(self._connect_selected)
+        self.apply_button.clicked.connect(self.apply)
+        self.zero_button.clicked.connect(lambda: self.controller.request("zero"))
+        self.step_down.clicked.connect(lambda: self.step(-1))
+        self.step_up.clicked.connect(lambda: self.step(1))
+        close.clicked.connect(self.reject)
+        self._fill_outputs(daq.DeviceOutputs(daq.SIMULATED_DEVICE))
+        self.load(saved)
+        for box in (self.generator_output, self.generator_terminal, self.piezo_output,
+                    self.piezo_mode):
+            box.currentIndexChanged.connect(self.refresh)
+        for spin in (self.frequency, self.amplitude, self.offset, self.generator_limit,
+                     self.piezo_voltage, self.piezo_amplitude, self.piezo_phase,
+                     self.piezo_step, self.piezo_limit):
+            spin.valueChanged.connect(self.refresh)
+        for check in (self.generator_on, self.piezo_on):
+            check.toggled.connect(self.refresh)
+        self.connected(None)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+
+    @staticmethod
+    def _saved_settings():
+        """Read the settings saved on this computer.
+
+        Args: None.
+        Returns: daq.DaqSettings (the defaults when none are saved or the
+            saved text is unreadable).
+        """
+        text = QSettings("ESPI", "espi_live").value(DAQ_SETTINGS_KEY, "")
+        try:
+            data = json.loads(text) if text else {}
+        except (TypeError, ValueError):
+            data = {}
+        return daq.DaqSettings.from_dict(data)
+
+    def showEvent(self, event):
+        """Follow the controller while the window is open; scan the first time.
+
+        Args: event is the Qt show event.
+        Returns: None.
+        """
+        super().showEvent(event)
+        self.timer.start(DAQ_POLL_MS)
+        if not self.scanned:
+            self.scan()
+
+    def hideEvent(self, event):
+        """Stop following the controller while hidden.
+
+        Args: event is the Qt hide event.
+        Returns: None.
+        """
+        self.timer.stop()
+        super().hideEvent(event)
+
+    def scan(self):
+        """Ask for the list of NI devices.
+
+        Args: None.
+        Returns: None.
+        """
+        self.scanned = True
+        self.device_status.setText("Looking for NI devices…")
+        self.controller.request("scan")
+
+    def _set_combo(self, box, data):
+        """Select the entry with this data, when present.
+
+        Args: box is a QComboBox; data is the wanted entry's data.
+        Returns: True when it was found.
+        """
+        index = box.findData(data)
+        if index >= 0:
+            box.setCurrentIndex(index)
+        return index >= 0
+
+    def _fill_outputs(self, outputs):
+        """List a device's outputs in the assignment boxes, keeping choices.
+
+        Args: outputs is the device's daq.DeviceOutputs.
+        Returns: None.
+        """
+        choices = ((self.generator_output,
+                    (daq.OFF,) + outputs.analog + outputs.counters, generator_choice_text),
+                   (self.piezo_output, (daq.OFF,) + outputs.analog,
+                    lambda output: "Off (not assigned)" if output == daq.OFF
+                    else daq.output_label(output)),
+                   (self.generator_terminal, outputs.terminals, daq.terminal_label))
+        for box, values, text in choices:
+            current = box.currentData()
+            box.blockSignals(True)
+            box.clear()
+            for value in values:
+                box.addItem(text(value), value)
+            if not self._set_combo(box, current):
+                box.setCurrentIndex(0)
+            box.blockSignals(False)
+
+    def load(self, settings):
+        """Show settings in the form.
+
+        Args: settings is daq.DaqSettings.
+        Returns: None.
+        """
+        s = settings
+        self._set_combo(self.generator_output, s.generator_output)
+        self._set_combo(self.generator_terminal, s.generator_terminal)
+        self._set_combo(self.piezo_output, s.piezo_output)
+        self._set_combo(self.piezo_mode, s.piezo_mode)
+        self.generator_on.setChecked(s.generator_on)
+        self.frequency.setValue(s.generator_frequency_hz)
+        self.amplitude.setValue(s.generator_amplitude_v)
+        self.offset.setValue(s.generator_offset_v)
+        self.generator_limit.setValue(s.generator_limit_v)
+        self.piezo_on.setChecked(s.piezo_on)
+        self.piezo_voltage.setValue(s.piezo_voltage_v)
+        self.piezo_amplitude.setValue(s.piezo_amplitude_v)
+        self.piezo_phase.setValue(s.piezo_phase_deg)
+        self.piezo_step.setValue(s.piezo_step_v)
+        self.piezo_limit.setValue(s.piezo_limit_v)
+        self.wanted_device = s.device
+
+    def settings(self):
+        """Read the form.
+
+        Args: None.
+        Returns: daq.DaqSettings.
+        """
+        return daq.DaqSettings(
+            device=self.device_box.currentData() or "",
+            generator_output=self.generator_output.currentData() or daq.OFF,
+            generator_terminal=self.generator_terminal.currentData() or "",
+            generator_on=self.generator_on.isChecked(),
+            generator_frequency_hz=self.frequency.value(),
+            generator_amplitude_v=self.amplitude.value(),
+            generator_offset_v=self.offset.value(),
+            generator_limit_v=self.generator_limit.value(),
+            piezo_output=self.piezo_output.currentData() or daq.OFF,
+            piezo_on=self.piezo_on.isChecked(),
+            piezo_mode=self.piezo_mode.currentData(),
+            piezo_voltage_v=self.piezo_voltage.value(),
+            piezo_amplitude_v=self.piezo_amplitude.value(),
+            piezo_phase_deg=self.piezo_phase.value(),
+            piezo_step_v=self.piezo_step.value(),
+            piezo_limit_v=self.piezo_limit.value())
+
+    def refresh(self, *_):
+        """Enable the controls that apply, and preview or explain the result.
+
+        Args: _ are the signal's values (ignored).
+        Returns: None.
+        """
+        s = self.settings()
+        outputs = self.outputs or daq.DeviceOutputs(daq.SIMULATED_DEVICE)
+        counter = s.generator_output in outputs.counters
+        sine_generator = s.generator_output in outputs.analog
+        self.generator_terminal.setEnabled(counter)
+        for widget in (self.amplitude, self.offset):
+            widget.setEnabled(sine_generator)
+        has_generator = s.generator_output != daq.OFF
+        for widget in (self.generator_on, self.frequency, self.generator_limit):
+            widget.setEnabled(has_generator)
+        has_piezo = s.piezo_output != daq.OFF
+        sine_piezo = has_piezo and s.piezo_mode == daq.SINE
+        for widget in (self.piezo_on, self.piezo_mode, self.piezo_voltage,
+                       self.piezo_limit):
+            widget.setEnabled(has_piezo)
+        for widget in (self.piezo_amplitude, self.piezo_phase):
+            widget.setEnabled(sine_piezo)
+        for widget in (self.piezo_step, self.step_down, self.step_up):
+            widget.setEnabled(has_piezo and s.piezo_mode == daq.HOLD)
+        found = daq.problems(s, outputs)
+        self.problem_label.setText("\n".join(found))
+        self.apply_button.setEnabled(self.outputs is not None and not found)
+        self.generator_result.setText(self._preview(s, outputs, found))
+
+    @staticmethod
+    def _preview(settings, outputs, found):
+        """Say what the generator will produce once applied.
+
+        Args: settings is daq.DaqSettings; outputs the device's outputs;
+            found is the list of problems.
+        Returns: One line of text ("" when there is nothing to say).
+        """
+        if found or settings.generator_output == daq.OFF:
+            return ""
+        if settings.generator_output in outputs.counters:
+            actual = daq.square_frequency(settings.generator_frequency_hz)
+            return (f"Produces about {actual:.6g} Hz, 0–5 V square, on "
+                    f"{daq.terminal_label(settings.generator_terminal)}.")
+        channels = len({settings.generator_output, settings.piezo_output} - {daq.OFF})
+        rate, samples, actual = daq.choose_timing(settings.generator_frequency_hz, channels)
+        return (f"Produces {actual:.6g} Hz: {samples} samples per cycle at "
+                f"{rate:,.0f} samples/s.")
+
+    def _connect_selected(self, *_):
+        """Connect to the device chosen in the list.
+
+        Args: _ is the activated index (ignored).
+        Returns: None.
+        """
+        device = self.device_box.currentData()
+        if device:
+            self.outputs = None
+            self.connected(None)
+            self.device_status.setText("Connecting…")
+            self.controller.request("connect", device=device)
+
+    def apply(self):
+        """Save the settings and send them to the device.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = self.settings()
+        QSettings("ESPI", "espi_live").setValue(DAQ_SETTINGS_KEY,
+                                                json.dumps(settings.to_dict()))
+        self.state_label.setText("Outputs: applying…")
+        self.controller.request("apply", settings=settings)
+
+    def step(self, direction):
+        """Move the held piezo voltage by one step, and apply it if the piezo is on.
+
+        Args: direction is +1 or -1.
+        Returns: None.
+        """
+        self.piezo_voltage.setValue(self.piezo_voltage.value()
+                                    + direction * self.piezo_step.value())
+        if self.piezo_on.isChecked() and self.apply_button.isEnabled():
+            self.apply()
+
+    def connected(self, outputs):
+        """Show the connected device (or none).
+
+        Args: outputs is the device's daq.DeviceOutputs, or None.
+        Returns: None.
+        """
+        self.outputs = outputs
+        if outputs is not None:
+            self._fill_outputs(outputs)
+            info = outputs.device
+            if info.simulated:
+                note = f"{self.scan_note} " if self.scan_note else ""
+                self.device_status.setText(f"{note}Simulated device: nothing is driven. "
+                                           "Use it to try the controls.")
+                # Styled like dummy mode, so simulated output is never taken for real.
+                self.device_status.setStyleSheet(
+                    "background:#8b0000;color:white;font-weight:bold;"
+                    f"padding:{ui_scale.px(4)}px;border-radius:{ui_scale.px(4)}px;")
+            else:
+                self.device_status.setText(f"Connected to {info.label}.")
+                self.device_status.setStyleSheet("")
+            self.state_label.setText("Outputs: all at 0 V until you apply.")
+        self.refresh()
+
+    def poll(self):
+        """Handle what the controller has reported.
+
+        Args: None.
+        Returns: None.
+        """
+        while True:
+            try:
+                kind, payload = self.controller.events.get_nowait()
+            except queue.Empty:
+                return
+            if kind == "devices":
+                self._show_devices(*payload)
+            elif kind == "connected":
+                self.connected(payload)
+            elif kind == "applied":
+                prefix = ("Simulated, nothing driven: "
+                          if self.outputs is not None and self.outputs.device.simulated
+                          else "Outputs: ")
+                self.state_label.setText(prefix + payload.summary)
+            elif kind == "rejected":
+                self.problem_label.setText("\n".join(payload))
+                self.state_label.setText("Outputs: not changed.")
+            elif kind == "zeroed":
+                self._switch_off()
+                self.state_label.setText("Outputs: all at 0 V.")
+            elif kind == "failed":
+                self._switch_off()
+                self.problem_label.setText(
+                    f"The DAQ reported an error: {payload}. The outputs were set to "
+                    "0 V where the device allowed it.")
+                self.state_label.setText("Outputs: stopped after an error.")
+
+    def _switch_off(self):
+        """Untick both On boxes, to match outputs at 0 V.
+
+        Args: None.
+        Returns: None.
+        """
+        self.generator_on.setChecked(False)
+        self.piezo_on.setChecked(False)
+
+    def _show_devices(self, devices, reason):
+        """List the devices found (plus the simulated one) and connect.
+
+        Args: devices is a list of daq.DeviceInfo; reason explains why none
+            could be listed, or is None.
+        Returns: None.
+        """
+        self.scan_note = reason or ("" if devices else
+                                    "No NI device found: plug it in and press Rescan.")
+        self.device_box.clear()
+        for info in devices + [daq.SIMULATED_DEVICE]:
+            self.device_box.addItem(info.label, info.name)
+        if not self._set_combo(self.device_box, self.wanted_device):
+            self.device_box.setCurrentIndex(0)
+        self._connect_selected()
+
+
 class StatusLayout(QLayout):
     """Lay out the status bar in one row when it fits, and in more when not.
 
@@ -2456,6 +2970,8 @@ class MainWindow(QMainWindow):
         self.drawn_sequence = 0
         self.shown_packet = None  # the packet on screen; Freeze holds this one
         self.compare_dialog = None  # ReferenceCompareDialog, built on first use
+        self.daq = None  # daq.DaqController, made when the DAQ window first opens
+        self.daq_dialog = None  # DaqDialog, built on first use
         self.view_state = None  # last logged (view size, zoom, image size)
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
@@ -3825,6 +4341,14 @@ class MainWindow(QMainWindow):
                     "R: reset last. A: reset average. "
                     "Q or Esc: quit.")
 
+        devices_menu = self.menuBar().addMenu("&Devices")
+        devices_menu.setToolTipsVisible(True)
+        self.daq_action = devices_menu.addAction(f"{DAQ_TITLE}…")
+        set_tooltip(self.daq_action,
+                    "Assign an NI DAQ's outputs to the frequency generator (specimen "
+                    "drive) and the piezo driver, and run them.")
+        self.daq_action.triggered.connect(self._show_daq_dialog)
+
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.setToolTipsVisible(True)
         guide = help_menu.addAction("Which settings should I use?")
@@ -4296,6 +4820,20 @@ class MainWindow(QMainWindow):
         self.compare_dialog.show()
         self.compare_dialog.raise_()
         self.compare_dialog.activateWindow()
+
+    def _show_daq_dialog(self):
+        """Open the NI DAQ window, creating its controller on first use.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.daq is None:
+            self.daq = daq.DaqController(self.log)
+        if self.daq_dialog is None:
+            self.daq_dialog = DaqDialog(self, self.daq)
+        self.daq_dialog.show()
+        self.daq_dialog.raise_()
+        self.daq_dialog.activateWindow()
 
     def _show_frozen(self):
         """Show or hide every frozen-display indicator for the displayed camera.
@@ -5102,6 +5640,11 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.tip_timer.stop()
             self.update_timer.stop()
+            if self.daq is not None:  # amplifiers must not be left driven
+                self.statusBar().showMessage("Setting the NI DAQ outputs to 0 V…")
+                if not self.daq.shutdown(DAQ_SHUTDOWN_S):
+                    self.log.warning("NI DAQ: the device did not confirm 0 V on its "
+                                     f"outputs within {DAQ_SHUTDOWN_S:g} s.")
             self.statusBar().showMessage("Finishing recordings and releasing the camera…")
             for engine in self._all_engines():
                 engine.stop()

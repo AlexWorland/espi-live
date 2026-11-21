@@ -2,3 +2,7 @@ numpy==2.5.4
 opencv-python==5.0.0.93
 PySide6==6.12.0
 cv2_enumerate_cameras==1.4.0; platform_system != "Darwin"
+# NI DAQ outputs (daq.py). The NI-DAQmx driver is a separate NI install;
+# nidaqmx 1.8 drops Python 3.10, which the camera PC runs.
+pylablib-lightweight==1.4.3
+nidaqmx==1.7.0
