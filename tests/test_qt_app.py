@@ -1604,7 +1604,8 @@ class SimpleUiTests(WindowTestCase):
             self.assertTrue(shown.isVisibleTo(w), shown)
         self.assertFalse(w.single_field.isVisibleTo(w))  # hides itself unless needed
         for toggle in w._section_toggles.values():
-            self.assertTrue(toggle.isVisibleTo(w), toggle.text())
+            if toggle.text() != "iPhone":  # shown only for a phone camera
+                self.assertTrue(toggle.isVisibleTo(w), toggle.text())
         # The window is too narrow for every toolbar item, so Qt moves the last
         # ones into its overflow menu; check the actions, not the widgets.
         self.assertEqual(len(w._advanced_actions), 9)
@@ -1619,8 +1620,9 @@ class SimpleUiTests(WindowTestCase):
             self.assertFalse(hidden.isVisibleTo(w), hidden)
         self.assertFalse(any(a.isVisible() for a in w._advanced_actions))
         for toggle in w._section_toggles.values():
-            self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
-                             toggle.text())
+            if toggle.text() != "iPhone":
+                self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
+                                 toggle.text())
         self.assertFalse(w.tips_action.isVisible())
         self.assertIs(FakeSettings.store["ui/simple"], True)
 
