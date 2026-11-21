@@ -9,7 +9,10 @@ How it is used and the link protocol are described in `docs/iphone/README.md`.
 | `ESPICamera/Sources/CameraStreamer.swift` | Capture with locked exposure, focus and white balance; the loopback TCP listener; frame sending (one frame in flight, skip when busy) |
 | `ESPICamera/Sources/LinkProtocol.swift` | Wire format shared with `src/espi_live/iphone.py` |
 | `ESPICamera/Sources/ContentView.swift`, `AppModel.swift`, `CameraPreview.swift`, `ESPICameraApp.swift` | Status and controls on the phone |
-| `ESPICamera/Tests/` | Protocol tests (byte layout, parser, JSON keys) |
+| `ESPICamera/Sources/RawPipeline.swift` | The difference view's source choice (Bayer RAW stills, then 10-bit, then 8-bit luma), CFA patterns and labels |
+| `ESPICamera/Sources/DifferenceEngine.swift`, `Difference.metal` | The GPU difference (red photosites or luma, the previous image kept on the GPU) and its on-screen drawing |
+| `ESPICamera/Sources/DifferenceView.swift` | The full-screen difference view, its label and controls |
+| `ESPICamera/Tests/` | Protocol tests (byte layout, parser, JSON keys); the difference view's source choice; the GPU difference checked against a CPU reference on synthetic buffers |
 | `ESPICamera/testflight.sh` | Archive, sign and upload to TestFlight |
 
 You need a Mac with Xcode 26 or later and XcodeGen (`brew install xcodegen`).
@@ -25,7 +28,8 @@ xcodebuild -project ESPICamera.xcodeproj -scheme ESPICamera \
   -destination 'platform=iOS Simulator,name=iPhone 17' test
 ```
 
-The simulator has no camera, so only the protocol tests run there. Install
+The simulator has no camera, so the tests there cover the protocol, the
+source choice and the GPU difference on synthetic images. Install
 it on a phone with TestFlight, or from Xcode with your own team selected.
 
 ## TestFlight
