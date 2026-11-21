@@ -234,7 +234,7 @@ jobs:
           - name: windows-x64
             os: windows-latest
             python: "3.10"
-            pip_deps: numpy opencv-python PySide6 cv2_enumerate_cameras==1.4.0 certifi pyinstaller
+            pip_deps: numpy opencv-python PySide6 cv2_enumerate_cameras==1.4.0 pylablib-lightweight==1.4.3 nidaqmx==1.7.0 certifi pyinstaller
             asset: espi-live-windows-x64.zip
             sdk_files: flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
 
@@ -381,6 +381,9 @@ jobs:
           args+=(--hidden-import PySpin --collect-all PySpin)
           # Lists video devices (the analog-camera capture adapter).
           args+=(--hidden-import cv2_enumerate_cameras --collect-all cv2_enumerate_cameras)
+          # daq.py imports pyLabLib's NI module (and through it nidaqmx) lazily. The
+          # NI-DAQmx driver itself is installed on the camera PC, not bundled.
+          args+=(--hidden-import pylablib.devices.NI --hidden-import nidaqmx --collect-all nidaqmx)
           # A folder (onedir) starts at once, where a single self-extracting
           # file unpacks everything to a temporary folder on every start. Each
           # build keeps its libraries in its own _internal-N (N = build number)
