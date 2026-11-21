@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-21 — The mouse wheel scrolls the panel, not the sliders
+
+### Previous state
+
+- Scrolling the Controls panel with the mouse wheel changed any slider or number box under the pointer, so exposure or gain could change by accident. The toolbar's Zoom slider also zoomed on a wheel notch.
+
+### Current state
+
+- The mouse wheel over a slider or a number box in the Controls panel scrolls the panel and never changes the value. Dragging, clicking, the arrow keys and typing a number still change it, and a wheel no longer moves keyboard focus into a number box.
+- The toolbar's **Zoom** slider ignores the wheel too. Zoom is still set by dragging, clicking, the arrow keys, the **Fit** and **1:1** buttons, and the wheel or trackpad on the image.
+
 ## 2026-11-21 — Basic controls only, and a quick release
 
 ### Previous state
