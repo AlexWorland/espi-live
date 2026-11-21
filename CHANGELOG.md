@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-21 — Every merge into main publishes a quick release
+
+### Previous state
+
+- Merging into `main` released nothing: **Quick release** (and **Release**) had to be started by hand, and merges piled up in the draft release.
+
+### Current state
+
+- **Quick release** also runs on every push to `main` (every merged pull request) while the project is in active development. It is the same untested build as before, published as a full release, so installed copies are offered each merge: the tag is the next patch version and the notes are GitHub's generated notes.
+- If merges land faster than a build finishes, GitHub keeps only the newest waiting run, so one release can cover several merges. Running it by hand, with the **Pre-release** and **Publish** options, works as before, and **Release** from `main` is still the tested release.
+- Deleting the `push:` trigger in `quick-release.yml` restores hand-started releases only.
+
 ## 2026-11-21 — Frequency generator and piezo driver on an NI DAQ
 
 ### Previous state
