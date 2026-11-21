@@ -11,6 +11,17 @@
 - A **Raw difference** toggle on the toolbar shows |live − previous| of the raw camera frames and nothing else: every processing step and display setting is bypassed while it is on. The button turns red and the view buttons grey out; turning it off returns to your view and settings unchanged.
 - The camera's own exposure and gain are not touched (the analog camera sets those on its switches). Recordings made in it are named `espi_rawdiff_*.avi`, and the comparison window shows the two raw frames that were subtracted.
 
+## 2026-11-21 — Simple UI button
+
+### Previous state
+
+- The simple interface (only the basic controls) was fixed at build time by `SIMPLE_UI` in `qt_app.py`; showing every control meant editing the source.
+
+### Current state
+
+- A **Simple UI** button at the left of the toolbar switches between the basic controls and every control, while the program runs. Nothing is rebuilt or reset: settings, collapsed sections and the camera keep their state, and the hidden controls keep working in both modes. **View > Help tips** and the rotating tip return with the full interface.
+- The choice is remembered for the next run. A new install still starts in the simple interface (`SIMPLE_UI` is now only that default).
+
 ## 2026-11-21 — iPhone camera over USB
 
 ### Previous state
