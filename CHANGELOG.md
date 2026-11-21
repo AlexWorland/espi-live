@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-21 — Basic controls only, and a quick release
+
+### Previous state
+
+- The controls panel and toolbar showed every setting at once (frame rate, noise reduction, averaging, the fringe-enhancement and display tools, presets, Freeze, Compare, the reset buttons, the zoom bar and the interface size), which overwhelmed new users.
+- A release always ran the full test suite and the native update tests first.
+
+### Current state
+
+- Only the basics are rendered: the Raw/Previous/Reference views, Record AVI, Save frame, Set reference, the camera picker, the camera's model and status, Exposure and Gain. Everything else is created but not shown (`SIMPLE_UI` in `qt_app.py`; set it to `False` to render every control again). The shortcuts (S, F, R, A, C, 0, 1, Space), mouse-wheel zoom and the View menu still work, and the hidden settings keep their defaults. This is temporary while the interface is redesigned.
+- **Actions > Quick release** (`quick-release.yml`) builds the Windows program without running the tests, for quick development builds. It only makes a pre-release tagged `vX.Y.Z-dev.N`, which installed copies are never offered. Use **Release** for a tested release.
+
 ## 2026-11-15 — Peak hold preset for the analog camera
 
 ### Previous state

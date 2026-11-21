@@ -1,0 +1,354 @@
+name: Quick release
+
+# A release without the test gate, for quick development builds. It runs the
+# same Windows PyInstaller build, smoke test and packaging as "Release"
+# (build-binaries.yml) but skips the test suite, the 100% coverage check and the
+# native update tests, so a build is out in minutes. Start it by hand: Actions >
+# Quick release > Run workflow, from any branch ("Use workflow from").
+#
+# It only ever makes a PRE-RELEASE, tagged vX.Y.Z-dev.N: X.Y.Z is the patch
+# after the newest full release (so no real version number is used up) and N is
+# this run's number. Installed copies update from the newest full release only,
+# so a quick build is never offered to them: download it from the Releases page.
+# Run "Release" from main for a tested release.
+#
+# Build numbers: build-info.json records this workflow's own run number, and
+# the updater orders builds by it. Quick builds are pre-releases the updater
+# never reads, but a copy installed from one carries a number from this
+# counter, which can be lower or higher than the "Release" counter. A copy
+# whose number is not lower than the newest full release will not offer that
+# release as an update: reinstall it by hand from a full release.
+#
+# Keep the build, smoke test and packaging steps in step with build-binaries.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Notes to put above the generated release notes (optional)"
+        type: string
+        required: false
+        default: ""
+      publish:
+        description: "Publish a pre-release (untick to only build; the archive stays on the run's page)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One quick release at a time, so build numbers and tags stay in order.
+concurrency:
+  group: quick-release
+  cancel-in-progress: false
+
+env:
+  BUILD_REF: ${{ github.sha }}
+
+jobs:
+  # Picks the pre-release tag first, so a problem fails before the build.
+  version:
+    name: Choose the version tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - name: Choose the tag
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          plain='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          next_patch() { local ma mi pa; IFS=. read -r ma mi pa <<< "${1#v}"; echo "v$ma.$mi.$((pa + 1))"; }
+          last=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq '.[] | select((.draft or .prerelease) | not) | .tag_name' \
+            | grep -E "$plain" | sort -V | tail -n 1 || true)
+          tag="$(next_patch "${last:-v0.0.0}")-dev.$BUILD_NUMBER"
+          if gh api "repos/$GH_REPO/git/ref/tags/$tag" --silent 2>/dev/null; then
+            echo "::error::Tag $tag already exists"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Quick release $tag"
+
+  build:
+    name: Build windows-x64
+    needs: [version]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows matches the camera PC: Python 3.10 + the SDK 4.2 PySpin wheel.
+          - name: windows-x64
+            os: windows-latest
+            python: "3.10"
+            pip_deps: numpy opencv-python PySide6 cv2_enumerate_cameras==1.4.0 certifi pyinstaller
+            asset: espi-live-windows-x64.zip
+            sdk_files: flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
+
+      # The FLIR Spinnaker SDK is not in this public repository: it lives in the
+      # private AlexWorland/espi-live-sdk, checked out into third_party/ (where
+      # the paths below and the scripts expect it) with a read-only deploy key,
+      # the SDK_DEPLOY_KEY secret.
+      - name: Check out the FLIR SDK
+        if: matrix.sdk_files != ''
+        uses: actions/checkout@v4
+        with:
+          repository: AlexWorland/espi-live-sdk
+          ssh-key: ${{ secrets.SDK_DEPLOY_KEY }}
+          path: third_party
+          lfs: false # fetch only the SDK files this platform needs, below
+
+      # Git LFS bandwidth is metered, so cache the LFS objects keyed by their
+      # content hashes: unchanged SDK files are never re-downloaded.
+      - name: Compute LFS cache key
+        if: matrix.sdk_files != ''
+        id: lfs
+        shell: bash
+        working-directory: third_party
+        env:
+          SDK_FILES: ${{ matrix.sdk_files }}
+        run: |
+          key=$(git lfs ls-files --long --include="$SDK_FILES" | awk '{print $1}' | sort | sha256sum | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore LFS cache
+        if: matrix.sdk_files != ''
+        uses: actions/cache@v4
+        with:
+          path: third_party/.git/lfs
+          key: lfs-${{ matrix.name }}-${{ steps.lfs.outputs.key }}
+
+      - name: Fetch SDK files (Git LFS)
+        if: matrix.sdk_files != ''
+        shell: bash
+        working-directory: third_party
+        env:
+          SDK_FILES: ${{ matrix.sdk_files }}
+        run: git lfs pull --include="$SDK_FILES"
+
+      # Cache pip's downloads between runs. The key also covers the OS and
+      # Python version; Windows installs unpinned packages, so a new release
+      # of one is downloaded once and then cached too.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        shell: bash
+        run: python -m pip install --upgrade pip && python -m pip install ${{ matrix.pip_deps }}
+
+      - name: Install PySpin
+        shell: bash
+        run: python -m pip install third_party/flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
+
+      # Fail here, not in the field, if the SDK did not install correctly.
+      - name: Check PySpin imports
+        if: matrix.sdk_files != ''
+        shell: bash
+        run: python -c "import PySpin; print('PySpin loaded from', PySpin.__file__)"
+
+      # Build facts the updater compares against build-info.json in the release.
+      # The run number only increases, so it orders builds. The repository is
+      # public, so installed copies read releases anonymously; UPDATE_TOKEN is
+      # optional (an empty secret is fine) and only raises the API rate limit.
+      # FEEDBACK_TOKEN is a separate fine-grained token with only Issues: read &
+      # write. The built binary must contain it: Request feature, camera
+      # reports and --send-changes file issues with it. Feature requests have
+      # no browser fallback. The step fails when the secret is missing.
+      # LOGS_TOKEN is a fine-grained token with only Contents: read & write on
+      # the private espi-live-logs repository (never this one): the app
+      # uploads its scrubbed run logs there. Without it the build only warns
+      # and that copy does not upload.
+      # COMMITTED_AT is the commit time the error reporter compares against
+      # an issue's closed_at to tell a regression from a fixed bug. VERSION is
+      # the release tag the "version" job chose.
+      - name: Write build info
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          VERSION: ${{ needs.version.outputs.tag }}
+          COMMIT: ${{ env.BUILD_REF }}
+          REPO: ${{ github.repository }}
+          ASSET: ${{ matrix.asset }}
+          UPDATE_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+          FEEDBACK_TOKEN: ${{ secrets.FEEDBACK_TOKEN }}
+          LOGS_TOKEN: ${{ secrets.LOGS_TOKEN }}
+        run: |
+          COMMITTED_AT="$(git show -s --format=%cI "$COMMIT")"
+          export COMMITTED_AT
+          python - <<'EOF'
+          import os
+          values = {"BUILD": int(os.environ["BUILD_NUMBER"])}
+          # The release's tag (v0.10.0, or v0.10.0-pre.N): shown in the window
+          # title, --version and the About box. The updater still orders builds
+          # by BUILD, never by this.
+          values["VERSION"] = os.environ["VERSION"].strip()
+          if not values["VERSION"]:
+              raise SystemExit("The version job produced no release tag")
+          for name in ("COMMIT", "COMMITTED_AT", "REPO", "ASSET"):
+              values[name] = os.environ[name]
+          values["TOKEN"] = os.environ.get("UPDATE_TOKEN", "")
+          values["FEEDBACK_TOKEN"] = os.environ.get("FEEDBACK_TOKEN", "").strip()
+          if not values["FEEDBACK_TOKEN"]:
+              raise SystemExit(
+                  "FEEDBACK_TOKEN secret is empty; the built binary must "
+                  "include it so the app can file issues")
+          values["LOGS_TOKEN"] = os.environ.get("LOGS_TOKEN", "").strip()
+          values["LOGS_REPO"] = "AlexWorland/espi-live-logs"
+          if not values["LOGS_TOKEN"]:
+              print("::warning::LOGS_TOKEN is empty; this build will not upload logs")
+          with open("src/espi_live/_build_info.py", "w", encoding="utf-8") as out:
+              out.write('"""Generated by CI; read by updater.py, feedback.py, '
+                        'error_reports.py and log_uploads.py."""\n')
+              for name, value in values.items():
+                  out.write(f"{name} = {value!r}\n")
+          print("Version", values["VERSION"], "build", values["BUILD"], values["ASSET"],
+                "with update token" if values["TOKEN"] else "WITHOUT update token",
+                "and with feedback token",
+                "and with logs token" if values["LOGS_TOKEN"] else "and WITHOUT logs token",
+                f"committed {values['COMMITTED_AT']}")
+          EOF
+
+      - name: Build with PyInstaller
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          args=(--noconfirm --clean --paths src --distpath dist --workpath build)
+          # The Help menu opens the bundled HTML user guide; ship it as data.
+          args+=(--add-data "src/espi_live/user_guide.html;espi_live")
+          # camera.py imports PySpin lazily through importlib, so PyInstaller cannot see it.
+          args+=(--hidden-import PySpin --collect-all PySpin)
+          # Lists video devices (the analog-camera capture adapter).
+          args+=(--hidden-import cv2_enumerate_cameras --collect-all cv2_enumerate_cameras)
+          # A folder (onedir) starts at once, where a single self-extracting
+          # file unpacks everything to a temporary folder on every start. Each
+          # build keeps its libraries in its own _internal-N (N = build number)
+          # beside the executable: Windows cannot overwrite or delete the DLLs a
+          # running copy has loaded, so an update moves the new folder in beside
+          # the old one and swaps only the executable (see updater.py).
+          # Keep the console: the app mirrors its log there and users start it from a shortcut or terminal.
+          args+=(--name espi-live --console --onedir --contents-directory "_internal-$BUILD_NUMBER")
+          python -m PyInstaller "${args[@]}" src/espi_live/__main__.py
+
+      # --help exercises the launcher; --check also imports the Qt front end, the
+      # engine, OpenCV, NumPy and PySpin (when bundled) without opening a window,
+      # so it catches a binary that is missing bundled modules or shared libraries.
+      # The program folder must hold only the executable and _internal-N, the
+      # layout the updater accepts (updater.move_in_library).
+      - name: Smoke test the binary
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          exe=dist/espi-live/espi-live.exe
+          "$exe" --help
+          "$exe" --version
+          # The token is inside the frozen program (not an env var or a sidecar
+          # file). --check names whether it is present and never prints it.
+          unset ESPI_FEEDBACK_TOKEN
+          check_out=$("$exe" --check)
+          printf '%s\n' "$check_out"
+          case "$check_out" in
+            *"feedback token: present"*) ;;
+            *) echo "::error::the binary has no feedback token"; exit 1 ;;
+          esac
+          shopt -s dotglob
+          entries=(dist/espi-live/*)
+          if [ "${#entries[@]}" -ne 2 ] || [ ! -f "$exe" ] || [ ! -d "dist/espi-live/_internal-$BUILD_NUMBER" ]; then
+            echo "::error::dist/espi-live must hold only $(basename "$exe") and _internal-$BUILD_NUMBER, not: ${entries[*]##*/}"
+            exit 1
+          fi
+
+      # The archive holds one entry, which the updater unpacks: the espi-live
+      # program folder.
+      - name: Package
+        shell: bash
+        run: |
+          mkdir release
+          (cd dist && 7z a -tzip "../release/${{ matrix.asset }}" espi-live)
+          ls -lh release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: espi-live-${{ matrix.name }}
+          path: release/*
+          compression-level: 0 # already compressed
+          if-no-files-found: error
+
+  publish:
+    name: Publish pre-release
+    needs: [version, build]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the pre-release (and its tag)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          pattern: espi-live-*
+          merge-multiple: true
+
+      # Same file the updater reads in "Release": the archives' sums go under
+      # "archives", never under "sha256".
+      - name: Write build-info.json
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          SHA: ${{ env.BUILD_REF }}
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, os
+          sums = {}
+          for name in sorted(os.listdir("release")):
+              with open(os.path.join("release", name), "rb") as handle:
+                  sums[name] = hashlib.sha256(handle.read()).hexdigest()
+          info = {"build": int(os.environ["BUILD_NUMBER"]), "commit": os.environ["SHA"],
+                  "archives": sums}
+          with open("release/build-info.json", "w") as out:
+              json.dump(info, out, indent=2)
+          print(json.dumps(info, indent=2))
+          EOF
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ env.BUILD_REF }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          BRANCH: ${{ github.ref_name }}
+          USER_NOTES: ${{ inputs.notes }}
+          TAG: ${{ needs.version.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # The app's "What's new" window reads the build number from the
+          # "Pre-release ... from ..., build N." line and leaves out this block
+          # (updater.CI_BUILD_LINE and CI_BLOCK): keep that line first.
+          {
+            if [ -n "$USER_NOTES" ]; then printf '%s\n\n' "$USER_NOTES"; fi
+            cat <<EOF
+          Pre-release (not offered to installed copies) from \`$BRANCH\`, commit \`${SHA:0:7}\`, build $BUILD_NUMBER. Build log: $RUN_URL
+
+          **Quick build: the tests were skipped.** Use "Release" from main for a tested release.
+
+          - **Windows** (\`espi-live-windows-x64.zip\`) includes PySpin, so it can open a real camera. It unpacks to an \`espi-live\` folder: run \`espi-live.exe\` inside it, and keep the folder together. Add \`--demo\` for synthetic video without a camera.
+          EOF
+          } > notes.md
+          gh release create "$TAG" release/* \
+            --target "$SHA" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --generate-notes \
+            --prerelease

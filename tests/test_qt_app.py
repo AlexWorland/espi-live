@@ -224,16 +224,21 @@ def wait_for(predicate, timeout=5.0):
     return predicate()
 
 
-def demo_window(engine, log, use_gl=False, check_updates=False):
+def demo_window(engine, log, use_gl=False, check_updates=False, simple_ui=False):
     """Build a MainWindow around one demo engine.
 
+    Most tests exercise every control, so the simple UI (which only renders the
+    basic ones) is off unless a test asks for it.
+
     Args: engine is a demo Engine (not started); log is the FakeLog; use_gl
-        and check_updates are passed to MainWindow.
+        and check_updates are passed to MainWindow; simple_ui is the value of
+        qt_app.SIMPLE_UI while the window is built.
     Returns: The MainWindow.
     """
     channel = Channel(log, CameraInfo("DEMO1", "Synthetic camera"), demo=True,
                       engine=engine)
-    return qt_app.MainWindow([channel], log, use_gl, check_updates)
+    with mock.patch.object(qt_app, "SIMPLE_UI", simple_ui):
+        return qt_app.MainWindow([channel], log, use_gl, check_updates)
 
 
 def make_info(size=5_000_000):
@@ -986,6 +991,7 @@ class WindowTestCase(unittest.TestCase):
     """Base class: a MainWindow on a demo engine with every side effect faked."""
 
     use_gl = False
+    simple_ui = False
 
     def setUp(self):
         """Patch settings, dialogs and the updater, then build the window.
@@ -1006,7 +1012,8 @@ class WindowTestCase(unittest.TestCase):
         self.log = FakeLog()
         self.engine = Engine(self.log)
         self.engine.use_demo()
-        self.window = demo_window(self.engine, self.log, self.use_gl)
+        self.window = demo_window(self.engine, self.log, self.use_gl,
+                                  simple_ui=self.simple_ui)
         self.addCleanup(self.cleanup_window)
 
     def cleanup_window(self):
@@ -1526,6 +1533,61 @@ def _dock_controls_missing_tooltips(dock):
         if not widget.toolTip().strip():
             missing.append(widget)
     return missing
+
+
+class SimpleUiTests(WindowTestCase):
+    """The temporary basic-controls-only build renders just the essentials."""
+
+    simple_ui = True
+
+    def test_only_basic_controls_are_rendered(self):
+        """Basic controls are visible; every other control exists but is hidden.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        for shown in (w.exposure, w.gain, w.record_button, *w.mode_group.buttons()):
+            self.assertTrue(shown.isVisibleTo(w), shown)
+        for hidden in (w.fps, w.noise_reduction, w.average, w.rolling, w.ref_refresh,
+                       w.frames_back, w.smoothing_combo, w.smoothing, w.scaling,
+                       w.invert, w.clip, w.palette_combo, w.gamma, w.brightness,
+                       w.clahe, w.flip_button, w.labview_button, w.ui_scale_row,
+                       w.frame_title, w.frame_notes, w.zoom_slider, w.zoom_label):
+            self.assertFalse(hidden.isVisibleTo(w), hidden)
+        for toggle in w._section_toggles.values():
+            self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
+                             toggle.text())
+        buttons = {b.text(): b for b in w.actions_bar.findChildren(qt_app.QPushButton)}
+        for label in ("Save frame (S)", "Set reference (F)"):
+            self.assertTrue(buttons[label].isVisibleTo(w), label)
+        for label in ("Compare (C)", "Reset last (R)", "Reset average (A)", "Fit",
+                      "1:1", "Freeze (Space)"):
+            self.assertFalse(buttons[label].isVisibleTo(w), label)
+
+    def test_help_tips_stay_hidden(self):
+        """Tips advertise hidden controls, so neither the tip nor its menu item shows.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        w._show_tip()
+        self.assertFalse(w.tip_label.isVisibleTo(w))
+        self.assertFalse(w.tips_action.isVisible())
+
+    def test_hidden_controls_still_drive_the_engine(self):
+        """A hidden control keeps its wiring, so presets and shortcuts still work.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.noise_reduction.set_value(10)
+        self.window.noise_reduction.valueChanged.emit(10)
+        self.assertEqual(self.engine.settings().noise_reduction, 10)
+        self.assertTrue(self.window.handle_key(Qt.Key_R))
 
 
 class SettingsGuideTests(WindowTestCase):
