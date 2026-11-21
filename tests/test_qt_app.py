@@ -1581,8 +1581,14 @@ class SimpleUiTests(WindowTestCase):
             self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
                              toggle.text())
         buttons = {b.text(): b for b in w.actions_bar.findChildren(qt_app.QPushButton)}
-        for label in ("Save frame (S)", "Set reference (F)", "Compare (C)"):
+        for label in ("Save frame (S)", "Set reference (F)"):
             self.assertTrue(buttons[label].isVisibleTo(w), label)
+        # The basic toolbar is wider than this test window, so Qt may move the
+        # last button into its overflow menu: check the toolbar item, not the widget.
+        compare = next(a for a in w.actions_bar.actions()
+                       if w.actions_bar.widgetForAction(a) is buttons["Compare (C)"])
+        self.assertTrue(compare.isVisible())
+        self.assertNotIn(compare, w._advanced_actions)
         for label in ("Reset last (R)", "Reset average (A)", "Fit",
                       "1:1", "Freeze (Space)"):
             self.assertFalse(buttons[label].isVisibleTo(w), label)
