@@ -38,6 +38,7 @@ docs/
   labview/            the LabVIEW ESPI 1.5 VI (known-good flow for the Sony XC-ST50), its block diagram, and a decoded description
 third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
 .github/workflows/    build-binaries.yml: tests, builds and releases PyInstaller binaries when started by hand;
+                      quick-release.yml: the same build without the tests, as a pre-release, for quick development builds;
                       release-drafter.yml: regenerates the draft release (next version, notes) after every merge into main;
                       enrich-feature-request.yml: Copilot enrichment of feature-request issues;
                       codex-change.yml: turns changes sent from Open in Codex into pull requests;

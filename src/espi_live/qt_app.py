@@ -139,6 +139,10 @@ FEATURE_BUSY_LABEL = "Sending request…"
 CHECK_TIP = "Check GitHub for a newer build of ESPI live."
 FEATURE_TIP = "Send a feature request to the developers as a GitHub issue."
 CODEX_TIP = "Ask OpenAI's Codex how ESPI live works, using this build's real source code."
+# Temporary pared-down build: only the basic controls are rendered. The rest
+# are still created (so settings, presets, shortcuts and tests keep working)
+# but are never shown. Set to False to render every control again.
+SIMPLE_UI = True
 LAYOUT_VERSION = 5  # bump when docks/toolbars change so stale saved layouts are ignored
 # A camera PC can stay open for days. Recheck well inside GitHub's rate limit.
 UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
@@ -2340,6 +2344,7 @@ class MainWindow(QMainWindow):
         self.reporting = reporting
         self.report_outcomes = {}  # fingerprint -> latest error_reports.Outcome
         self.fatal_boxes = {}  # fingerprint -> (open "ESPI stopped" box, its message)
+        self.simple_ui = SIMPLE_UI  # read once: the layout is built for it
         self.closing = False
         self.updates = updater.UpdateWorker()
         self.update_info = None
@@ -2707,32 +2712,34 @@ class MainWindow(QMainWindow):
                     "processing and recording. Shortcut: Space. S saves the held image.")
         self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
         self.freeze_button.toggled.connect(self.set_frozen)
-        bar.addWidget(self.freeze_button)
-        for label, tip, handler in (
+        self._hide_in_simple_ui(bar.addWidget(self.freeze_button))
+        for label, tip, handler, basic in (
                 ("Save frame (S)",
                  "Save the displayed frame as a PNG, plus a notes file when the title "
                  "or notes box is filled in. Shortcut: S.",
-                 self.save_frame),
+                 self.save_frame, True),
                 ("Set reference (F)",
                  "Use the current live frame as the Reference view's base, or the "
                  "average of the next Ref. frames frames. Shortcut: F.",
-                 lambda: self.engine.request("reference")),
+                 lambda: self.engine.request("reference"), True),
                 ("Compare (C)",
                  "Open a window with the stored reference, the current frame and "
                  "their processed difference side by side, live, to check the "
                  "reference. It has its own Freeze and saves all three. Shortcut: C.",
-                 self.show_compare),
+                 self.show_compare, False),
                 ("Reset last (R)",
                  "Restart the Previous view's difference from the next frame. Shortcut: R.",
-                 lambda: self.engine.request("reset_previous")),
+                 lambda: self.engine.request("reset_previous"), False),
                 ("Reset average (A)",
                  "Discard the frames averaged so far and start the average again. "
                  "Shortcut: A.",
-                 lambda: self.engine.request("reset_average"))):
+                 lambda: self.engine.request("reset_average"), False)):
             button = QPushButton(label)
             set_tooltip(button, tip)
             button.clicked.connect(handler)
-            bar.addWidget(button)
+            action = bar.addWidget(button)
+            if not basic:
+                self._hide_in_simple_ui(action)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2762,12 +2769,21 @@ class MainWindow(QMainWindow):
         zoom_icon = QLabel("Zoom")
         self._sized(zoom_icon.setContentsMargins, 0, 0, 4, 0)
         set_tooltip(zoom_icon, "Zoom from the whole image (100%) up to 64 times.")
-        bar.addWidget(zoom_icon)
-        bar.addWidget(self.zoom_slider)
-        bar.addWidget(self.zoom_label)
-        bar.addWidget(fit_button)
-        bar.addWidget(actual_button)
+        for widget in (zoom_icon, self.zoom_slider, self.zoom_label, fit_button,
+                       actual_button):
+            # Wheel zoom, the 0 and 1 keys and the View menu remain.
+            self._hide_in_simple_ui(bar.addWidget(widget))
         self._show_zoom(self.view.zoom)
+
+    @staticmethod
+    def _hide_in_simple_ui(action):
+        """Hide a toolbar item while SIMPLE_UI is on.
+
+        Args: action is the QAction QToolBar.addWidget returned.
+        Returns: None.
+        """
+        if SIMPLE_UI:
+            action.setVisible(False)
 
     def _build_controls(self):
         """Create the controls dock as one aligned grid of settings.
@@ -2833,17 +2849,22 @@ class MainWindow(QMainWindow):
         # be collapsed without touching the visibility its widgets manage
         # themselves. _align_sections gives every grid the same label column,
         # so labels, sliders and values still line up across sections.
+        # Controls outside the basic set are parked in a hidden widget: created
+        # and wired up, but never rendered while SIMPLE_UI is on.
+        self.hidden_controls = QWidget(panel)
+        self.hidden_controls.setVisible(False)
         self._section_grids = []
         self._section_names = []  # the label in each labeled row, for alignment
         self._section_toggles = {}  # heading text -> its toggle button
         grid = None
         row = 0
 
-        def heading(text):
+        def heading(text, basic=False):
             """Start a collapsible section.
 
             Args: text is the section name; clicking it hides or shows the
-                section, and the choice is remembered between runs.
+                section, and the choice is remembered between runs; basic is
+                False for a section the simple UI leaves out.
             Returns: None.
             """
             nonlocal grid, row
@@ -2880,14 +2901,21 @@ class MainWindow(QMainWindow):
                 QSettings("ESPI", "espi_live").setValue(
                     f"{SECTION_SETTING_PREFIX}{text}", not on)
             toggle.toggled.connect(show_section)
+            if SIMPLE_UI and not basic:
+                toggle.setVisible(False)
+                body.setVisible(False)
 
-        def add(widget, label=None):
+        def add(widget, label=None, basic=False):
             """Add a labeled setting, or a full-width widget when unlabeled.
 
-            Args: widget is the control; label is its name, if any.
+            Args: widget is the control; label is its name, if any; basic is
+                False for a control the simple UI leaves out.
             Returns: None.
             """
             nonlocal row
+            if SIMPLE_UI and not basic:
+                widget.setParent(self.hidden_controls)
+                return
             if label is None:
                 grid.addWidget(widget, row, 0, 1, 2)
             else:
@@ -2898,21 +2926,22 @@ class MainWindow(QMainWindow):
                 self._section_names.append(name)
             row += 1
 
-        def note(label):
+        def note(label, basic=False):
             """Style a secondary, wrapping status line and add it full width.
 
-            Args: label is the QLabel to style.
+            Args: label is the QLabel to style; basic is False for a line the
+                simple UI leaves out.
             Returns: None.
             """
             label.setWordWrap(True)
             label.setStyleSheet("color: palette(placeholder-text);")
-            add(label)
+            add(label, basic=basic)
 
-        heading("Camera")
+        heading("Camera", basic=True)
         self.model_label = QLabel()  # detected model; hidden in dummy mode
         self.model_label.setWordWrap(True)
         self.model_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        add(self.model_label)
+        add(self.model_label, basic=True)
         self.report_label = QLabel()  # camera-report status for unrecognised devices
         self.report_label.setWordWrap(True)
         self.report_label.setTextFormat(Qt.RichText)
@@ -2922,14 +2951,14 @@ class MainWindow(QMainWindow):
                     "Whether a report for this unrecognised camera was filed, and a "
                     "link to the issue when one was.")
         self.report_label.hide()
-        add(self.report_label)
+        add(self.report_label, basic=True)
         self.report_button = QPushButton("Report this camera")
         set_tooltip(self.report_button,
                     "Open GitHub's new-issue page with this camera's details. This "
                     "copy cannot file reports itself.")
         self.report_button.clicked.connect(self._open_report_in_browser)
         self.report_button.hide()
-        add(self.report_button)
+        add(self.report_button, basic=True)
         self.exposure = SliderSpin(*DEFAULT_LIMITS["ExposureTime"], 1, 0,
                                    s.exposure_us, " µs")
         self.exposure.set_description(
@@ -2951,8 +2980,8 @@ class MainWindow(QMainWindow):
             lambda v: self.engine.update_settings(exposure_us=v))
         self.gain.valueChanged.connect(lambda v: self.engine.update_settings(gain_db=v))
         self.fps.valueChanged.connect(lambda v: self.engine.update_settings(fps=v))
-        add(self.exposure, "Exposure")
-        add(self.gain, "Gain")
+        add(self.exposure, "Exposure", basic=True)
+        add(self.gain, "Gain", basic=True)
         add(self.fps, "Requested FPS")
         self.single_field = QCheckBox("Single field (interlaced camera)")
         set_tooltip(self.single_field,
@@ -2991,7 +3020,7 @@ class MainWindow(QMainWindow):
             "Fixed gain shows it. Not the Speckle filter or Average N.")
         note(self.noise_note)
         self.camera_label = QLabel()
-        note(self.camera_label)
+        note(self.camera_label, basic=True)
 
         heading("ESPI measurement")
         self._add_preset_buttons(add)
@@ -3649,6 +3678,7 @@ class MainWindow(QMainWindow):
         self.tips_action.setChecked(not self.tips.hidden)
         set_tooltip(self.tips_action, "Show rotating help tips in the status bar.")
         self.tips_action.triggered.connect(self._set_tips_visible)
+        self.tips_action.setVisible(not self.simple_ui)
         menu.addAction(self.tips_action)
         scale_menu = menu.addMenu("Interface size")
         self.scale_larger_action = QAction("Larger", self)
@@ -4293,7 +4323,8 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         text = self.tips.current()
-        shown = not self.tips.hidden
+        # The tips advertise controls the simple UI does not render.
+        shown = not self.tips.hidden and not self.simple_ui
         self.tip_label.setText(text)
         if text:
             set_tooltip(self.tip_label, text,
