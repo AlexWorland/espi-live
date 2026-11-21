@@ -1580,6 +1580,109 @@ class SimpleUiTests(WindowTestCase):
         self.assertFalse(w.tip_label.isVisibleTo(w))
         self.assertFalse(w.tips_action.isVisible())
 
+    def test_toggle_button_shows_every_control_and_back(self):
+        """The Simple UI button renders the hidden controls, then hides them again.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        button = w.simple_ui_button
+        self.assertTrue(button.isChecked())
+        self.assertTrue(button.isVisibleTo(w))
+        self.assertFalse(w.tips_action.isVisible())
+        button.click()
+        QApplication.processEvents()
+        self.assertFalse(w.simple_ui)
+        self.assertTrue(button.isVisibleTo(w))
+        for shown in (w.exposure, w.gain, w.fps, w.noise_reduction, w.average,
+                      w.scaling, w.palette_combo, w.labview_button, w.frame_title):
+            self.assertTrue(shown.isVisibleTo(w), shown)
+        self.assertFalse(w.single_field.isVisibleTo(w))  # hides itself unless needed
+        for toggle in w._section_toggles.values():
+            self.assertTrue(toggle.isVisibleTo(w), toggle.text())
+        # The window is too narrow for every toolbar item, so Qt moves the last
+        # ones into its overflow menu; check the actions, not the widgets.
+        self.assertEqual(len(w._advanced_actions), 9)
+        self.assertTrue(all(a.isVisible() for a in w._advanced_actions))
+        self.assertTrue(w.tips_action.isVisible())
+        self.assertIn(("ui/simple", False), FakeSettings.store.items())
+        button.click()
+        QApplication.processEvents()
+        self.assertTrue(w.simple_ui)
+        for hidden in (w.fps, w.noise_reduction, w.scaling, w.frame_title,
+                       w.zoom_slider):
+            self.assertFalse(hidden.isVisibleTo(w), hidden)
+        self.assertFalse(any(a.isVisible() for a in w._advanced_actions))
+        for toggle in w._section_toggles.values():
+            self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
+                             toggle.text())
+        self.assertFalse(w.tips_action.isVisible())
+        self.assertIs(FakeSettings.store["ui/simple"], True)
+
+    def test_toggle_keeps_values_and_collapsed_sections(self):
+        """Switching modes changes nothing about the settings or collapsed sections.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        w.noise_reduction.set_value(10)
+        w.noise_reduction.valueChanged.emit(10)
+        w.simple_ui_button.setChecked(False)
+        w._section_toggles["Display"].setChecked(False)
+        QApplication.processEvents()
+        self.assertFalse(w.palette_combo.isVisibleTo(w))
+        self.assertEqual(w.noise_reduction.value(), 10)
+        w.simple_ui_button.setChecked(True)
+        w.simple_ui_button.setChecked(False)
+        QApplication.processEvents()
+        self.assertEqual(self.engine.settings().noise_reduction, 10)
+        self.assertEqual(w.noise_reduction.value(), 10)
+        self.assertFalse(w.palette_combo.isVisibleTo(w))  # still collapsed
+        self.assertTrue(w.noise_reduction.isVisibleTo(w))
+        w._section_toggles["Display"].setChecked(True)
+        QApplication.processEvents()
+        self.assertTrue(w.palette_combo.isVisibleTo(w))
+
+    def test_toggle_does_not_duplicate_labels(self):
+        """Each full-UI toggle makes one label per labeled row, not an extra copy.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        simple_labels = len(w._section_names)
+        w.simple_ui_button.setChecked(False)
+        full_labels = len(w._section_names)
+        self.assertGreater(full_labels, simple_labels)
+        w.simple_ui_button.setChecked(True)
+        w.simple_ui_button.setChecked(False)
+        self.assertEqual(len(w._section_names), full_labels)
+        w.simple_ui_button.setChecked(True)
+        self.assertEqual(len(w._section_names), simple_labels)
+
+    def test_saved_choice_wins_over_the_default(self):
+        """A window built after the choice was saved starts in that mode.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store["ui/simple"] = "false"  # QSettings reads booleans as text
+        engine = Engine(self.log)
+        engine.use_demo()
+        self.addCleanup(engine.wait, 5.0)
+        self.addCleanup(engine.stop)
+        window = demo_window(engine, self.log, simple_ui=True)
+        self.addCleanup(window.close)
+        self.assertFalse(window.simple_ui)
+        self.assertFalse(window.simple_ui_button.isChecked())
+        window.show()
+        self.assertTrue(window.noise_reduction.isVisibleTo(window))
+
     def test_hidden_controls_still_drive_the_engine(self):
         """A hidden control keeps its wiring, so presets and shortcuts still work.
 
