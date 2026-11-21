@@ -1753,6 +1753,32 @@ class FringeControlsTests(WindowTestCase):
         self.assertTrue(window._section_toggles["Display"].isChecked())
         window.close()
 
+    def test_frame_averaging_and_noise_floor_controls(self):
+        """The two checkboxes send their settings; the button asks for a map.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertFalse(w.frames_first.isChecked())
+        self.assertTrue(w.rolling.isEnabled())
+        w.frames_first.setChecked(True)
+        self.assertTrue(self.engine.settings().average_frames_first)
+        self.assertFalse(w.rolling.isEnabled())  # block averages only
+        w.frames_first.setChecked(False)
+        self.assertTrue(w.rolling.isEnabled())
+        w.floor_subtract.setChecked(True)
+        self.assertTrue(self.engine.settings().floor_subtract)
+        self.queued()
+        w.floor_button.click()
+        self.assertIn(("measure_floor", {}), self.queued())
+        w._load_settings(replace(self.engine.settings(), average_frames_first=True,
+                                 floor_subtract=False), {})
+        self.assertTrue(w.frames_first.isChecked())
+        self.assertFalse(w.floor_subtract.isChecked())
+        self.assertFalse(w.rolling.isEnabled())
+        self.assertTrue(self.engine.settings().floor_subtract)  # not sent back
+
     def test_noise_calibration_result_updates_the_floor_slider(self):
         """noise_calibrated shows the measured floor without sending it back.
 

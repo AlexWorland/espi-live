@@ -56,6 +56,14 @@ MAX_BRIGHTNESS_GAIN = 6.0
 # Peak hold splits its window into this many slices; the window's edge is
 # accurate to one slice (0.25 s for a 3 s window).
 PEAK_SLICES = 12
+# Noise floor: a still scene's difference never averages to zero, because an
+# absolute difference of noise is always positive. A map of each pixel's
+# still-scene level is measured for at least this long and over at least this
+# many images, and each pixel's spread is added this many times, so the
+# subtraction leaves a still scene nearly black while a change still shows.
+FLOOR_MIN_S = 2.0
+FLOOR_MIN_IMAGES = 16
+FLOOR_SD_MARGIN = 1.0
 
 
 def normalize_min_max(image):
@@ -527,6 +535,82 @@ def palette_rgb_table(palette, gamma):
 MAX_REFERENCE_FRAMES = 60
 
 
+class NoiseFloorMap:
+    """Measure each pixel's still-scene difference level, to subtract it later.
+
+    Run it with the object at rest: every processed difference image adds
+    to a per-pixel sum and sum of squares. The floor is each pixel's mean
+    plus FLOOR_SD_MARGIN of its spread. It is per pixel because noise grows
+    with brightness: the middle of a laser spot is noisier than its edge.
+    """
+
+    def __init__(self, now, duration_s=FLOOR_MIN_S, min_images=FLOOR_MIN_IMAGES):
+        """Start a measurement.
+
+        Args: now is the monotonic start time; duration_s is the shortest
+            sampling time; min_images is the fewest images to sample.
+        Returns: None.
+        """
+        self.until = now + duration_s
+        self.min_images = int(min_images)
+        self.count = 0
+        self.total = None
+        self.squares = None
+
+    def add(self, image):
+        """Record one processed difference image.
+
+        An image of a different size than the ones before starts the sums
+        over, so images of two sizes are never mixed.
+
+        Args: image is a uint8 difference image (before the floor is subtracted).
+        Returns: None.
+        """
+        if self.total is None or self.total.shape != image.shape:
+            self.total = image.astype(np.float32)
+            self.squares = self.total * self.total
+            self.count = 1
+            return
+        cv2.accumulate(image, self.total)
+        cv2.accumulateSquare(image, self.squares)
+        self.count += 1
+
+    def done(self, now):
+        """Report whether enough time and images have been sampled.
+
+        Args: now is the monotonic time.
+        Returns: True once the measurement is over.
+        """
+        return self.count >= self.min_images and now >= self.until
+
+    def result(self):
+        """Build the floor map.
+
+        Args: None.
+        Returns: A float32 array the size of the images, each pixel's mean
+            plus FLOOR_SD_MARGIN standard deviations, or None when no image
+            was recorded.
+        """
+        if self.total is None:
+            return None
+        mean = self.total / self.count
+        spread = np.sqrt(np.maximum(self.squares / self.count - mean * mean, 0.0))
+        return mean + np.float32(FLOOR_SD_MARGIN) * spread
+
+
+def subtract_floor(image, floor):
+    """Take a measured noise floor off a difference image.
+
+    Args: image is a uint8 difference image; floor is a float32 map of the
+        same shape (NoiseFloorMap.result).
+    Returns: A new uint8 image, image minus floor, rounded and never below 0.
+    """
+    out = image.astype(np.float32)
+    out -= floor
+    np.maximum(out, 0.0, out=out)
+    return cv2.convertScaleAbs(out)
+
+
 class ReferenceCapture:
     """Average several camera frames into one reference baseline.
 
@@ -594,6 +678,9 @@ class ESPIProcessor:
         self.avg_target = None
         self.rolling = None
         self.denoised = None
+        self.frame_accum = None        # camera frames summed before the difference
+        self.frame_count = 0
+        self.frame_target = None
 
     def reset_avg(self):
         """Discard any partial temporal average.
@@ -605,6 +692,49 @@ class ESPIProcessor:
         self.avg_count = 0
         self.avg_target = None
         self.rolling = None
+
+    def reset_frame_average(self):
+        """Discard camera frames summed toward a pre-difference average.
+
+        Args: None.
+        Returns: None.
+        """
+        self.frame_accum = None
+        self.frame_count = 0
+        self.frame_target = None
+
+    def average_frames(self, frame, count):
+        """Block-average camera frames before they are subtracted.
+
+        The mean of count frames has 1/sqrt(count) of a single frame's noise,
+        and consecutive block means are independent, so a difference of two
+        of them is quieter by the same factor while a steady change (time-
+        averaged fringes, a static deformation) is kept. Averaging absolute
+        differences instead can never fall below the noise floor.
+
+        Args: frame is the Mono8 frame after single field and noise
+            reduction; count is the number of frames per average, with one
+            disabling it.
+        Returns: The rounded uint8 mean when count frames are summed, the
+            frame itself when count is 1, otherwise None. A frame of a new
+            size or a changed count starts the sum over.
+        """
+        if count <= 1:
+            self.reset_frame_average()
+            return frame
+        if (self.frame_accum is None or self.frame_target != count or
+                self.frame_accum.shape != frame.shape):
+            self.frame_accum = frame.astype(np.float32)
+            self.frame_count = 1
+            self.frame_target = count
+        else:
+            cv2.accumulate(frame, self.frame_accum)
+            self.frame_count += 1
+        if self.frame_count < count:
+            return None
+        result = cv2.convertScaleAbs(self.frame_accum, alpha=1.0 / self.frame_count)
+        self.reset_frame_average()
+        return result
 
     def denoise(self, frame, strength):
         """Reduce sensor noise in the camera feed by blending frames over time.

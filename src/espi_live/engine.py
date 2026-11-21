@@ -35,13 +35,13 @@ from espi_live.camera import CameraSession
 from espi_live.capture_models import adapter_for
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
                                   ESPIProcessor, MAX_FRAMES_BACK,
-                                  NoiseCalibration, PeakHold,
+                                  NoiseCalibration, NoiseFloorMap, PeakHold,
                                   RangeTracker, apply_gain, apply_levels,
                                   apply_palette, denoise_strength, display_lut,
                                   even_out_brightness, gamma_lut,
                                   local_normalize, reject_outliers,
                                   single_field, smooth_speckle, stretch_levels,
-                                  watermark_demo)
+                                  subtract_floor, watermark_demo)
 from espi_live.recording import (AVIRecorder, recording_path, save_frame,
                                  save_frame_set)
 
@@ -96,6 +96,8 @@ class Settings:
     record: bool = False
     single_field: bool = False    # interlaced sources: even rows only, line-doubled
     auto_reference: bool = False  # Reference view captures one when it has none
+    average_frames_first: bool = False  # Average N averages camera frames, then subtracts
+    floor_subtract: bool = False  # take the measured per-pixel noise floor off each difference
 
 
 # The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
@@ -135,6 +137,8 @@ LABVIEW_FLOW = {
     "clahe": False,
     "single_field": False,
     "auto_reference": True,
+    "average_frames_first": False,
+    "floor_subtract": False,
 }
 
 
@@ -287,9 +291,32 @@ def condition_difference(difference, frame, s):
     return reject_outliers(difference, s.outlier_filter), labview_order
 
 
+def floor_key(s, processor, shape):
+    """Describe what a noise floor map was measured under.
+
+    A floor map only fits images made the same way: the same frame size,
+    view and baseline, camera exposure and gain, and every step before the
+    subtraction. A map whose key differs from the current one is not used.
+
+    Args: s is the Settings snapshot; processor is the ESPIProcessor (its
+        reference time identifies the Reference baseline); shape is the
+        frame shape.
+    Returns: A hashable tuple.
+    """
+    labview = s.gain_before_average and not s.scale_range
+    baseline = s.frames_back if s.mode == "Previous" else processor.ref_time
+    return (shape, s.mode, baseline, s.exposure_us, s.gain_db, s.noise_reduction,
+            s.single_field, s.threshold, s.even_brightness, s.outlier_filter,
+            s.average, s.rolling, s.average_frames_first, s.smoothing,
+            s.smoothing_method,
+            (s.difference_gain, s.average_multiplier) if labview else None)
+
+
 def finish_difference(averaged, s, clahe, measure=True, peaks=None, ranges=None,
-                      now=0.0, sample=None, labview_order=False):
-    """Run the steps after averaging: speckle filter, peak hold, scaling, gamma/CLAHE.
+                      now=0.0, sample=None, labview_order=False, floor=None,
+                      floor_sample=None):
+    """Run the steps after averaging: speckle filter, noise floor, peak hold,
+    scaling, gamma/CLAHE.
 
     Args: averaged is a uint8 difference image; s is the Settings snapshot;
         clahe is the worker's CLAHE object; measure asks for the input range
@@ -298,13 +325,20 @@ def finish_difference(averaged, s, clahe, measure=True, peaks=None, ranges=None,
         RangeTracker, or None to leave out peak hold and the steady range
         (the comparison's single difference); now is the monotonic time;
         sample is called with the filtered image and now (the noise
-        calibration); labview_order says the gain was applied before averaging.
+        calibration); labview_order says the gain was applied before averaging;
+        floor is a NoiseFloorMap result to subtract, or None; floor_sample is
+        called with the filtered image and now before the floor is taken off
+        (a noise floor measurement), or None.
     Returns: (image, palette, gamma, levels): the processed image, the palette
         and gamma still to apply on display, and (low, high, scaled_low,
         scaled_high) for the status bar (scaled_low is None under Local
         normalization), or None when not measured.
     """
     averaged = smooth_speckle(averaged, s.smoothing_method, s.smoothing)
+    if floor_sample is not None:
+        floor_sample(averaged, now)
+    if floor is not None:
+        averaged = subtract_floor(averaged, floor)
     if peaks is not None:
         averaged = peaks.update(averaged, s.peak_hold_s, now)
     if sample is not None:
@@ -369,16 +403,19 @@ def reference_text(processor, now):
             f"{max(0.0, now - processor.ref_time):.0f} s old")
 
 
-def view_hint(s, processor):
+def view_hint(s, processor, floor_note=None):
     """Choose the status-bar hint for the current view and reference state.
 
-    Args: s is the Settings snapshot; processor is the ESPIProcessor.
+    Args: s is the Settings snapshot; processor is the ESPIProcessor;
+        floor_note is the noise floor's state (Engine._floor_note), or None.
     Returns: One short sentence (no longer than the Qt LONGEST_HINT).
     """
     capture = processor.ref_capture
     if capture is not None:
         kept = "; the old one stays in use" if processor.ref is not None else ""
         return f"Capturing reference: {capture.count}/{capture.target} frames{kept}"
+    if floor_note is not None:
+        return floor_note
     if s.mode == "Raw":
         return "Raw view: camera pixels, with gamma; no stretch or palette"
     if s.mode == "Reference" and processor.ref is None:
@@ -454,6 +491,8 @@ class Engine:
         self._settings_lock = threading.Lock()
         self._actions = queue.SimpleQueue()
         self._calibration = None  # a running NoiseCalibration (worker thread only)
+        self._floor = None          # (floor_key, float32 map) last measured (worker only)
+        self._floor_measure = None  # (floor_key or None, running NoiseFloorMap) (worker only)
         self._saves_waiting = 0  # frame saves queued or being written
         self._saves_lock = threading.Lock()
         self._packet = None
@@ -643,7 +682,9 @@ class Engine:
             current frame, or starts averaging the next ref_frames frames),
             "reset_previous", "reset_average", "calibrate_noise" (measure a
             still scene's difference noise for 2 s, then set min_range and
-            send a "noise_calibrated" event), "switch_live" (the
+            send a "noise_calibrated" event), "measure_floor" (measure each
+            pixel's still-scene difference level, the map Subtract noise
+            floor takes off), "switch_live" (the
             "switched_live" event then carries every detected CameraInfo) or
             "camera_command" (payload: phone-only settings such as
             lens_position, width and height, crop_width and crop_height,
@@ -804,6 +845,8 @@ class Engine:
         last_single_field = applied.single_field
         last_noise = applied.noise_reduction
         last_ref_frames = applied.ref_frames
+        last_frames_first = applied.average_frames_first
+        last_shape = None
         last_compare = 0.0
         last_readback = time.monotonic()
         last_error_log = 0.0
@@ -836,7 +879,8 @@ class Engine:
         while not self._stop.is_set():
             s = self.settings()
             self._reap_recorders()
-            signature = (s.mode, s.average if s.mode != "Raw" else 1, s.rolling)
+            signature = (s.mode, s.average if s.mode != "Raw" else 1,
+                         s.rolling and not s.average_frames_first)
             recorder = self._recorder
             if recorder is not None and (
                     not s.record or signature != record_signature
@@ -851,6 +895,7 @@ class Engine:
                 self._set_status(record="Recording: finishing file")
             if s.mode != last_mode:
                 processor.reset_avg()
+                processor.reset_frame_average()
                 ranges.reset()
                 peaks.reset()
                 if s.mode == "Previous":
@@ -860,8 +905,18 @@ class Engine:
             if s.rolling != last_rolling:
                 processor.reset_avg()
                 last_rolling = s.rolling
+            if s.average_frames_first != last_frames_first:
+                processor.reset_avg()  # the difference now compares other frames
+                processor.reset_frame_average()
+                processor.reset_previous()
+                peaks.reset()
+                self.log.write("Averaging: camera frames, then the difference"
+                               if s.average_frames_first else
+                               "Averaging: differences")
+                last_frames_first = s.average_frames_first
             if s.single_field != last_single_field:
                 processor.reset_avg()  # field geometry changed: start over
+                processor.reset_frame_average()
                 peaks.reset()
                 processor.reset_previous()
                 processor.clear_reference()
@@ -879,7 +934,8 @@ class Engine:
             if s.noise_reduction != last_noise:
                 self._noise_changed(processor, last_noise, s.noise_reduction)
                 last_noise = s.noise_reduction
-            self._set_status(hint=view_hint(s, processor))
+            self._set_status(hint=view_hint(
+                s, processor, self._floor_note(s, processor, last_shape)))
 
             work_started = time.monotonic()
             if self.demo:
@@ -959,6 +1015,7 @@ class Engine:
 
             update_range = now - last_range_time >= RANGE_INTERVAL_S
             image = None
+            measured = frame  # the frame the difference uses (an average, or frame)
             palette, gamma = "Gray", 1.0
             if s.mode == "Raw":
                 image = frame
@@ -967,27 +1024,44 @@ class Engine:
                     self._calibration = None
                     self.log.warning("Noise calibration needs the Previous or "
                                      "Reference view; switch views and try again.")
+                if self._floor_measure is not None:
+                    self._floor_measure = None
+                    self.log.warning("Measuring the noise floor needs the Previous "
+                                     "or Reference view; switch views and try again.")
                 if update_range:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
             else:
-                difference, labview_order = condition_difference(
-                    processor.difference(frame, s.mode, s.frames_back), frame, s)
-                count, scale = s.average, None
-                if labview_order:
-                    scale = s.average_multiplier
-                    if s.average > 1 and not s.rolling:
-                        # The VI's loop stops after iteration N, so it sums N + 1
-                        # frames and divides by N: one frame more, (N+1)/N brighter.
-                        count = s.average + 1
-                        scale = s.average_multiplier * count / s.average
-                averaged = (processor.rolling_average(difference, count, scale)
-                            if s.rolling else processor.average(difference, count, scale))
+                # Average frames first: the camera frames are block-averaged
+                # and the mean is subtracted, so Average N lowers the noise
+                # itself instead of averaging rectified noise into a floor.
+                measured = (processor.average_frames(frame, s.average)
+                            if s.average_frames_first else frame)
+                averaged = None
+                if measured is not None:
+                    last_shape = measured.shape
+                    difference, labview_order = condition_difference(
+                        processor.difference(measured, s.mode, s.frames_back),
+                        measured, s)
+                    count = 1 if s.average_frames_first else s.average
+                    scale = None
+                    if labview_order:
+                        scale = s.average_multiplier
+                        if count > 1 and not s.rolling:
+                            # The VI's loop stops after iteration N, so it sums N + 1
+                            # frames and divides by N: one frame more, (N+1)/N brighter.
+                            count += 1
+                            scale = s.average_multiplier * count / s.average
+                    averaged = (processor.rolling_average(difference, count, scale)
+                                if s.rolling else
+                                processor.average(difference, count, scale))
                 if averaged is not None:
+                    floor, floor_sample = self._floor_use(s, processor, measured.shape)
                     image, palette, gamma, levels = finish_difference(
                         averaged, s, clahe, update_range, peaks=peaks,
                         ranges=ranges, now=now, sample=self._sample_noise,
-                        labview_order=labview_order)
+                        labview_order=labview_order, floor=floor,
+                        floor_sample=floor_sample)
                     if update_range:
                         self._set_status(range=range_text(levels, s))
                         last_range_time = now
@@ -1006,7 +1080,7 @@ class Engine:
                     s, signature, record_signature, packet, resulting_fps)
                 if (self._compare.is_set() and
                         now - last_compare >= COMPARE_INTERVAL_S):
-                    self._publish_compare(processor, frame, s, packet, clahe, now)
+                    self._publish_compare(processor, measured, s, packet, clahe, now)
                     last_compare = now
             elif (s.mode == "Previous" and self._compare.is_set() and
                     now - last_compare >= COMPARE_INTERVAL_S and
@@ -1268,6 +1342,80 @@ class Engine:
                        f"{noise:.1f} grey levels; sensitivity floor set to {floor}.")
         self.events.put(("noise_calibrated", floor))
 
+    def _floor_note(self, s, processor, shape):
+        """Describe the noise floor's state for the status-bar hint.
+
+        Args: s is the Settings snapshot; processor is the ESPIProcessor;
+            shape is the last difference frame's shape, or None.
+        Returns: A short sentence while a measurement runs, or while Subtract
+            noise floor is on without a map for the current settings;
+            otherwise None (Raw view included).
+        """
+        if s.mode == "Raw":
+            return None
+        if self._floor_measure is not None:
+            running = self._floor_measure[1]
+            return (f"Measuring noise floor: {running.count}/{running.min_images} "
+                    "images; keep the object still")
+        if s.floor_subtract and (self._floor is None or
+                                 self._floor[0] != floor_key(s, processor, shape)):
+            return "No noise floor for these settings: press Measure noise floor"
+        return None
+
+    def _floor_use(self, s, processor, shape):
+        """Choose the floor map to subtract and the measurement to feed.
+
+        Args: s is the Settings snapshot; processor is the ESPIProcessor;
+            shape is the difference frame's shape.
+        Returns: (floor, floor_sample) for finish_difference: the stored map
+            when Subtract noise floor is on and it was measured under the
+            current settings, else None; and a callback feeding a running
+            measurement, else None.
+        """
+        key = floor_key(s, processor, shape)
+        floor = None
+        if s.floor_subtract and self._floor is not None and self._floor[0] == key:
+            floor = self._floor[1]
+        sample = None
+        if self._floor_measure is not None:
+            def sample(image, now):
+                """Feed this frame to the running floor measurement.
+
+                Args: image is the filtered difference; now is the monotonic time.
+                Returns: None.
+                """
+                self._sample_floor(image, key, now)
+        return floor, sample
+
+    def _sample_floor(self, image, key, now):
+        """Feed a running noise floor measurement and store the map when done.
+
+        A change of settings, view or baseline while it runs cancels it, so a
+        map never mixes images made two ways.
+
+        Args: image is the filtered difference before the floor is taken
+            off; key is its floor_key; now is the monotonic time.
+        Returns: None.
+        """
+        started, running = self._floor_measure
+        if started is None:
+            started = key
+        elif key != started:
+            self._floor_measure = None
+            self.log.write("Noise floor measurement cancelled: the settings changed "
+                           "while it ran. Press Measure noise floor again.")
+            return
+        self._floor_measure = (started, running)
+        running.add(image)
+        if not running.done(now):
+            return
+        self._floor_measure = None
+        floor = running.result()
+        self._floor = (key, floor)
+        self.log.write(f"Noise floor measured from {running.count} images: "
+                       f"median {float(np.median(floor)):.1f}, highest "
+                       f"{float(floor.max()):.1f} grey levels.")
+
     def _reap_recorders(self):
         """Report and forget recordings whose writer threads have finished.
 
@@ -1333,6 +1481,10 @@ class Engine:
             elif action == "calibrate_noise":
                 self._calibration = NoiseCalibration(time.monotonic())
                 self.log.write("Noise calibration: keep the object still for 2 s.")
+            elif action == "measure_floor":
+                self._floor_measure = (None, NoiseFloorMap(time.monotonic()))
+                self.log.write("Measuring the noise floor: keep the object still "
+                               "for at least 2 s.")
             elif action == "reference":
                 s = self.settings()
                 if s.ref_frames > 1:
