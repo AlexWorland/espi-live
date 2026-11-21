@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-21 — Simple UI button
+
+### Previous state
+
+- The simple interface (only the basic controls) was fixed at build time by `SIMPLE_UI` in `qt_app.py`; showing every control meant editing the source.
+
+### Current state
+
+- A **Simple UI** button at the left of the toolbar switches between the basic controls and every control, while the program runs. Nothing is rebuilt or reset: settings, collapsed sections and the camera keep their state, and the hidden controls keep working in both modes. **View > Help tips** and the rotating tip return with the full interface.
+- The choice is remembered for the next run. A new install still starts in the simple interface (`SIMPLE_UI` is now only that default).
+
 ## 2026-11-21 — iPhone camera over USB
 
 ### Previous state
