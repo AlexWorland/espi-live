@@ -3,8 +3,12 @@ name: Quick release
 # A release without the test gate, for quick builds. It runs the same Windows
 # PyInstaller build, smoke test and packaging as "Release" (build-binaries.yml)
 # but skips the test suite, the 100% coverage check and the native update
-# tests, so a build is out in minutes. Start it by hand: Actions > Quick
-# release > Run workflow, from any branch ("Use workflow from").
+# tests, so a build is out in minutes. It runs on every push to main (every
+# merged pull request), which is deliberate while the project is in active
+# development: delete the `push:` trigger below to go back to starting it by
+# hand only. It can also be started by hand from any branch (Actions > Quick
+# release > Run workflow, "Use workflow from"); only a push to main is
+# automatic, and it is always a full release with GitHub's generated notes.
 #
 # It publishes like "Release" does. By default it makes a full release tagged
 # vX.Y.Z (the version the draft release proposes, else the next patch) and
@@ -23,6 +27,8 @@ name: Quick release
 #
 # Keep the build, smoke test and packaging steps in step with build-binaries.yml.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       notes:
@@ -121,7 +127,7 @@ jobs:
           - name: windows-x64
             os: windows-latest
             python: "3.10"
-            pip_deps: numpy opencv-python PySide6 cv2_enumerate_cameras==1.4.0 certifi pyinstaller
+            pip_deps: numpy opencv-python PySide6 cv2_enumerate_cameras==1.4.0 pylablib-lightweight==1.4.3 nidaqmx==1.7.0 certifi pyinstaller
             asset: espi-live-windows-x64.zip
             sdk_files: flir-spinnaker-4.2/python-wheel/spinnaker_python-4.2.0.88-cp310-cp310-win_amd64.whl
 
@@ -268,6 +274,9 @@ jobs:
           args+=(--hidden-import PySpin --collect-all PySpin)
           # Lists video devices (the analog-camera capture adapter).
           args+=(--hidden-import cv2_enumerate_cameras --collect-all cv2_enumerate_cameras)
+          # daq.py imports pyLabLib's NI module (and through it nidaqmx) lazily. The
+          # NI-DAQmx driver itself is installed on the camera PC, not bundled.
+          args+=(--hidden-import pylablib.devices.NI --hidden-import nidaqmx --collect-all nidaqmx)
           # A folder (onedir) starts at once, where a single self-extracting
           # file unpacks everything to a temporary folder on every start. Each
           # build keeps its libraries in its own _internal-N (N = build number)
@@ -326,7 +335,8 @@ jobs:
   publish:
     name: Publish release
     needs: [version, build]
-    if: ${{ inputs.publish }}
+    # A push has no inputs, so `inputs.publish` is empty there: always publish.
+    if: ${{ github.event_name == 'push' || inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release (and its tag)

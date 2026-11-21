@@ -87,6 +87,18 @@ class GuideTest(unittest.TestCase):
         self.assertIn("&lt; 1 darkens", text)
         self.assertNotIn("auto-gain off, 8000 µs", text)
 
+    def test_guide_covers_the_daq_window(self):
+        """The guide explains the NI DAQ window's controls and safety rules.
+
+        Args: None.
+        Returns: None.
+        """
+        text = guide_html()
+        for phrase in ("Frequency generator and piezo (NI DAQ)", "Assign outputs",
+                       "Simulated device (no hardware)", "Safety limit",
+                       "All outputs to\n          0 V", "Step −", "pylablib-lightweight"):
+            self.assertIn(phrase, text)
+
     def test_internal_links_have_targets(self):
         """Every in-page link points at an id that exists on the page.
 

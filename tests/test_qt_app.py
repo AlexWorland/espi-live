@@ -1464,7 +1464,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         next(a for a in help_menu.actions() if a.text().startswith("About")).trigger()
         self.dialogs.about.assert_called_once()
         self.assertEqual(self.dialogs.about.call_args.args[2], updater.describe_build())
@@ -1475,7 +1475,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
         path = os.path.join(os.path.dirname(qt_app.__file__), "user_guide.html")
         with mock.patch.object(qt_app, "guide_path", return_value=path), \
@@ -1492,7 +1492,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
         with mock.patch.object(qt_app, "guide_path",
                                return_value="/no/such/user_guide.html"):
@@ -1506,7 +1506,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
         path = os.path.join(os.path.dirname(qt_app.__file__), "user_guide.html")
         with mock.patch.object(qt_app, "guide_path", return_value=path), \
@@ -3300,8 +3300,9 @@ class MultiCameraTests(unittest.TestCase):
         self.window.close()
         self.window.deleteLater()
 
-    def test_single_camera_hides_the_camera_list(self):
-        """With one camera there is no drop-down and no log prefix.
+    def test_single_camera_keeps_the_dropdown_but_not_the_process_rows(self):
+        """With one camera the drop-down names it; there is nothing to process
+        in the background and no log prefix.
 
         Args: None.
         Returns: None.
@@ -3311,7 +3312,13 @@ class MultiCameraTests(unittest.TestCase):
         window = demo_window(engine, self.log)
         self.addCleanup(window.deleteLater)
         self.addCleanup(window.close)
-        self.assertTrue(window.cameras_box.isHidden())
+        self.assertFalse(window.cameras_box.isHidden())
+        self.assertFalse(window.camera_combo.isHidden())
+        self.assertEqual(window.camera_combo.count(), 1)
+        self.assertEqual(window.camera_combo.itemText(0), "Synthetic camera (DEMO1)")
+        self.assertTrue(window.process_note.isHidden())
+        self.assertTrue(all(w.isHidden() for w in window.camera_checks + window.camera_states))
+        self.assertEqual(window.current.log.prefix, "")
         self.assertEqual(window.windowTitle(), f"{updater.app_title()} — DUMMY MODE")
 
     def test_cameras_are_listed_with_the_displayed_one_locked_on(self):
@@ -3322,6 +3329,8 @@ class MultiCameraTests(unittest.TestCase):
         """
         window = self.window
         self.assertFalse(window.cameras_box.isHidden())
+        self.assertFalse(window.process_note.isHidden())
+        self.assertFalse(any(w.isHidden() for w in window.camera_checks + window.camera_states))
         self.assertEqual(window.camera_combo.count(), 3)
         self.assertEqual([c.isChecked() for c in window.camera_checks], [True, False, False])
         self.assertEqual([c.isEnabled() for c in window.camera_checks], [False, True, True])
@@ -4137,17 +4146,18 @@ class SimpleUiProfileTests(ProfileWindowTests):
                        w.preset_delete_button, w.reset_camera_button):
             self.assertTrue(widget.isVisibleTo(w), widget)
 
-    def test_one_camera_hides_only_the_switcher(self):
-        """A single camera needs no switcher or name line; presets stay.
+    def test_one_camera_hides_only_the_process_rows_and_name_line(self):
+        """A single camera keeps the Display drop-down and presets, not the name line.
 
         Args: None.
         Returns: None.
         """
         w = self.make_window(count=1)
         w.show()
-        self.assertFalse(w.cameras_box.isVisibleTo(w))
+        self.assertFalse(w.process_note.isVisibleTo(w))
         self.assertFalse(w.profile_label.isVisibleTo(w))
-        for widget in (w.preset_combo, w.preset_save_button, w.reset_camera_button):
+        for widget in (w.cameras_box, w.camera_combo, w.preset_combo,
+                       w.preset_save_button, w.reset_camera_button):
             self.assertTrue(widget.isVisibleTo(w), widget)
 
 

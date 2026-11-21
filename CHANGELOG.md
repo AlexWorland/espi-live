@@ -29,6 +29,45 @@
 - The display is always grayscale, with the display gamma. **Palette** and **CLAHE** are gone from the controls, the presets, the guide and the settings, and the diagnostics line no longer reports CLAHE.
 - Saved PNGs and AVI recordings are unchanged: they hold the same gray values as the screen, written as before. `processing.apply_palette` and `palette_rgb_table` became `apply_display(image, gamma)` and `display_rgb_table(gamma)`.
 - The guide and help text now give the display order as brightness, gain and contrast, then gamma, which is what the program does.
+## 2026-11-21 — The camera drop-down is always shown
+
+### Previous state
+
+- The **Cameras** section at the top of Controls, with the **Display** drop-down, was hidden unless two or more cameras were detected. With a single camera there was no camera list in the window, so it looked as if the camera switcher had been removed.
+
+### Current state
+
+- The **Display** drop-down is always shown. With one camera it lists that camera, so the window names the camera in use.
+- The **Process** note and the per-camera checkboxes (with their rate and `REC` readouts) still appear only when more than one camera is detected, since a single camera has nothing to run in the background.
+- Nothing else changes: choosing a camera in **Display** still shows it and starts its processing if it was off.
+
+## 2026-11-21 — Every merge into main publishes a quick release
+
+### Previous state
+
+- Merging into `main` released nothing: **Quick release** (and **Release**) had to be started by hand, and merges piled up in the draft release.
+
+### Current state
+
+- **Quick release** also runs on every push to `main` (every merged pull request) while the project is in active development. It is the same untested build as before, published as a full release, so installed copies are offered each merge: the tag is the next patch version and the notes are GitHub's generated notes.
+- If merges land faster than a build finishes, GitHub keeps only the newest waiting run, so one release can cover several merges. Running it by hand, with the **Pre-release** and **Publish** options, works as before, and **Release** from `main` is still the tested release.
+- Deleting the `push:` trigger in `quick-release.yml` restores hand-started releases only.
+
+## 2026-11-21 — Frequency generator and piezo driver on an NI DAQ
+
+### Previous state
+
+- ESPI live controlled only cameras. The specimen's drive signal and the reference piezo's voltage came from separate instruments, set by hand.
+
+### Current state
+
+- **Devices → Frequency generator and piezo (NI DAQ)…** runs both from an NI multifunction DAQ such as the USB-6251. Each role is assigned its own output: the frequency generator to **AO 0** or **AO 1** (a sine with amplitude and offset) or to **Counter 0** or **Counter 1** (a 0–5 V square wave on a chosen **PFI** terminal), and the piezo driver to an analog output. A role can be left **Off**, and an assigned output that is switched off is held at 0 V. Two roles cannot share one output.
+- The piezo **holds a voltage**, with **Step −** and **Step +** to move it by a set amount, or follows the generator with a **sine at the generator's frequency** with its own amplitude, centre and **phase**. Both analog outputs run on one sample clock, so that phase is exact.
+- Each role has a **Safety limit** (1 V by default) that no setting may exceed; problems are explained in the window and Apply stays disabled until they are fixed. The window shows the frequency the device will really produce (the sine is built from whole samples of a 20 MHz clock), and the log records every setting applied.
+- **All outputs to 0 V** stops everything. The outputs also go to 0 V after a device error and when ESPI live closes, before the cameras are released. Closing the window leaves them running.
+- Without NI support (the `pylablib-lightweight` and `nidaqmx` packages, now in `requirements.txt` and the Windows setup script, and NI's NI-DAQmx driver, Windows and Linux only), the window offers only a **Simulated device (no hardware)**, marked in red, and says what is missing. `--check` reports whether NI DAQ support is installed. A missing driver or an unplugged device is logged as a warning, not reported as an error.
+- Frames are not synchronised to the drive yet; `docs/notes/ni-usb-6251-integration.md` describes how that could be done.
+
 ## 2026-11-21 — Quick release is offered to installed copies
 
 ### Previous state
