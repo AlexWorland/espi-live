@@ -413,6 +413,14 @@ jobs:
             *"feedback token: present"*) ;;
             *) echo "::error::the binary has no feedback token"; exit 1 ;;
           esac
+          # The analog-camera adapter is only found if the frozen program can
+          # import cv2_enumerate_cameras, whose native module needs a runtime DLL
+          # from a *.libs folder (capture.import_enumerator); "not installed" or
+          # "could not be loaded" would ship a build that lists no video devices.
+          case "$check_out" in
+            *"cv2_enumerate_cameras available"*) ;;
+            *) echo "::error::the binary cannot import cv2_enumerate_cameras"; exit 1 ;;
+          esac
           shopt -s dotglob
           entries=(dist/espi-live/*)
           if [ "${#entries[@]}" -ne 2 ] || [ ! -f "$exe" ] || [ ! -d "dist/espi-live/_internal-$BUILD_NUMBER" ]; then

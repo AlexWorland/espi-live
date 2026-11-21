@@ -23,9 +23,13 @@ class CaptureAdapter:
     channel: int = 0  # OpenCV CAP_PROP_CHANNEL: 0 composite, 1 S-Video
 
 
-# Adapters tested with this viewer, keyed by USB (vendor ID, product ID).
+# Adapters tested with this viewer, keyed by USB (vendor ID, product ID). The
+# USB-Live2 reports 2040:C200 to Linux's cx231xx driver and 2040:C220 on a
+# Windows 11 camera PC.
+USB_LIVE2 = CaptureAdapter("Hauppauge USB-Live2", True, 720, 480, 0)
 ADAPTERS = {
-    (0x2040, 0xC200): CaptureAdapter("Hauppauge USB-Live2", True, 720, 480, 0),
+    (0x2040, 0xC200): USB_LIVE2,
+    (0x2040, 0xC220): USB_LIVE2,
 }
 # Lower-case name fragments for drivers that do not report a USB ID.
 ADAPTER_NAMES = (

@@ -97,12 +97,13 @@ def self_check():
         pyspin = f"PySpin {load_pyspin().__file__}"
     except ImportError:
         pyspin = "PySpin not bundled (demo only)"
-    from espi_live.capture import load_enumerator  # imports only; lists nothing
+    from espi_live.capture import import_enumerator  # imports only; lists nothing
     from espi_live.daq import support_text  # imports pyLabLib; opens no device
     from espi_live.feedback import feedback_token
     from espi_live.log_uploads import logs_token
+    enumerator, problem = import_enumerator()
     video = ("Video devices: cv2_enumerate_cameras "
-             + ("available" if load_enumerator() else "not installed"))
+             + ("available" if enumerator else problem))
     # Present or absent only: the token itself stays out of the log.
     token = "present" if feedback_token() else "absent"
     logs = "present" if logs_token() else "absent"
