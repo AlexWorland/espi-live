@@ -297,7 +297,8 @@ class EngineDemoTests(unittest.TestCase):
             brightness=5, clahe=False)
         self.assertTrue(wait_until(lambda: "Local normalization 9 px"
                                    in self.engine.status()["range"]))
-        packet = self.engine.latest_packet()
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        packet = self.engine.latest_packet()  # the status text comes just before it
         self.assertEqual(packet.mode, "Previous")
         self.engine.update_settings(normalize_window=0, scale_range=True, min_range=30,
                                     steady_range_s=0.5)

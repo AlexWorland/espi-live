@@ -2102,6 +2102,23 @@ class ReferenceCompareTests(WindowTestCase):
                              "1 frame, noise reduction 0, 2 s old" if reference
                              else "none yet", "the Reference view, no averaging", demo)
 
+    def previous_compare(self, sequence=1, back=2, baseline=True, difference=True):
+        """Build a Previous view ComparePacket with small images.
+
+        Args: sequence is its number; back is the frames back; baseline and
+            difference say which of those panels exist.
+        Returns: The ComparePacket.
+        """
+        image = np.full((40, 60), 80, dtype=np.uint8)
+        frames = f"{back} {'frame' if back == 1 else 'frames'}"
+        part = FramePacket(sequence, image, "Gray", 1.0, "Current", False)
+        diff = FramePacket(sequence, image, "Turbo", 1.0, "Previous", False)
+        return ComparePacket(
+            sequence, part, part if baseline else None, diff if difference else None,
+            f"the frame the view subtracts, {frames} back" if baseline else "none yet",
+            "the Previous view, no averaging" if difference else "averaging: 1 of 4 frames",
+            False, "Previous", f"Previous ({frames} back)")
+
     def open_dialog(self):
         """Open the comparison window with the C key.
 
@@ -2146,19 +2163,19 @@ class ReferenceCompareTests(WindowTestCase):
         self.assertIsNone(dialog.shown)
         self.engine._compare_packet = self.compare(1, reference=False)
         dialog.poll()
-        self.assertIs(dialog.stacks["reference"].currentWidget(), dialog.messages["reference"])
+        self.assertIs(dialog.stacks["baseline"].currentWidget(), dialog.messages["baseline"])
         self.assertIs(dialog.stacks["difference"].currentWidget(),
                       dialog.messages["difference"])
         self.assertIs(dialog.stacks["current"].currentWidget(), dialog.views["current"])
-        self.assertIn("Press Set reference (F)", dialog.messages["reference"].text())
-        self.assertEqual(dialog.captions["reference"].text(), "none yet")
+        self.assertIn("Press Set reference (F)", dialog.messages["baseline"].text())
+        self.assertEqual(dialog.captions["baseline"].text(), "none yet")
         packet = self.compare(2, demo=True)
         self.engine._compare_packet = packet
         dialog.poll()
-        for name in ("reference", "current", "difference"):
+        for name in ("baseline", "current", "difference"):
             self.assertIs(dialog.stacks[name].currentWidget(), dialog.views[name])
         self.assertIs(dialog.views["difference"].packet, packet.difference)
-        self.assertIn("2 s old", dialog.captions["reference"].text())
+        self.assertIn("2 s old", dialog.captions["baseline"].text())
         self.assertIn("DUMMY MODE", dialog.windowTitle())
         self.assertFalse(dialog.demo_label.isHidden())
         with mock.patch.object(dialog, "show_compare") as show:
@@ -2194,6 +2211,102 @@ class ReferenceCompareTests(WindowTestCase):
         self.assertEqual(dialog.shown.sequence, 2)
         self.assertTrue(any("comparison frozen" in line for line in self.log.lines))
         self.assertTrue(any("comparison live again" in line for line in self.log.lines))
+
+    def test_previous_view_names_the_panels_and_disables_set_reference(self):
+        """In Previous view the panels read Previous / Current / Difference.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(mode="Previous", frames_back=3)
+        dialog = self.open_dialog()
+        self.assertEqual(dialog.titles["baseline"].text(), "Previous (3 frames back)")
+        self.assertEqual(dialog.windowTitle(), "Previous comparison")
+        self.assertFalse(dialog.reference_button.isEnabled())
+        self.assertIn("Not used in Previous view", dialog.reference_button.toolTip())
+        self.assertIn("earlier frame", dialog.titles["baseline"].toolTip())
+        self.assertIn("No previous frame yet", dialog.messages["baseline"].text())
+        self.engine._compare_packet = self.previous_compare(1, back=1)
+        dialog.poll()
+        self.assertEqual(dialog.titles["baseline"].text(), "Previous (1 frame back)")
+        self.assertEqual(dialog.titles["current"].text(), "Current frame")
+        self.assertEqual(dialog.titles["difference"].text(), "Difference")
+        self.assertEqual(dialog.captions["baseline"].text(),
+                         "the frame the view subtracts, 1 frame back")
+        self.assertEqual(dialog.captions["difference"].text(),
+                         "the Previous view, no averaging")
+        for name in ("baseline", "current", "difference"):
+            self.assertIs(dialog.stacks[name].currentWidget(), dialog.views[name])
+        self.assertFalse(dialog.reference_button.isEnabled())
+
+    def test_previous_view_without_a_baseline_or_difference_shows_messages(self):
+        """No earlier frame, or an average still filling, gets a message per panel.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.engine._compare_packet = self.previous_compare(1, baseline=False,
+                                                            difference=False)
+        dialog.poll()
+        self.assertIs(dialog.stacks["baseline"].currentWidget(), dialog.messages["baseline"])
+        self.assertIn("No previous frame yet", dialog.messages["difference"].text())
+        self.engine._compare_packet = self.previous_compare(2, difference=False)
+        dialog.poll()
+        self.assertIs(dialog.stacks["baseline"].currentWidget(), dialog.views["baseline"])
+        self.assertIs(dialog.stacks["difference"].currentWidget(),
+                      dialog.messages["difference"])
+        self.assertIn("Averaging", dialog.messages["difference"].text())
+        self.assertEqual(dialog.captions["difference"].text(), "averaging: 1 of 4 frames")
+
+    def test_switching_views_switches_the_panels_and_set_reference(self):
+        """Reference and Previous packets rename the panels and toggle Set reference.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertTrue(dialog.reference_button.isEnabled())
+        self.engine._compare_packet = self.previous_compare(1)
+        dialog.poll()
+        self.assertEqual(dialog.titles["baseline"].text(), "Previous (2 frames back)")
+        self.assertFalse(dialog.reference_button.isEnabled())
+        self.engine._compare_packet = self.compare(2)
+        dialog.poll()
+        self.assertEqual(dialog.titles["baseline"].text(), "Reference")
+        self.assertEqual(dialog.windowTitle(), "Reference comparison")
+        self.assertTrue(dialog.reference_button.isEnabled())
+        self.assertIn("Press Set reference (F)", dialog.messages["baseline"].text())
+        self.assertIn("stored reference frame", dialog.titles["baseline"].toolTip())
+
+    def test_freeze_holds_all_three_previous_panels(self):
+        """Freeze keeps the Previous set; Save sends it; unfreezing resumes.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        first = self.previous_compare(1)
+        self.engine._compare_packet = first
+        dialog.poll()
+        dialog.freeze_button.setChecked(True)
+        newer = self.previous_compare(2, back=4)
+        self.engine._compare_packet = newer
+        dialog.poll()
+        self.assertIs(dialog.shown, first)
+        for name in ("baseline", "current", "difference"):
+            self.assertIs(dialog.views[name].packet, getattr(first, name))
+        self.assertEqual(dialog.titles["baseline"].text(), "Previous (2 frames back)")
+        dialog.save_button.click()
+        (save, payload), = self.queued()
+        self.assertEqual((save, payload["packet"]), ("save_compare", first))
+        dialog.freeze_button.setChecked(False)
+        dialog.poll()
+        self.assertIs(dialog.shown, newer)
+        self.assertEqual(dialog.titles["baseline"].text(), "Previous (4 frames back)")
+        self.assertTrue(any("Previous comparison frozen" in line for line in self.log.lines))
+        self.assertTrue(any("Previous comparison live again" in line
+                            for line in self.log.lines))
 
     def test_window_follows_the_displayed_camera(self):
         """When the displayed camera changes, the request moves with it.

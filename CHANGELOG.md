@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-21 — Compare works in Previous view
+
+### Previous state
+
+- **Compare** (`C`) always showed the stored reference, even in Previous view, which does not use one. The window gave no way to see the two frames Previous view actually subtracts.
+
+### Current state
+
+- In Previous view the Compare window shows **Previous (N frames back)**, the **Current frame** and the **Difference**, live and together. The previous panel is the exact frame the difference subtracted (the processor keeps it as `ESPIProcessor.previous`), after single field and noise reduction like the current frame, so Frames back above 1 is shown correctly. The difference is the main window's image, averaging included.
+- With Average N above 1 the window shows the live previous and current frames and a count ("averaging: 3 of 10 frames") until the first average completes; after that all three images update together each time one does. Without an earlier frame yet the panels say so.
+- **Freeze** holds all three, **Save all three** writes `previous`, `current` and `difference` PNGs with the notes file naming how many frames back, and **Set reference** is greyed out in Previous view. Changing the view while the window is open switches between the reference and Previous panels. Reference and Raw view behave as before.
+- `ComparePacket.reference` and `reference_info` are now `baseline` and `baseline_info`, with `view` and `baseline_label` added.
+
 ## 2026-11-21 — The mouse wheel scrolls the panel, not the sliders
 
 ### Previous state
