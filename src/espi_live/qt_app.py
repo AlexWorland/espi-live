@@ -355,15 +355,17 @@ RESET_CAMERA_TIP = (
 )
 MESSAGE_TIP_WIDTH = 120
 # Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
-PIPELINE = ("noise reduction → difference (N frames back) → noise threshold → "
-            "beam brightness → outlier filter → average → speckle filter → "
-            "peak hold → fixed gain, stretch or local normalization → invert → "
-            "brightness, gain and contrast → gamma")
+PIPELINE = ("noise reduction → (frame average) → difference (N frames back) → "
+            "noise threshold → beam brightness → outlier filter → average → "
+            "speckle filter → noise floor → peak hold → fixed gain, stretch or "
+            "local normalization → invert → brightness, gain and contrast → gamma")
 # Fringe-enhancement and display-tone values every preset sets unless it
 # overrides them, so a preset never inherits peak hold or a threshold from the
 # last one. The sensitivity floor is not here: it is per camera (analog capture
 # starts at 30, Calibrate noise measures it) and no preset changes it.
 FRINGE_TOOLS_OFF = {
+    "average_frames_first": False,
+    "floor_subtract": False,
     "threshold": 0,
     "steady_range_s": 0.0,
     "even_brightness": False,
@@ -3837,6 +3839,22 @@ class MainWindow(QMainWindow):
         self.rolling.setChecked(s.rolling)
         self.rolling.toggled.connect(lambda on: self.engine.update_settings(rolling=on))
         add(self.rolling)
+        self.frames_first = QCheckBox("Average camera frames, then subtract")
+        set_tooltip(self.frames_first,
+            "Off: Average N averages the difference images. Each difference is "
+            "an absolute value, so camera noise never averages to zero; it "
+            "settles into a grey floor. On: Average N averages the camera "
+            "frames themselves (one image every N frames) and subtracts the "
+            "averages, which cuts the noise by the square root of N while a "
+            "steady change, such as time-averaged fringes, stays. In Previous "
+            "view, Frames back then counts averages. Rolling average does not "
+            "apply. Pair it with Ref. frames of N or more in Reference view, so "
+            "the reference is as quiet. Start off; try it with Average N 4–8 on "
+            "a noisy or analog camera.")
+        self.frames_first.setChecked(s.average_frames_first)
+        self.frames_first.toggled.connect(self._frames_first_changed)
+        add(self.frames_first)
+        self.rolling.setEnabled(not s.average_frames_first)
         self.ref_frames = SliderSpin(1, MAX_REFERENCE_FRAMES, 1, 0, s.ref_frames)
         self.ref_frames.set_description(
             "How many camera frames F (Set reference) averages into the reference. "
@@ -3991,6 +4009,30 @@ class MainWindow(QMainWindow):
         self.calibrate_button.clicked.connect(
             lambda: self.engine.request("calibrate_noise"))
         add(self.calibrate_button)
+        self.floor_subtract = QCheckBox("Subtract noise floor")
+        set_tooltip(self.floor_subtract,
+            "Takes a measured still-scene level off every pixel after "
+            "averaging and the speckle filter, so a still scene shows black "
+            "instead of grey grain. Each pixel gets its own level, because "
+            "noise grows with brightness. It needs a measurement: with the "
+            "object still, press Measure noise floor. The map only fits the "
+            "settings it was measured with; after a change (view, reference, "
+            "exposure, averaging, filters) the status bar asks for a new one. "
+            "Unlike Noise threshold, it keeps faint changes that last across "
+            "the average. Start off; use it with Average N 4 or more.")
+        self.floor_subtract.setChecked(s.floor_subtract)
+        self.floor_subtract.toggled.connect(
+            lambda on: self.engine.update_settings(floor_subtract=on))
+        add(self.floor_subtract)
+        self.floor_button = QPushButton("Measure noise floor (object still)")
+        set_tooltip(self.floor_button,
+            "In Previous or Reference view, with the object at rest, records "
+            "each pixel's difference level for at least 2 s and 16 images. "
+            "Subtract noise floor then takes it off. Measure again after "
+            "changing the view, the reference or the processing.")
+        self.floor_button.clicked.connect(
+            lambda: self.engine.request("measure_floor"))
+        add(self.floor_button)
         self.steady_range = SliderSpin(0, 3, 0.1, 1, s.steady_range_s, " s")
         self.steady_range.set_description(
             "With Auto stretch, lets the stretch range shrink only over this many "
@@ -5098,6 +5140,8 @@ class MainWindow(QMainWindow):
                    (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
                    (self.even_brightness, s.even_brightness),
+                   (self.frames_first, s.average_frames_first),
+                   (self.floor_subtract, s.floor_subtract),
                    (self.record_button, s.record), (self.single_field, s.single_field),
                    (self.raw_difference_button, s.raw_difference))
         combos = ((self.smoothing_combo, s.smoothing_method),
@@ -5114,6 +5158,7 @@ class MainWindow(QMainWindow):
             button.setChecked(button.text() == s.mode)
         self._sync_raw_difference(s.raw_difference)
         self._sync_scaling_controls(s.scale_range, s.gain_before_average)
+        self.rolling.setEnabled(not s.average_frames_first)
         self.labview_button.blockSignals(True)
         self.labview_button.setChecked(self.current is not None and
                                        self.current.labview_saved is not None)
@@ -5128,6 +5173,15 @@ class MainWindow(QMainWindow):
         stretch = name == SCALING_MODES[1]
         self.engine.update_settings(scale_range=stretch)
         self._sync_scaling_controls(stretch, self.gain_before_average.isChecked())
+
+    def _frames_first_changed(self, on):
+        """Send the Average camera frames choice and match Rolling average.
+
+        Args: on is the checkbox state.
+        Returns: None.
+        """
+        self.engine.update_settings(average_frames_first=on)
+        self.rolling.setEnabled(not on)
 
     def _gain_order_changed(self, on):
         """Send the Gain before averaging choice and match the multiplier.

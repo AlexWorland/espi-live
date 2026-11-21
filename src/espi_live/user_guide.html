@@ -926,11 +926,12 @@ python -m espi_live</code></pre>
         <p><strong>Help → Which settings should I use?</strong> explains the
           presets and can apply them to the displayed camera. Reference refresh
           also hides motion slower than its interval; use 0 for a fixed before/after.</p>
-        <p>Processing order: noise reduction → difference (N frames back) →
-          noise threshold → beam brightness → outlier filter → average →
-          speckle filter → peak hold → fixed gain, stretch or local
-          normalization → invert → brightness, gain and contrast → gamma.
-          With <strong>Gain before averaging</strong>, the fixed
+        <p>Processing order: noise reduction → (frame average) → difference
+          (N frames back) → noise threshold → beam brightness → outlier filter
+          → average → speckle filter → noise floor → peak hold → fixed gain,
+          stretch or local normalization → invert → brightness,
+          gain and contrast → gamma. The frame average and the noise floor
+          run only when their checkboxes are on. With <strong>Gain before averaging</strong>, the fixed
           gain moves to just before the outlier filter. Raw skips difference
           processing and still applies noise reduction, display gamma and the
           display brightness, gain and contrast.</p>
@@ -946,6 +947,16 @@ python -m espi_live</code></pre>
             running average that still updates at the camera rate. Use it when
             you want to watch fringes move instead of waiting for each block of
             N frames.</li>
+          <li><strong>Average camera frames, then subtract</strong> — Average N
+            averages the camera frames themselves, one image per N frames, and
+            the averages are subtracted. Each difference is an absolute value,
+            so averaging differences never brings camera noise to zero: it
+            settles into a grey floor. Averaging the frames first cuts the noise
+            by the square root of N and keeps a steady change such as
+            time-averaged fringes. Rolling average does not apply; in Previous
+            view Frames back counts averages; in Reference view, set Ref. frames
+            to N or more so the reference is as quiet. Off by default; try it
+            with Average N 4–8 on a noisy or analog camera.</li>
           <li><strong>Ref. frames</strong> — how many camera frames
             <kbd>F</kbd> averages into the reference (1–60; 1 is one frame, as
             before). A one-frame reference keeps that frame's sensor noise, and
@@ -1029,6 +1040,21 @@ python -m espi_live</code></pre>
           <li><strong>Noise threshold</strong> — right after the subtraction,
             differences below this many grey levels become 0. Hides camera
             noise; too high also hides faint fringes. 0 = off; try 3–8.</li>
+          <li><strong>Subtract noise floor</strong> — takes each pixel's
+            measured still-scene level off every difference, after averaging and
+            the speckle filter, so a still scene shows black instead of grey
+            grain. The level is per pixel because noise grows with brightness.
+            Unlike Noise threshold it keeps faint changes that last across the
+            average, so use it with Average N 4 or more. Off by default.</li>
+          <li><strong>Measure noise floor (object still)</strong> — in Previous
+            or Reference view, with the object at rest, records each pixel's
+            difference level (its mean plus one standard deviation) for at least
+            2 s and 16 images; the status bar counts the images. The map fits
+            only the settings it was measured with: after changing the view, the
+            reference, exposure, gain, averaging or the filters before it, the
+            status bar asks for a new measurement and nothing is subtracted.
+            Changing them while it runs cancels it. In Raw it logs a warning and
+            does nothing.</li>
           <li><strong>Steady range</strong> — Auto stretch only: the range
             shrinks only over this many seconds, so the contrast stops pumping;
             a growing range is followed at once. 0 = every frame.</li>
@@ -1570,6 +1596,8 @@ python -m espi_live</code></pre>
               <td>Ignored in Raw view.</td></tr>
             <tr><td>Rolling average</td><td>Off</td><td>On / off</td>
               <td>Updates every frame instead of one per N.</td></tr>
+            <tr><td>Average camera frames, then subtract</td><td>Off</td>
+              <td>On / off</td><td>Average N averages frames, not differences.</td></tr>
             <tr><td>Ref. frames</td><td>1</td><td>1–60, step 1</td>
               <td>Frames averaged into each reference.</td></tr>
             <tr><td>Ref. refresh</td><td>0 s (never)</td>
@@ -1596,6 +1624,8 @@ python -m espi_live</code></pre>
               <td>0–128 levels</td><td>Auto stretch and Local normalization.</td></tr>
             <tr><td>Noise threshold</td><td>0 (off)</td><td>0–64 levels</td>
               <td>Right after the subtraction.</td></tr>
+            <tr><td>Subtract noise floor</td><td>Off</td><td>On / off</td>
+              <td>Needs Measure noise floor with the object still.</td></tr>
             <tr><td>Steady range</td><td>0 s</td><td>0–3 s, step 0.1</td>
               <td>Auto stretch only.</td></tr>
             <tr><td>Even out beam brightness</td><td>Off</td><td>On / off</td>

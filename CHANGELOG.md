@@ -29,6 +29,20 @@
 - The display is always grayscale, with the display gamma. **Palette** and **CLAHE** are gone from the controls, the presets, the guide and the settings, and the diagnostics line no longer reports CLAHE.
 - Saved PNGs and AVI recordings are unchanged: they hold the same gray values as the screen, written as before. `processing.apply_palette` and `palette_rgb_table` became `apply_display(image, gamma)` and `display_rgb_table(gamma)`.
 - The guide and help text now give the display order as brightness, gain and contrast, then gamma, which is what the program does.
+## 2026-11-21 — Quieter difference images: frame averaging and a noise floor
+
+### Previous state
+
+- A still scene in Previous or Reference view showed TV-like grain, worst on the analog Sony XC-ST50: a frame difference is never zero, because camera noise differs in every frame. Fixed gain 42× turns 1–5 grey levels of noise into mid-grey and white.
+- **Average N** averaged the difference images. Each difference is an absolute value, so that only smoothed the grain into an even grey floor; it never brought a still scene to black.
+- **Noise threshold** could hide the grain, but it cut faint fringes along with it.
+
+### Current state
+
+- **Average camera frames, then subtract** (ESPI measurement, off by default): Average N averages the camera frames and the averages are subtracted, which lowers the noise itself by √N. A steady change, such as time-averaged fringes, stays. One image appears per N frames; Rolling average does not apply.
+- **Subtract noise floor** with **Measure noise floor (object still)** (Fringe enhancement, off by default): the measurement records each pixel's still-scene difference level for at least 2 s and 16 images. With the box ticked, that level is taken off every difference after averaging and the speckle filter, so a still scene goes black. Faint changes that last across the average still show. The map is per pixel because noise grows with brightness. It only applies under the settings it was measured with; otherwise the status bar asks for a new measurement.
+- The LabVIEW flow and the presets turn both off.
+
 ## 2026-11-21 — Raw difference: live minus previous, with no processing
 
 ### Previous state
