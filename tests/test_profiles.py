@@ -206,6 +206,18 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(profiles.profile_key(unknown),
                          "profiles/capture/usb-unknown/unnamed")
 
+    def test_iphones_have_their_own_namespace(self):
+        """An iPhone is keyed by its UDID-derived serial, apart from FLIR cameras.
+
+        Args: None.
+        Returns: None.
+        """
+        phone = CameraInfo("iphone-4d5e801e", "iPhone (USB)", kind="iphone",
+                           path="00008110-001A4D5E801E")
+        self.assertEqual(profiles.profile_key(phone), "profiles/iphone/iphone-4d5e801e")
+        self.assertNotEqual(profiles.profile_key(phone),
+                            profiles.profile_key(replace(phone, kind="flir")))
+
     def test_separators_in_names_are_encoded(self):
         """Slashes, backslashes and dots cannot split a key into groups.
 

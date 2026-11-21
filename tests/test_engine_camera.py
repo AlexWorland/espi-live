@@ -14,11 +14,12 @@ from unittest import mock
 import cv2
 import numpy as np
 
-from espi_live import camera, capture, diagnostics, engine, paths
+from espi_live import camera, capture, diagnostics, engine, iphone, paths
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine, WindowsPreviewTimer
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
                           interlaced_frame, usb_live2, webcam)
+from fake_iphone import commands, frame_bytes, phone_socket
 from fake_pyspin import (FakeCamera, FakeImage, FakeNode, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
 from list_log import ListLog
@@ -101,7 +102,8 @@ class CameraEngineCase(unittest.TestCase):
         for patcher in (mock.patch.object(camera, "PySpin", make_pyspin(self.system)),
                         mock.patch.object(capture, "load_enumerator",
                                           return_value=self.enumerator),
-                        mock.patch.object(capture.cv2, "VideoCapture", self.factory)):
+                        mock.patch.object(capture.cv2, "VideoCapture", self.factory),
+                        mock.patch.object(iphone, "list_iphones", return_value=[])):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.engine = Engine(self.log)
@@ -1125,3 +1127,85 @@ class CameraReportEventTests(CaptureEngineCase):
         self.assertEqual(len(reports), 1)
         self.assertNotIn("| Device name |", reports[0].body)
         self.assertTrue(self.log.has("Could not read the device details: driver"))
+
+
+class IPhoneEngineTests(CameraEngineCase):
+    """An engine whose source is an iPhone over USB (a scripted link)."""
+
+    def phone_engine(self):
+        """Create an engine for an iPhone whose link is self.link.
+
+        Args: None.
+        Returns: The Engine (opened, not started).
+        """
+        info = CameraInfo("iphone-4d5e801e", "iPhone (USB)", kind="iphone",
+                          path="00008110-001A2B3C4D5E801E")
+        self.link = phone_socket()
+
+        def make(log, info_, exposure_us, gain_db, fps):
+            """Build the session with a fake connector.
+
+            Args: as sources.make_session.
+            Returns: An unopened IPhoneSession.
+            """
+            return iphone.IPhoneSession(log, info_, exposure_us, gain_db, fps,
+                                        connector=lambda _info: self.link)
+
+        patcher = mock.patch.object(engine.sources, "make_session", make)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.engine = Engine(self.log, tag=info.serial, info=info)
+        self.engine.open_camera()
+        return self.engine
+
+    def test_engine_streams_and_forwards_settings(self):
+        """Frames flow; sliders, phone commands and phone settings cross the link.
+
+        Args: None.
+        Returns: None.
+        """
+        engine_ = self.phone_engine()
+        self.assertEqual(self.wait_event("camera_identity").short_name(),
+                         "iPhone iPhone16,1")
+        self.assertEqual(self.wait_event("camera_limits")["AcquisitionFrameRate"],
+                         (1.0, 60.0))
+        stop = threading.Event()
+
+        def stream():
+            """Send a frame every 10 ms, as the phone does at a high rate.
+
+            Args: None.
+            Returns: None.
+            """
+            while not stop.wait(0.01):
+                self.link.feed(frame_bytes(64, 48, value=10))
+
+        feeder = threading.Thread(target=stream, daemon=True)
+        self.addCleanup(feeder.join, 1.0)
+        self.addCleanup(stop.set)
+        with mock.patch.object(engine, "READBACK_INTERVAL_S", 0.05):
+            engine_.start()
+            feeder.start()
+            self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
+            changed = self.wait_event("camera_settings")
+            self.assertEqual((changed["width"], changed["lens_position"]), (1920, 0.5))
+            engine_.request("camera_command", lens_position=0.3)
+            engine_.update_settings(exposure_us=1000.0)
+            self.assertTrue(wait_until(
+                lambda: {"lens_position": 0.3} in commands(self.link)
+                and {"exposure_us": 1000.0} in commands(self.link)))
+        self.assertTrue(engine_.status()["camera"].startswith("iPhone iPhone16,1 64 × 48"))
+
+    def test_camera_command_failures_and_other_sources(self):
+        """A failed send is logged; cameras without commands ignore them.
+
+        Args: None.
+        Returns: None.
+        """
+        engine_ = self.phone_engine()
+        self.link.send_error = OSError("gone")
+        engine_._camera_command({"refocus": True})
+        self.assertTrue(self.log.has("Could not send {'refocus': True} to the camera: gone"))
+        engine_.camera = types.SimpleNamespace()  # a FLIR or capture session
+        engine_._camera_command({"refocus": True})
+        engine_.camera = None

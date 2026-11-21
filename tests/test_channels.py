@@ -11,7 +11,7 @@ import unittest
 from dataclasses import replace
 from unittest import mock
 
-from espi_live import camera, capture, channels, paths, profiles
+from espi_live import camera, capture, channels, iphone, paths, profiles
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine
 from fake_capture import FakeCaptureFactory, FakeEnumerator, usb_live2, webcam
@@ -42,7 +42,8 @@ class ChannelTestCase(unittest.TestCase):
         for patcher in (mock.patch.object(camera, "PySpin", make_pyspin(self.system)),
                         mock.patch.object(capture, "load_enumerator",
                                           return_value=self.enumerator),
-                        mock.patch.object(capture.cv2, "VideoCapture", self.factory)):
+                        mock.patch.object(capture.cv2, "VideoCapture", self.factory),
+                        mock.patch.object(iphone, "list_iphones", return_value=[])):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.channels = []

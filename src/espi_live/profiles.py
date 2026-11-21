@@ -194,8 +194,9 @@ def profile_key(info, demo=False):
     Returns: "profiles/demo/<serial>" for a synthetic camera,
         "profiles/capture/<vid>-<pid>/<name>" for a video-capture device
         (its serial is only the enumeration order; "usb-unknown" when the
-        USB IDs were not reported) or "profiles/flir/<serial>" for a FLIR
-        camera.
+        USB IDs were not reported), "profiles/iphone/<serial>" for an
+        iPhone (its serial comes from the device's UDID) or
+        "profiles/flir/<serial>" for a FLIR camera.
     """
     if demo:
         parts = ("demo", info.serial)
@@ -203,6 +204,8 @@ def profile_key(info, demo=False):
         usb = (f"{info.vid:04x}-{info.pid:04x}"
                if info.vid is not None and info.pid is not None else "usb-unknown")
         parts = ("capture", usb, info.model or "unnamed")
+    elif info.kind == "iphone":
+        parts = ("iphone", info.serial)
     else:
         parts = ("flir", info.serial)
     return PROFILE_PREFIX + "/".join(_segment(part) for part in parts)
