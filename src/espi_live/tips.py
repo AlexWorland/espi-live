@@ -24,6 +24,7 @@ TIPS = (
     "Did you know: Request feature sends an idea",
     "Did you know: Log and Controls can float",
     "Did you know: the camera list switches view",
+    "Did you know: each camera keeps its settings",
     "Did you know: scroll to zoom and drag to pan",
 )
 

@@ -8,14 +8,16 @@ display or real output folder is touched.
 
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest import mock
 
-from espi_live import camera, capture, channels, paths
+from espi_live import camera, capture, channels, paths, profiles
 from espi_live.camera import CameraInfo
 from espi_live.engine import Engine
 from fake_capture import FakeCaptureFactory, FakeEnumerator, usb_live2, webcam
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from test_engine_camera import ListLog, wait_until
+from test_profiles import DictStore
 
 
 class ChannelTestCase(unittest.TestCase):
@@ -342,6 +344,147 @@ class StartupHelperTests(ChannelTestCase):
         self.channels.extend(found)
         self.assertEqual([c.active for c in found], [True, False, False])
         self.assertTrue(found[0].engine.demo)
+
+
+class ProfileChannelTests(ChannelTestCase):
+    """Each channel's own profile: snapshot, apply and restore at startup."""
+
+    def setUp(self):
+        """Add an in-memory profile store to the fake rig.
+
+        Args: None.
+        Returns: None.
+        """
+        super().setUp()
+        self.store = DictStore()
+        self.profiles = profiles.ProfileStore(self.store, self.log)
+
+    def saved(self, info, demo=False, **values):
+        """Store a profile for a camera, as an earlier run would have.
+
+        Args: info is the CameraInfo; demo selects the demo namespace;
+            values are Settings fields to change from its defaults.
+        Returns: The stored Profile.
+        """
+        defaults = profiles.default_profile(info, demo)
+        profile = replace(defaults, settings=replace(defaults.settings, **values))
+        self.profiles.save_profile(profiles.profile_key(info, demo), profile)
+        return profile
+
+    def test_profile_is_a_snapshot_without_recording(self):
+        """The running engine's settings and the LabVIEW state, never recording.
+
+        Args: None.
+        Returns: None.
+        """
+        demo = self.channel(CameraInfo("DEMO1"), demo=True)
+        self.assertEqual(demo.profile_key, "profiles/demo/DEMO1")
+        self.assertEqual(demo.profile(), demo.default_profile())
+        demo.start()
+        demo.engine.update_settings(gain_db=5.0, record=True)
+        demo.labview_saved = {"gamma": 2.0}
+        snapshot = demo.profile()
+        self.assertEqual((snapshot.settings.gain_db, snapshot.settings.record), (5.0, False))
+        demo.labview_saved["gamma"] = 3.0  # the snapshot keeps its own copy
+        self.assertEqual(snapshot.labview_saved, {"gamma": 2.0})
+
+    def test_apply_profile_changes_only_this_channel_and_keeps_recording(self):
+        """A running engine gets the values; a recording keeps going.
+
+        Args: None.
+        Returns: None.
+        """
+        first = self.channel(CameraInfo("DEMO1"), demo=True)
+        second = self.channel(CameraInfo("DEMO2"), demo=True)
+        first.start()
+        first.engine.update_settings(record=True)
+        profile = profiles.default_profile(CameraInfo("x"), demo=True)
+        profile = replace(profile, settings=replace(profile.settings, exposure_us=1500.0,
+                                                    mode="Previous", record=False),
+                          labview_saved={"gamma": 1.0})
+        first.apply_profile(profile)
+        s = first.engine.settings()
+        self.assertEqual((s.exposure_us, s.mode, s.record), (1500.0, "Previous", True))
+        self.assertEqual(first.labview_saved, {"gamma": 1.0})
+        self.assertEqual(second.profile(), second.default_profile())
+        second.apply_profile(profile)  # idle: kept for the next start
+        self.assertEqual(second.settings.exposure_us, 1500.0)
+        second.start()
+        self.assertEqual(second.engine.settings().exposure_us, 1500.0)
+
+    def test_a_given_profile_replaces_the_defaults(self):
+        """Channel(profile=...) starts from it, also on an adopted engine.
+
+        Args: None.
+        Returns: None.
+        """
+        profile = self.saved(CameraInfo("DEMO1"), demo=True, gain_db=7.0)
+        idle = self.channel(CameraInfo("DEMO1"), demo=True, profile=profile)
+        self.assertEqual(idle.settings.gain_db, 7.0)
+        engine = Engine(self.log)
+        engine.use_demo()
+        adopted = self.channel(CameraInfo("DEMO1"), demo=True, engine=engine,
+                               profile=profile)
+        self.assertEqual(adopted.engine.settings().gain_db, 7.0)
+
+    def test_demo_channels_restore_their_own_profiles(self):
+        """DEMO2's saved values come back for DEMO2 only, and are logged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.saved(CameraInfo("DEMO2"), demo=True, gain_db=9.0, mode="Previous")
+        found = channels.demo_channels(self.log, 2, self.profiles)
+        self.channels.extend(found)
+        self.assertEqual(found[0].engine.settings().gain_db, 0.0)
+        self.assertEqual((found[1].settings.gain_db, found[1].settings.mode),
+                         (9.0, "Previous"))
+        self.assertTrue(self.log.has("Synthetic camera (DEMO2): saved settings restored "
+                                     "(exposure 8000 µs, gain 9 dB, 30 fps, Previous view)."))
+        self.assertFalse(self.log.has("Synthetic camera (DEMO1): saved settings restored"))
+
+    def test_a_restored_camera_opens_with_its_saved_values(self):
+        """The saved exposure, gain and rate reach the camera when it opens.
+
+        Args: None.
+        Returns: None.
+        """
+        self.saved(CameraInfo("1", "BFS"), exposure_us=12000.0, gain_db=4.0, fps=20.0)
+        found = channels.open_camera_channels(self.log, self.profiles)
+        self.channels.extend(found)
+        nodes = self.system.camera_list.cameras[0].nodemap.nodes
+        self.assertEqual((nodes["ExposureTime"].value, nodes["Gain"].value,
+                          nodes["AcquisitionFrameRate"].value), (12000.0, 4.0, 20.0))
+        self.assertEqual(found[1].settings.exposure_us, 8000.0)  # camera 2: defaults
+
+    def test_a_demo_profile_never_lands_on_a_real_camera(self):
+        """A demo profile under a real camera's serial is not used for it.
+
+        Args: None.
+        Returns: None.
+        """
+        self.saved(CameraInfo("1", "BFS"), demo=True, gain_db=9.0)
+        found = channels.open_camera_channels(self.log, self.profiles)
+        self.channels.extend(found)
+        self.assertEqual(found[0].engine.settings().gain_db, 0.0)
+
+    def test_an_analog_profile_restores_the_labview_state(self):
+        """Turned off last time, the analog camera starts with the flow off.
+
+        Args: None.
+        Returns: None.
+        """
+        analog = CameraInfo("video 1", "Hauppauge USB-Live2", kind="capture",
+                            vid=0x2040, pid=0xC200)
+        own = profiles.default_profile(analog).labview_saved
+        self.profiles.save_profile(profiles.profile_key(analog), profiles.Profile(
+            replace(profiles.default_profile(analog).settings, **own)))
+        restored = channels.restore_channel(self.log, analog, profiles=self.profiles)
+        self.assertIsNone(restored.labview_saved)
+        self.assertEqual(restored.settings.mode, "Raw")
+        self.assertTrue(self.log.has("saved settings restored"))
+        fresh = channels.restore_channel(self.log, analog, profiles=None)
+        self.assertIsNotNone(fresh.labview_saved)
 
 
 class ReportingStartupTests(ChannelTestCase):
