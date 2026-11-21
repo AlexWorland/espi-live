@@ -47,12 +47,14 @@ def auto_open_order(infos):
     """Order the cameras startup may open without being asked.
 
     Args: infos is a list of CameraInfo from detect_cameras().
-    Returns: FLIR cameras, then supported capture devices, then iPhones;
-        unsupported video devices are left out.
+    Returns: FLIR cameras, then supported capture devices, then iPhones
+        (each phone's main camera only: its other cameras share the one
+        link, so they are opened only when chosen); unsupported video
+        devices are left out.
     """
     flir = [info for info in infos if info.kind == "spinnaker"]
     adapters = [info for info in infos if info.kind == "capture" and is_supported(info)]
-    phones = [info for info in infos if info.kind == "iphone"]
+    phones = iphone.main_lenses([info for info in infos if info.kind == "iphone"])
     return flir + adapters + phones
 
 
@@ -85,7 +87,8 @@ def open_first_live(log, exposure_us=8000.0, gain_db=0.0, fps=30.0):
         attempt is logged first.
     """
     candidates = ([None] + [info for info in capture.list_capture_devices(log)
-                            if is_supported(info)] + iphone.list_iphones(log))
+                            if is_supported(info)]
+                  + iphone.main_lenses(iphone.list_iphones(log)))
     error = None
     for info in candidates:
         session = (camera.CameraSession(log, None, exposure_us, gain_db, fps)

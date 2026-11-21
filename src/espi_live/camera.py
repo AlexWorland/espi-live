@@ -47,7 +47,10 @@ class CameraInfo:
 
     kind is "spinnaker" for FLIR cameras or "capture" for OpenCV video
     devices; a capture device's serial is a short "video N" id, and index,
-    backend, vid, pid and path are what the device enumerator reported.
+    backend, vid, pid and path are what the device enumerator reported. An
+    iPhone has one entry per back camera: path is the phone's UDID and lens
+    names the camera ("wide", "ultra_wide", "telephoto"; empty until the
+    phone's app has said which it has).
     """
 
     serial: str
@@ -58,6 +61,7 @@ class CameraInfo:
     vid: int | None = None
     pid: int | None = None
     path: str = ""
+    lens: str = ""
 
     @property
     def label(self):

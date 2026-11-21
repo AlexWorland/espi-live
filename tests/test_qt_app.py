@@ -37,7 +37,7 @@ from espi_live import (camera, camera_reports, capture, feedback, iphone, paths,
                        ui_scale, updater)
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, integrated_webcam,
                           interlaced_frame, usb_live2, webcam)
-from fake_iphone import commands, phone_socket
+from fake_iphone import commands, lens_socket, phone_socket
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
@@ -5485,6 +5485,129 @@ class PhoneWindowTests(unittest.TestCase):
         self.assertAlmostEqual(window.phone_focus.spin.value(), 0.7)  # not displayed
         window.show_channel(self.phone)
         self.assertAlmostEqual(window.phone_focus.spin.value(), 0.1)
+
+
+class PhoneLensWindowTests(unittest.TestCase):
+    """One iPhone with three back cameras: one drop-down entry each, one streaming."""
+
+    def setUp(self):
+        """Build the window over a phone listed as ultra wide, wide and telephoto.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        udid = "00008110-001A2B3C4D5E801E"
+        self.infos = [
+            CameraInfo("iphone-4d5e801e", "iPhone Wide 1× (USB)", kind="iphone",
+                       path=udid, lens="wide"),
+            CameraInfo("iphone-4d5e801e-ultra-wide", "iPhone Ultra Wide 0.5× (USB)",
+                       kind="iphone", path=udid, lens="ultra_wide"),
+            CameraInfo("iphone-4d5e801e-telephoto", "iPhone Telephoto 5× (USB)",
+                       kind="iphone", path=udid, lens="telephoto")]
+        self.links = {}
+        real_make = sources.make_session
+
+        def make(log, info, exposure_us=8000.0, gain_db=0.0, fps=30.0):
+            """Give the phone a scripted link that greets as the app does.
+
+            Args: as sources.make_session.
+            Returns: An unopened session.
+            """
+            return iphone.IPhoneSession(log, info, exposure_us, gain_db, fps,
+                                        connector=self.connect)
+
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", make_dialogs()),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
+                mock.patch.object(sources, "make_session", make)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(iphone._lens_cache.clear)
+        self.log = FakeLog()
+        self.channels = [Channel(self.log, info) for info in self.infos]
+        self.wide, self.ultra, self.tele = self.channels
+        self.wide.open()
+        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.window.tip_timer.stop()
+        self.addCleanup(self.cleanup_window)
+        self.wide.engine.start()
+
+    def connect(self, info):
+        """Hand out a scripted link for the camera asked for.
+
+        Args: info is the camera's CameraInfo.
+        Returns: A FakeSocket.
+        """
+        self.links[info.lens] = lens_socket(info.lens)
+        return self.links[info.lens]
+
+    def cleanup_window(self):
+        """Close the window, which stops and waits for every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_every_lens_is_a_camera_but_only_one_can_stream(self):
+        """The drop-down names each lens; the other lenses cannot be processed
+        alongside the displayed one.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertEqual([window.camera_combo.itemText(i) for i in range(3)],
+                         [info.label for info in self.infos])
+        self.assertIn("Ultra Wide 0.5×", window.camera_combo.itemText(1))
+        self.assertEqual([check.isChecked() for check in window.camera_checks],
+                         [True, False, False])
+        self.assertEqual([check.isEnabled() for check in window.camera_checks],
+                         [False, False, False])
+
+    def test_choosing_a_lens_hands_the_phone_over(self):
+        """The shown lens stops, the chosen one opens and asks the app for its camera.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window.camera_combo.setCurrentIndex(1)
+        self.assertIs(window.current, self.ultra)
+        self.assertFalse(self.wide.active)
+        self.assertTrue(self.ultra.active)
+        self.assertIn("Processing off: iPhone Wide 1× (USB) (iphone-4d5e801e) "
+                      "(the phone streams one camera at a time)", self.log.lines)
+        self.assertTrue(wait_for(lambda: "ultra_wide" in self.links and any(
+            command.get("lens") == "ultra_wide"
+            for command in commands(self.links["ultra_wide"]))))
+        self.assertTrue(wait_for(lambda: self.ultra.engine.status().get("camera")
+                                 is not None))
+        self.assertEqual([check.isEnabled() for check in window.camera_checks],
+                         [False, False, False])
+        self.assertEqual([check.isChecked() for check in window.camera_checks],
+                         [False, True, False])
+
+    def test_a_background_lens_cannot_be_processed(self):
+        """Asking to process another lens of the displayed phone is refused.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._set_processing(self.tele, True)
+        self.assertFalse(self.tele.active)
+        self.assertTrue(self.wide.active)
+        self.assertFalse(self.window.camera_checks[2].isChecked())
 
 
 class CaptureWindowTests(unittest.TestCase):
