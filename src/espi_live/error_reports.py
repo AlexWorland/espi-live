@@ -99,6 +99,9 @@ EXPECTED = {
     "feedback": ("espi_live.feedback.FeedbackError",),   # network or GitHub errors
     "save": ("OSError",),             # saving a frame to a full or read-only disk
     "recorder": ("OSError",),         # recording to a full or read-only disk
+    # NI DAQ outputs: package or driver missing, device unplugged or busy.
+    "daq": ("ImportError", "OSError", "nidaqmx.errors.Error",
+            "pylablib.core.devio.base.DeviceError"),
 }
 CAPTURE_POINTS = {
     "main_thread": "uncaught exception on the main thread",
@@ -108,6 +111,7 @@ CAPTURE_POINTS = {
     "recorder": "recording thread failed",
     "qt_message": "Qt critical or fatal message",
     "native_crash": "native crash in the previous run",
+    "daq": "NI DAQ outputs (frequency generator and piezo driver)",
 }
 POSIX_SIGNALS = {"segmentation fault": "SIGSEGV", "floating-point exception": "SIGFPE",
                  "floating point exception": "SIGFPE", "aborted": "SIGABRT",
