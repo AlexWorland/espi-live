@@ -502,6 +502,7 @@
           </ol>
         </li>
         <li><a href="#several-cameras">Several cameras</a></li>
+        <li><a href="#profiles">Camera profiles and presets</a></li>
         <li><a href="#analog">Analog camera</a></li>
         <li><a href="#defaults">Defaults and limits</a></li>
         <li><a href="#operations">Common operations</a>
@@ -834,6 +835,11 @@ python -m espi_live</code></pre>
             LabVIEW program used). On, it keeps one field, doubled to full
             height, removing the 1/60 s offset between fields at the cost of
             half the vertical detail.</li>
+          <li><strong>Presets</strong> — your saved presets, with
+            <strong>Apply</strong>, <strong>Save as…</strong> and
+            <strong>Delete</strong>, and <strong>Reset camera to
+            defaults…</strong>. See
+            <a href="#profiles">Camera profiles and presets</a>.</li>
         </ul>
         <p>Each control has a slider for quick changes and a number box for
           exact entry: drag the slider, type a value and press Enter, or use the
@@ -1296,7 +1302,76 @@ python -m espi_live</code></pre>
         rate or use separate controllers if it drops. <code>--demo
         --demo-cameras 3</code> simulates three cameras for trying this without
         hardware.</p>
-      <p>See <a href="#op-cameras">Use several cameras</a>.</p>
+      <p>See <a href="#op-cameras">Use several cameras</a> and
+        <a href="#profiles">Camera profiles and presets</a>.</p>
+    </section>
+
+    <section id="profiles">
+      <h2>Camera profiles and presets <a class="anchor" href="#profiles" aria-label="Link to Camera profiles and presets">#</a></h2>
+      <p>Every camera has its own <strong>profile</strong>: exposure, gain,
+        frame rate, the view, and every processing and display control,
+        including whether the <strong>LabVIEW flow</strong> is on. A change
+        made while one camera is displayed never reaches another camera.
+        With several cameras, the Camera section starts with
+        <strong>Settings of</strong> and the camera's name, so it is always
+        clear whose settings you are editing; pick another camera under
+        <strong>Display</strong> to edit its profile instead.</p>
+      <h4>Saved between runs</h4>
+      <ul>
+        <li>Each camera's profile is saved about a second after you stop
+          changing it, when you switch to another camera, and when the program
+          closes. The next time that camera is connected it starts with the
+          same values, and the log says so: <code>BFS (12345678): saved
+          settings restored (exposure 12000 µs, gain 2 dB, 30 fps, Reference
+          view).</code></li>
+        <li>A FLIR camera is recognised by its serial number, and an analog
+          capture stick by its USB ID and name (its <em>video N</em> number
+          changes between runs). Demo cameras keep separate profiles, so
+          demo values never land on a real camera, also not after
+          <strong>Switch to live capture</strong>: the live camera starts
+          with its own saved profile, or with its defaults.</li>
+        <li>Recording is never saved: a camera always starts with
+          <strong>Record AVI</strong> off. Window layout, interface size,
+          zoom and which Controls sections are open are not part of a
+          profile.</li>
+        <li>A camera seen for the first time starts from the defaults in
+          <a href="#defaults">Defaults and limits</a> (exposure 8000 µs,
+          gain 0 dB, 30 fps; the LabVIEW flow on for the analog camera).
+          Exposure, gain and frame rate are still clamped to what the camera
+          reports.</li>
+        <li><strong>Reset camera to defaults…</strong> puts the displayed
+          camera back to those defaults after you confirm, and clears its saved
+          profile. Other cameras and your presets do not change.</li>
+      </ul>
+      <h4>Presets</h4>
+      <p>A <strong>preset</strong> is a profile saved under a name you choose,
+        which any camera can use. The <strong>Presets</strong> row sits in the
+        Camera section:</p>
+      <ul>
+        <li><strong>Save as…</strong> asks for a name and saves the displayed
+          camera's current settings. Names ignore letter case, so a name that
+          is already used asks before it replaces that preset.</li>
+        <li>Pick a preset in the list, then <strong>Apply</strong>: it changes
+          only the displayed camera, which keeps the new settings as its
+          profile. A preset saved on another camera model still applies: the
+          processing values in full, and exposure, gain and frame rate fitted
+          into this camera's limits. The log lists every value that had to
+          change and ends with <code>Preset applied: &lt;name&gt; to
+          &lt;camera&gt;</code>.</li>
+        <li><strong>Delete</strong> removes the chosen preset after you
+          confirm; cameras keep their settings.</li>
+        <li>Hover a preset in the list to see the camera model it was saved
+          from.</li>
+      </ul>
+      <p>The built-in <strong>Live preview</strong>, <strong>Measurement</strong>
+        and <strong>Peak hold</strong> buttons (top of
+        <a href="#measurement">ESPI measurement</a>) are separate: they change
+        only processing, never exposure, gain, frame rate or the LabVIEW flow,
+        and they are not listed with your presets. To keep one together with
+        your camera values, press it, then <strong>Save as…</strong>.</p>
+      <p>Profiles and presets live in the program's own settings store (the
+        registry on Windows, a preferences file on macOS and Linux), beside
+        the window layout, not in <code>output/</code>.</p>
     </section>
 
     <section id="analog">
@@ -1342,7 +1417,9 @@ python -m espi_live</code></pre>
       <h2>Defaults and limits <a class="anchor" href="#defaults" aria-label="Link to Defaults and limits">#</a></h2>
       <p>These are the values the app starts with and the ranges its controls
         expose. The camera may clamp a value further; check the
-        <strong>Applied</strong> readout.</p>
+        <strong>Applied</strong> readout. A camera with a saved profile starts
+        with its own last values instead (see
+        <a href="#profiles">Camera profiles and presets</a>).</p>
       <div class="table-wrap">
         <table>
           <caption class="sr-only">Default values and control ranges</caption>
@@ -1685,6 +1762,10 @@ python -m espi_live</code></pre>
           <li>Uncheck <strong>Process</strong> to stop a camera and release it;
             its settings are kept, but its reference and average start fresh
             when it runs again.</li>
+          <li>Each camera keeps its own settings, also between runs. To give
+            two cameras the same settings, save a preset on one
+            (<strong>Save as…</strong>), display the other and press
+            <strong>Apply</strong>.</li>
         </ol>
       </section>
     </section>
