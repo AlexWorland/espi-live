@@ -12,6 +12,26 @@
 - **Compare (C)** is rendered next to **Set reference (F)** in the toolbar and opens the same window. Its tooltip now describes both views: in Previous view the earlier frame being subtracted, the current frame and their difference; in Reference view the stored reference, the current frame and their difference.
 - A new **All controls** button, first in the toolbar and always rendered, switches between the basic controls and every control and toolbar button. Pressing it moves the hidden controls into their rows, shows the other sections, Freeze, the reset buttons, the zoom bar and the Help tips menu item, and refits the Controls panel; pressing it again hides them. A section collapsed earlier stays collapsed, and every control keeps its value either way. The program still starts in the basic view (`SIMPLE_UI`), and the choice is not remembered between runs.
 
+## 2026-11-21 — iPhone camera over USB
+
+### Previous state
+
+- Only FLIR cameras and the analog Sony XC-ST50 (through a USB-Live2) could feed the viewer.
+
+### Current state
+
+- An iPhone running the new **ESPI Camera** app (`ios/ESPICamera/`, distributed through TestFlight as ESPI-Live-Camera) is a camera over its USB cable. Frames are the camera's 8-bit luma, sent uncompressed. When USB is busy the phone skips a frame rather than compressing it.
+- The phone's exposure, ISO, focus and white balance are locked. HDR, low-light boost, distortion correction and stabilization are off.
+- On Windows, iTunes from apple.com provides the USB connection (Apple Mobile Device Service); macOS has it built in. No network is involved.
+- The phone appears in the camera list as **iPhone (USB)**, after any FLIR camera or capture adapter. It is opened at startup only when neither is present, and **Switch to live capture** finds it.
+- Everything is controlled from ESPI Live:
+  - **Exposure** sets the phone's exposure in µs.
+  - **Gain** sets its ISO: 0 dB is the lowest ISO, +20 dB is ten times that.
+  - A new **iPhone** section (shown only for a phone) sets frame rate, frame size, a centre crop, a cap on frames sent, the locked focus, and **Autofocus once, then lock**.
+  - Changes made on the phone's own screen are reflected back.
+- A lost link (the app left the screen, the cable was pulled) is re-opened automatically every 2 s.
+- The phone is a rolling-shutter colour camera with noise reduction that cannot be turned off, so the viewer marks it as a qualitative source. Details are in `docs/iphone/README.md`.
+
 ## 2026-11-21 — The camera drop-down is always shown
 
 ### Previous state

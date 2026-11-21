@@ -53,8 +53,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QTextEdit, QToolBar, QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
-from espi_live import (camera, camera_reports, codex, daq, error_reports, feedback, log_uploads,
-                       paths, source_code, tips, ui_scale, updater)
+from espi_live import (camera, camera_reports, codex, daq, error_reports, feedback, iphone,
+                       log_uploads, paths, source_code, tips, ui_scale, updater)
 from espi_live.channels import Channel, demo_channels, open_camera_channels
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
@@ -72,6 +72,9 @@ DEFAULT_HEIGHT = 900
 QWIDGETSIZE_MAX = 16777215  # Qt's "no maximum size" (not exported by PySide6)
 
 ANALOG_CONTROL_TIP = "Set on the camera itself; not adjustable over analog video"
+IPHONE_GAIN_TIP = "iPhone: sets the phone's ISO; 0 dB is its lowest ISO, +20 dB ten times that"
+IPHONE_CONTROL_TIP = "iPhone: sent to the ESPI Camera app over USB"
+PHONE_FRAME_RATES = (1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 24.0, 25.0, 30.0, 60.0)
 # Gamma stays its own Display control: it is a curve, not a second stretch.
 GAMMA_TIP = (
     "Shifts mid-tones after Scaling (Fixed gain or Auto stretch), in Raw, "
@@ -3656,6 +3659,11 @@ class MainWindow(QMainWindow):
         self.camera_label = QLabel()
         note(self.camera_label, basic=True)
 
+        heading("iPhone", basic=True)
+        self.phone_section = (self._section_toggles["iPhone"],
+                              self._section_grids[-1].parentWidget())
+        self._build_phone_controls(add)
+
         heading("ESPI measurement")
         self._add_preset_buttons(add)
         self.average = SliderSpin(1, 60, 1, 0, s.average)
@@ -4076,6 +4084,174 @@ class MainWindow(QMainWindow):
         self.controls_scroll.setMinimumWidth(
             panel.minimumSizeHint().expandedTo(panel.minimumSize()).width()
             + self.controls_scroll.verticalScrollBar().sizeHint().width())
+
+    def _build_phone_controls(self, add):
+        """Create the iPhone's own controls, shown only while an iPhone is displayed.
+
+        Exposure, gain (the phone's ISO) and frame rate use the Camera
+        section's sliders; these are the settings only the phone has. Every
+        one is sent to the ESPI Camera app, so nothing needs changing on the
+        phone itself.
+
+        Args: add is _build_controls' add(widget, label, basic) helper.
+        Returns: None.
+        """
+        self.phone_fps = QComboBox()
+        set_tooltip(self.phone_fps,
+                    "Frame rate the iPhone captures at. A USB 2 iPhone carries about "
+                    "30 MB/s: 1920 × 1080 at about 15 fps, or a smaller crop at 30 fps.")
+        self.phone_fps.activated.connect(self._phone_fps_chosen)
+        add(self.phone_fps, "Frame rate", basic=True)
+        self.phone_size = QComboBox()
+        set_tooltip(self.phone_size,
+                    "Frame size the iPhone camera captures. Larger frames show finer "
+                    "speckle but need more USB bandwidth.")
+        self.phone_size.activated.connect(self._phone_size_chosen)
+        add(self.phone_size, "Frame size", basic=True)
+        self.phone_crop = QComboBox()
+        for size in iphone.CROP_SIZES:
+            self.phone_crop.addItem("Full frame" if size == 0 else f"{size} × {size} centre",
+                                    size)
+        set_tooltip(self.phone_crop,
+                    "Send only the centre of each frame, at full resolution: less "
+                    "data, so a higher frame rate over USB.")
+        self.phone_crop.activated.connect(
+            lambda index: self._phone_command(crop_width=self.phone_crop.itemData(index),
+                                              crop_height=self.phone_crop.itemData(index)))
+        add(self.phone_crop, "Crop", basic=True)
+        self.phone_send_cap = QComboBox()
+        for cap in iphone.SEND_CAPS:
+            self.phone_send_cap.addItem("Every frame" if cap == 0 else f"{cap:g} fps", cap)
+        set_tooltip(self.phone_send_cap,
+                    "Send at most this many frames per second, even when the camera "
+                    "captures more. The phone always skips a frame rather than "
+                    "compress or queue it.")
+        self.phone_send_cap.activated.connect(
+            lambda index: self._phone_command(
+                max_send_fps=self.phone_send_cap.itemData(index)))
+        add(self.phone_send_cap, "Send at most", basic=True)
+        self.phone_focus = SliderSpin(0, 1, 0.005, 3, 0.5)
+        self.phone_focus.set_description(
+            "Lens position, locked: 0 is the nearest focus, 1 the farthest. "
+            "Autofocus sets it once and locks it again.")
+        self.phone_focus.valueChanged.connect(
+            lambda v: self._phone_command(lens_position=v))
+        add(self.phone_focus, "Focus", basic=True)
+        self.phone_autofocus = QPushButton("Autofocus once, then lock")
+        set_tooltip(self.phone_autofocus,
+                    "Focus on the centre of the image, then lock the lens there so "
+                    "focus cannot drift during a measurement.")
+        self.phone_autofocus.clicked.connect(lambda: self._phone_command(refocus=True))
+        add(self.phone_autofocus, basic=True)
+        for widget in self.phone_section:
+            widget.setVisible(False)
+
+    def _phone_command(self, **fields):
+        """Send phone-only settings to the displayed iPhone.
+
+        Args: fields are COMMAND keys and values (see iphone.IPhoneSession).
+        Returns: None.
+        """
+        self.engine.request("camera_command", **fields)
+
+    def _phone_fps_chosen(self, index):
+        """Use a frame rate picked in the iPhone section.
+
+        Args: index is the drop-down position.
+        Returns: None; the Camera section's frame-rate slider follows.
+        """
+        fps = self.phone_fps.itemData(index)
+        self.fps.set_value(fps)
+        self.engine.update_settings(fps=fps)
+
+    def _phone_size_chosen(self, index):
+        """Use a frame size picked in the iPhone section.
+
+        Args: index is the drop-down position.
+        Returns: None.
+        """
+        width, height = (int(part) for part in self.phone_size.itemData(index).split("x"))
+        self._phone_command(width=width, height=height)
+
+    def _sync_phone_controls(self, channel):
+        """Show the iPhone section for an iPhone and fill it from what it reported.
+
+        Args: channel is the displayed Channel.
+        Returns: None.
+        """
+        phone = not channel.demo and channel.info.kind == "iphone"
+        toggle, body = self.phone_section
+        toggle.setVisible(phone)
+        body.setVisible(phone and toggle.isChecked())  # keep a collapsed section collapsed
+        if not phone:
+            return
+        identity = channel.identity
+        formats = getattr(identity, "formats", ()) or ()
+        settings = channel.camera_settings or {}
+        self.phone_size.clear()
+        for width, height, max_fps in formats:
+            # "WxH" text, not a tuple: findData cannot match Python tuples.
+            self.phone_size.addItem(f"{width} × {height} (up to {max_fps:g} fps)",
+                                    f"{width}x{height}")
+        top = max([entry[2] for entry in formats] + [30.0])
+        self.phone_fps.clear()
+        for fps in PHONE_FRAME_RATES:
+            if fps <= top:
+                self.phone_fps.addItem(f"{fps:g} fps", fps)
+        self._show_phone_settings({"fps": self.engine.settings().fps, **settings})
+
+    def _show_phone_settings(self, settings):
+        """Set the iPhone controls to the phone's values, without sending them back.
+
+        Args: settings maps take_settings_update() keys to values; missing
+            keys leave their control unchanged.
+        Returns: None.
+        """
+        def select(combo, data):
+            """Pick the item whose data matches, if there is one.
+
+            Args: combo is a QComboBox; data is the item data to find.
+            Returns: None.
+            """
+            index = combo.findData(data)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
+        if "width" in settings and "height" in settings:
+            select(self.phone_size, f"{settings['width']}x{settings['height']}")
+        if "crop_width" in settings:
+            select(self.phone_crop, settings["crop_width"])
+        if "max_send_fps" in settings:
+            select(self.phone_send_cap, float(settings["max_send_fps"]))
+        if "fps" in settings:
+            fps = float(settings["fps"])
+            if self.phone_fps.findData(fps) < 0:
+                self.phone_fps.addItem(f"{fps:g} fps", fps)
+            select(self.phone_fps, fps)
+        if "lens_position" in settings:
+            self.phone_focus.set_value(settings["lens_position"])
+
+    def _phone_settings_changed(self, channel, changed):
+        """Follow settings the phone reports (changed on the phone, or clamped).
+
+        Args: channel is the iPhone's Channel; changed is the dict from a
+            "camera_settings" event.
+        Returns: None; the camera sliders and the engine settings follow
+            exposure, gain and frame rate, so the two screens agree.
+        """
+        channel.camera_settings = {**(channel.camera_settings or {}), **changed}
+        engine_fields = {field: changed[key] for key, field in (
+            ("exposure_us", "exposure_us"), ("gain_db", "gain_db"), ("fps", "fps"))
+            if key in changed}
+        if engine_fields and channel.engine is not None:
+            channel.engine.update_settings(**engine_fields)
+        if channel is not self.current:
+            return
+        for key, widget in (("exposure_us", self.exposure), ("gain_db", self.gain),
+                            ("fps", self.fps)):
+            if key in changed:
+                widget.set_value(changed[key])
+        self._show_phone_settings(changed)
 
     def _add_preset_buttons(self, add):
         """Add one button per processing preset, and the LabVIEW flow toggle, to the controls grid.
@@ -4786,16 +4962,20 @@ class MainWindow(QMainWindow):
         """Fit the camera controls to the displayed source.
 
         An analog camera behind a capture adapter sets its own exposure, gain
-        and frame rate, so those controls are disabled for it; interlaced
-        sources also get the single-field toggle.
+        and frame rate, so those controls are disabled for it; an iPhone's
+        are sent to its app, the gain as ISO; interlaced sources also get
+        the single-field toggle.
 
         Args: None.
         Returns: None.
         """
         channel = self.current
         analog = not channel.demo and channel.info.kind == "capture"
+        phone = not channel.demo and channel.info.kind == "iphone"
         if analog:
             note = ANALOG_CONTROL_TIP
+        elif phone:
+            note = IPHONE_CONTROL_TIP
         elif not self.demo_banner.isHidden():
             # isHidden, not isVisible: the banner is flagged shown before the
             # window itself is on screen, which is when this first runs.
@@ -4804,7 +4984,8 @@ class MainWindow(QMainWindow):
             note = ""
         for widget in (self.exposure, self.gain, self.fps):
             widget.setEnabled(not analog)
-            widget.set_note(note)
+            widget.set_note(IPHONE_GAIN_TIP if phone and widget is self.gain else note)
+        self._sync_phone_controls(channel)
         self.single_field.setVisible(
             not channel.demo and getattr(channel.identity, "interlaced", False))
 
@@ -5670,6 +5851,8 @@ class MainWindow(QMainWindow):
             channel.limits = payload
             if displayed:
                 self._apply_limits(payload)
+        elif kind == "camera_settings":
+            self._phone_settings_changed(channel, payload)
         elif kind == "noise_calibrated" and displayed:
             self.min_range.set_value(payload)
         elif kind == "record_off" and displayed:

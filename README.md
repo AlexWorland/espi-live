@@ -32,8 +32,10 @@ scripts/
   bash/               Bash equivalents
   camera_live_control.py   standalone live camera-control helper
 experiments/          candidate, test and older working scripts
+ios/ESPICamera/       the ESPI Camera iOS app (iPhone as a USB camera; SwiftUI, XcodeGen, TestFlight)
 docs/
   camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition / XC-ST50 + USB-Live2 notes
+  iphone/             iPhone over USB: setup, bandwidth, limits and the link protocol
   notes/              development notes and reports
   labview/            the LabVIEW ESPI 1.5 VI (known-good flow for the Sony XC-ST50), its block diagram, and a decoded description
 third_party/          not in this repository: clone of the private espi-live-sdk (FLIR Spinnaker SDK), git-ignored
@@ -185,6 +187,10 @@ Other video devices (webcams, other capture sticks) are listed as **not yet supp
 **Devices → Frequency generator and piezo (NI DAQ)…** drives the specimen excitation and the reference piezo from an NI multifunction DAQ such as the USB-6251. Assign each role its own output: the frequency generator to an analog output (a sine) or to a counter (a 0–5 V square wave on a chosen PFI terminal), and the piezo driver to an analog output. The piezo either holds a voltage, with **Step −/+** buttons for manual phase steps, or follows the generator with a sine at the same frequency and a set phase; the two analog outputs share one sample clock, so that phase is exact. Each role has a **Safety limit** in volts that no setting may exceed. **All outputs to 0 V** stops everything, and the outputs also go to 0 V on an error and when the program closes. Volts are at the DAQ, before your amplifiers: the DAQ cannot drive a shaker or piezo directly. Frames are not synchronised to the drive yet.
 
 The device work goes through [pyLabLib](https://pylablib.readthedocs.io/en/latest/devices/nidaq.html)'s `NIDAQ` class (`pylablib-lightweight`, without its Qt and other extras) on NI's `nidaqmx` package, both in `requirements.txt`. The NI-DAQmx driver comes from ni.com and runs on Windows and Linux only. Without it, or on a Mac, the window offers only a **Simulated device (no hardware)**, marked in red, for trying the controls. Hardware research and the synchronisation design are in `docs/notes/ni-usb-6251-integration.md` (PR #68).
+
+### iPhone camera (USB)
+
+An iPhone running the **ESPI Camera** app (`ios/ESPICamera/`, installed from TestFlight) is a camera source over its USB cable: frames arrive uncompressed (8-bit luma), with exposure, ISO, focus and white balance locked. On Windows, install iTunes from apple.com once for the Apple Mobile Device Service. Plug the phone in, unlock it, tap **Trust** and keep the app on screen; it is listed as **iPhone (USB)**. Exposure and Gain (as ISO above the phone's lowest) drive the phone, and an **iPhone** section sets its frame rate, frame size, crop, send-rate cap and focus, so nothing needs touching on the phone. USB 2 phones manage about 1920 × 1080 at 15 fps. It is a rolling-shutter colour camera with built-in noise reduction, so treat it as a qualitative viewer. Setup, bandwidth, limits and the link protocol: `docs/iphone/README.md`; building and TestFlight: `ios/README.md`.
 
 ### Demo mode
 
