@@ -19,7 +19,8 @@ XC-ST50 ──12-pin──► DC-700 (power, sync breakout) ──BNC VIDEO OUT�
 - **Power/sync adapter:** a Sony DC-700 gives 13 V DC, which is within the
   camera's range, and breaks out VIDEO, HD, VD, trigger and WEN to BNC jacks.
   It does not digitize anything.
-- **Capture adapter:** Hauppauge USB-Live2 (USB ID `2040:c200`). USB 2.0,
+- **Capture adapter:** Hauppauge USB-Live2 (USB ID `2040:c220` on a Windows 11
+  PC, `2040:c200` under Linux's `cx231xx`; the viewer recognises both). USB 2.0,
   composite and S-Video in, 720 × 480 for NTSC (720 × 576 for PAL), 4:2:2
   sampling. Hauppauge provides the Windows 11 driver. Linux uses the kernel's
   `cx231xx` driver. There is no macOS driver.
@@ -41,8 +42,10 @@ XC-ST50 ──12-pin──► DC-700 (power, sync breakout) ──BNC VIDEO OUT�
 The prebuilt release includes `cv2_enumerate_cameras`, which lists video
 devices with their names and USB IDs. Source checkouts need
 `pip install -r requirements.txt` (the setup script installs it). Without
-the package, no video devices are listed and the log says why. `--check`
-reports whether it is present.
+the package, no video devices are listed and the log says why (not installed,
+or installed but its native module could not load, with the error). `--check`
+reports whether it is available, and the release build fails its smoke test
+when it is not.
 
 ## How the viewer uses it
 

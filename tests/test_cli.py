@@ -212,15 +212,18 @@ class SelfCheckTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        for enumerator, expected in (
-                (types.ModuleType("cv2_enumerate_cameras"),
+        broken = "could not be loaded: DLL load failed while importing _windows_backend"
+        for enumerator, problem, expected in (
+                (types.ModuleType("cv2_enumerate_cameras"), "",
                  "Video devices: cv2_enumerate_cameras available"),
-                (None, "Video devices: cv2_enumerate_cameras not installed")):
+                (None, "is not installed",
+                 "Video devices: cv2_enumerate_cameras is not installed"),
+                (None, broken, f"Video devices: cv2_enumerate_cameras {broken}")):
             with mock.patch.object(cli.importlib, "import_module"), \
                     mock.patch.object(camera, "load_pyspin",
                                       side_effect=ImportError("no PySpin")), \
-                    mock.patch.object(capture, "load_enumerator",
-                                      return_value=enumerator), \
+                    mock.patch.object(capture, "import_enumerator",
+                                      return_value=(enumerator, problem)), \
                     mock.patch.object(capture, "list_capture_devices") as listing:
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):

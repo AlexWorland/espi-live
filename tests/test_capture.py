@@ -1,8 +1,10 @@
 """Tests for the OpenCV capture source, against fake devices (no hardware)."""
 
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import cv2
@@ -66,7 +68,8 @@ class ListCaptureDevicesTests(unittest.TestCase):
         Returns: (infos, log).
         """
         log = ListLog()
-        with mock.patch.object(capture, "load_enumerator", return_value=enumerator):
+        with mock.patch.object(capture, "import_enumerator",
+                               return_value=(enumerator, "" if enumerator else "is not installed")):
             return capture.list_capture_devices(log), log
 
     def test_list_capture_devices(self):
@@ -119,7 +122,20 @@ class ListCaptureDevicesTests(unittest.TestCase):
         infos, log = self.list_with(None)
         self.assertEqual(infos, [])
         self.assertEqual(len(log.lines), 1)
-        self.assertIn("cv2_enumerate_cameras", log.lines[0])
+        self.assertEqual(log.lines, ["Video devices are not listed: cv2_enumerate_cameras "
+                                     "is not installed."])
+
+    def test_list_says_why_the_enumerator_failed(self):
+        """A package that is present but cannot load is reported with its error.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        problem = "could not be loaded: DLL load failed while importing _windows_backend"
+        with mock.patch.object(capture, "import_enumerator", return_value=(None, problem)):
+            self.assertEqual(capture.list_capture_devices(log), [])
+        self.assertEqual(log.lines, [f"Video devices are not listed: cv2_enumerate_cameras {problem}."])
 
     def test_list_error(self):
         """An enumeration failure lists nothing and is logged.
@@ -142,7 +158,7 @@ class ListCaptureDevicesTests(unittest.TestCase):
             with mock.patch.object(capture.sys, "platform", platform):
                 self.assertEqual(capture.capture_backend(), backend)
 
-    def test_load_enumerator(self):
+    def test_import_enumerator(self):
         """The enumerator imports lazily and is optional.
 
         Args: None.
@@ -150,9 +166,98 @@ class ListCaptureDevicesTests(unittest.TestCase):
         """
         fake = types.ModuleType("cv2_enumerate_cameras")
         with mock.patch.dict(sys.modules, {"cv2_enumerate_cameras": fake}):
-            self.assertIs(capture.load_enumerator(), fake)
+            self.assertEqual(capture.import_enumerator(), (fake, ""))
         with mock.patch.dict(sys.modules, {"cv2_enumerate_cameras": None}):
-            self.assertIsNone(capture.load_enumerator())
+            self.assertEqual(capture.import_enumerator(), (None, "is not installed"))
+
+    def test_import_enumerator_reports_a_failing_native_module(self):
+        """A DLL error is reported as such, not as "not installed".
+
+        Args: None.
+        Returns: None.
+        """
+        error = ImportError("DLL load failed while importing _windows_backend")
+        with mock.patch("builtins.__import__", side_effect=error), \
+                mock.patch.object(capture, "bundled_dll_directories", return_value=[]):
+            module, problem = capture.import_enumerator()
+        self.assertIsNone(module)
+        self.assertEqual(problem, "could not be loaded: DLL load failed while importing "
+                                  "_windows_backend")
+
+    def test_import_enumerator_retries_with_bundled_dll_folders(self):
+        """A frozen build adds its `*.libs` folders to the DLL search path and retries.
+
+        Args: None.
+        Returns: None.
+        """
+        fake = types.ModuleType("cv2_enumerate_cameras")
+        real_import = __import__
+        calls = []
+
+        def flaky_import(name, *args, **kwargs):
+            if name != "cv2_enumerate_cameras":
+                return real_import(name, *args, **kwargs)
+            calls.append(name)
+            if len(calls) == 1:
+                raise ImportError("DLL load failed while importing _windows_backend")
+            return fake
+
+        added = []
+        folders = [Path("a.libs"), Path("b.libs")]
+        before = len(capture._dll_directory_handles)
+        with mock.patch("builtins.__import__", side_effect=flaky_import), \
+                mock.patch.object(capture, "bundled_dll_directories", return_value=folders), \
+                mock.patch.object(capture.os, "add_dll_directory",
+                                  side_effect=lambda path: added.append(path) or path,
+                                  create=True):
+            self.assertEqual(capture.import_enumerator(), (fake, ""))
+        self.assertEqual(added, ["a.libs", "b.libs"])
+        self.assertEqual(len(calls), 2)
+        del capture._dll_directory_handles[before:]
+
+    def test_import_enumerator_still_failing_after_the_retry(self):
+        """When the retry fails too, the second error is the one reported.
+
+        Args: None.
+        Returns: None.
+        """
+        errors = [ImportError("first"), ImportError("DLL load failed again")]
+
+        def always_fail(name, *args, **kwargs):
+            raise errors.pop(0)
+
+        before = len(capture._dll_directory_handles)
+        with mock.patch("builtins.__import__", side_effect=always_fail), \
+                mock.patch.object(capture, "bundled_dll_directories",
+                                  return_value=[Path("a.libs")]), \
+                mock.patch.object(capture.os, "add_dll_directory", create=True):
+            module, problem = capture.import_enumerator()
+        self.assertIsNone(module)
+        self.assertEqual(problem, "could not be loaded: DLL load failed again")
+        del capture._dll_directory_handles[before:]
+
+    def test_bundled_dll_directories(self):
+        """Only a frozen build on a platform with DLL search paths has folders to add.
+
+        Args: None.
+        Returns: None.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "pandas.libs").mkdir()
+            (root / "cv2_enumerate_cameras.libs").mkdir()
+            (root / "numpy").mkdir()
+            (root / "stray.libs").write_text("a file, not a folder")
+            with mock.patch.object(capture.os, "add_dll_directory", create=True):
+                with mock.patch.object(sys, "_MEIPASS", folder, create=True):
+                    self.assertEqual([path.name for path in capture.bundled_dll_directories()],
+                                     ["cv2_enumerate_cameras.libs", "pandas.libs"])
+                with mock.patch.object(sys, "_MEIPASS", "", create=True):
+                    self.assertEqual(capture.bundled_dll_directories(), [])
+            with mock.patch.object(sys, "_MEIPASS", folder, create=True), \
+                    mock.patch.object(capture, "os", types.SimpleNamespace()):
+                self.assertEqual(capture.bundled_dll_directories(), [])
+        self.assertEqual(capture.bundled_dll_directories(), [])  # not frozen
 
 
 class SessionOpenTests(CaptureTestCase):

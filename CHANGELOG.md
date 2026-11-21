@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-21 — USB-Live2 found again in the Windows build
+
+### Previous state
+
+- The Windows build (v0.14.8) listed no video devices, so with the Hauppauge USB-Live2 plugged in the app said "No FLIR camera or recognised capture adapter detected". The log only said `cv2_enumerate_cameras is not installed`. The package was in the build, but its native module could not load: the runtime DLL it needs sits in a `cv2_enumerate_cameras.libs` folder, which PyInstaller left out (it kept one copy of the shared DLL, under `pandas.libs`).
+- The adapter table knew only USB ID `2040:C200`; a USB-Live2 on Windows 11 reports `2040:C220`, so it matched by name only.
+
+### Current state
+
+- When `cv2_enumerate_cameras` fails to import in the built program, the app adds the build's `*.libs` folders to the DLL search path and tries once more, so it finds the DLL wherever PyInstaller put it.
+- The log and `--check` now give the real reason: `is not installed`, or `could not be loaded: <the ImportError>`.
+- The release workflow's smoke test fails unless `--check` reports `cv2_enumerate_cameras available`, so a build that cannot list video devices is no longer published.
+- `2040:C220` is recognised as a Hauppauge USB-Live2, next to `2040:C200`.
+
 ## 2026-11-21 — iPhone Bayer RAW mode
 
 ### Previous state
