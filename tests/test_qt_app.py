@@ -1587,6 +1587,23 @@ class SimpleUiTests(WindowTestCase):
                       "1:1", "Freeze (Space)"):
             self.assertFalse(buttons[label].isVisibleTo(w), label)
 
+    def test_placing_or_parking_a_row_twice_does_nothing(self):
+        """A row already parked stays parked; one already placed stays placed.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        entry = w._advanced_rows[0]
+        self.assertFalse(entry.placed)
+        w._park_row(entry)
+        self.assertFalse(entry.placed)
+        w._place_row(entry)
+        name = entry.name
+        w._place_row(entry)
+        self.assertTrue(entry.placed)
+        self.assertIs(entry.name, name)
+
     def test_help_tips_stay_hidden(self):
         """Tips advertise hidden controls, so neither the tip nor its menu item shows.
 
