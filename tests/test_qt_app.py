@@ -1442,7 +1442,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         next(a for a in help_menu.actions() if a.text().startswith("About")).trigger()
         self.dialogs.about.assert_called_once()
         self.assertEqual(self.dialogs.about.call_args.args[2], updater.describe_build())
@@ -1453,7 +1453,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
         path = os.path.join(os.path.dirname(qt_app.__file__), "user_guide.html")
         with mock.patch.object(qt_app, "guide_path", return_value=path), \
@@ -1470,7 +1470,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
         with mock.patch.object(qt_app, "guide_path",
                                return_value="/no/such/user_guide.html"):
@@ -1484,7 +1484,7 @@ class MainWindowBuildTests(WindowTestCase):
         Args: None.
         Returns: None.
         """
-        help_menu = self.window.menuBar().actions()[1].menu()
+        help_menu = self.window.menuBar().actions()[-1].menu()
         guide = next(a for a in help_menu.actions() if a.text() == "User Guide")
         path = os.path.join(os.path.dirname(qt_app.__file__), "user_guide.html")
         with mock.patch.object(qt_app, "guide_path", return_value=path), \
