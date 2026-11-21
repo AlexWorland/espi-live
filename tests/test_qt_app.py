@@ -1168,6 +1168,25 @@ class MainWindowBuildTests(WindowTestCase):
         button.click()
         self.assertEqual(self.engine.settings().mode, button.text())
 
+    def test_raw_difference_button_overrides_the_view(self):
+        """Raw difference turns on in the engine and greys out the view buttons.
+
+        Loading settings (for example on a camera switch) keeps the button
+        and the view buttons in step; turning it off gives the views back.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.raw_difference_button.setChecked(True)
+        self.assertTrue(self.engine.settings().raw_difference)
+        self.assertFalse(any(b.isEnabled() for b in w.mode_group.buttons()))
+        self.engine.update_settings(raw_difference=False)
+        w._load_settings(self.engine.settings(), w.current.limits)
+        self.assertFalse(w.raw_difference_button.isChecked())
+        self.assertTrue(all(b.isEnabled() for b in w.mode_group.buttons()))
+        self.assertIn("|live - previous|", w.raw_difference_button.toolTip())
+
     def test_record_button_toggles_engine_recording(self):
         """Toggling the record button sets the engine's record flag.
 

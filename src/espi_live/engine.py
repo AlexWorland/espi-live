@@ -39,8 +39,8 @@ from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
                                   RangeTracker, apply_gain, apply_levels,
                                   apply_palette, denoise_strength, display_lut,
                                   even_out_brightness, gamma_lut,
-                                  local_normalize, reject_outliers,
-                                  single_field, smooth_speckle, stretch_levels,
+                                  local_normalize, raw_difference,
+                                  reject_outliers, single_field, smooth_speckle, stretch_levels,
                                   watermark_demo)
 from espi_live.recording import (AVIRecorder, recording_path, save_frame,
                                  save_frame_set)
@@ -55,6 +55,8 @@ TIMING_LOG_INTERVAL_S = 5.0  # DEBUG frame-timing lines at most this often
 # The reference comparison window is refreshed at most this often, so three
 # extra full-size images do not slow a 6 MP camera's 30 fps.
 COMPARE_INTERVAL_S = 0.1
+# The view name Raw difference frames carry, in packets and recording names.
+RAW_DIFFERENCE = "RawDiff"
 
 
 @dataclass
@@ -96,6 +98,7 @@ class Settings:
     record: bool = False
     single_field: bool = False    # interlaced sources: even rows only, line-doubled
     auto_reference: bool = False  # Reference view captures one when it has none
+    raw_difference: bool = False  # |live - previous| raw frames; every other step off
 
 
 # The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
@@ -379,6 +382,8 @@ def view_hint(s, processor):
     if capture is not None:
         kept = "; the old one stays in use" if processor.ref is not None else ""
         return f"Capturing reference: {capture.count}/{capture.target} frames{kept}"
+    if s.raw_difference:
+        return "Raw difference: live minus previous raw frame, nothing else"
     if s.mode == "Raw":
         return "Raw view: camera pixels, with gamma; no stretch or palette"
     if s.mode == "Reference" and processor.ref is None:
@@ -800,6 +805,8 @@ class Engine:
         last_single_field = applied.single_field
         last_noise = applied.noise_reduction
         last_ref_frames = applied.ref_frames
+        last_raw_difference = applied.raw_difference
+        raw_previous = None  # the last unprocessed frame, for Raw difference
         last_compare = 0.0
         last_readback = time.monotonic()
         last_error_log = 0.0
@@ -832,7 +839,8 @@ class Engine:
         while not self._stop.is_set():
             s = self.settings()
             self._reap_recorders()
-            signature = (s.mode, s.average if s.mode != "Raw" else 1, s.rolling)
+            signature = ((RAW_DIFFERENCE, 1, False) if s.raw_difference else
+                         (s.mode, s.average if s.mode != "Raw" else 1, s.rolling))
             recorder = self._recorder
             if recorder is not None and (
                     not s.record or signature != record_signature
@@ -845,6 +853,17 @@ class Engine:
                 self._recorder = None
                 record_signature = None
                 self._set_status(record="Recording: finishing file")
+            if s.raw_difference != last_raw_difference:
+                # The processing state was not fed meanwhile: start it over.
+                raw_previous = None
+                processor.reset_avg()
+                processor.reset_previous()
+                ranges.reset()
+                peaks.reset()
+                self.log.write("Raw difference on: |live - previous| of raw frames, "
+                               "every other processing step off"
+                               if s.raw_difference else "Raw difference off")
+                last_raw_difference = s.raw_difference
             if s.mode != last_mode:
                 processor.reset_avg()
                 ranges.reset()
@@ -900,13 +919,15 @@ class Engine:
                 frame = grabbed
             if frame.ndim != 2 or frame.dtype != np.uint8:
                 raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
-            if s.single_field and self.camera is not None and self.camera.interlaced:
+            if (s.single_field and not s.raw_difference and
+                    self.camera is not None and self.camera.interlaced):
                 frame = single_field(frame)
 
             now = time.monotonic()
             gaps.frame_ok(now, 1.0 / max(1.0, resulting_fps or s.fps), context)
             camera_sharpness.observe(frame, now, context)
-            frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
+            if not s.raw_difference:
+                frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
             now = time.monotonic()
             last_valid = now
             if not self.demo:
@@ -931,11 +952,12 @@ class Engine:
                     applied = s
                     last_setting_time = now
 
-            if s.mode == "Reference" and s.auto_reference and processor.ref is None:
+            reference_view = s.mode == "Reference" and not s.raw_difference
+            if reference_view and s.auto_reference and processor.ref is None:
                 processor.set_reference(frame, now)  # as the LabVIEW VI did at start
                 processor.reset_avg()
                 self.log.write("Captured reference frame (automatic).")
-            if s.mode == "Reference" and s.ref_refresh_s > 0 and (
+            if reference_view and s.ref_refresh_s > 0 and (
                     processor.ref_capture is None) and (
                     processor.ref is None or
                     now - processor.ref_time >= s.ref_refresh_s):
@@ -952,13 +974,19 @@ class Engine:
             update_range = now - last_range_time >= RANGE_INTERVAL_S
             image = None
             palette, gamma = "Gray", 1.0
-            if s.mode == "Raw":
+            earlier = raw_previous
+            if s.raw_difference:
+                raw_previous = frame.copy()  # outlives this iteration's frame
+                image = raw_difference(frame, earlier)
+                self._drop_calibration("Raw difference")
+                if update_range:
+                    self._set_status(range="Raw difference: |live - previous|, "
+                                     "no gain, filters or scaling")
+                    last_range_time = now
+            elif s.mode == "Raw":
                 image = frame
                 gamma = s.gamma  # curve only; Raw skips stretch and palette
-                if self._calibration is not None:
-                    self._calibration = None
-                    self.log.warning("Noise calibration needs the Previous or "
-                                     "Reference view; switch views and try again.")
+                self._drop_calibration("Raw view")
                 if update_range:
                     self._set_status(range="Raw Mono8: no brightness scaling")
                     last_range_time = now
@@ -986,19 +1014,24 @@ class Engine:
 
             if image is not None:
                 shown_sharpness.observe(image, now, context)
-                # every view; before the watermark so its text reads normally
-                image = present(image, s.flip_horizontal, self.demo,
-                                display_lut(s.display_gain, s.contrast, s.brightness))
+                if s.raw_difference:  # no flip or display tone either
+                    image = present(image, False, self.demo)
+                else:  # every view; before the watermark so its text reads normally
+                    image = present(image, s.flip_horizontal, self.demo,
+                                    display_lut(s.display_gain, s.contrast, s.brightness))
                 sequence += 1
                 packet = FramePacket(sequence, image, palette, gamma,
-                                     s.mode, self.demo)
+                                     signature[0], self.demo)
                 with self._packet_lock:
                     self._packet = packet
                 record_signature = self._feed_recorder(
                     s, signature, record_signature, packet, resulting_fps)
                 if (self._compare.is_set() and
                         now - last_compare >= COMPARE_INTERVAL_S):
-                    self._publish_compare(processor, frame, s, packet, clahe, now)
+                    if s.raw_difference:
+                        self._publish_raw_compare(frame, earlier, packet)
+                    else:
+                        self._publish_compare(processor, frame, s, packet, clahe, now)
                     last_compare = now
             elif (s.mode == "Previous" and self._compare.is_set() and
                     now - last_compare >= COMPARE_INTERVAL_S and
@@ -1142,6 +1175,40 @@ class Engine:
         with self._packet_lock:
             self._compare_packet = compare
 
+    def _publish_raw_compare(self, frame, earlier, packet):
+        """Publish the two raw frames Raw difference subtracts, and their difference.
+
+        Args: frame is the live raw frame; earlier is the raw frame before
+            it; packet is the Raw difference FramePacket just published.
+        Returns: None.
+        """
+        def raw(image, name):
+            """Wrap one unprocessed frame for a comparison panel.
+
+            Args: image is a 2-D uint8 frame; name is the panel's mode text.
+            Returns: A FramePacket (Gray, gamma 1, demo watermark only).
+            """
+            return FramePacket(packet.sequence, present(image, False, self.demo),
+                               "Gray", 1.0, name, self.demo)
+        compare = ComparePacket(
+            packet.sequence, raw(frame, "Current"), raw(earlier, "Previous frame"),
+            packet, "the raw frame before the live one, unprocessed",
+            "Raw difference: |live - previous|, no processing", self.demo,
+            "Previous", "Previous raw frame")
+        with self._packet_lock:
+            self._compare_packet = compare
+
+    def _drop_calibration(self, view):
+        """Cancel a running noise calibration in a view that has no difference to sample.
+
+        Args: view names the view in force, for the warning.
+        Returns: None.
+        """
+        if self._calibration is not None:
+            self._calibration = None
+            self.log.warning(f"Noise calibration needs the Previous or Reference "
+                             f"view, not {view}; switch views and try again.")
+
     def _publish_compare_filling(self, processor, frame, s, sequence):
         """Publish the Previous comparison while its first average is filling.
 
@@ -1228,7 +1295,7 @@ class Engine:
         frames_per_image = 1 if signature[2] else signature[1]  # rolling: every frame
         fps = min(30.0, max(1.0, source_fps / frames_per_image))
         try:
-            path = recording_path(s.mode, self.demo, self.tag)
+            path = recording_path(signature[0], self.demo, self.tag)
             self._recorder = AVIRecorder(path, packet.render(), fps)
         except OSError as exc:
             self.update_settings(record=False)
