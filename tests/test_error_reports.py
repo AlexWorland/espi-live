@@ -1559,7 +1559,9 @@ class WorkerTests(unittest.TestCase):
             worker.start()
             self.assertTrue(stub.done.wait(5))
             worker.stop()
-        worker.thread.join(5)
+            # The stub signals before it raises, so wait for the thread to
+            # finish (it logs, then sees stop) before leaving assertLogs.
+            worker.thread.join(5)
         self.assertFalse(worker.thread.is_alive())
 
     def test_kick_and_stop_are_safe_before_a_start(self):
