@@ -1391,6 +1391,48 @@ class CpuImageView(ViewNavigation, QWidget):
         painter.drawImage(QPointF(x + left * scale, y + top * scale), qimage)
 
 
+class WheelIgnoringSlider(QSlider):
+    """A slider that leaves the mouse wheel to the widgets around it.
+
+    A wheel notch over the slider is ignored, so it reaches the parent and a
+    scrolling panel scrolls instead of the value changing. Dragging, clicking
+    and the keyboard still set the value.
+    """
+
+    def wheelEvent(self, event):
+        """Ignore the wheel so the parent widget gets it.
+
+        Args: event is the Qt wheel event.
+        Returns: None.
+        """
+        event.ignore()
+
+
+class WheelIgnoringSpinBox(QDoubleSpinBox):
+    """A number box that leaves the mouse wheel to the widgets around it.
+
+    It also takes focus only by a click or Tab: Qt's default is to take focus
+    on a wheel event, which would move the keyboard focus while scrolling.
+    """
+
+    def __init__(self):
+        """Create the number box with click-and-Tab focus only.
+
+        Args: None.
+        Returns: None.
+        """
+        super().__init__()
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        """Ignore the wheel so the parent widget gets it.
+
+        Args: event is the Qt wheel event.
+        Returns: None.
+        """
+        event.ignore()
+
+
 class SliderSpin(QWidget):
     """A slider and exact-entry spin box sharing one numeric value."""
 
@@ -1408,8 +1450,8 @@ class SliderSpin(QWidget):
         self.step = step
         self._description = ""
         self._note = ""
-        self.slider = QSlider(Qt.Horizontal)
-        self.spin = QDoubleSpinBox()
+        self.slider = WheelIgnoringSlider(Qt.Horizontal)
+        self.spin = WheelIgnoringSpinBox()
         self.spin.setDecimals(decimals)
         self.spin.setSingleStep(step)
         self.spin.setSuffix(suffix)
@@ -2745,10 +2787,10 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         bar.addWidget(spacer)
 
-        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider = WheelIgnoringSlider(Qt.Horizontal)
         self.zoom_slider.setRange(0, ZOOM_TICKS)
-        # A wheel notch scrolls three single steps; make that one 1.25x step,
-        # matching wheel zoom on the image.
+        # The wheel no longer moves this slider. Arrow keys still step a third
+        # of a 1.25x zoom step, the size a wheel notch used to scroll in three.
         self.zoom_slider.setSingleStep(round(
             ZOOM_TICKS * math.log(1.25) / math.log(MAX_ZOOM) / 3))
         self.zoom_slider.setPageStep(ZOOM_TICKS // 6)
