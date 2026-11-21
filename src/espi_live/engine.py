@@ -28,6 +28,8 @@ import cv2
 import numpy as np
 
 from espi_live import error_reports, sources
+from espi_live.pixel_square import (SQUARE_INTERVAL_S, SquarePacket,
+                                   square_area, square_values)
 from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
                                    StreamCounterMonitor, settings_summary)
 from espi_live.camera_reports import capture_report
@@ -488,6 +490,10 @@ class Engine:
         self._packet = None
         self._compare_packet = None
         self._compare = threading.Event()  # set while a comparison window is open
+        self._square_request = None  # (size, center) while the Pixels window is open
+        self._square_packet = None
+        self._square_cut = None  # the request the newest square was cut for (worker)
+        self._square_time = 0.0
         self._packet_lock = threading.Lock()
         self._status = {
             "demo": False, "camera": "Camera values: waiting for connection",
@@ -730,6 +736,31 @@ class Engine:
         """
         with self._packet_lock:
             return self._compare_packet
+
+    def set_square(self, size, center=None):
+        """Ask for the pixel square, or stop asking.
+
+        The worker cuts it only while asked, so a closed Pixels window costs
+        the frame loop nothing.
+
+        Args: size is N for an N×N square, or None to stop; center is the
+            (x, y) displayed pixel to center it on, or None for the image
+            center.
+        Returns: None.
+        """
+        with self._packet_lock:
+            self._square_request = None if size is None else (int(size), center)
+            self._square_packet = None
+
+    def latest_square(self):
+        """Return the newest pixel square.
+
+        Args: None.
+        Returns: A SquarePacket, or None while none is asked for or before the
+            first one.
+        """
+        with self._packet_lock:
+            return self._square_packet
 
     def status(self):
         """Return a snapshot of the status texts and counters.
@@ -1029,6 +1060,8 @@ class Engine:
                 raw_previous = frame.copy()  # outlives this iteration's frame
                 image = raw_difference(frame, earlier)
                 gamma = 1.0  # ... except Raw difference, which applies nothing
+                self._cut_square(frame if image is None else image, image is not None,
+                                 "Raw difference", False, now)
                 self._drop_calibration("Raw difference")
                 if update_range:
                     self._set_status(range="Raw difference: |live - previous|, "
@@ -1036,6 +1069,7 @@ class Engine:
                     last_range_time = now
             elif s.mode == "Raw":
                 image = frame  # gamma curve only; Raw skips stretch
+                self._cut_square(frame, True, "Raw", s.flip_horizontal, now)
                 self._drop_calibration("Raw view")
                 if update_range:
                     self._set_status(range="Raw Mono8: no brightness scaling")
@@ -1049,9 +1083,15 @@ class Engine:
                 averaged = None
                 if measured is not None:
                     last_shape = measured.shape
+                    unconditioned = processor.difference(measured, s.mode,
+                                                         s.frames_back)
+                    self._cut_square(unconditioned, (
+                        processor.previous is not None if s.mode == "Previous" else
+                        processor.ref is not None and
+                        processor.ref.shape == measured.shape),
+                        s.mode, s.flip_horizontal, now)
                     difference, labview_order = condition_difference(
-                        processor.difference(measured, s.mode, s.frames_back),
-                        measured, s)
+                        unconditioned, measured, s)
                     count = 1 if s.average_frames_first else s.average
                     scale = None
                     if labview_order:
@@ -1182,6 +1222,32 @@ class Engine:
         elif processor.ref is not None and processor.ref_noise == old:
             self.log.write(f"Noise reduction is now {new:g}, but the reference was "
                            f"taken at {old:g}. Press F to retake it.")
+
+    def _cut_square(self, image, ready, view, flip, now):
+        """Publish the pixel square while the Pixels window asks for one.
+
+        Args: image is the frame's raw absolute difference (the frame itself
+            in Raw view), before the threshold, gain, averaging and scaling;
+            ready is False while there is no baseline to subtract (image then
+            only gives the size); view names what is measured (the Settings
+            mode, or "Raw difference"); flip is whether the display mirrors
+            the image; now is the monotonic time.
+        Returns: None. A new SquarePacket is published at most every
+            SQUARE_INTERVAL_S, and at once when the request changes.
+        """
+        request = self._square_request  # (size, center); one read, any thread set it
+        if request is None:
+            return
+        if request is self._square_cut and now - self._square_time < SQUARE_INTERVAL_S:
+            return
+        size, center = request
+        left, top, size = square_area(center, size, image.shape)
+        values = square_values(image, left, top, size, flip) if ready else None
+        packet = SquarePacket(values, view, left, top, size, self.demo)
+        with self._packet_lock:
+            if self._square_request is request:  # not turned off meanwhile
+                self._square_packet = packet
+        self._square_cut, self._square_time = request, now
 
     def _publish_compare(self, processor, frame, s, packet, now):
         """Publish the baseline, the current frame and their difference.

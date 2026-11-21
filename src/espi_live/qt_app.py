@@ -35,7 +35,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-from PySide6.QtCore import (QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect,
+from PySide6.QtCore import (QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect, QRectF,
                             QSettings, QSize, Qt, QtMsgType, QTimer, QUrl, Signal,
                             qInstallMessageHandler)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
@@ -61,6 +61,7 @@ from espi_live.channels import demo_channels, open_camera_channels, restore_chan
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
+from espi_live.pixel_square import DEFAULT_SQUARE_SIZE, SQUARE_SIZES
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, MAX_DENOISE_PERCENT,
                                   MAX_FRAMES_BACK, MAX_REFERENCE_FRAMES,
                                   SCALING_MODES, SMOOTHING_METHODS,
@@ -315,6 +316,14 @@ def describe_session(channels, display):
 
 # Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
 FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
+# The pixel square's outline on the main image: a bright line with a dark
+# edge reads on every palette. A square smaller than BOX_MIN_SIZE screen
+# pixels is outlined at that size around its center, so a 1×1 square shows.
+BOX_COLOR = QColor(255, 212, 0)
+BOX_EDGE = QColor(0, 0, 0, 200)
+BOX_MIN_SIZE = 8
+# A press that moves less than this many screen pixels is a click, not a pan.
+CLICK_SLOP = 4
 # The longest view hint the engine reports (the status bar measures it), and the
 # least width the tip keeps beside it. The hint is information and gets its whole
 # sentence; the tip takes what is left and is shortened with an ellipsis.
@@ -1083,6 +1092,8 @@ class ViewNavigation:
         self.center = None
         self.image_size = None  # (width, height)
         self.drag_origin = None
+        self.press_point = None  # where the left button went down, for clicks
+        self.box = None  # the outlined pixel square (left, top, right, bottom), or None
         self.setMouseTracking(True)
 
     def display_rect(self):
@@ -1187,6 +1198,8 @@ class ViewNavigation:
         Args: event is the Qt mouse event.
         Returns: None.
         """
+        if event.button() == Qt.LeftButton:
+            self.press_point = event.position()
         if event.button() == Qt.LeftButton and self.zoom > 1.0:
             self.drag_origin = event.position()
             self.setCursor(Qt.ClosedHandCursor)
@@ -1211,13 +1224,56 @@ class ViewNavigation:
             self.hovered.emit(int(point[0]), int(point[1]))
 
     def mouseReleaseEvent(self, event):
-        """Finish panning.
+        """Finish panning, or report a click on the image.
+
+        A left press and release that hardly moved is a click: imageClicked
+        reports the image pixel under it (when there is one).
 
         Args: event is the Qt mouse event.
         Returns: None.
         """
+        press, self.press_point = self.press_point, None
+        if press is not None and event.button() == Qt.LeftButton and \
+                (event.position() - press).manhattanLength() < CLICK_SLOP:
+            point = self.widget_to_image(event.position())
+            if point is not None and 0 <= point[0] < self.image_size[0] and \
+                    0 <= point[1] < self.image_size[1]:
+                self.imageClicked.emit(int(point[0]), int(point[1]))
         self.drag_origin = None
         self.unsetCursor()
+
+    def set_box(self, box):
+        """Outline a square on the image, or none.
+
+        Args: box is (left, top, right, bottom) in image pixels, right and
+            bottom exclusive, or None.
+        Returns: None.
+        """
+        if box != self.box:
+            self.box = box
+            self.update()
+
+    def paint_box(self, painter):
+        """Draw the outline over the image.
+
+        Args: painter is an active QPainter on this widget.
+        Returns: None.
+        """
+        rect = self.display_rect()
+        if self.box is None or rect is None:
+            return
+        x, y, _, _, scale = rect
+        left, top, right, bottom = self.box
+        area = QRectF(x + left * scale, y + top * scale,
+                      (right - left) * scale, (bottom - top) * scale)
+        if area.width() < BOX_MIN_SIZE:
+            area = QRectF(area.center().x() - BOX_MIN_SIZE / 2,
+                          area.center().y() - BOX_MIN_SIZE / 2,
+                          BOX_MIN_SIZE, BOX_MIN_SIZE)
+        painter.setPen(QPen(BOX_EDGE, 3))
+        painter.drawRect(area)
+        painter.setPen(QPen(BOX_COLOR, 1))
+        painter.drawRect(area)
 
     def leaveEvent(self, event):
         """Clear the pixel readout when the cursor leaves the image.
@@ -1233,6 +1289,7 @@ class GLImageView(ViewNavigation, QOpenGLWidget):
 
     hovered = Signal(int, int)
     zoomChanged = Signal(float)  # zoom relative to fit-to-window
+    imageClicked = Signal(int, int)  # the image pixel clicked (not dragged)
 
     def __init__(self, parent=None):
         """Create the view; GL resources are made in initializeGL.
@@ -1376,6 +1433,10 @@ class GLImageView(ViewNavigation, QOpenGLWidget):
         gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         self.vao.release()
         self.program.release()
+        if self.box is not None:
+            painter = QPainter(self)  # after the GL drawing, on top of it
+            self.paint_box(painter)
+            painter.end()
 
 
 class CpuImageView(ViewNavigation, QWidget):
@@ -1383,6 +1444,7 @@ class CpuImageView(ViewNavigation, QWidget):
 
     hovered = Signal(int, int)
     zoomChanged = Signal(float)  # zoom relative to fit-to-window
+    imageClicked = Signal(int, int)  # the image pixel clicked (not dragged)
 
     def __init__(self, parent=None):
         """Create the fallback view.
@@ -1455,6 +1517,7 @@ class CpuImageView(ViewNavigation, QWidget):
                         QImage.Format_RGB888)
         qimage.setDevicePixelRatio(ratio)
         painter.drawImage(QPointF(x + left * scale, y + top * scale), qimage)
+        self.paint_box(painter)
 
 
 class WheelIgnoringSlider(QSlider):
@@ -2061,6 +2124,273 @@ class ReferenceCompareDialog(QDialog):
         self.engine.request("save_compare", packet=self.shown,
                             title=self.window.frame_title.text(),
                             notes=self.window.frame_notes.toPlainText())
+
+
+PIXELS_POLL_MS = 100
+PIXELS_SIZE_SETTING = "pixels/size"
+# Numbers are written on a cell at least this many screen pixels wide; the
+# hint says to enlarge the window when the square's cells are smaller.
+MIN_NUMBER_CELL = 16
+PIXELS_HINT = (
+    "Each cell is one camera pixel, enlarged, with its value written on it. "
+    "In Previous and Reference view the value is the raw difference in camera "
+    "levels (0–255), before the noise threshold, Difference gain, averaging and "
+    "Scaling: 0 means that pixel did not change, and movement raises it. In Raw "
+    "view it is the camera level. Cells are shaded from black (0) to white (the "
+    "largest value in the square). Click the main image to move the square; "
+    "enlarge this window if a large square's numbers are hidden."
+)
+
+
+class PixelGrid(QWidget):
+    """Draw a pixel square enlarged, each cell shaded and numbered."""
+
+    def __init__(self, parent=None):
+        """Create an empty grid.
+
+        Args: parent is the owning widget.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.packet = None
+        self.message = "Waiting for the camera…"
+        self.setMinimumSize(200, 200)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
+
+    def set_packet(self, packet):
+        """Show a square, or none.
+
+        Args: packet is a SquarePacket, or None to show the message.
+        Returns: None.
+        """
+        self.packet = packet
+        self.update()
+
+    def cell_size(self):
+        """Measure one cell on screen.
+
+        Args: None.
+        Returns: The cell's width in logical pixels, or 0 without a square.
+        """
+        if self.packet is None or self.packet.values is None:
+            return 0
+        return min(self.width(), self.height()) / self.packet.size
+
+    def paintEvent(self, event):
+        """Shade and number every cell, or show why there is nothing yet.
+
+        Args: event is the Qt paint event.
+        Returns: None.
+        """
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
+        packet = self.packet
+        if packet is None or packet.values is None:
+            text = self.message if packet is None else packet.summary().split(" · ")[-1]
+            painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, text)
+            return
+        values = np.asarray(packet.values)
+        size, cell = packet.size, self.cell_size()
+        left = (self.width() - cell * size) / 2
+        top = (self.height() - cell * size) / 2
+        peak = int(values.max())
+        shades = (np.rint(values.astype(np.float32) * (255.0 / peak)) if peak else
+                  np.zeros(values.shape, np.float32)).astype(np.uint8)
+        numbers = cell >= MIN_NUMBER_CELL
+        if numbers:
+            font = painter.font()
+            font.setPixelSize(max(6, int(cell * 0.36)))
+            painter.setFont(font)
+        painter.setPen(QPen(QColor(90, 90, 90), 1) if cell >= 6 else Qt.NoPen)
+        for row in range(size):
+            for column in range(size):
+                shade = int(shades[row, column])
+                area = QRectF(left + column * cell, top + row * cell, cell, cell)
+                painter.setBrush(QColor(shade, shade, shade))
+                painter.drawRect(area)
+                if numbers:
+                    pen = painter.pen()
+                    painter.setPen(Qt.white if shade < 140 else Qt.black)
+                    painter.drawText(area, Qt.AlignCenter, str(int(values[row, column])))
+                    painter.setPen(pen)
+
+
+class PixelSquareDialog(QDialog):
+    """Show an N×N square of the displayed camera's raw difference, numbered.
+
+    The engine cuts the square only while this window is open. A click on
+    the main image moves it there; it starts at the image center.
+    """
+
+    def __init__(self, window):
+        """Build the size choice, Freeze, the summary and the grid.
+
+        Args: window is the MainWindow; its engine (the displayed camera) is
+            the source.
+        Returns: None.
+        """
+        super().__init__(window)
+        self.window = window
+        self.engine = None  # the engine currently asked for squares
+        self.shown = None  # the SquarePacket on screen (Freeze keeps it)
+        self.center = None  # displayed (x, y) the square is centered on; None = middle
+        saved = QSettings("ESPI", "espi_live").value(PIXELS_SIZE_SETTING,
+                                                      DEFAULT_SQUARE_SIZE)
+        try:
+            self.size = int(saved)
+        except (TypeError, ValueError):
+            self.size = DEFAULT_SQUARE_SIZE
+        if self.size not in SQUARE_SIZES:
+            self.size = DEFAULT_SQUARE_SIZE
+        self.setWindowTitle("Pixel values")
+        self.resize(ui_scale.px(640), ui_scale.px(720))
+        self.demo_label = QLabel("DUMMY MODE — synthetic video, not camera data")
+        self.demo_label.setAlignment(Qt.AlignCenter)
+        self.demo_label.setStyleSheet(
+            f"background:#8b0000;color:white;font-weight:bold;"
+            f"padding:{ui_scale.px(4)}px;border-radius:{ui_scale.px(4)}px;")
+        self.demo_label.setVisible(False)
+        self.size_combo = QComboBox()
+        for size in SQUARE_SIZES:
+            self.size_combo.addItem(f"{size} × {size} pixels", size)
+        self.size_combo.setCurrentIndex(SQUARE_SIZES.index(self.size))
+        set_tooltip(self.size_combo, "How many camera pixels the square spans on each side.")
+        self.size_combo.currentIndexChanged.connect(self.set_size)
+        self.freeze_button = QPushButton("Freeze")
+        self.freeze_button.setCheckable(True)
+        self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
+        set_tooltip(self.freeze_button,
+                    "Hold these values still to read them. The camera keeps running; "
+                    "the main window stays live.")
+        self.freeze_button.toggled.connect(self.set_frozen)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Square"))
+        controls.addWidget(self.size_combo)
+        controls.addStretch(1)
+        controls.addWidget(self.freeze_button)
+        self.summary = QLabel("Waiting for the camera…")
+        self.summary.setWordWrap(True)
+        set_tooltip(self.summary, "Where the square is on the image, and the smallest, "
+                    "mean and largest value in it.")
+        self.grid = PixelGrid()
+        hint = QLabel(PIXELS_HINT)
+        hint.setWordWrap(True)
+        buttons = QDialogButtonBox()
+        close = buttons.addButton(QDialogButtonBox.Close)
+        close.setAutoDefault(False)
+        close.clicked.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.demo_label)
+        layout.addLayout(controls)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.grid, 1)
+        layout.addWidget(hint)
+        layout.addWidget(buttons)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+
+    def showEvent(self, event):
+        """Ask the displayed camera for squares while the window is open.
+
+        Args: event is the Qt show event.
+        Returns: None.
+        """
+        super().showEvent(event)
+        self._follow(self.window.engine)
+        self.timer.start(PIXELS_POLL_MS)
+
+    def hideEvent(self, event):
+        """Stop the squares and remove the outline from the main image.
+
+        Args: event is the Qt hide event.
+        Returns: None.
+        """
+        super().hideEvent(event)
+        self.timer.stop()
+        self._follow(None)
+        self.freeze_button.setChecked(False)
+
+    def _follow(self, engine):
+        """Move the square request to another engine.
+
+        Args: engine is the Engine to read from, or None for none.
+        Returns: None.
+        """
+        if self.engine is not None:
+            self.engine.set_square(None)
+        self.engine = engine
+        self.shown = None
+        self.grid.set_packet(None)
+        self.window.view.set_box(None)
+        self._request()
+
+    def _request(self):
+        """Send the current size and center to the engine.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.engine is not None:
+            self.engine.set_square(self.size, self.center)
+
+    def set_size(self, index):
+        """Use another square size, and remember it.
+
+        Args: index is the size choice's index into SQUARE_SIZES.
+        Returns: None.
+        """
+        self.size = SQUARE_SIZES[index]
+        QSettings("ESPI", "espi_live").setValue(PIXELS_SIZE_SETTING, self.size)
+        self._request()
+
+    def move_to(self, x, y):
+        """Center the square on a displayed pixel.
+
+        Args: x and y are the image pixel clicked on the main image.
+        Returns: None.
+        """
+        self.center = (x, y)
+        self._request()
+        self.freeze_button.setChecked(False)
+
+    def poll(self):
+        """Show the displayed camera's newest square.
+
+        Follows the main window to another camera; does nothing while frozen.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.window.engine is not self.engine:
+            self.freeze_button.setChecked(False)
+            self._follow(self.window.engine)
+        if self.freeze_button.isChecked():
+            return
+        packet = self.engine.latest_square()
+        if packet is None or packet is self.shown:
+            return
+        self.show_square(packet)
+
+    def show_square(self, packet):
+        """Put a square on screen and outline it on the main image.
+
+        Args: packet is the SquarePacket.
+        Returns: None.
+        """
+        self.shown = packet
+        self.grid.set_packet(packet)
+        self.summary.setText(packet.summary())
+        self.demo_label.setVisible(packet.demo)
+        self.setWindowTitle("Pixel values" + (" — DUMMY MODE" if packet.demo else ""))
+        self.window.view.set_box(packet.box())
+
+    def set_frozen(self, on):
+        """Hold the shown values still, or follow the camera again.
+
+        Args: on is the Freeze button state.
+        Returns: None.
+        """
+        self.window.log.write("Pixel values frozen." if on else "Pixel values live again.")
 
 
 DAQ_POLL_MS = 100
@@ -3044,6 +3374,7 @@ class MainWindow(QMainWindow):
         self.drawn_sequence = 0
         self.shown_packet = None  # the packet on screen; Freeze holds this one
         self.compare_dialog = None  # ReferenceCompareDialog, built on first use
+        self.pixels_dialog = None  # PixelSquareDialog, built on first use
         self.daq = None  # daq.DaqController, made when the DAQ window first opens
         self.daq_dialog = None  # DaqDialog, built on first use
         self.view_state = None  # last logged (view size, zoom, image size)
@@ -3053,6 +3384,7 @@ class MainWindow(QMainWindow):
         self.hover = (-1, -1)
         self.view = GLImageView() if use_gl else CpuImageView()
         self.view.hovered.connect(self._set_hover)
+        self.view.imageClicked.connect(self._image_clicked)
         # The frozen banner floats over the top of the image (same grid cell);
         # mouse events pass through it so zoom, pan and the readout still work.
         self.frozen_banner = QLabel()
@@ -3433,6 +3765,12 @@ class MainWindow(QMainWindow):
                  "current frame and their difference. It has its own Freeze and "
                  "saves all three. Shortcut: C.",
                  self.show_compare, True),
+                ("Pixels (P)",
+                 "Open a window with a small square of the image (1×1 up to 64×64 "
+                 "pixels) enlarged, each pixel's value written on it: the raw "
+                 "difference in camera levels, so 0 means no change. Click the "
+                 "image to move the square. Shortcut: P.",
+                 self.show_pixels, True),
                 ("Reset last (R)",
                  "Restart the Previous view's difference from the next frame. Shortcut: R.",
                  lambda: self.engine.request("reset_previous"), False),
@@ -4934,6 +5272,7 @@ class MainWindow(QMainWindow):
         set_tooltip(hint,
                     "Wheel: zoom. Drag: pan. 0: fit. 1: actual size. Space: freeze. "
                     "S: save. F: set reference. C: compare with the reference. "
+                    "P: pixel values (click the image to move the square). "
                     "R: reset last. A: reset average. "
                     "Q or Esc: quit.")
 
@@ -5435,6 +5774,7 @@ class MainWindow(QMainWindow):
             Qt.Key_S: self.save_frame,
             Qt.Key_F: lambda: self.engine.request("reference"),
             Qt.Key_C: self.show_compare,
+            Qt.Key_P: self.show_pixels,
             Qt.Key_R: lambda: self.engine.request("reset_previous"),
             Qt.Key_A: lambda: self.engine.request("reset_average"),
             Qt.Key_Q: self.close,
@@ -5485,6 +5825,31 @@ class MainWindow(QMainWindow):
         self.compare_dialog.show()
         self.compare_dialog.raise_()
         self.compare_dialog.activateWindow()
+
+    def show_pixels(self):
+        """Open (or raise) the pixel values window for the displayed camera.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.pixels_dialog is None:
+            self.pixels_dialog = PixelSquareDialog(self)
+            self.pixels_dialog.finished.connect(
+                lambda _: self.log.write("Pixel values closed."))
+        if not self.pixels_dialog.isVisible():
+            self.log.write(f"Pixel values opened for {self.current.label}.")
+        self.pixels_dialog.show()
+        self.pixels_dialog.raise_()
+        self.pixels_dialog.activateWindow()
+
+    def _image_clicked(self, x, y):
+        """Move the pixel square to a clicked pixel while its window is open.
+
+        Args: x and y are the image pixel clicked.
+        Returns: None.
+        """
+        if self.pixels_dialog is not None and self.pixels_dialog.isVisible():
+            self.pixels_dialog.move_to(x, y)
 
     def _show_daq_dialog(self):
         """Open the NI DAQ window, creating its controller on first use.

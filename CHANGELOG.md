@@ -13,6 +13,18 @@
 - Each lens has its own saved profile; the wide camera keeps its old serial, so its saved settings carry over.
 - **Needs the new ESPI Camera app build** (TestFlight): the app reports its back cameras in HELLO and switches on a new `lens` command. With an older app the phone is listed as before, as one **iPhone (USB)**.
 
+## 2026-11-21 — Pixel values window
+
+### Previous state
+
+- The only numeric readout was the pixel under the pointer, and it showed the displayed value, after gain, averaging and scaling, so it could not show whether anything had actually moved.
+
+### Current state
+
+- A **Pixels (P)** toolbar button opens a window with a square of the image enlarged: 1×1, 2×2, 4×4, 8×8, 16×16, 32×32 or 64×64 camera pixels (8×8 at first; the choice is remembered). Each pixel is a cell with its integer value written on it, shaded from black (0) to white (the largest in the square), and the square's position, min, mean and max are shown above it.
+- In Previous and Reference view the values are the raw absolute difference in camera levels (0–255), taken before the noise threshold, Difference gain, averaging and Scaling, so display settings do not change them: 0 means the pixel did not change, and movement raises it. With averaging before the difference on, they are the difference of the averaged frames. In Raw difference they are that view's |live − previous|; Raw view shows camera levels.
+- The square starts at the image center, is outlined in yellow on the main image, and moves to wherever you click the image. It refreshes ten times a second, has its own **Freeze**, and follows the displayed camera. The outline is not part of saved frames or recordings.
+
 ## 2026-11-21 — Per-camera profiles and saved presets
 
 ### Previous state
