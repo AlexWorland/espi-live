@@ -503,6 +503,7 @@
           </ol>
         </li>
         <li><a href="#several-cameras">Several cameras</a></li>
+        <li><a href="#profiles">Camera profiles and presets</a></li>
         <li><a href="#analog">Analog camera</a></li>
         <li><a href="#daq">Frequency generator and piezo (NI DAQ)</a></li>
         <li><a href="#iphone">iPhone camera</a></li>
@@ -537,7 +538,7 @@
             <li><a href="#ts-record-skip">Skipped frames</a></li>
             <li><a href="#ts-record-stop">Recording stops</a></li>
             <li><a href="#ts-clamp">Control clamps</a></li>
-            <li><a href="#ts-colors">Color mismatch</a></li>
+            <li><a href="#ts-colors">Brightness mismatch</a></li>
             <li><a href="#ts-fatal">Fatal error</a></li>
           </ol>
         </li>
@@ -593,8 +594,7 @@
           fringe pattern.</li>
         <li>If the pattern is noisy, raise <a href="#measurement">Average N</a>.
           If it is faint, raise <strong>Difference gain</strong> (Fixed gain) or
-          switch <strong>Scaling</strong> to Auto stretch, and try a
-          color <a href="#display">Palette</a>.</li>
+          switch <strong>Scaling</strong> to Auto stretch.</li>
         <li>Press <kbd>S</kbd> (<strong>Save frame</strong>) to keep a still, or
           <a href="#capture">Record AVI</a> to capture a sequence. Add a title
           and notes before saving to identify the measurement.</li>
@@ -764,7 +764,7 @@ python -m espi_live</code></pre>
             the camera's own grey levels. While it is on (the button turns red
             and the view buttons grey out) every other step is bypassed: noise
             reduction, single field, filters, averaging, difference gain,
-            stretch, palette, gamma, flip and display tone. Your settings are
+            stretch, gamma, flip and display tone. Your settings are
             kept and come back when you turn it off; the camera's own exposure
             and gain are unchanged. Recordings are named
             <code>espi_rawdiff_*.avi</code>, and the comparison window shows the
@@ -799,8 +799,8 @@ python -m espi_live</code></pre>
         <div class="card-grid">
           <div class="card">
             <h4>Raw</h4>
-            <p>The direct Mono8 camera image with no subtraction, stretch or
-              palette; the gamma slider still applies. Use it for positioning,
+            <p>The direct Mono8 camera image with no subtraction or stretch;
+              the gamma slider still applies. Use it for positioning,
               focusing and checking exposure.</p>
           </div>
           <div class="card">
@@ -853,6 +853,11 @@ python -m espi_live</code></pre>
             LabVIEW program used). On, it keeps one field, doubled to full
             height, removing the 1/60 s offset between fields at the cost of
             half the vertical detail.</li>
+          <li><strong>Presets</strong> — your saved presets, with
+            <strong>Apply</strong>, <strong>Save as…</strong> and
+            <strong>Delete</strong>, and <strong>Reset camera to
+            defaults…</strong>. See
+            <a href="#profiles">Camera profiles and presets</a>.</li>
         </ul>
         <p>Each control has a slider for quick changes and a number box for
           exact entry: drag the slider, type a value and press Enter, or use the
@@ -913,7 +918,7 @@ python -m espi_live</code></pre>
           and turns off noise reduction, the noise threshold, beam-brightness
           correction, the speckle and outlier filters, peak hold, local
           normalization, stretch, the display brightness, gain and contrast,
-          CLAHE and invert. If you turn averaging on, it sums N + 1
+          and invert. If you turn averaging on, it sums N + 1
           frames and divides by N, as the program did. Exposure, gain, frame
           rate, recording and the flip keep their values. Turn it off to get
           your own settings back; changes made while it is on are dropped. Each
@@ -924,8 +929,8 @@ python -m espi_live</code></pre>
         <p>Processing order: noise reduction → (frame average) → difference
           (N frames back) → noise threshold → beam brightness → outlier filter
           → average → speckle filter → noise floor → peak hold → fixed gain,
-          stretch or local normalization → invert → gamma/CLAHE → brightness,
-          gain and contrast → palette. The frame average and the noise floor
+          stretch or local normalization → invert → brightness,
+          gain and contrast → gamma. The frame average and the noise floor
           run only when their checkboxes are on. With <strong>Gain before averaging</strong>, the fixed
           gain moves to just before the outlier filter. Raw skips difference
           processing and still applies noise reduction, display gamma and the
@@ -1005,7 +1010,7 @@ python -m espi_live</code></pre>
             255, so fringes fill the display; a constant difference image maps
             to black. The Sony XC-ST50 starts in Fixed gain, the Blackfly and
             demo mode in Auto stretch. The status bar shows the input and scaled
-            ranges, before gamma and palette.</li>
+            ranges, before gamma.</li>
           <li><strong>Difference gain</strong> — Fixed gain's multiplier,
             1–64×; 42× by default, the LabVIEW program's Constant, so any
             difference of 7 grey levels or more is white. Lower it when noise
@@ -1073,28 +1078,18 @@ python -m espi_live</code></pre>
 
       <section id="display">
         <h3>Display <a class="anchor" href="#display" aria-label="Link to Display">#</a></h3>
-        <p>Gamma applies in <strong>Raw</strong>, <strong>Previous</strong> and
-          <strong>Reference</strong> views. Raw stays grayscale and ignores
-          the palette and CLAHE.</p>
+        <p>The display is always grayscale. Gamma applies in
+          <strong>Raw</strong>, <strong>Previous</strong> and
+          <strong>Reference</strong> views.</p>
         <ul>
-          <li><strong>Palette</strong> — Gray, Turbo, Jet, Hot, Viridis, Plasma
-            or Inferno. Color palettes make small intensity differences easier
-            to see. The palette applies to the whole processed frame, and saved
-            files and recordings use exactly the same colors as the screen.</li>
           <li><strong>Gamma</strong> — a display curve from 0.1 to 3.0. Values
             below 1 <strong>darken</strong> midtones and values above 1
             <strong>brighten</strong> them. Gamma does not change the
             measurement data, only how it is displayed and saved. 1.0 leaves
             the image unchanged.</li>
-          <li><strong>CLAHE (color palettes only)</strong> — contrast-limited
-            adaptive histogram equalization. It boosts local contrast in small
-            tiles, which can reveal faint fringes in unevenly lit areas. It is
-            computed on the CPU, so it costs more processing time, and it is
-            ignored when the palette is Gray. Gamma is applied before
-            CLAHE.</li>
           <li><strong>Brightness</strong>, <strong>Gain</strong> and
             <strong>S-curve contrast</strong> — one lookup table applied in
-            every view before the palette: Gain multiplies the displayed image
+            every view before gamma: Gain multiplies the displayed image
             (bright values saturate), the S-curve darkens values below mid-grey
             and brightens those above, and Brightness adds grey levels. Saved
             frames and recordings match the screen. All off by default (0, 1×,
@@ -1111,7 +1106,7 @@ python -m espi_live</code></pre>
             <strong>Previous</strong>/<strong>Reference</strong> the output rate
             is the source rate divided by <strong>Average N</strong>, capped at
             30 fps and floored at 1 fps. In <strong>Raw</strong> view Average N
-            is ignored. Recording includes the palette, gamma, CLAHE, scaling
+            is ignored. Recording includes gamma, scaling
             and, in demo mode, the watermark, so the file matches the screen.
             The label beside the button shows the output rate, and recording
             continues while you move, resize or interact with the window.
@@ -1124,8 +1119,8 @@ python -m espi_live</code></pre>
               <li>Changing the view mode, or <strong>Average N</strong> or
                 <strong>Rolling average</strong> in Previous/Reference, closes
                 the current AVI and starts a new one.
-                <strong>Other changes do not split the file:</strong> palette,
-                gamma, CLAHE, Scaling, Difference gain, Stretch clip, Outlier
+                <strong>Other changes do not split the file:</strong> gamma,
+                Scaling, Difference gain, Stretch clip, Outlier
                 filter, Speckle filter, Invert, Frames back, exposure, gain, FPS, noise reduction, Single field,
                 <strong>Set reference</strong>, <strong>Reset last</strong> and
                 <strong>Reset average</strong> all continue writing to the same
@@ -1208,7 +1203,7 @@ python -m espi_live</code></pre>
             reference exists and the image is not black; in Previous view, wait
             for the first baseline frame. A recording started before either
             exists contains black frames. Stop the recording before changing
-            exposure, gain, FPS, palette, gamma, CLAHE or scaling, or before
+            exposure, gain, FPS, gamma or scaling, or before
             <strong>Set reference</strong>, <strong>Reset last</strong> or
             <strong>Reset average</strong>. Check free disk space first: the AVI
             is full-resolution MJPG, there is no size limit or free-space check,
@@ -1248,8 +1243,7 @@ python -m espi_live</code></pre>
             input minimum and maximum and the scaled range, for example
             <code>Input: 3–41    Scaled: 0–255</code>. In Raw view it reads
             <code>Raw Mono8: no brightness scaling</code>. The range is
-            measured after Stretch clip and before gamma, CLAHE and the
-            palette.</li>
+            measured after Stretch clip and before gamma.</li>
           <li><strong>Processing and display rate</strong> —
             <code>Processed: 29.9 fps  Work: 4.2 ms/frame</code> followed by
             <code>Displayed: 29.8 fps</code>. <strong>Processed</strong> is
@@ -1263,8 +1257,7 @@ python -m espi_live</code></pre>
             image is published only after N frames.</li>
           <li><strong>Pixel readout</strong> — while the pointer is over the
             image: <code>x 412, y 208: 137</code>, the image coordinates and the
-            0–255 sample used for display: after Stretch clip and scaling, and
-            after gamma/CLAHE when CLAHE is on. With scaling off it is the raw
+            0–255 sample used for display: after Stretch clip and scaling. With scaling off it is the raw
             absolute difference. It is not calibrated in physical units.</li>
         </ul>
       </section>
@@ -1377,7 +1370,76 @@ python -m espi_live</code></pre>
         rate or use separate controllers if it drops. <code>--demo
         --demo-cameras 3</code> simulates three cameras for trying this without
         hardware.</p>
-      <p>See <a href="#op-cameras">Use several cameras</a>.</p>
+      <p>See <a href="#op-cameras">Use several cameras</a> and
+        <a href="#profiles">Camera profiles and presets</a>.</p>
+    </section>
+
+    <section id="profiles">
+      <h2>Camera profiles and presets <a class="anchor" href="#profiles" aria-label="Link to Camera profiles and presets">#</a></h2>
+      <p>Every camera has its own <strong>profile</strong>: exposure, gain,
+        frame rate, the view, and every processing and display control,
+        including whether the <strong>LabVIEW flow</strong> is on. A change
+        made while one camera is displayed never reaches another camera.
+        With several cameras, the Camera section starts with
+        <strong>Settings of</strong> and the camera's name, so it is always
+        clear whose settings you are editing; pick another camera under
+        <strong>Display</strong> to edit its profile instead.</p>
+      <h4>Saved between runs</h4>
+      <ul>
+        <li>Each camera's profile is saved about a second after you stop
+          changing it, when you switch to another camera, and when the program
+          closes. The next time that camera is connected it starts with the
+          same values, and the log says so: <code>BFS (12345678): saved
+          settings restored (exposure 12000 µs, gain 2 dB, 30 fps, Reference
+          view).</code></li>
+        <li>A FLIR camera is recognised by its serial number, and an analog
+          capture stick by its USB ID and name (its <em>video N</em> number
+          changes between runs). Demo cameras keep separate profiles, so
+          demo values never land on a real camera, also not after
+          <strong>Switch to live capture</strong>: the live camera starts
+          with its own saved profile, or with its defaults.</li>
+        <li>Recording is never saved: a camera always starts with
+          <strong>Record AVI</strong> off. Window layout, interface size,
+          zoom and which Controls sections are open are not part of a
+          profile.</li>
+        <li>A camera seen for the first time starts from the defaults in
+          <a href="#defaults">Defaults and limits</a> (exposure 8000 µs,
+          gain 0 dB, 30 fps; the LabVIEW flow on for the analog camera).
+          Exposure, gain and frame rate are still clamped to what the camera
+          reports.</li>
+        <li><strong>Reset camera to defaults…</strong> puts the displayed
+          camera back to those defaults after you confirm, and clears its saved
+          profile. Other cameras and your presets do not change.</li>
+      </ul>
+      <h4>Presets</h4>
+      <p>A <strong>preset</strong> is a profile saved under a name you choose,
+        which any camera can use. The <strong>Presets</strong> row sits in the
+        Camera section:</p>
+      <ul>
+        <li><strong>Save as…</strong> asks for a name and saves the displayed
+          camera's current settings. Names ignore letter case, so a name that
+          is already used asks before it replaces that preset.</li>
+        <li>Pick a preset in the list, then <strong>Apply</strong>: it changes
+          only the displayed camera, which keeps the new settings as its
+          profile. A preset saved on another camera model still applies: the
+          processing values in full, and exposure, gain and frame rate fitted
+          into this camera's limits. The log lists every value that had to
+          change and ends with <code>Preset applied: &lt;name&gt; to
+          &lt;camera&gt;</code>.</li>
+        <li><strong>Delete</strong> removes the chosen preset after you
+          confirm; cameras keep their settings.</li>
+        <li>Hover a preset in the list to see the camera model it was saved
+          from.</li>
+      </ul>
+      <p>The built-in <strong>Live preview</strong>, <strong>Measurement</strong>
+        and <strong>Peak hold</strong> buttons (top of
+        <a href="#measurement">ESPI measurement</a>) are separate: they change
+        only processing, never exposure, gain, frame rate or the LabVIEW flow,
+        and they are not listed with your presets. To keep one together with
+        your camera values, press it, then <strong>Save as…</strong>.</p>
+      <p>Profiles and presets live in the program's own settings store (the
+        registry on Windows, a preferences file on macOS and Linux), beside
+        the window layout, not in <code>output/</code>.</p>
     </section>
 
     <section id="analog">
@@ -1509,7 +1571,9 @@ python -m espi_live</code></pre>
       <h2>Defaults and limits <a class="anchor" href="#defaults" aria-label="Link to Defaults and limits">#</a></h2>
       <p>These are the values the app starts with and the ranges its controls
         expose. The camera may clamp a value further; check the
-        <strong>Applied</strong> readout.</p>
+        <strong>Applied</strong> readout. A camera with a saved profile starts
+        with its own last values instead (see
+        <a href="#profiles">Camera profiles and presets</a>).</p>
       <div class="table-wrap">
         <table>
           <caption class="sr-only">Default values and control ranges</caption>
@@ -1571,11 +1635,11 @@ python -m espi_live</code></pre>
             <tr><td>Local normalization</td><td>0 px (off)</td><td>0–255 px</td>
               <td>Replaces Fixed gain or Auto stretch.</td></tr>
             <tr><td>Brightness</td><td>0</td><td>0–128 levels</td>
-              <td>Every view, before the palette.</td></tr>
+              <td>Every view, before gamma.</td></tr>
             <tr><td>Gain (display)</td><td>1×</td><td>1–8×, step 0.1</td>
-              <td>Every view, before the palette.</td></tr>
+              <td>Every view, before gamma.</td></tr>
             <tr><td>S-curve contrast</td><td>0%</td><td>0–100%</td>
-              <td>Every view, before the palette.</td></tr>
+              <td>Every view, before gamma.</td></tr>
             <tr><td>Stretch clip</td><td>0%</td><td>0–10%, step 0.1%</td>
               <td>0 = exact min/max.</td></tr>
             <tr><td>Invert</td><td>Off</td><td>On / off</td>
@@ -1583,12 +1647,8 @@ python -m espi_live</code></pre>
             <tr><td>Flip horizontally</td><td>Off</td><td>On / off</td>
               <td>Mirrors the image left to right in every view, including saved
                 frames and recordings.</td></tr>
-            <tr><td>Palette</td><td>Gray</td><td>Gray, Turbo, Jet, Hot,
-              Viridis, Plasma, Inferno</td><td>Raw is always grayscale.</td></tr>
             <tr><td>Gamma</td><td>1.0</td><td>0.1–3.0, step 0.1</td>
               <td>&lt; 1 darkens midtones; &gt; 1 brightens.</td></tr>
-            <tr><td>CLAHE</td><td>On</td><td>On / off</td>
-              <td>Only with a color palette.</td></tr>
             <tr><td>Interface size</td><td>100%</td><td>70–200%, step 5%</td>
               <td>Scales the whole window; remembered for the next run.</td></tr>
             <tr><td>Record AVI</td><td>Off</td><td>On / off</td>
@@ -1653,8 +1713,7 @@ python -m espi_live</code></pre>
           <li>Load, heat or otherwise deform the specimen. The image now shows
             absolute differences from the resting state.</li>
           <li>If the pattern is too faint, raise <strong>Difference gain</strong>
-            or switch <strong>Scaling</strong> to Auto stretch, and try a
-            <a href="#display">color palette</a>.</li>
+            or switch <strong>Scaling</strong> to Auto stretch.</li>
           <li>To start a new measurement from the current state, press
             <kbd>F</kbd> again.</li>
           <li>If the camera settings or illumination change, capture a new
@@ -1715,8 +1774,6 @@ python -m espi_live</code></pre>
             the Blackfly; Fixed gain on the analog camera, raising
             <strong>Difference gain</strong> until the fringes are bright. The
             status bar shows the true input range.</li>
-          <li>Choose a color <a href="#display">Palette</a> for small
-            differences.</li>
           <li>Use <strong>Speckle filter</strong> and <strong>Filter width</strong>
             to blur away pixel-scale speckle; keep the width well below the
             fringe spacing.</li>
@@ -1725,9 +1782,6 @@ python -m espi_live</code></pre>
           <li>Adjust <strong>Gamma</strong> to brighten or darken the
             midtones, and <strong>Invert</strong> to swap bright and dark
             fringes.</li>
-          <li>Enable <strong>CLAHE</strong> if one area is much dimmer than
-            another; it boosts local contrast but costs processing time and only
-            works with a color palette.</li>
           <li>Use Fixed gain at 1× when you need to judge absolute difference
             values between frames; the status bar and pixel readout then show
             the unscaled values.</li>
@@ -1748,14 +1802,14 @@ python -m espi_live</code></pre>
             matching <code>.txt</code> file holds them with the source (Camera
             or Demo).</li>
         </ol>
-        <p>The PNG contains exactly the current display, including palette,
-          gamma, CLAHE, stretch, invert and the demo watermark.</p>
+        <p>The PNG contains exactly the current display, including gamma,
+          stretch, invert and the demo watermark.</p>
       </section>
 
       <section id="op-record">
         <h3>Record a measurement sequence <a class="anchor" href="#op-record" aria-label="Link to Record a measurement sequence">#</a></h3>
         <ol>
-          <li>Set the view, averaging, palette and contrast you want. These
+          <li>Set the view, averaging, gamma and contrast you want. These
             choices are baked into the recording.</li>
           <li>Click <strong>Record AVI</strong>. The status label beside the
             button shows the output frame rate.</li>
@@ -1769,7 +1823,7 @@ python -m espi_live</code></pre>
         <div class="note">
           <p>Only the view mode, and <strong>Average N</strong> or
             <strong>Rolling average</strong> in Previous/Reference, start a new
-            file. Changing palette, gamma, CLAHE, Scaling, Difference gain,
+            file. Changing gamma, Scaling, Difference gain,
             Stretch clip, Outlier filter, Speckle filter, Frames back, Invert, exposure, gain, FPS, noise reduction,
             Single field, <strong>Set reference</strong>,
             <strong>Reset last</strong> or <strong>Reset average</strong>
@@ -1867,6 +1921,10 @@ python -m espi_live</code></pre>
           <li>Uncheck <strong>Process</strong> to stop a camera and release it;
             its settings are kept, but its reference and average start fresh
             when it runs again.</li>
+          <li>Each camera keeps its own settings, also between runs. To give
+            two cameras the same settings, save a preset on one
+            (<strong>Save as…</strong>), display the other and press
+            <strong>Apply</strong>.</li>
         </ol>
       </section>
     </section>
@@ -1876,7 +1934,7 @@ python -m espi_live</code></pre>
       <p>Shortcuts are ignored while you are typing in a text field, so
         <kbd>S</kbd> in the notes box types the letter instead of saving. The
         same applies after clicking the number boxes for exposure, gain, FPS,
-        Average N or gamma, or the Palette list: click the image or press
+        Average N or gamma: click the image or press
         <kbd>Esc</kbd> before using <kbd>S</kbd>, <kbd>F</kbd>, <kbd>R</kbd> or
         <kbd>A</kbd>.</p>
       <p>The same shortcut list is in the <strong>View</strong> menu, and
@@ -1942,7 +2000,7 @@ python -m espi_live</code></pre>
           <code>output/logs/espi_&lt;YYYYMMDD_HHMMSS_microseconds&gt;.log</code>.</li>
       </ul>
       <p>Recordings are MJPG-compressed AVI files. They are capped at 30 fps and
-        use the same colors as the screen. A frame title or notes produce a
+        use the same gray values as the screen. A frame title or notes produce a
         sidecar text file with the frame name, source, title, notes and, for a
         frozen image, the time it was frozen.</p>
     </section>
@@ -2048,9 +2106,9 @@ python -m espi_live</code></pre>
       </details>
 
       <details class="faq" id="ts-colors">
-        <summary>Saved colors do not match the screen</summary>
+        <summary>Saved brightness does not match the screen</summary>
         <p>They should: saved frames and recordings are produced by the same
-          palette and gamma path as the display. Confirm you are looking at the
+          gamma path as the display. Confirm you are looking at the
           file from the same run and that it is a demo file (watermarked) or a
           camera file as expected.</p>
       </details>

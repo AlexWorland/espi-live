@@ -188,7 +188,7 @@ class FloorHelpersTests(unittest.TestCase):
         s = Settings(mode="Previous", scale_range=True)
         key = floor_key(s, processor, (4, 4))
         self.assertEqual(key, floor_key(replace(s, difference_gain=3.0), processor, (4, 4)))
-        self.assertEqual(key, floor_key(replace(s, palette="Jet"), processor, (4, 4)))
+        self.assertEqual(key, floor_key(replace(s, gamma=2.0), processor, (4, 4)))
         for changed in (replace(s, frames_back=2), replace(s, average=4),
                         replace(s, average_frames_first=True), replace(s, smoothing=3),
                         replace(s, exposure_us=1.0), replace(s, mode="Reference")):
@@ -209,12 +209,11 @@ class FloorHelpersTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        s = Settings(mode="Previous", scale_range=False, difference_gain=10.0,
-                     clahe=False)
+        s = Settings(mode="Previous", scale_range=False, difference_gain=10.0)
         seen = []
         image = np.full((2, 2), 5, np.uint8)
-        out, _, _, levels = finish_difference(
-            image, s, None, floor=np.full((2, 2), 3.0, np.float32),
+        out, levels = finish_difference(
+            image, s, floor=np.full((2, 2), 3.0, np.float32),
             floor_sample=lambda img, now: seen.append((img.copy(), now)), now=4.0)
         self.assertEqual(seen[0][0].tolist(), image.tolist())
         self.assertEqual(seen[0][1], 4.0)

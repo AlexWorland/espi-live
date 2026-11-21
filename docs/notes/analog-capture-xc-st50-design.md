@@ -83,8 +83,8 @@ devices; the FLIR part follows in a later PR).
 - The engine talks to its source through `open`, `grab(timeout_ms) →
   (frame, status)`, `set_float`, `limits`, `read_values`, `close`,
   `identity`, `info`; only the source's owning thread touches it.
-- Source, processing and report code stay free of GUI imports; display colour
-  stays only in `processing.apply_palette`.
+- Source, processing and report code stay free of GUI imports; display tone
+  stays only in `processing.apply_display`.
 - Optional platform pieces are imported lazily and guarded (as PySpin is);
   `--demo` and `--check` never open a device.
 - 100 % line coverage, `Args: / Returns:` docstrings, `CHANGELOG.md`,

@@ -12,6 +12,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import json
 import logging
 import queue
 import sys
@@ -129,6 +130,7 @@ class FakeSettings:
     """Dictionary-backed QSettings replacement so the user's store is untouched."""
 
     store = {}
+    syncs = 0
 
     def __init__(self, *args):
         """Accept and ignore the organization and application names.
@@ -153,6 +155,30 @@ class FakeSettings:
         Returns: None.
         """
         self.store[key] = value
+
+    def remove(self, key):
+        """Forget a value.
+
+        Args: key is the setting name.
+        Returns: None.
+        """
+        self.store.pop(key, None)
+
+    def allKeys(self):
+        """List every stored key.
+
+        Args: None.
+        Returns: A list of setting names.
+        """
+        return list(self.store)
+
+    def sync(self):
+        """Count a request to write the store to disk.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.syncs += 1
 
 
 class FakeUpdateWorker:
@@ -204,14 +230,14 @@ def make_dialogs(answer=None):
     return dialogs
 
 
-def make_packet(sequence=1, width=64, height=48, palette="Gray", gamma=1.0):
+def make_packet(sequence=1, width=64, height=48, gamma=1.0):
     """Build a FramePacket with a horizontal ramp image.
 
-    Args: sequence, width, height and palette/gamma describe the frame.
+    Args: sequence, width, height and gamma describe the frame.
     Returns: A FramePacket.
     """
     image = np.tile(np.arange(width, dtype=np.uint8) * 3, (height, 1))
-    return FramePacket(sequence, image, palette, gamma, "Raw", True)
+    return FramePacket(sequence, image, gamma, "Raw", True)
 
 
 def wait_for(predicate, timeout=5.0):
@@ -660,7 +686,7 @@ class CpuImageViewPaintTests(unittest.TestCase):
         Returns: None.
         """
         image = np.full((1500, 2000), 200, np.uint8)
-        packet = FramePacket(1, image, "Gray", 1.0, "Raw", True)
+        packet = FramePacket(1, image, 1.0, "Raw", True)
         self.view.show_packet(packet, self.table, None)
         self.assertEqual(self.center_pixel(), 200)
 
@@ -671,7 +697,7 @@ class CpuImageViewPaintTests(unittest.TestCase):
         Returns: None.
         """
         image = np.full((20, 20), 90, np.uint8)
-        packet = FramePacket(1, image, "Gray", 1.0, "Raw", True)
+        packet = FramePacket(1, image, 1.0, "Raw", True)
         self.view.show_packet(packet, self.table, None)
         self.view.set_zoom(3.0)
         self.assertEqual(self.center_pixel(), 90)
@@ -683,7 +709,7 @@ class CpuImageViewPaintTests(unittest.TestCase):
         Returns: None.
         """
         image = np.full((100, 100), 255, np.uint8)
-        packet = FramePacket(1, image, "Gray", 1.0, "Raw", True)
+        packet = FramePacket(1, image, 1.0, "Raw", True)
         self.view.show_packet(packet, self.table, None)
         self.view.zoom, self.view.center = 2.0, (-100000.0, -100000.0)
         self.assertLess(self.center_pixel(), 255)
@@ -1293,18 +1319,14 @@ class MainWindowBuildTests(WindowTestCase):
         w.gain_before_average.setChecked(not before.gain_before_average)
         w.invert.setChecked(not before.invert)
         w.flip_button.setChecked(not before.flip_horizontal)
-        w.clahe.setChecked(not before.clahe)
         w.smoothing_combo.setCurrentIndex(w.smoothing_combo.count() - 1)
-        w.palette_combo.setCurrentIndex(w.palette_combo.count() - 1)
         after = self.engine.settings()
         self.assertEqual(after.rolling, not before.rolling)
         self.assertEqual(after.scale_range, not before.scale_range)
         self.assertEqual(after.gain_before_average, not before.gain_before_average)
         self.assertEqual(after.invert, not before.invert)
         self.assertEqual(after.flip_horizontal, not before.flip_horizontal)
-        self.assertEqual(after.clahe, not before.clahe)
         self.assertEqual(after.smoothing_method, w.smoothing_combo.currentText())
-        self.assertEqual(after.palette, w.palette_combo.currentText())
 
     def test_fringe_and_display_controls_update_engine(self):
         """Sensitivity, threshold, steady range, peak hold, normalization, tone.
@@ -1387,7 +1409,7 @@ class MainWindowBuildTests(WindowTestCase):
         """
         w = self.window
         self.engine.update_settings(mode="Previous", noise_reduction=40, smoothing=5,
-                                    palette="Turbo", difference_gain=12, exposure_us=3000)
+                                    gamma=1.4, difference_gain=12, exposure_us=3000)
         w._load_settings(self.engine.settings(), w.current.limits)
         with mock.patch.object(self.engine, "request") as request:
             w.labview_button.setChecked(True)
@@ -1402,8 +1424,8 @@ class MainWindowBuildTests(WindowTestCase):
         w.smoothing.spin.setValue(7)  # a change made in the LabVIEW flow is dropped
         w.labview_button.setChecked(False)
         s = self.engine.settings()
-        self.assertEqual((s.mode, s.noise_reduction, s.smoothing, s.palette),
-                         ("Previous", 40, 5, "Turbo"))
+        self.assertEqual((s.mode, s.noise_reduction, s.smoothing, s.gamma),
+                         ("Previous", 40, 5, 1.4))
         self.assertEqual(s.difference_gain, 12)
         self.assertIsNone(w.current.labview_saved)
         self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
@@ -1573,8 +1595,8 @@ class SimpleUiTests(WindowTestCase):
             self.assertTrue(shown.isVisibleTo(w), shown)
         for hidden in (w.fps, w.noise_reduction, w.average, w.rolling, w.ref_refresh,
                        w.frames_back, w.smoothing_combo, w.smoothing, w.scaling,
-                       w.invert, w.clip, w.palette_combo, w.gamma, w.brightness,
-                       w.clahe, w.flip_button, w.labview_button, w.ui_scale_row,
+                       w.invert, w.clip, w.gamma, w.brightness,
+                       w.flip_button, w.labview_button, w.ui_scale_row,
                        w.frame_title, w.frame_notes, w.zoom_slider, w.zoom_label):
             self.assertFalse(hidden.isVisibleTo(w), hidden)
         for toggle in w._section_toggles.values():
@@ -1642,7 +1664,7 @@ class SimpleUiTests(WindowTestCase):
         self.assertGreaterEqual(w.controls_panel.height(),
                                 w.controls_panel.minimumSizeHint().height())
         for shown in (w.exposure, w.gain, w.fps, w.noise_reduction, w.average,
-                      w.scaling, w.palette_combo, w.labview_button, w.frame_title):
+                      w.scaling, w.gamma, w.labview_button, w.frame_title):
             self.assertTrue(shown.isVisibleTo(w), shown)
         self.assertFalse(w.single_field.isVisibleTo(w))  # hides itself unless needed
         for toggle in w._section_toggles.values():
@@ -1681,18 +1703,18 @@ class SimpleUiTests(WindowTestCase):
         w.simple_ui_button.setChecked(False)
         w._section_toggles["Display"].setChecked(False)
         QApplication.processEvents()
-        self.assertFalse(w.palette_combo.isVisibleTo(w))
+        self.assertFalse(w.gamma.isVisibleTo(w))
         self.assertEqual(w.noise_reduction.value(), 10)
         w.simple_ui_button.setChecked(True)
         w.simple_ui_button.setChecked(False)
         QApplication.processEvents()
         self.assertEqual(self.engine.settings().noise_reduction, 10)
         self.assertEqual(w.noise_reduction.value(), 10)
-        self.assertFalse(w.palette_combo.isVisibleTo(w))  # still collapsed
+        self.assertFalse(w.gamma.isVisibleTo(w))  # still collapsed
         self.assertTrue(w.noise_reduction.isVisibleTo(w))
         w._section_toggles["Display"].setChecked(True)
         QApplication.processEvents()
-        self.assertTrue(w.palette_combo.isVisibleTo(w))
+        self.assertTrue(w.gamma.isVisibleTo(w))
 
     def test_toggle_does_not_duplicate_labels(self):
         """Each full-UI toggle makes one label per labeled row, not an extra copy.
@@ -1770,9 +1792,7 @@ class SettingsGuideTests(WindowTestCase):
             w.invert: ("bright and dark", "Start off"),
             w.flip_button: ("left to right", "Start off"),
             w.clip: ("speckles", "Start at 0"),
-            w.palette_combo: ("Start with Gray",),
             w.gamma: ("Start at 1.0",),
-            w.clahe: ("color palette", "Gray"),
         }
         for widget, phrases in expected.items():
             tip = " ".join(widget.toolTip().split())
@@ -1797,7 +1817,7 @@ class SettingsGuideTests(WindowTestCase):
         self.assertEqual(s.mode, "Reference")
         self.assertEqual((s.average, s.rolling, s.ref_refresh_s), (8, False, 2.0))
         self.assertEqual((s.smoothing, s.smoothing_method), (3, "Median"))
-        self.assertEqual((s.noise_reduction, s.clip_percent, s.clahe), (0.0, 0.5, True))
+        self.assertEqual((s.noise_reduction, s.clip_percent), (0.0, 0.5))
         self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
         self.assertFalse(s.single_field)
         self.assertEqual(w.average.value(), 8)
@@ -1805,7 +1825,7 @@ class SettingsGuideTests(WindowTestCase):
         buttons["Live preview"].click()
         s = self.engine.settings()
         self.assertEqual(qt_app.PROCESSING_PRESETS["Live preview"]["mode"], s.mode)
-        self.assertEqual((s.average, s.smoothing, s.clahe, s.ref_refresh_s), (1, 0, False, 0.0))
+        self.assertEqual((s.average, s.smoothing, s.ref_refresh_s), (1, 0, 0.0))
         self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
         self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
         self.assertIn("Preset applied: Live preview", self.log.lines)
@@ -2273,8 +2293,8 @@ class ReferenceCompareTests(WindowTestCase):
         Returns: The ComparePacket.
         """
         image = np.full((40, 60), 80, dtype=np.uint8)
-        part = FramePacket(sequence, image, "Gray", 1.0, "Current", demo)
-        diff = FramePacket(sequence, image, "Turbo", 1.0, "Reference", demo)
+        part = FramePacket(sequence, image, 1.0, "Current", demo)
+        diff = FramePacket(sequence, image, 1.0, "Reference", demo)
         return ComparePacket(sequence, part, part if reference else None,
                              diff if reference else None,
                              "1 frame, noise reduction 0, 2 s old" if reference
@@ -2289,8 +2309,8 @@ class ReferenceCompareTests(WindowTestCase):
         """
         image = np.full((40, 60), 80, dtype=np.uint8)
         frames = f"{back} {'frame' if back == 1 else 'frames'}"
-        part = FramePacket(sequence, image, "Gray", 1.0, "Current", False)
-        diff = FramePacket(sequence, image, "Turbo", 1.0, "Previous", False)
+        part = FramePacket(sequence, image, 1.0, "Current", False)
+        diff = FramePacket(sequence, image, 1.0, "Previous", False)
         return ComparePacket(
             sequence, part, part if baseline else None, diff if difference else None,
             f"the frame the view subtracts, {frames} back" if baseline else "none yet",
@@ -2671,7 +2691,7 @@ class PollingTests(WindowTestCase):
         self.assertEqual(self.window.drawn_frames, 2)
         self.assertIs(self.window.table, first_table)
         self.assertEqual(self.window.view.image_size, (64, 48))
-        self.engine._packet = make_packet(sequence=3, palette="Jet")
+        self.engine._packet = make_packet(sequence=3, gamma=2.0)
         self.window._poll_frame()
         self.assertIsNot(self.window.table, first_table)
 
@@ -2779,6 +2799,7 @@ class PollingTests(WindowTestCase):
         """
         window = self.window
         window.show()
+        window.resize(1600, 800)  # wide enough that no status item wraps or is dropped
         QApplication.processEvents()
         names = {window.check_button: "Check for updates",
                  window.feature_button: "Request feature",
@@ -2799,8 +2820,15 @@ class PollingTests(WindowTestCase):
                              "Request feature: Send a feature request to the developers "
                              "as a GitHub issue."))
         # Reading order (row, then left to right): the buttons, the rule, then the source.
+        # The window is wide, so they share one row; a narrow one wraps the source down.
         def reading_order(widget):
-            return (widget.y(), widget.x())
+            """Place a status item in reading order: its row, then its x.
+
+            Args: widget is a status-bar item.
+            Returns: (row, x), where the row is its vertical centre in button heights.
+            """
+            row_height = window.codex_button.height()
+            return (widget.geometry().center().y() // row_height, widget.x())
 
         self.assertLess(reading_order(window.codex_button),
                         reading_order(window.status_actions_rule))
@@ -3047,16 +3075,27 @@ class EngineEventTests(WindowTestCase):
     def test_switched_live_selects_raw_and_leaves_demo(self):
         """switched_live selects Raw, unchecks record and hides demo indicators.
 
+        The dummy-mode values stay behind: the live camera starts from its
+        defaults (it has no saved profile here).
+
         Args: None.
         Returns: None.
         """
         self.window.record_button.setChecked(True)
+        self.window.gain.spin.setValue(7.0)
+        self.window.mode_group.buttons()[1].click()
+        self.engine.update_settings(record=False, mode="Raw")  # as _switch_live does
         self.engine.events.put(("switched_live", None))
         self.window._handle_events()
         checked = [b.text() for b in self.window.mode_group.buttons() if b.isChecked()]
         self.assertEqual(checked, ["Raw"])
         self.assertFalse(self.window.record_button.isChecked())
         self.assertEqual(self.window.windowTitle(), updater.app_title())
+        self.assertEqual(self.engine.settings().gain_db, 0.0)
+        self.assertEqual(self.window.gain.value(), 0.0)
+        self.assertTrue(self.log.has("starts from its defaults"))
+        demo = json.loads(FakeSettings.store["profiles/demo/DEMO1"])  # kept apart
+        self.assertEqual(demo["settings"]["gain_db"], 7.0)
 
     def test_switch_failed_warns_and_keeps_demo(self):
         """switch_failed warns the user and stays in demo mode.
@@ -3512,7 +3551,7 @@ class MultiCameraTests(unittest.TestCase):
         """
         window, second = self.window, self.channels[1]
         second.settings = replace(second.settings, exposure_us=2500.0, mode="Previous",
-                                  palette="Jet", rolling=True, noise_reduction=40.0)
+                                  gamma=2.0, rolling=True, noise_reduction=40.0)
         second.limits = {"Gain": (0.0, 12.0)}
         window.exposure.set_value(4000.0)
         window.exposure.valueChanged.emit(4000.0)
@@ -3522,7 +3561,7 @@ class MultiCameraTests(unittest.TestCase):
         self.assertEqual(window.exposure.value(), 2500.0)
         self.assertEqual(window.noise_reduction.value(), 40.0)
         self.assertEqual(window.gain.spin.maximum(), 12.0)
-        self.assertEqual(window.palette_combo.currentText(), "Jet")
+        self.assertEqual(window.gamma.value(), 2.0)
         self.assertTrue(window.rolling.isChecked())
         checked = [b.text() for b in window.mode_group.buttons() if b.isChecked()]
         self.assertEqual(checked, ["Previous"])
@@ -3733,6 +3772,572 @@ class MultiCameraTests(unittest.TestCase):
         self.window.close()
         self.assertTrue(all(engine._stop.is_set() for engine in engines))
         self.assertTrue(self.window.wait_for_engines(5.0))
+
+
+KEY1 = "profiles/demo/DEMO1"
+KEY2 = "profiles/demo/DEMO2"
+
+
+def stored(key):
+    """Decode one JSON entry of the fake settings store.
+
+    Args: key is the entry's name.
+    Returns: The decoded object.
+    """
+    return json.loads(FakeSettings.store[key])
+
+
+class ProfileWindowTests(unittest.TestCase):
+    """Each camera's own controls, saved between runs, and the saved presets."""
+
+    simple_ui = False
+
+    def setUp(self):
+        """Build a window over two synthetic cameras on an empty fake store.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        FakeSettings.syncs = 0
+        self.dialogs = make_dialogs()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        self.prompts = []  # (title, label, preset text) of each name prompt
+        self.window = self.make_window()
+
+    def make_window(self, count=2):
+        """Start the program again: cameras restored from the store, then the window.
+
+        Args: count is how many synthetic cameras to create.
+        Returns: The MainWindow; self.channels holds its channels.
+        """
+        store = qt_app.profiles.ProfileStore(FakeSettings(), self.log)
+        self.channels = demo_channels(self.log, count, store)
+        with mock.patch.object(qt_app, "SIMPLE_UI", self.simple_ui):
+            window = qt_app.MainWindow(self.channels, self.log, False, False,
+                                       profile_store=store)
+        for timer in (window.frame_timer, window.status_timer, window.tip_timer,
+                      window.profile_timer):
+            timer.stop()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        return window
+
+    def display(self, index):
+        """Pick a camera in the Display drop-down.
+
+        Args: index is its position.
+        Returns: That Channel.
+        """
+        self.window.camera_combo.setCurrentIndex(index)
+        self.assertIs(self.window.current, self.channels[index])
+        return self.channels[index]
+
+    def checked_mode(self):
+        """Name the view mode button that is checked.
+
+        Args: None.
+        Returns: "Raw", "Previous" or "Reference".
+        """
+        return next(b.text() for b in self.window.mode_group.buttons() if b.isChecked())
+
+    def name_prompt(self, name, accept=True):
+        """Answer the preset-name prompt instead of showing it.
+
+        Args: name is the text typed; accept presses Save (True) or Cancel.
+        Returns: A patcher for QInputDialog.exec.
+        """
+        def fake_exec(dialog):
+            """Record the prompt, type the name and close it.
+
+            Args: dialog is the QInputDialog.
+            Returns: Accepted or Rejected.
+            """
+            self.prompts.append((dialog.windowTitle(), dialog.labelText(),
+                                 dialog.textValue()))
+            dialog.setTextValue(name)
+            return qt_app.QDialog.Accepted if accept else qt_app.QDialog.Rejected
+        return mock.patch.object(qt_app.QInputDialog, "exec", fake_exec)
+
+    def save_preset(self, name, answer=None):
+        """Save the displayed camera's settings as a preset.
+
+        Args: name is the typed name; answer is the reply to a replace question.
+        Returns: None.
+        """
+        if answer is not None:
+            self.dialogs.question.return_value = answer
+        with self.name_prompt(name):
+            self.window.preset_save_button.click()
+
+    # ----- isolation ------------------------------------------------------
+
+    def test_changes_stay_with_their_camera_both_ways(self):
+        """Camera 1's changes never reach camera 2, and camera 2's never reach 1.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        first, second = self.channels
+        w.exposure.spin.setValue(12000)
+        w.gain.spin.setValue(6.0)
+        w.noise_reduction.spin.setValue(20)
+        w.mode_group.buttons()[2].click()
+        w.invert.setChecked(True)
+        w.scaling.setCurrentText(qt_app.SCALING_MODES[0])
+        w.smoothing_combo.setCurrentText("Median")
+        self.display(1)
+        self.assertEqual(second.profile(), second.default_profile())
+        self.assertEqual((w.exposure.value(), w.gain.value(), w.noise_reduction.value()),
+                         (8000, 0, 0))
+        self.assertEqual(self.checked_mode(), "Raw")
+        self.assertFalse(w.invert.isChecked())
+        self.assertEqual(w.scaling.currentText(), qt_app.SCALING_MODES[1])
+        self.assertIn("Settings of Synthetic camera (DEMO2)", w.profile_label.text())
+        w.labview_button.setChecked(True)
+        w.gain.spin.setValue(12.0)
+        w.flip_button.setChecked(True)
+        self.display(0)
+        s = first.profile().settings
+        self.assertEqual((s.exposure_us, s.gain_db, s.noise_reduction, s.mode, s.invert,
+                          s.scale_range, s.smoothing_method, s.flip_horizontal),
+                         (12000, 6.0, 20, "Reference", True, False, "Median", False))
+        self.assertIsNone(first.labview_saved)
+        self.assertFalse(w.labview_button.isChecked())
+        self.assertEqual((w.exposure.value(), w.gain.value()), (12000, 6.0))
+        self.assertEqual(self.checked_mode(), "Reference")
+        s = second.profile().settings
+        self.assertEqual((s.gain_db, s.flip_horizontal, s.exposure_us), (12.0, True, 8000))
+        self.assertIsNotNone(second.labview_saved)
+        self.display(1)
+        self.assertTrue(w.labview_button.isChecked())
+        self.assertEqual(w.gain.value(), 12.0)
+
+    def test_another_cameras_limits_never_send_it_this_cameras_values(self):
+        """A narrower range clamps the shown value quietly instead of sending it.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        first, second = self.channels
+        second.limits = {"ExposureTime": (100.0, 20000.0), "Gain": (0.0, 10.0)}
+        w.exposure.spin.setValue(40000)
+        w.gain.spin.setValue(20.0)
+        self.display(1)
+        self.assertEqual(w.exposure.spin.maximum(), 20000.0)
+        self.assertEqual((second.profile().settings.exposure_us,
+                          second.profile().settings.gain_db), (8000.0, 0.0))
+        w.gain.spin.setValue(9.0)
+        first.limits = {"Gain": (0.0, 5.0)}
+        self.display(0)
+        self.assertEqual(second.profile().settings.gain_db, 9.0)
+        self.assertEqual(first.profile().settings.exposure_us, 40000.0)
+
+    def test_limits_arriving_for_the_shown_camera_still_clamp_it(self):
+        """The camera's own limits event clamps and sends its own value, as before.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.gain.spin.setValue(20.0)
+        self.channels[0].engine.events.put(("camera_limits", {"Gain": (0.0, 10.0)}))
+        w._handle_events()
+        self.assertEqual(self.channels[0].profile().settings.gain_db, 10.0)
+        self.assertEqual(self.channels[1].profile().settings.gain_db, 0.0)
+
+    # ----- persistence ------------------------------------------------------
+
+    def test_nothing_is_written_until_something_changes(self):
+        """A camera left at its defaults writes nothing, even on close.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.window.profile_timer.interval(), qt_app.PROFILE_SAVE_MS)
+        self.window._save_profiles()
+        self.window._save_profiles()
+        self.window.close()
+        self.assertEqual([key for key in FakeSettings.store if key.startswith("profiles/")], [])
+
+    def test_profiles_are_written_once_settled_and_on_close(self):
+        """The timer writes a profile after it stops changing; closing writes the rest.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.gain.spin.setValue(3.0)
+        w.record_button.setChecked(True)
+        w._save_profiles()
+        self.assertNotIn(KEY1, FakeSettings.store)  # still changing, as far as it knows
+        w._save_profiles()
+        self.assertEqual(stored(KEY1)["settings"]["gain_db"], 3.0)
+        self.assertNotIn("record", stored(KEY1)["settings"])
+        self.assertNotIn(KEY2, FakeSettings.store)
+        w.gain.spin.setValue(4.0)
+        w.close()
+        self.assertEqual(stored(KEY1)["settings"]["gain_db"], 4.0)
+        self.assertEqual(FakeSettings.syncs, 1)
+
+    def test_switching_saves_the_camera_left_behind(self):
+        """Picking another camera writes the one just edited at once.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.exposure.spin.setValue(9000)
+        self.display(1)
+        self.assertEqual(stored(KEY1)["settings"]["exposure_us"], 9000.0)
+        self.assertNotIn(KEY2, FakeSettings.store)
+
+    def test_each_camera_comes_back_with_its_own_settings_after_a_restart(self):
+        """A new window on the same store restores both cameras, never recording.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.exposure.spin.setValue(15000)
+        w.mode_group.buttons()[1].click()
+        w.labview_button.setChecked(True)
+        w.record_button.setChecked(True)
+        self.display(1)
+        w.gain.spin.setValue(11.0)
+        w.gamma.spin.setValue(2.0)
+        w.close()
+        restarted = self.make_window()
+        first, second = self.channels
+        s = first.engine.settings()
+        self.assertEqual((s.exposure_us, s.mode, s.record), (15000.0, "Reference", False))
+        self.assertTrue(restarted.labview_button.isChecked())
+        self.assertFalse(restarted.record_button.isChecked())
+        self.assertEqual(restarted.exposure.value(), 15000)
+        self.assertEqual((second.settings.gain_db, second.settings.gamma), (11.0, 2.0))
+        self.assertTrue(self.log.has("Synthetic camera (DEMO1): saved settings restored "
+                                     "(exposure 15000 µs, gain 0 dB, 30 fps, Reference "
+                                     "view, LabVIEW flow)."))
+        restarted.labview_button.setChecked(False)  # back to the settings kept for it
+        self.assertEqual(first.engine.settings().mode, "Previous")
+        restarted.camera_combo.setCurrentIndex(1)
+        self.assertEqual((restarted.gain.value(), restarted.gamma.value()), (11.0, 2.0))
+
+    def test_a_real_camera_gets_its_own_profile_after_going_live(self):
+        """Switching to live capture saves the demo profile and restores the camera's.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        shown = self.channels[0]
+        saved = replace(qt_app.profiles.default_profile(CameraInfo("111", "BFS")).settings,
+                        exposure_us=5000.0, mode="Previous")
+        FakeSettings.store["profiles/flir/111"] = qt_app.profiles.Profile(saved).dumps()
+        w.gain.spin.setValue(8.0)
+        shown.engine.update_settings(record=False, mode="Raw")  # as _switch_live does
+        shown.engine.camera_info = CameraInfo("111", "BFS")
+        shown.engine.events.put(("switched_live", [CameraInfo("111", "BFS"),
+                                                   CameraInfo("222", "BFS")]))
+        w._handle_events()
+        s = shown.engine.settings()
+        self.assertEqual((s.exposure_us, s.gain_db, s.mode), (5000.0, 0.0, "Previous"))
+        self.assertEqual((w.exposure.value(), self.checked_mode()), (5000, "Previous"))
+        self.assertEqual(stored(KEY1)["settings"]["gain_db"], 8.0)
+        self.assertTrue(self.log.has("BFS (111): saved settings restored"))
+        self.assertEqual(w.channels[1].profile_key, "profiles/flir/222")
+        w.gain.spin.setValue(2.0)
+        w.close()
+        self.assertEqual(stored("profiles/flir/111")["settings"]["gain_db"], 2.0)
+        self.assertNotIn("profiles/flir/222", FakeSettings.store)
+
+    # ----- presets ------------------------------------------------------------
+
+    def test_save_as_lists_the_preset(self):
+        """Save as asks for a name, stores the settings and selects the preset.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertEqual(w.preset_combo.count(), 0)
+        self.assertEqual(w.preset_combo.placeholderText(), "No saved presets")
+        self.assertFalse(w.preset_apply_button.isEnabled())
+        self.assertFalse(w.preset_delete_button.isEnabled())
+        w.gain.spin.setValue(5.0)
+        self.save_preset("  Bright  ")
+        self.assertEqual(self.prompts, [("Save preset",
+                                         "Save the settings of Synthetic camera (DEMO1) as:",
+                                         "")])
+        self.assertEqual(w.preset_combo.currentText(), "Bright")
+        self.assertTrue(w.preset_apply_button.isEnabled())
+        data = stored("presets/bright")
+        self.assertEqual((data["name"], data["source_model"], data["settings"]["gain_db"]),
+                         ("Bright", "Synthetic camera", 5.0))
+        self.assertIn("Saved from Synthetic camera.",
+                      w.preset_combo.itemData(0, Qt.ToolTipRole))
+        self.assertTrue(self.log.has("Preset saved: Bright from Synthetic camera (DEMO1)"))
+        self.dialogs.question.assert_not_called()
+        identity = CameraIdentity(model="BFS-U3-63S4M")  # a detected model names the source
+        self.channels[0].identity = identity
+        self.save_preset("Detected")
+        self.assertEqual(stored("presets/detected")["source_model"], identity.short_name())
+
+    def test_cancel_or_a_blank_name_saves_nothing(self):
+        """Cancel leaves the store alone; a blank name is refused.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.name_prompt("Kept", accept=False):
+            self.window.save_preset_as()
+        self.save_preset("   ")
+        self.assertFalse(any(key.startswith("presets/") for key in FakeSettings.store))
+        self.assertTrue(self.log.has("Preset not saved: it needs a name."))
+
+    def test_an_existing_name_is_replaced_only_after_confirmation(self):
+        """Saving over a name asks first; No keeps the old preset, Yes replaces it.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.gain.spin.setValue(1.0)
+        self.save_preset("Bright")
+        w.gain.spin.setValue(2.0)
+        self.save_preset("BRIGHT", answer=self.dialogs.No)
+        title, text = self.dialogs.question.call_args.args[1:3]
+        self.assertEqual(title, "Replace preset?")
+        self.assertIn("“Bright” already exists", text)
+        self.assertEqual(stored("presets/bright")["settings"]["gain_db"], 1.0)
+        self.assertEqual(self.prompts[-1][2], "Bright")  # the chosen name is offered
+        self.save_preset("BRIGHT", answer=self.dialogs.Yes)
+        self.assertEqual(stored("presets/bright")["settings"]["gain_db"], 2.0)
+        self.assertEqual([w.preset_combo.itemText(i) for i in range(w.preset_combo.count())],
+                         ["BRIGHT"])
+
+    def test_apply_changes_only_the_displayed_camera_and_keeps_it(self):
+        """A preset saved on camera 1 and applied to camera 2 leaves camera 1 alone.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        first, second = self.channels
+        w.exposure.spin.setValue(10000)
+        w.gain.spin.setValue(5.0)
+        w.mode_group.buttons()[1].click()
+        w.average.spin.setValue(8)
+        self.save_preset("Mine")
+        w.gain.spin.setValue(1.0)  # camera 1 moves on
+        self.display(1)
+        w.preset_apply_button.click()
+        s = second.engine.settings()
+        self.assertEqual((s.exposure_us, s.gain_db, s.mode, s.average),
+                         (10000.0, 5.0, "Previous", 8))
+        self.assertEqual((w.gain.value(), self.checked_mode()), (5.0, "Previous"))
+        self.assertEqual(first.profile().settings.gain_db, 1.0)
+        self.assertEqual(stored(KEY2)["settings"]["gain_db"], 5.0)  # kept at once
+        self.assertTrue(self.log.has("Preset applied: Mine to Synthetic camera (DEMO2) "
+                                     "(exposure 10000 µs, gain 5 dB, 30 fps, Previous view)"))
+
+    def test_a_preset_from_another_model_is_clamped_to_this_camera(self):
+        """Processing values apply in full; camera values are fitted and logged.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        base = qt_app.profiles.default_profile(CameraInfo("9", "BFS-U3-200S6M")).settings
+        preset = qt_app.profiles.Profile(replace(
+            base, exposure_us=45000.0, gain_db=27.0, fps=12.0, mode="Reference",
+            average=6, smoothing=3, smoothing_method="Median", contrast=40.0))
+        FakeSettings.store["presets/wide"] = json.dumps(
+            {**preset.to_data(), "name": "Wide", "source_model": "Blackfly S BFS-U3-200S6M"})
+        self.channels[0].limits = {"ExposureTime": (50.0, 30000.0), "Gain": (0.0, 24.0)}
+        w._refresh_presets(select="Wide")
+        self.assertIn("Saved from Blackfly S BFS-U3-200S6M.",
+                      w.preset_combo.itemData(0, Qt.ToolTipRole))
+        w.apply_saved_preset()
+        s = self.channels[0].engine.settings()
+        self.assertEqual((s.exposure_us, s.gain_db, s.fps), (30000.0, 24.0, 12.0))
+        self.assertEqual((s.mode, s.average, s.smoothing, s.smoothing_method, s.contrast),
+                         ("Reference", 6, 3, "Median", 40.0))
+        self.assertEqual((w.exposure.value(), w.gain.value()), (30000, 24.0))
+        self.assertTrue(self.log.has(
+            "Preset Wide: Exposure 45000 µs is outside this camera's range "
+            "(50–30000 µs); using 30000 µs."))
+        self.assertTrue(self.log.has(
+            "Preset Wide: Gain 27 dB is outside this camera's range (0–24 dB); using 24 dB."))
+        self.assertTrue(self.log.has("Preset applied: Wide to Synthetic camera (DEMO1)"))
+
+    def test_a_preset_brings_its_labview_state(self):
+        """A preset saved in the LabVIEW flow turns it on where it is applied.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.gamma.spin.setValue(1.5)
+        w.labview_button.setChecked(True)
+        self.save_preset("VI")
+        self.display(1)
+        w.apply_saved_preset("VI")
+        self.assertTrue(w.labview_button.isChecked())
+        w.labview_button.setChecked(False)
+        self.assertEqual(self.channels[1].engine.settings().gamma, 1.5)
+
+    def test_apply_without_a_choice_or_a_vanished_preset(self):
+        """Nothing chosen does nothing; a preset removed meanwhile is reported.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.apply_saved_preset()
+        self.save_preset("Gone")
+        del FakeSettings.store["presets/gone"]
+        w.apply_saved_preset()
+        self.assertTrue(self.log.has("Preset Gone is no longer saved."))
+        self.assertEqual(w.preset_combo.count(), 0)
+        self.assertEqual(self.channels[0].profile(), self.channels[0].default_profile())
+
+    def test_delete_asks_first(self):
+        """Delete removes the preset only after Yes; cameras keep their settings.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.delete_preset()  # nothing chosen
+        w.gain.spin.setValue(3.0)
+        self.save_preset("Old")
+        self.save_preset("Other")
+        w.preset_combo.setCurrentText("Old")
+        w.preset_delete_button.click()
+        title, text = self.dialogs.question.call_args.args[1:3]
+        self.assertEqual((title, text.split("?")[0]),
+                         ("Delete preset?", "Delete the preset “Old”"))
+        self.assertIn("presets/old", FakeSettings.store)
+        self.dialogs.question.return_value = self.dialogs.Yes
+        w.preset_delete_button.click()
+        self.assertNotIn("presets/old", FakeSettings.store)
+        self.assertEqual([w.preset_combo.itemText(i) for i in range(w.preset_combo.count())],
+                         ["Other"])
+        self.assertEqual(w.preset_combo.currentIndex(), -1)
+        self.assertEqual(w.preset_combo.placeholderText(), "Choose a preset")
+        self.assertFalse(w.preset_apply_button.isEnabled())
+        self.assertEqual(self.channels[0].profile().settings.gain_db, 3.0)
+        self.assertTrue(self.log.has("Preset deleted: Old"))
+
+    # ----- reset ----------------------------------------------------------------
+
+    def test_reset_returns_the_shown_camera_to_its_defaults_after_confirmation(self):
+        """No keeps everything; Yes resets this camera only and forgets its profile.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        first, second = self.channels
+        w.exposure.spin.setValue(20000)
+        w.labview_button.setChecked(True)
+        self.display(1)
+        w.gain.spin.setValue(4.0)
+        self.display(0)
+        self.assertIn(KEY1, FakeSettings.store)
+        w.reset_camera_button.click()
+        title, text = self.dialogs.question.call_args.args[1:3]
+        self.assertEqual(title, "Reset camera to defaults?")
+        self.assertIn("Synthetic camera (DEMO1)", text)
+        self.assertIn("exposure 8000 µs, gain 0 dB, 30 fps, Raw view", text)
+        self.assertEqual(first.profile().settings.exposure_us, 20000.0)
+        self.dialogs.question.return_value = self.dialogs.Yes
+        w.reset_camera_button.click()
+        self.assertEqual(first.profile(), first.default_profile())
+        self.assertEqual((w.exposure.value(), self.checked_mode()), (8000, "Raw"))
+        self.assertFalse(w.labview_button.isChecked())
+        self.assertNotIn(KEY1, FakeSettings.store)
+        self.assertEqual(second.profile().settings.gain_db, 4.0)
+        self.assertTrue(self.log.has("Camera reset to defaults: Synthetic camera (DEMO1)"))
+        w.close()
+        self.assertNotIn(KEY1, FakeSettings.store)  # nothing to save afterwards
+
+    # ----- layout ---------------------------------------------------------------
+
+    def test_every_control_range_is_a_valid_profile_range(self):
+        """Nothing a control can be set to is refused when it is read back.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        for widget, name in ((w.noise_reduction, "noise_reduction"), (w.average, "average"),
+                             (w.ref_frames, "ref_frames"), (w.ref_refresh, "ref_refresh_s"),
+                             (w.frames_back, "frames_back"),
+                             (w.outlier_filter, "outlier_filter"),
+                             (w.smoothing, "smoothing"),
+                             (w.difference_gain, "difference_gain"),
+                             (w.average_multiplier, "average_multiplier"),
+                             (w.clip, "clip_percent"), (w.min_range, "min_range"),
+                             (w.threshold, "threshold"), (w.steady_range, "steady_range_s"),
+                             (w.peak_hold, "peak_hold_s"),
+                             (w.normalize_window, "normalize_window"), (w.gamma, "gamma"),
+                             (w.brightness, "brightness"),
+                             (w.display_gain, "display_gain"), (w.contrast, "contrast"),
+                             (w.exposure, "exposure_us"), (w.gain, "gain_db"),
+                             (w.fps, "fps")):
+            low, high = qt_app.profiles.RANGES[name]
+            self.assertLessEqual(low, widget.spin.minimum(), name)
+            self.assertGreaterEqual(high, widget.spin.maximum(), name)
+        self.assertEqual(tuple(w.smoothing_combo.itemText(i)
+                               for i in range(w.smoothing_combo.count())),
+                         qt_app.profiles.CHOICES["smoothing_method"])
+
+
+class SimpleUiProfileTests(ProfileWindowTests):
+    """The profile and preset controls are part of the basic controls."""
+
+    simple_ui = True
+
+    def test_the_camera_switcher_and_preset_controls_are_shown(self):
+        """With two cameras: the switcher, whose settings, presets and reset.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        for widget in (w.cameras_box, w.camera_combo, w.profile_label, w.preset_combo,
+                       w.preset_apply_button, w.preset_save_button,
+                       w.preset_delete_button, w.reset_camera_button):
+            self.assertTrue(widget.isVisibleTo(w), widget)
+
+    def test_one_camera_hides_only_the_process_rows_and_name_line(self):
+        """A single camera keeps the Display drop-down and presets, not the name line.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.make_window(count=1)
+        w.show()
+        self.assertFalse(w.process_note.isVisibleTo(w))
+        self.assertFalse(w.profile_label.isVisibleTo(w))
+        for widget in (w.cameras_box, w.camera_combo, w.preset_combo,
+                       w.preset_save_button, w.reset_camera_button):
+            self.assertTrue(widget.isVisibleTo(w), widget)
 
 
 class UpdateFlowTests(WindowTestCase):
@@ -4348,7 +4953,9 @@ class RunTests(unittest.TestCase):
         self.startup_cleanup = mock.MagicMock(return_value=self.cleanup)
         self.reporting = mock.MagicMock()
         self.reporting_class = mock.MagicMock(return_value=self.reporting)
+        FakeSettings.store = {}
         for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
                 mock.patch.object(qt_app, "Reporting", self.reporting_class),
                 mock.patch.object(qt_app.updater, "StartupCleanup", self.startup_cleanup),
                 mock.patch.object(qt_app, "request_gl_format"),
@@ -4372,9 +4979,14 @@ class RunTests(unittest.TestCase):
         code = qt_app.run(force_demo=True, check_updates=False, demo_cameras=2)
         self.assertEqual(code, 7)
         self.cameras.assert_not_called()
-        self.demos.assert_called_once_with(self.log, 2)
+        self.demos.assert_called_once()
+        store = self.demos.call_args.args[2]
+        self.assertEqual(self.demos.call_args.args[:2], (self.log, 2))
+        self.assertIsInstance(store, qt_app.profiles.ProfileStore)
+        self.assertIsInstance(store.store, FakeSettings)  # never the real store in tests
         self.assertEqual(self.main_window.call_args.args[0], [self.channel])
-        self.assertEqual(self.main_window.call_args.args[2:], (True, False, self.reporting))
+        self.assertEqual(self.main_window.call_args.args[2:],
+                         (True, False, self.reporting, store))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
         self.reporting.start_uploads.assert_called_once_with()
@@ -4400,7 +5012,9 @@ class RunTests(unittest.TestCase):
         Returns: None.
         """
         qt_app.run()
-        self.cameras.assert_called_once_with(self.log)
+        self.assertEqual(self.cameras.call_args.args[0], self.log)
+        store = self.cameras.call_args.args[1]
+        self.assertIs(self.main_window.call_args.args[5], store)  # the same store saves them
         self.demos.assert_not_called()
         self.assertEqual(self.main_window.call_args.args[0], [self.channel, self.idle])
         self.engine.start.assert_called_once()
@@ -4415,7 +5029,7 @@ class RunTests(unittest.TestCase):
         self.cameras.side_effect = RuntimeError("no camera")
         self.assertEqual(qt_app.run(), 7)
         self.dialogs.question.assert_called_once()
-        self.demos.assert_called_once_with(self.log, 1)
+        self.assertEqual(self.demos.call_args.args[:2], (self.log, 1))
         self.assertTrue(any("Camera startup unavailable" in line
                             for line in self.log.lines))
 
@@ -5670,7 +6284,7 @@ class FreezeTests(WindowTestCase):
         frozen = make_packet(sequence=1)
         self.show(frozen)
         self.window.freeze_button.click()
-        self.show(make_packet(sequence=2, palette="Jet"))
+        self.show(make_packet(sequence=2, gamma=2.0))
         return frozen
 
     def test_freeze_holds_the_shown_frame_while_the_engine_continues(self):
@@ -5830,8 +6444,7 @@ class FreezeTests(WindowTestCase):
         Returns: None.
         """
         frozen = self.freeze_on_first_frame()
-        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), "Gray",
-                                          1.0, "Raw", True)
+        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), 1.0, "Raw", True)
         self.window.hover = (10, 5)
         self.window._poll_status()
         self.assertEqual(self.window.pixel_status.text(),

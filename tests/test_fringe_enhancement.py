@@ -257,7 +257,7 @@ class EngineFringeTests(unittest.TestCase):
             mode="Previous", threshold=6, even_brightness=True, smoothing=3,
             smoothing_method="Median", peak_hold_s=1.0, steady_range_s=1.0,
             min_range=30, clip_percent=0.5, contrast=30.0, brightness=5,
-            display_gain=1.5, clahe=False)
+            display_gain=1.5)
         packet = self.next_packets()
         self.assertEqual(packet.mode, "Previous")
         self.assertTrue(wait_until(

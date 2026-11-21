@@ -63,10 +63,10 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("noise_reduction=0", plain)
         self.assertIn("average=1 block", plain)
         self.assertIn("smoothing=off", plain)
-        self.assertIn("exposure=8000us gain=0dB fps=30 clahe=on", plain)
+        self.assertIn("exposure=8000us gain=0dB fps=30", plain)
         busy = diagnostics.settings_summary(Settings(
             mode="Previous", noise_reduction=40, average=8, rolling=True,
-            smoothing=5, smoothing_method="Median", clahe=False, frames_back=4,
+            smoothing=5, smoothing_method="Median", frames_back=4,
             outlier_filter=3, scale_range=False, difference_gain=6))
         self.assertIn("mode=Previous frames_back=4 noise_reduction=40", busy)
         self.assertIn("outlier_filter=3px", busy)
@@ -76,7 +76,7 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("scaling=gain x42 before average, multiplier x2.5", ordered)
         self.assertIn("average=8 rolling", busy)
         self.assertIn("smoothing=Median 5", busy)
-        self.assertIn("clahe=off", busy)
+        self.assertNotIn("clahe", busy)
 
     def test_sharpness_falls_with_blur_for_large_and_small_frames(self):
         """Blur lowers the value; small frames are measured without resizing.

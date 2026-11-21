@@ -4,8 +4,8 @@ The window is one QMainWindow: the image in the center, a dockable controls
 panel and log, and a status bar. Docks can be floated as separate windows.
 
 Display path: the engine publishes a Mono8 FramePacket; the GPU view uploads
-it as a single-channel texture, and a fragment shader applies gamma and the
-palette through a 256-entry lookup table built by processing.palette_rgb_table
+it as a single-channel texture, and a fragment shader applies the display
+gamma through a 256-entry gray lookup table built by processing.display_rgb_table
 (the same function saved frames use). Scaling to the window is done by the
 GPU with mipmaps. Machines without OpenGL 3.3 (for example some remote-desktop
 sessions) fall back to a CPU-drawn view with identical controls.
@@ -13,7 +13,9 @@ sessions) fall back to a CPU-drawn view with identical controls.
 Several cameras: the window owns one Channel per detected camera. A drop-down
 picks the camera on screen, and a "process" checkbox per camera keeps others
 acquiring, processing and recording in the background. Every control acts on
-the displayed camera's own engine and settings.
+the displayed camera's own engine and settings. Those settings are the
+camera's profile, saved between runs through profiles.ProfileStore, and the
+Camera section's Presets row saves and applies named presets.
 """
 
 import faulthandler
@@ -28,7 +30,7 @@ import sys
 import textwrap
 import time
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 
 import cv2
@@ -45,8 +47,8 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, QButtonGroup,
                                QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
-                               QGroupBox,
-                               QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow,
+                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLayout,
+                               QLineEdit, QMainWindow,
                                QMessageBox,
                                QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea,
                                QSizePolicy, QSlider, QStackedWidget, QStyle, QTextBrowser,
@@ -54,15 +56,15 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, codex, daq, error_reports, feedback, iphone,
-                       log_uploads, paths, source_code, tips, ui_scale, updater)
-from espi_live.channels import Channel, demo_channels, open_camera_channels
+                       log_uploads, paths, profiles, source_code, tips, ui_scale, updater)
+from espi_live.channels import demo_channels, open_camera_channels, restore_channel
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, MAX_DENOISE_PERCENT,
-                                  MAX_FRAMES_BACK, MAX_REFERENCE_FRAMES, PALETTES,
-                                  SCALING_MODES,
-                                  SMOOTHING_METHODS, VIEW_MODES, palette_rgb_table)
+                                  MAX_FRAMES_BACK, MAX_REFERENCE_FRAMES,
+                                  SCALING_MODES, SMOOTHING_METHODS,
+                                  VIEW_MODES, display_rgb_table)
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
 # layout is kept; a narrower window keeps the badge and elides the tip. Either
@@ -125,7 +127,7 @@ FRAGMENT_SHADER = """#version 330 core
 in vec2 uv;
 out vec4 color;
 uniform sampler2D image;  // R8 Mono8 measurement
-uniform sampler2D lut;    // 256x1 RGB: gamma + palette
+uniform sampler2D lut;    // 256x1 RGB: display gamma
 void main() {
     int index = int(texture(image, uv).r * 255.0 + 0.5);
     color = vec4(texelFetch(lut, ivec2(index, 0), 0).rgb, 1.0);
@@ -316,17 +318,47 @@ FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 # The longest view hint the engine reports (the status bar measures it), and the
 # least width the tip keeps beside it. The hint is information and gets its whole
 # sentence; the tip takes what is left and is shortened with an ellipsis.
-LONGEST_HINT = "ESPI difference view; min/max range is before gamma and palette"
+LONGEST_HINT = "Reference was taken at noise reduction 100; press F to retake"
 # QSettings key prefix; "<prefix><section heading>" is true while that
 # Controls section is collapsed.
 SECTION_SETTING_PREFIX = "controls/collapsed/"
+# Each camera's profile is written once it has not changed for this long
+# (profiles.ProfileStore.save_when_settled), so a slider drag writes once.
+PROFILE_SAVE_MS = 1000
+PRESET_NAME_MAX = 60  # characters in a saved preset's name
+PROFILE_TIP = (
+    "Every control in this panel changes only this camera. Each camera keeps "
+    "its own settings, saved between runs; pick another camera under Display "
+    "to edit its settings."
+)
+PRESET_COMBO_TIP = (
+    "Your saved presets: a camera's exposure, gain, frame rate and every "
+    "processing and display setting, including the LabVIEW flow. Pick one, "
+    "then press Apply to use it on the displayed camera."
+)
+PRESET_APPLY_TIP = (
+    "Use the chosen preset on the displayed camera only. Exposure, gain and "
+    "frame rate are fitted to this camera's limits, and the log lists any "
+    "value that had to change. The camera keeps these settings next time."
+)
+PRESET_SAVE_TIP = (
+    "Save the displayed camera's current settings as a named preset, which "
+    "any camera can apply later. A name already in use is replaced after you "
+    "confirm."
+)
+PRESET_DELETE_TIP = "Remove the chosen saved preset. Cameras keep their settings."
+RESET_CAMERA_TIP = (
+    "Put every control of the displayed camera back to its starting values "
+    "(exposure 8000 µs, gain 0 dB, 30 fps on a FLIR camera; the LabVIEW flow "
+    "on an analog one) and clear its saved settings, after you confirm. Other "
+    "cameras and saved presets do not change."
+)
 MESSAGE_TIP_WIDTH = 120
 # Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
 PIPELINE = ("noise reduction → (frame average) → difference (N frames back) → "
             "noise threshold → beam brightness → outlier filter → average → "
             "speckle filter → noise floor → peak hold → fixed gain, stretch or "
-            "local normalization → invert → gamma/CLAHE → brightness, gain and "
-            "contrast → palette")
+            "local normalization → invert → brightness, gain and contrast → gamma")
 # Fringe-enhancement and display-tone values every preset sets unless it
 # overrides them, so a preset never inherits peak hold or a threshold from the
 # last one. The sensitivity floor is not here: it is per camera (analog capture
@@ -360,9 +392,7 @@ PROCESSING_PRESETS = {
         "gain_before_average": False,
         "clip_percent": 0.0,
         "invert": False,
-        "palette": "Gray",
         "gamma": 1.0,
-        "clahe": False,
     },
     "Measurement": {
         **FRINGE_TOOLS_OFF,
@@ -379,9 +409,7 @@ PROCESSING_PRESETS = {
         "gain_before_average": False,
         "clip_percent": 0.5,
         "invert": False,
-        "palette": "Gray",
         "gamma": 1.0,
-        "clahe": True,
     },
     # A vibrating object seen through a noisy analog camera (Sony XC-ST50 on
     # a USB-Live2): each pixel keeps its largest frame-to-frame change for 1 s,
@@ -403,9 +431,7 @@ PROCESSING_PRESETS = {
         "gain_before_average": False,
         "clip_percent": 0.5,
         "invert": False,
-        "palette": "Gray",
         "gamma": 1.0,
-        "clahe": False,
         "threshold": 6,
         "steady_range_s": 1.0,
         "peak_hold_s": 1.0,
@@ -416,7 +442,7 @@ RAW_DIFFERENCE_TIP = (
     "Show only the difference between two raw camera frames: each pixel is "
     "|live - previous| in the camera's own grey levels. Every other step is "
     "bypassed while it is on: noise reduction, single field, filters, "
-    "averaging, difference gain, stretch, palette, gamma, flip and display "
+    "averaging, difference gain, stretch, gamma, flip and display "
     "tone. The view buttons and your settings are kept and come back when "
     "you turn it off. Exposure and gain on the camera itself are unchanged.")
 # The Raw difference button stands out while it overrides every setting.
@@ -425,7 +451,7 @@ LABVIEW_FLOW_TIP = (
     "Switch between your own settings and the LabVIEW ESPI 1.5 flow: Reference "
     "view with a reference captured now (and again whenever Reference view has "
     "none), full frames, Fixed gain applied to each frame before averaging, and "
-    "no noise reduction, speckle filter, CLAHE or invert. Difference gain, "
+    "no noise reduction, speckle filter or invert. Difference gain, "
     "exposure, gain, frame rate and recording stay as they are. On by default "
     "for an analog camera. Turning it off puts back your own settings; changes "
     "made while it is on are dropped."
@@ -448,7 +474,7 @@ Live preview — while you aim the camera and check that fringes form.
   View: Previous. Average N: 1 (off). Rolling average: off.
   Noise reduction: 0. Speckle filter: off. Ref. refresh: 0.
   Frames back: 1. Outlier filter: off.
-  Scaling: Auto stretch. Palette: Gray. Gamma: 1.0. CLAHE: off.
+  Scaling: Auto stretch. Gamma: 1.0.
   Switch the view to Raw to frame the object. Raw skips difference processing but still applies display gamma.
 
 Measurement — a still object, compared with one reference.
@@ -459,7 +485,7 @@ Measurement — a still object, compared with one reference.
   Ref. refresh: 2 s. That cancels slow drift (air, heat). Motion slower than the refresh disappears; use 0 and press F when you need one fixed before/after.
   Noise reduction: 0. Raise it only when the camera is noisy and the object is still, and set it before pressing F: the reference keeps the setting it was taken at, and a change afterwards leaves a frozen grain until you press F again.
   Scaling: Auto stretch, clip 0.5% so a few speckles don't flatten the contrast.
-  Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
+  Gamma: 1.0.
 
 Peak hold — a vibrating object through a noisy analog camera (Sony XC-ST50 on the USB-Live2).
   View: Previous. Each pixel shows its largest frame-to-frame change over the last second, so a steadily driven object's ring pattern builds up instead of flickering.
@@ -467,12 +493,12 @@ Peak hold — a vibrating object through a noisy analog camera (Sony XC-ST50 on 
   Peak hold window: 1 s. Longer fills in fainter rings but trails changes in the drive.
   Scaling: Auto stretch, clip 0.5%, steady range 1 s so the contrast does not pump.
   Sensitivity floor: unchanged. Analog cameras start at 30; press Calibrate noise with the drive off to measure your own.
-  S-curve contrast: 30%. Palette: Gray, gamma 1.0, CLAHE off. Noise reduction, averaging and Ref. refresh: off.
+  S-curve contrast: 30%. Gamma 1.0. Noise reduction, averaging and Ref. refresh: off.
 
 Processing order (Previous and Reference views):
   {PIPELINE}
 
-Raw view applies noise reduction and display gamma, without scaling or palette.
+Raw view applies noise reduction and display gamma, without scaling.
 
 Analog camera (Sony XC-ST50): it starts in the LabVIEW flow, the LabVIEW ESPI 1.5 VI's processing with its saved defaults: Reference view with an automatic reference, Fixed gain 42× (the VI's Constant) on each frame, no averaging or filters. Turn LabVIEW flow off for your own settings, which also use Fixed gain: Auto stretch would blow the camera's few grey levels of noise up to full-contrast grain. Lower Difference gain when noise shows as grey grain. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths, including its N + 1 frames divided by N.
 
@@ -659,7 +685,7 @@ ZOOM_SLIDER_TIP = ("Drag, click or scroll to zoom. The mouse wheel and "
                    "drag-to-pan on the image still work.")
 MODE_TIPS = {
     "Raw": ("Raw: the camera's Mono8 image, for aiming and focusing. "
-            "Gamma applies; no difference, stretch or palette."),
+            "Gamma applies; no difference or stretch."),
     "Previous": ("Previous: the difference from the last frame, so fringes show "
                  "what just changed. Shortcut: R restarts that difference."),
     "Reference": ("Reference: the difference from a stored frame. Shortcut: F "
@@ -1203,7 +1229,7 @@ class ViewNavigation:
 
 
 class GLImageView(ViewNavigation, QOpenGLWidget):
-    """Draw Mono8 frames with GPU scaling, gamma and palette."""
+    """Draw Mono8 frames with GPU scaling and gamma."""
 
     hovered = Signal(int, int)
     zoomChanged = Signal(float)  # zoom relative to fit-to-window
@@ -1250,7 +1276,7 @@ class GLImageView(ViewNavigation, QOpenGLWidget):
         self.update()
 
     def initializeGL(self):
-        """Compile the shaders and create the image and palette textures.
+        """Compile the shaders and create the image and lookup-table textures.
 
         Args: None.
         Returns: None. Raises RuntimeError if the shaders cannot be built.
@@ -1800,7 +1826,7 @@ COMPARE_PANELS = (
 COMPARE_BASELINES = {
     "Reference": (
         "The stored reference frame, as Raw view would show it: gamma only, no "
-        "stretch or palette. F or Set reference retakes it; Ref. frames averages "
+        "stretch. F or Set reference retakes it; Ref. frames averages "
         "several frames into it.",
         "No reference yet.\n\nPress Set reference (F) to capture one; "
         "Ref. frames sets how many frames it averages.",
@@ -2008,9 +2034,9 @@ class ReferenceCompareDialog(QDialog):
             if part is None:
                 self.stacks[name].setCurrentWidget(self.messages[name])
                 continue
-            key = (part.palette, round(part.gamma, 4))
+            key = round(part.gamma, 4)
             if key not in self.tables:
-                self.tables[key] = palette_rgb_table(part.palette, part.gamma)
+                self.tables[key] = display_rgb_table(part.gamma)
             self.views[name].show_packet(part, self.tables[key], key)
             self.stacks[name].setCurrentWidget(self.views[name])
 
@@ -2960,7 +2986,8 @@ class WhatsNewDialog(QDialog):
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
 
-    def __init__(self, channels, log, use_gl, check_updates=True, reporting=None):
+    def __init__(self, channels, log, use_gl, check_updates=True, reporting=None,
+                 profile_store=None):
         """Build the window and start polling the engines.
 
         Args: channels is a list of Channel, at least one of them active
@@ -2971,6 +2998,9 @@ class MainWindow(QMainWindow):
             Reporting, or None; and the window downloads this build's source
             code if it is missing (otherwise that waits for Open in Codex).
             False skips every update check, including the later ones.
+            profile_store is the profiles.ProfileStore the channels were
+            restored from (None: one over the app's QSettings); each
+            camera's profile and the named presets are saved there.
         Returns: None.
         """
         super().__init__()
@@ -2983,6 +3013,8 @@ class MainWindow(QMainWindow):
         self.channels = list(channels)
         self.current = next(channel for channel in self.channels if channel.active)
         self.log = log
+        self.profiles = (profile_store if profile_store is not None else
+                         profiles.ProfileStore(QSettings("ESPI", "espi_live"), log))
         self.reporting = reporting
         self.report_outcomes = {}  # fingerprint -> latest error_reports.Outcome
         self.fatal_boxes = {}  # fingerprint -> (open "ESPI stopped" box, its message)
@@ -3045,6 +3077,11 @@ class MainWindow(QMainWindow):
         self._sync_scale_controls()
         self._rebuild_cameras()
         self._set_demo(self.current.demo)
+        self._track_profiles()
+        self.profile_timer = QTimer(self)
+        self.profile_timer.setTimerType(Qt.CoarseTimer)
+        self.profile_timer.timeout.connect(self._save_profiles)
+        self.profile_timer.start(PROFILE_SAVE_MS)
         self.shortcut_filter = ShortcutFilter(self)
         self.tooltip_filter = TooltipFilter(self)
         app = QApplication.instance()
@@ -3687,6 +3724,12 @@ class MainWindow(QMainWindow):
             add(label, basic=basic)
 
         heading("Camera", basic=True)
+        # Whose settings the panel edits; shown when there are several cameras.
+        self.profile_label = QLabel()
+        self.profile_label.setWordWrap(True)
+        self.profile_label.setStyleSheet("font-weight:bold;")
+        set_tooltip(self.profile_label, PROFILE_TIP)
+        add(self.profile_label, basic=True)
         self.model_label = QLabel()  # detected model; hidden in dummy mode
         self.model_label.setWordWrap(True)
         self.model_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -3770,6 +3813,7 @@ class MainWindow(QMainWindow):
         note(self.noise_note)
         self.camera_label = QLabel()
         note(self.camera_label, basic=True)
+        self._add_profile_controls(add)
 
         heading("iPhone", basic=True)
         self.phone_section = (self._section_toggles["iPhone"],
@@ -4043,15 +4087,6 @@ class MainWindow(QMainWindow):
         self.flip_button.toggled.connect(
             lambda on: self.engine.update_settings(flip_horizontal=on))
         add(self.flip_button)
-        self.palette_combo = QComboBox()
-        self.palette_combo.addItems(PALETTES)
-        self.palette_combo.setCurrentText(s.palette)
-        set_tooltip(self.palette_combo,
-            "Colors the stretched image. Gray shows brightness and is what you "
-            "want for a measurement. A color palette (Turbo, Jet and the others) "
-            "makes small steps easier to see; pair it with CLAHE. Start with Gray.")
-        self.palette_combo.currentTextChanged.connect(
-            lambda name: self.engine.update_settings(palette=name))
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
         self.gamma.set_description(GAMMA_TIP + " Start at 1.0.")
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
@@ -4077,20 +4112,10 @@ class MainWindow(QMainWindow):
             "black. 0 = off. Try 30–60%.")
         self.contrast.valueChanged.connect(
             lambda v: self.engine.update_settings(contrast=v))
-        self.clahe = QCheckBox("CLAHE (color palettes only)")
-        set_tooltip(self.clahe,
-            "Boosts local contrast so faint fringes show up in a color palette. "
-            "It does nothing while the palette is Gray. Turn it on when a color "
-            "palette still looks flat; leave it off when the gray values must "
-            "stay as they are. Start on with a color palette, and off with Gray.")
-        self.clahe.setChecked(s.clahe)
-        self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
-        add(self.palette_combo, "Palette")
         add(self.gamma, "Gamma")
         add(self.brightness, "Brightness")
         add(self.display_gain, "Gain")
         add(self.contrast, "S-curve contrast")
-        add(self.clahe)
         self.ui_scale_row = SliderSpin(
             ui_scale.MIN_PERCENT, ui_scale.MAX_PERCENT, ui_scale.STEP_PERCENT, 0,
             ui_scale.percent(), "%")
@@ -4178,6 +4203,203 @@ class MainWindow(QMainWindow):
             panel.minimumSizeHint().expandedTo(panel.minimumSize()).width()
             + self.controls_scroll.verticalScrollBar().sizeHint().width())
 
+    def _add_profile_controls(self, add):
+        """Add the saved-preset row and the reset button to the Camera section.
+
+        Args: add places a widget on the next controls-grid row.
+        Returns: None.
+        """
+        self.preset_combo = QComboBox()
+        self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.preset_combo.setMinimumContentsLength(12)
+        set_tooltip(self.preset_combo, PRESET_COMBO_TIP)
+        self.preset_combo.currentIndexChanged.connect(self._sync_preset_buttons)
+        add(self.preset_combo, "Presets", basic=True)
+        buttons = QWidget()
+        row = QHBoxLayout(buttons)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.preset_apply_button = QPushButton("Apply")
+        self.preset_save_button = QPushButton("Save as…")
+        self.preset_delete_button = QPushButton("Delete")
+        for button, tip, handler in (
+                (self.preset_apply_button, PRESET_APPLY_TIP, self.apply_saved_preset),
+                (self.preset_save_button, PRESET_SAVE_TIP, self.save_preset_as),
+                (self.preset_delete_button, PRESET_DELETE_TIP, self.delete_preset)):
+            set_tooltip(button, tip)
+            button.clicked.connect(lambda _checked=False, handler=handler: handler())
+            row.addWidget(button)
+        add(buttons, basic=True)
+        self.reset_camera_button = QPushButton("Reset camera to defaults…")
+        set_tooltip(self.reset_camera_button, RESET_CAMERA_TIP)
+        self.reset_camera_button.clicked.connect(self.reset_camera)
+        add(self.reset_camera_button, basic=True)
+        self._refresh_presets()
+
+    def _refresh_presets(self, select=None):
+        """Fill the preset drop-down from the store.
+
+        Args: select is the name to choose (None: keep the current choice
+            while it still exists, otherwise choose nothing).
+        Returns: None.
+        """
+        combo = self.preset_combo
+        wanted = combo.currentText() if select is None else select
+        entries = self.profiles.presets()
+        combo.blockSignals(True)
+        combo.clear()
+        for index, entry in enumerate(entries):
+            combo.addItem(entry.name)
+            combo.setItemData(index, format_tooltip(
+                f"Saved from {entry.source_model or 'an unknown camera'}.",
+                PRESET_COMBO_TIP), Qt.ToolTipRole)
+        combo.setCurrentIndex(combo.findText(wanted) if wanted else -1)
+        combo.setPlaceholderText("Choose a preset" if entries else "No saved presets")
+        combo.blockSignals(False)
+        self._sync_preset_buttons()
+
+    def _sync_preset_buttons(self, *_):
+        """Enable Apply and Delete only while a preset is chosen.
+
+        Args: any arguments of the drop-down's signal are ignored.
+        Returns: None.
+        """
+        chosen = self.preset_combo.currentIndex() >= 0
+        self.preset_apply_button.setEnabled(chosen)
+        self.preset_delete_button.setEnabled(chosen)
+
+    @staticmethod
+    def _source_model(channel):
+        """Name a camera's model for a preset saved from it.
+
+        Args: channel is a Channel.
+        Returns: The detected model's short name, else the listed model or serial.
+        """
+        if channel.identity is not None:
+            return channel.identity.short_name()
+        return channel.info.model or channel.info.serial
+
+    def apply_saved_preset(self, name=None):
+        """Apply a saved preset to the displayed camera, and keep it as its profile.
+
+        Camera values are clamped to this camera's limits; each clamp, and
+        the result, is logged. No other camera changes.
+
+        Args: name is the preset (None: the one chosen in the drop-down).
+        Returns: None.
+        """
+        name = self.preset_combo.currentText() if name is None else name
+        if not name:
+            return
+        channel = self.current
+        profile = self.profiles.load_preset(name, channel.default_profile())
+        if profile is None:
+            self.log.write(f"Preset {name} is no longer saved.")
+            self._refresh_presets()
+            return
+        settings, notes = profiles.clamp_to_limits(
+            profile.settings, {**DEFAULT_LIMITS, **channel.limits})
+        for note in notes:
+            self.log.write(f"Preset {name}: {note}")
+        channel.apply_profile(replace(profile, settings=settings))
+        self._load_settings(self.engine.settings(), channel.limits)
+        self.profiles.save_profile(channel.profile_key, channel.profile())
+        self.log.write(f"Preset applied: {name} to {channel.label} "
+                       f"({profiles.summary(channel.profile())})")
+
+    def save_preset_as(self):
+        """Ask for a name and save the displayed camera's settings as a preset.
+
+        An existing name (letter case aside) is replaced only after a
+        confirmation.
+
+        Args: None.
+        Returns: None.
+        """
+        channel = self.current
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Save preset")
+        dialog.setLabelText(f"Save the settings of {channel.label} as:")
+        dialog.setTextValue(self.preset_combo.currentText())
+        dialog.setOkButtonText("Save")
+        dialog.findChild(QLineEdit).setMaxLength(PRESET_NAME_MAX)
+        accepted = dialog.exec() == QDialog.Accepted
+        name = dialog.textValue().strip()
+        dialog.deleteLater()
+        if not accepted:
+            return
+        if not name:
+            self.log.write("Preset not saved: it needs a name.")
+            return
+        existing = self.profiles.find_preset(name)
+        if existing is not None and QMessageBox.question(
+                self, "Replace preset?",
+                f"A preset named “{existing.name}” already exists. Replace it with "
+                f"the current settings of {channel.label}?") != QMessageBox.Yes:
+            return
+        self.profiles.save_preset(name, channel.profile(), self._source_model(channel))
+        self._refresh_presets(select=name)
+        self.log.write(f"Preset saved: {name} from {channel.label} "
+                       f"({profiles.summary(channel.profile())})")
+
+    def delete_preset(self):
+        """Delete the chosen saved preset after a confirmation.
+
+        Args: None.
+        Returns: None.
+        """
+        name = self.preset_combo.currentText()
+        if not name:
+            return
+        if QMessageBox.question(
+                self, "Delete preset?",
+                f"Delete the preset “{name}”? Every camera keeps its current "
+                "settings; only the saved preset is removed.") != QMessageBox.Yes:
+            return
+        self.profiles.delete_preset(name)
+        self._refresh_presets()
+        self.log.write(f"Preset deleted: {name}")
+
+    def reset_camera(self):
+        """Put the displayed camera back to its defaults after a confirmation.
+
+        Its saved profile is removed; other cameras and the presets stay.
+
+        Args: None.
+        Returns: None.
+        """
+        channel = self.current
+        defaults = channel.default_profile()
+        if QMessageBox.question(
+                self, "Reset camera to defaults?",
+                f"Put every control of {channel.label} back to its starting values "
+                f"({profiles.summary(defaults)}) and clear its saved settings? "
+                "Other cameras and saved presets do not change.") != QMessageBox.Yes:
+            return
+        channel.apply_profile(defaults)
+        self._load_settings(self.engine.settings(), channel.limits)
+        self.profiles.forget_profile(channel.profile_key, channel.profile())
+        self.log.write(f"Camera reset to defaults: {channel.label} "
+                       f"({profiles.summary(defaults)})")
+
+    def _track_profiles(self):
+        """Count every camera's settings now in force as saved.
+
+        Args: None.
+        Returns: None.
+        """
+        for channel in self.channels:
+            self.profiles.track(channel.profile_key, channel.profile())
+
+    def _save_profiles(self, settle=True):
+        """Save every camera's profile that changed.
+
+        Args: settle is True (the timer) to wait until a profile stops
+            changing; False (closing) writes every change at once.
+        Returns: None.
+        """
+        save = self.profiles.save_when_settled if settle else self.profiles.save_profile
+        for channel in self.channels:
+            save(channel.profile_key, channel.profile())
     def _build_phone_controls(self, add):
         """Create the iPhone's own controls, shown only while an iPhone is displayed.
 
@@ -4537,7 +4759,7 @@ class MainWindow(QMainWindow):
                                        "Raw Mono8: no brightness scaling")
         set_tooltip(self.range_status,
                     "Brightness before and after Scaling (Fixed gain or Auto "
-                    "stretch), measured before gamma and the palette. Raw view is "
+                    "stretch), measured before gamma. Raw view is "
                     "not scaled.")
         self.camera_fps_status = FixedLabel(  # sensor rate, then what the app keeps up with
             "Camera: 999.9 fps (simulated)")
@@ -4818,6 +5040,7 @@ class MainWindow(QMainWindow):
             self.camera_checks.append(check)
             self.camera_states.append(state)
         self.process_note.setVisible(several)
+        self.profile_label.setVisible(several)
         self._sync_cameras()
 
     def _sync_cameras(self):
@@ -4831,6 +5054,7 @@ class MainWindow(QMainWindow):
         self.camera_combo.blockSignals(True)
         self.camera_combo.setCurrentIndex(self.channels.index(self.current))
         self.camera_combo.blockSignals(False)
+        self.profile_label.setText(f"Settings of {self.current.label}")
         for channel, check in zip(self.channels, self.camera_checks):
             check.blockSignals(True)
             check.setChecked(channel.active)
@@ -4854,6 +5078,8 @@ class MainWindow(QMainWindow):
         """
         if channel is self.current:
             return
+        # The camera left behind keeps what was set on it, saved now.
+        self.profiles.save_profile(self.current.profile_key, self.current.profile())
         if not channel.active:
             self.log.write(f"Processing on: {channel.label}")
             channel.start()
@@ -4890,7 +5116,9 @@ class MainWindow(QMainWindow):
             high)}, missing names using DEFAULT_LIMITS.
         Returns: None.
         """
-        self._apply_limits({**DEFAULT_LIMITS, **limits})
+        # Quietly: a slider that clamps the value still on screen (another
+        # camera's) would otherwise send it to this camera.
+        self._apply_limits({**DEFAULT_LIMITS, **limits}, quiet=True)
         for widget, value in ((self.exposure, s.exposure_us), (self.gain, s.gain_db),
                               (self.fps, s.fps), (self.noise_reduction, s.noise_reduction),
                               (self.average, s.average),
@@ -4913,13 +5141,12 @@ class MainWindow(QMainWindow):
         toggles = ((self.rolling, s.rolling),
                    (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
-                   (self.clahe, s.clahe), (self.even_brightness, s.even_brightness),
+                   (self.even_brightness, s.even_brightness),
                    (self.frames_first, s.average_frames_first),
                    (self.floor_subtract, s.floor_subtract),
                    (self.record_button, s.record), (self.single_field, s.single_field),
                    (self.raw_difference_button, s.raw_difference))
         combos = ((self.smoothing_combo, s.smoothing_method),
-                  (self.palette_combo, s.palette),
                   (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
         for widget, _ in toggles + combos:
             widget.blockSignals(True)
@@ -4981,16 +5208,20 @@ class MainWindow(QMainWindow):
         self.gain_before_average.setEnabled(not stretch)
         self.average_multiplier.setEnabled(not stretch and before_average)
 
-    def _apply_limits(self, limits):
+    def _apply_limits(self, limits, quiet=False):
         """Set the camera sliders to device limits.
 
-        Args: limits is {node name: (low, high)} for the names to change.
+        Args: limits is {node name: (low, high)} for the names to change;
+            quiet keeps a value the new range clamps from being sent to the
+            engine (used while another camera's values are still shown).
         Returns: None.
         """
         for name, widget in (("ExposureTime", self.exposure), ("Gain", self.gain),
                              ("AcquisitionFrameRate", self.fps)):
             if name in limits:
+                widget.blockSignals(quiet)
                 widget.set_range(*limits[name])
+                widget.blockSignals(False)
 
     def _camera_state(self, channel):
         """Summarize a camera for its row in the camera list.
@@ -5017,6 +5248,9 @@ class MainWindow(QMainWindow):
             CameraInfo the engine found (may be empty).
         Returns: None.
         """
+        for other in self.channels:  # the demo cameras' own profiles, as they were
+            if other.demo_source:
+                self.profiles.save_profile(other.profile_key, other.profile())
         channel.demo_source = False
         if channel.engine.camera_info is not None:
             channel.info = channel.engine.camera_info
@@ -5025,9 +5259,18 @@ class MainWindow(QMainWindow):
             if other is not channel and other.demo_source:
                 other.stop()
                 self.retired_channels.append(other)
+        # Dummy-mode values never carry over to a real camera: it gets its own
+        # saved profile, or its defaults.
+        defaults = channel.default_profile()
+        saved = self.profiles.load_profile(channel.profile_key, defaults)
+        channel.apply_profile(saved or defaults)
+        self.log.write(f"{channel.label}: " + (
+            f"saved settings restored ({profiles.summary(saved)})" if saved else
+            f"starts from its defaults ({profiles.summary(defaults)})"))
         self.channels = [channel] + [
-            Channel(self.log, info) for info in cameras
+            restore_channel(self.log, info, profiles=self.profiles) for info in cameras
             if info.serial != channel.info.serial]
+        self._track_profiles()
         self._rebuild_cameras()
 
     def wait_for_engines(self, timeout):
@@ -5308,9 +5551,9 @@ class MainWindow(QMainWindow):
         Args: packet is the FramePacket to show.
         Returns: None.
         """
-        key = (packet.palette, round(packet.gamma, 4))
+        key = round(packet.gamma, 4)
         if key != getattr(self, "table_key", None):
-            self.table = palette_rgb_table(packet.palette, packet.gamma)
+            self.table = display_rgb_table(packet.gamma)
             self.table_key = key
         self.view.show_packet(packet, self.table, key)
         self.shown_packet = packet
@@ -5989,11 +6232,8 @@ class MainWindow(QMainWindow):
             channel.frozen = channel.frozen_at = None
             self._show_frozen()
             self._adopt_live_cameras(channel, payload or [])
-            for button in self.mode_group.buttons():
-                button.setChecked(button.text() == "Raw")
-            self.record_button.blockSignals(True)
-            self.record_button.setChecked(False)
-            self.record_button.blockSignals(False)
+            if displayed:
+                self._load_settings(channel.engine.settings(), channel.limits)
             self._set_demo(False)
         elif kind == "switch_failed":
             QMessageBox.warning(self, "Camera unavailable",
@@ -6052,6 +6292,9 @@ class MainWindow(QMainWindow):
             while not self.wait_for_engines(0.05) and time.monotonic() < deadline:
                 QApplication.processEvents()
             self._poll_status()
+            self.profile_timer.stop()
+            self._save_profiles(settle=False)
+            self.profiles.sync()
             settings = QSettings("ESPI", "espi_live")
             settings.setValue("geometry", self.saveGeometry())
             settings.setValue("windowState", self.saveState(LAYOUT_VERSION))
@@ -6116,9 +6359,11 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
             log.write(f"Log file: {path}")
         reporting.start(log)
         cleanup.start()
+        # Each camera's saved profile is restored before its camera opens.
+        store = profiles.ProfileStore(QSettings("ESPI", "espi_live"), log)
         if not force_demo:
             try:
-                channels = open_camera_channels(log)
+                channels = open_camera_channels(log, store)
             except Exception as exc:
                 error_reports.caught(log, exc, "camera_startup", "Camera startup unavailable")
                 answer = QMessageBox.question(
@@ -6129,13 +6374,13 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
                     log.write("No camera detected; demo mode declined.")
                     return 0
         if not channels:
-            channels = demo_channels(log, demo_cameras)
+            channels = demo_channels(log, demo_cameras, store)
         use_gl, description = opengl_available()
         display = f"GPU ({description})" if use_gl else f"CPU fallback ({description})"
         log.write(f"Display: {display}")
         log.info(describe_session(channels, display))
         reporting.reporter.update_context(display=display)
-        window = MainWindow(channels, log, use_gl, check_updates, reporting)
+        window = MainWindow(channels, log, use_gl, check_updates, reporting, store)
         window.show()
         for channel in channels:
             if channel.active:

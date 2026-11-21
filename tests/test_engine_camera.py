@@ -446,7 +446,7 @@ class CameraStreamingTests(CameraEngineCase):
         Returns: None.
         """
         self.start_camera()
-        self.engine.update_settings(mode="Previous", average=2, palette="Gray",
+        self.engine.update_settings(mode="Previous", average=2,
                                     scale_range=False, difference_gain=1.0)
         self.assertTrue(wait_until(lambda: (
             self.engine.latest_packet() is not None and
@@ -640,7 +640,7 @@ class DirectWorkerTests(CameraEngineCase):
         Args: None.
         Returns: An engine.FramePacket.
         """
-        return engine.FramePacket(1, np.zeros((8, 8), np.uint8), "Gray", 1.0,
+        return engine.FramePacket(1, np.zeros((8, 8), np.uint8), 1.0,
                                   "Raw", False)
 
     def test_reap_logs_error_and_marks_recording_off(self):
@@ -719,7 +719,7 @@ class DirectWorkerTests(CameraEngineCase):
         Args: None.
         Returns: None.
         """
-        frozen = engine.FramePacket(1, np.full((8, 8), 7, np.uint8), "Gray", 1.0,
+        frozen = engine.FramePacket(1, np.full((8, 8), 7, np.uint8), 1.0,
                                     "Raw", True)
         self.engine._packet = self.packet()  # newer live frame, not demo
         when = object()

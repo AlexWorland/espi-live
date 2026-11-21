@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-11-21 — Per-camera profiles and saved presets
+
+### Previous state
+
+- Each camera had its own settings only while the program ran; every start began from the defaults again (exposure 8000 µs, gain 0 dB, 30 fps; the LabVIEW flow for the analog camera).
+- Showing a camera whose exposure, gain or frame-rate range was narrower than the value still on screen could send the previous camera's value, clamped, to the newly shown camera.
+- After **Switch to live capture**, the live camera kept the values set on the synthetic camera.
+- Only the three built-in processing presets existed, and they never hold exposure, gain or frame rate; there was no way to keep your own setup.
+
+### Current state
+
+- **Each camera keeps its own profile between runs**: exposure, gain, frame rate, the view and every processing and display control, including the LabVIEW flow's state. It is saved about a second after it stops changing, on a camera switch and on close, under the camera's serial number (FLIR), USB ID and name (capture devices) or demo name, and restored before the camera opens. **A camera with a saved profile now starts from its last values instead of the defaults**, and the log says so with its exposure, gain, frame rate and view. A camera with nothing saved still starts from exactly the defaults above, and exposure, gain and frame rate are still clamped to the camera's limits. Recording is never saved.
+- **Reset camera to defaults…** (Camera section, with a confirmation) puts the displayed camera back to its defaults and clears its saved profile.
+- **Presets** (Camera section, also in the simple interface): **Save as…** names and stores the displayed camera's settings (an existing name asks before it is replaced), **Apply** puts the chosen preset on the displayed camera only (a preset from another camera model fits exposure, gain and frame rate into this camera's limits and logs each change, then `Preset applied: <name> to <camera>`), and **Delete** removes one after a confirmation. The built-in Live preview, Measurement and Peak hold buttons are unchanged and not listed there.
+- With several cameras, the Camera section names the camera being edited (**Settings of** *camera*).
+- Fixed: showing another camera no longer sends it the previous camera's clamped exposure, gain or frame rate, and the live camera after **Switch to live capture** gets its own saved profile or its defaults instead of the demo's values.
+- Older stored values that no longer exist (such as `palette` and `clahe`) are ignored, and a damaged value falls back to the default with a log line.
+
+## 2026-11-21 — Color palettes and CLAHE removed
+
+### Previous state
+
+- The Display section offered a **Palette** list (Gray, Turbo, Jet, Hot, Viridis, Plasma, Inferno) and a **CLAHE (color palettes only)** checkbox. CLAHE did nothing while the palette was Gray, and the Measurement preset turned it on.
+
+### Current state
+
+- The display is always grayscale, with the display gamma. **Palette** and **CLAHE** are gone from the controls, the presets, the guide and the settings, and the diagnostics line no longer reports CLAHE.
+- Saved PNGs and AVI recordings are unchanged: they hold the same gray values as the screen, written as before. `processing.apply_palette` and `palette_rgb_table` became `apply_display(image, gamma)` and `display_rgb_table(gamma)`.
+- The guide and help text now give the display order as brightness, gain and contrast, then gamma, which is what the program does.
 ## 2026-11-21 — Compare button is shown in the Simple UI
 
 ### Previous state

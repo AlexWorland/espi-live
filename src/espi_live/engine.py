@@ -36,11 +36,11 @@ from espi_live.capture_models import adapter_for
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
                                   ESPIProcessor, MAX_FRAMES_BACK,
                                   NoiseCalibration, NoiseFloorMap, PeakHold,
-                                  RangeTracker, apply_gain, apply_levels,
-                                  apply_palette, denoise_strength, display_lut,
-                                  even_out_brightness, gamma_lut,
-                                  local_normalize, raw_difference,
-                                  reject_outliers, single_field, smooth_speckle, stretch_levels,
+                                  RangeTracker, apply_display, apply_gain,
+                                  apply_levels, denoise_strength, display_lut,
+                                  even_out_brightness, local_normalize,
+                                  raw_difference, reject_outliers,
+                                  single_field, smooth_speckle, stretch_levels,
                                   subtract_floor, watermark_demo)
 from espi_live.recording import (AVIRecorder, recording_path, save_frame,
                                  save_frame_set)
@@ -89,12 +89,10 @@ class Settings:
     normalize_window: int = 0     # local normalization window in px (replaces stretch); 0 = off
     invert: bool = False
     flip_horizontal: bool = False  # mirror left-right (flip across the vertical axis)
-    palette: str = "Gray"
     gamma: float = 1.0
     brightness: int = 0           # grey levels added to every displayed pixel; 0 = off
     display_gain: float = 1.0     # every displayed pixel multiplied by this; 1 = off
     contrast: float = 0.0         # S-curve contrast strength, 0–100 %; 0 = off
-    clahe: bool = True
     record: bool = False
     single_field: bool = False    # interlaced sources: even rows only, line-doubled
     auto_reference: bool = False  # Reference view captures one when it has none
@@ -108,10 +106,10 @@ class Settings:
 # a reference grabbed at the start and never refreshed (BY FRAME off), full
 # frames, each difference multiplied by Constant = 42 and saturated, Low Pass
 # Filter off, Average off (block averaging, Multiplier 1, when turned on), no
-# wait between grabs, Gray palette, and nothing the VI lacks (noise
+# wait between grabs, and nothing the VI lacks (noise
 # reduction, noise threshold, beam-brightness correction, speckle filter, peak
 # hold, local normalization, stretch, invert, gamma, display brightness, gain
-# and contrast, CLAHE). The Auto-stretch-only sensitivity floor and steady
+# and contrast). The Auto-stretch-only sensitivity floor and steady
 # range are left as they are, since Fixed gain ignores them. Exposure, gain,
 # frame rate, recording and the image flip are left alone.
 LABVIEW_FLOW = {
@@ -132,12 +130,10 @@ LABVIEW_FLOW = {
     "gain_before_average": True,
     "average_multiplier": 1.0,
     "invert": False,
-    "palette": "Gray",
     "gamma": 1.0,
     "brightness": 0,
     "display_gain": 1.0,
     "contrast": 0.0,
-    "clahe": False,
     "single_field": False,
     "auto_reference": True,
     "average_frames_first": False,
@@ -198,14 +194,12 @@ class FramePacket:
     """One processed frame ready for display, saving or recording.
 
     image is a 2-D uint8 array that is never modified after publication.
-    palette and gamma are the color steps still to apply. Raw frames stay
-    Gray (no palette) and carry the display gamma. CLAHE frames already
-    include gamma.
+    gamma is the display tone still to apply (the display is always
+    grayscale).
     """
 
     sequence: int
     image: np.ndarray
-    palette: str
     gamma: float
     mode: str
     demo: bool
@@ -214,9 +208,9 @@ class FramePacket:
         """Produce the exact colors shown on screen, on the CPU.
 
         Args: None.
-        Returns: A grayscale or BGR uint8 image for saving or recording.
+        Returns: A grayscale uint8 image for saving or recording.
         """
-        return apply_palette(self.image, self.palette, self.gamma)
+        return apply_display(self.image, self.gamma)
 
 
 @dataclass(frozen=True)
@@ -315,14 +309,14 @@ def floor_key(s, processor, shape):
             (s.difference_gain, s.average_multiplier) if labview else None)
 
 
-def finish_difference(averaged, s, clahe, measure=True, peaks=None, ranges=None,
+def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
                       now=0.0, sample=None, labview_order=False, floor=None,
                       floor_sample=None):
     """Run the steps after averaging: speckle filter, noise floor, peak hold,
-    scaling, gamma/CLAHE.
+    scaling, invert.
 
     Args: averaged is a uint8 difference image; s is the Settings snapshot;
-        clahe is the worker's CLAHE object; measure asks for the input range
+        measure asks for the input range
         when Fixed gain or Local normalization is on (it costs a pass over
         the frame); peaks and ranges are the worker's PeakHold and
         RangeTracker, or None to leave out peak hold and the steady range
@@ -332,8 +326,8 @@ def finish_difference(averaged, s, clahe, measure=True, peaks=None, ranges=None,
         floor is a NoiseFloorMap result to subtract, or None; floor_sample is
         called with the filtered image and now before the floor is taken off
         (a noise floor measurement), or None.
-    Returns: (image, palette, gamma, levels): the processed image, the palette
-        and gamma still to apply on display, and (low, high, scaled_low,
+    Returns: (image, levels): the processed image (the display gamma is still
+        to apply) and (low, high, scaled_low,
         scaled_high) for the status bar (scaled_low is None under Local
         normalization), or None when not measured.
     """
@@ -367,16 +361,7 @@ def finish_difference(averaged, s, clahe, measure=True, peaks=None, ranges=None,
             levels = (int(low), int(high), int(top), int(bottom))
     if s.invert:
         image = cv2.bitwise_not(image)
-    palette, gamma = s.palette, s.gamma
-    if s.clahe and s.palette != "Gray":
-        # CLAHE sits between gamma and the palette, so do both
-        # here; the display then applies only the palette.
-        lut = gamma_lut(s.gamma)
-        if lut is not None:
-            image = cv2.LUT(image, lut)
-        image = clahe.apply(image)
-        gamma = 1.0
-    return image, palette, gamma, levels
+    return image, levels
 
 
 def range_text(levels, s):
@@ -422,7 +407,7 @@ def view_hint(s, processor, floor_note=None):
     if floor_note is not None:
         return floor_note
     if s.mode == "Raw":
-        return "Raw view: camera pixels, with gamma; no stretch or palette"
+        return "Raw view: camera pixels, with gamma; no stretch"
     if s.mode == "Reference" and processor.ref is None:
         return "Reference: press F or Set reference to capture a baseline"
     if s.mode == "Reference" and processor.ref_noise != s.noise_reduction:
@@ -430,7 +415,7 @@ def view_hint(s, processor, floor_note=None):
                 "press F to retake")
     if s.mode == "Reference" and s.ref_refresh_s > 0:
         return f"Reference refreshes every {s.ref_refresh_s:.1f} s to cancel slow drift"
-    return "ESPI difference view; min/max range is before gamma and palette"
+    return "ESPI difference view; min/max range is before gamma"
 
 
 class WindowsPreviewTimer:
@@ -507,7 +492,7 @@ class Engine:
         self._status = {
             "demo": False, "camera": "Camera values: waiting for connection",
             "range": "Input: —    Scaled: —",
-            "hint": "Raw view: camera pixels, with gamma; no stretch or palette",
+            "hint": "Raw view: camera pixels, with gamma; no stretch",
             "processing": "Processing: —", "record": "Recording: off",
             "camera_fps": "Camera: — fps",
             "processed_fps": 0.0,
@@ -838,7 +823,6 @@ class Engine:
         processor = ESPIProcessor()
         ranges = RangeTracker()
         peaks = PeakHold()
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         applied = self.settings()  # the camera was opened at these values
         last_setting_time = 0.0
         last_mode = applied.mode
@@ -1039,19 +1023,19 @@ class Engine:
             update_range = now - last_range_time >= RANGE_INTERVAL_S
             image = None
             measured = frame  # the frame the difference uses (an average, or frame)
-            palette, gamma = "Gray", 1.0
+            gamma = s.gamma  # every view shows the display gamma ...
             earlier = raw_previous
             if s.raw_difference:
                 raw_previous = frame.copy()  # outlives this iteration's frame
                 image = raw_difference(frame, earlier)
+                gamma = 1.0  # ... except Raw difference, which applies nothing
                 self._drop_calibration("Raw difference")
                 if update_range:
                     self._set_status(range="Raw difference: |live - previous|, "
                                      "no gain, filters or scaling")
                     last_range_time = now
             elif s.mode == "Raw":
-                image = frame
-                gamma = s.gamma  # curve only; Raw skips stretch and palette
+                image = frame  # gamma curve only; Raw skips stretch
                 self._drop_calibration("Raw view")
                 if update_range:
                     self._set_status(range="Raw Mono8: no brightness scaling")
@@ -1082,8 +1066,8 @@ class Engine:
                                 processor.average(difference, count, scale))
                 if averaged is not None:
                     floor, floor_sample = self._floor_use(s, processor, measured.shape)
-                    image, palette, gamma, levels = finish_difference(
-                        averaged, s, clahe, update_range, peaks=peaks,
+                    image, levels = finish_difference(
+                        averaged, s, update_range, peaks=peaks,
                         ranges=ranges, now=now, sample=self._sample_noise,
                         labview_order=labview_order, floor=floor,
                         floor_sample=floor_sample)
@@ -1099,7 +1083,7 @@ class Engine:
                     image = present(image, s.flip_horizontal, self.demo,
                                     display_lut(s.display_gain, s.contrast, s.brightness))
                 sequence += 1
-                packet = FramePacket(sequence, image, palette, gamma,
+                packet = FramePacket(sequence, image, gamma,
                                      signature[0], self.demo)
                 with self._packet_lock:
                     self._packet = packet
@@ -1110,7 +1094,7 @@ class Engine:
                     if s.raw_difference:
                         self._publish_raw_compare(frame, earlier, packet)
                     else:
-                        self._publish_compare(processor, measured, s, packet, clahe, now)
+                        self._publish_compare(processor, measured, s, packet, now)
                     last_compare = now
             elif (s.mode == "Previous" and self._compare.is_set() and
                     now - last_compare >= COMPARE_INTERVAL_S and
@@ -1199,13 +1183,13 @@ class Engine:
             self.log.write(f"Noise reduction is now {new:g}, but the reference was "
                            f"taken at {old:g}. Press F to retake it.")
 
-    def _publish_compare(self, processor, frame, s, packet, clahe, now):
+    def _publish_compare(self, processor, frame, s, packet, now):
         """Publish the baseline, the current frame and their difference.
 
         Args: processor is the ESPIProcessor; frame is this iteration's frame
             (after single-field and noise reduction); s is the Settings
-            snapshot; packet is the FramePacket just published; clahe is the
-            worker's CLAHE object; now is the monotonic time.
+            snapshot; packet is the FramePacket just published; now is the
+            monotonic time.
         Returns: None. In Reference and Previous views the difference is the
             published packet itself (with its averaging) and, in Previous
             view, the baseline is the earlier frame that difference
@@ -1216,7 +1200,7 @@ class Engine:
         flip = s.flip_horizontal
         tone = display_lut(s.display_gain, s.contrast, s.brightness)
         current = FramePacket(packet.sequence, present(frame, flip, self.demo, tone),
-                              "Gray", s.gamma, "Current", self.demo)
+                              s.gamma, "Current", self.demo)
         if s.mode == "Previous":
             compare = self._previous_compare(processor, s, packet.sequence, packet,
                                              current, flip, tone)
@@ -1237,18 +1221,18 @@ class Engine:
             detail = f"one difference, no averaging (the view is {s.mode})"
         if ref is not None and ref.shape == frame.shape:
             reference = FramePacket(packet.sequence, present(ref, flip, self.demo, tone),
-                                    "Gray", s.gamma, "Reference frame", self.demo)
+                                    s.gamma, "Reference frame", self.demo)
             if s.mode == "Reference":
                 difference = packet
             else:
                 single, labview_order = condition_difference(
                     cv2.absdiff(frame, ref), frame, s)
-                image, palette, gamma, _ = finish_difference(
-                    single, s, clahe, measure=False, now=now,
+                image, _ = finish_difference(
+                    single, s, measure=False, now=now,
                     labview_order=labview_order)
                 difference = FramePacket(packet.sequence,
                                          present(image, flip, self.demo, tone),
-                                         palette, gamma, "Reference", self.demo)
+                                         s.gamma, "Reference", self.demo)
         compare = ComparePacket(packet.sequence, current, reference, difference,
                                 info, detail, self.demo)
         with self._packet_lock:
@@ -1265,10 +1249,10 @@ class Engine:
             """Wrap one unprocessed frame for a comparison panel.
 
             Args: image is a 2-D uint8 frame; name is the panel's mode text.
-            Returns: A FramePacket (Gray, gamma 1, demo watermark only).
+            Returns: A FramePacket (gamma 1, demo watermark only).
             """
             return FramePacket(packet.sequence, present(image, False, self.demo),
-                               "Gray", 1.0, name, self.demo)
+                               1.0, name, self.demo)
         compare = ComparePacket(
             packet.sequence, raw(frame, "Current"), raw(earlier, "Previous frame"),
             packet, "the raw frame before the live one, unprocessed",
@@ -1317,7 +1301,7 @@ class Engine:
         flip = s.flip_horizontal
         tone = display_lut(s.display_gain, s.contrast, s.brightness)
         current = FramePacket(sequence, present(frame, flip, self.demo, tone),
-                              "Gray", s.gamma, "Current", self.demo)
+                              s.gamma, "Current", self.demo)
         compare = self._previous_compare(processor, s, sequence, None, current,
                                          flip, tone)
         with self._packet_lock:
@@ -1348,7 +1332,7 @@ class Engine:
             info = f"none yet: the view needs {frames} of history"
         else:
             baseline = FramePacket(sequence, present(previous, flip, self.demo, tone),
-                                   "Gray", s.gamma, "Previous frame", self.demo)
+                                   s.gamma, "Previous frame", self.demo)
             info = f"the frame the view subtracts, {frames} back"
             if packet is not None:
                 difference = packet
