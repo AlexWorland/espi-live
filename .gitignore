@@ -39,11 +39,10 @@ research/
 src/espi_live/_build_info.py
 update-token.txt
 
-# Coverage data, and the class durations scripts/run_tests.py orders by
+# Coverage data
 .coverage
 .coverage.*
 htmlcov/
-.test-durations.json
 
 # iOS app (ios/): XcodeGen output, Xcode user state, archives and keys
 ios/**/*.xcodeproj/
