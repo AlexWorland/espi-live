@@ -751,9 +751,24 @@ python -m espi_live</code></pre>
       <section id="toolbar">
         <h3>Toolbar <a class="anchor" href="#toolbar" aria-label="Link to Toolbar">#</a></h3>
         <ul>
+          <li><strong>Simple UI</strong> — on, only the basic controls are shown
+            (views, Record AVI, Save frame, Set reference, the camera, Exposure
+            and Gain); off, every control, section and toolbar button is shown.
+            Switching changes only what is displayed: settings and the camera
+            are untouched, and the choice is remembered for the next run.</li>
           <li><strong>View modes</strong> — <strong>Raw</strong>,
             <strong>Previous</strong> and <strong>Reference</strong>; see
             <a href="#view">View</a>.</li>
+          <li><strong>Raw difference</strong> — show only the difference
+            between two raw camera frames: each pixel is |live − previous| in
+            the camera's own grey levels. While it is on (the button turns red
+            and the view buttons grey out) every other step is bypassed: noise
+            reduction, single field, filters, averaging, difference gain,
+            stretch, palette, gamma, flip and display tone. Your settings are
+            kept and come back when you turn it off; the camera's own exposure
+            and gain are unchanged. Recordings are named
+            <code>espi_rawdiff_*.avi</code>, and the comparison window shows the
+            two raw frames.</li>
           <li><strong>Record AVI</strong> — start or stop recording the
             displayed image. The recording label shows the output rate.</li>
           <li><strong>Freeze (Space)</strong> — hold the displayed image without
@@ -1386,6 +1401,9 @@ python -m espi_live</code></pre>
           averaging or filters). Turn the toggle off for your own settings,
           which also start in Fixed gain: Auto stretch would blow the capture
           noise (3–5 grey levels) up to full-contrast grain.</li>
+        <li><strong>Raw difference</strong> on the toolbar shows the bare
+          |live − previous| of the capture frames, with none of the above
+          processing, to see what the camera itself delivers.</li>
         <li>Images look about 12% wide because NTSC pixels are not square;
           they are not resampled. Expect coarser fringes than with the
           Blackfly.</li>

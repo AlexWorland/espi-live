@@ -256,6 +256,8 @@ class EngineFloorStateTests(unittest.TestCase):
         """
         engine, s, shape = self.engine, self.s, (2, 2)
         self.assertIsNone(engine._floor_note(replace(s, mode="Raw"), self.processor, shape))
+        self.assertIsNone(engine._floor_note(replace(s, raw_difference=True),
+                                             self.processor, shape))
         self.assertIn("press Measure noise floor",
                       engine._floor_note(s, self.processor, shape))
         engine._floor = (floor_key(s, self.processor, shape), np.zeros(shape, np.float32))

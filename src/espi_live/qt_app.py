@@ -28,7 +28,7 @@ import sys
 import textwrap
 import time
 import traceback
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 
 import cv2
@@ -144,10 +144,15 @@ FEATURE_BUSY_LABEL = "Sending request…"
 CHECK_TIP = "Check GitHub for a newer build of ESPI live."
 FEATURE_TIP = "Send a feature request to the developers as a GitHub issue."
 CODEX_TIP = "Ask OpenAI's Codex how ESPI live works, using this build's real source code."
-# Temporary pared-down build: only the basic controls are rendered. The rest
-# are still created (so settings, presets, shortcuts and tests keep working)
-# but are never shown. Set to False to render every control again.
+# Simple UI: only the basic controls are rendered. The rest are still created
+# (so settings, presets, shortcuts and tests keep working) but are not shown.
+# SIMPLE_UI is the default for a fresh install; the toolbar's Simple UI button
+# switches it while the window runs and the choice is remembered
+# (SIMPLE_UI_SETTING_KEY).
 SIMPLE_UI = True
+SIMPLE_UI_SETTING_KEY = "ui/simple"
+SIMPLE_UI_TIP = ("Show only the basic controls. Turn it off to show every control, "
+                 "section and toolbar button. Your settings are kept either way.")
 LAYOUT_VERSION = 5  # bump when docks/toolbars change so stale saved layouts are ignored
 # A camera PC can stay open for days. Recheck well inside GitHub's rate limit.
 UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
@@ -196,6 +201,24 @@ def setting_on(value):
     Returns: False for False, 0, "false" or "0"; otherwise True.
     """
     return str(value).strip().lower() not in ("false", "0")
+
+
+@dataclass
+class ControlRow:
+    """One row of the controls grid that the simple UI can take out and put back.
+
+    Attributes: widget is the control; label is its name, or None for a
+        full-width row; grid is the section grid and row its row number there;
+        name is the QLabel in column 0 while the row is placed; placed is False
+        while the widget is parked in the hidden holder.
+    """
+
+    widget: object
+    label: object
+    grid: object
+    row: int
+    name: object = None
+    placed: bool = False
 
 
 class Reporting:
@@ -389,6 +412,15 @@ PROCESSING_PRESETS = {
         "contrast": 30.0,
     },
 }
+RAW_DIFFERENCE_TIP = (
+    "Show only the difference between two raw camera frames: each pixel is "
+    "|live - previous| in the camera's own grey levels. Every other step is "
+    "bypassed while it is on: noise reduction, single field, filters, "
+    "averaging, difference gain, stretch, palette, gamma, flip and display "
+    "tone. The view buttons and your settings are kept and come back when "
+    "you turn it off. Exposure and gain on the camera itself are unchanged.")
+# The Raw difference button stands out while it overrides every setting.
+RAW_DIFFERENCE_STYLE = "background:#c03030;color:white;font-weight:bold;"
 LABVIEW_FLOW_TIP = (
     "Switch between your own settings and the LabVIEW ESPI 1.5 flow: Reference "
     "view with a reference captured now (and again whenever Reference view has "
@@ -2954,7 +2986,11 @@ class MainWindow(QMainWindow):
         self.reporting = reporting
         self.report_outcomes = {}  # fingerprint -> latest error_reports.Outcome
         self.fatal_boxes = {}  # fingerprint -> (open "ESPI stopped" box, its message)
-        self.simple_ui = SIMPLE_UI  # read once: the layout is built for it
+        self.simple_ui = setting_on(
+            QSettings("ESPI", "espi_live").value(SIMPLE_UI_SETTING_KEY, SIMPLE_UI))
+        self._advanced_actions = []  # toolbar actions the simple UI hides
+        self._advanced_sections = []  # (heading button, body) the simple UI hides
+        self._advanced_rows = []  # _ControlRow entries the simple UI parks
         self.closing = False
         self.updates = updater.UpdateWorker()
         self.update_info = None
@@ -3293,6 +3329,16 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, bar)
         self.actions_bar = bar
 
+        # First, so a narrow window never pushes it into the overflow menu: it
+        # is the only way back from the simple UI to the full one.
+        self.simple_ui_button = QPushButton("Simple UI")
+        self.simple_ui_button.setCheckable(True)
+        self.simple_ui_button.setChecked(self.simple_ui)
+        set_tooltip(self.simple_ui_button, SIMPLE_UI_TIP)
+        self.simple_ui_button.toggled.connect(self.set_simple_ui)
+        bar.addWidget(self.simple_ui_button)
+        bar.addSeparator()
+
         self.mode_group = QButtonGroup(self)
         for mode in VIEW_MODES:
             button = QPushButton(mode)
@@ -3303,6 +3349,15 @@ class MainWindow(QMainWindow):
             bar.addWidget(button)
         self.mode_group.buttonClicked.connect(
             lambda button: self.engine.update_settings(mode=button.text()))
+        self.raw_difference_button = QPushButton("Raw difference")
+        self.raw_difference_button.setCheckable(True)
+        self.raw_difference_button.setChecked(s.raw_difference)
+        set_tooltip(self.raw_difference_button, RAW_DIFFERENCE_TIP)
+        self.raw_difference_button.setStyleSheet(
+            f"QPushButton:checked {{{RAW_DIFFERENCE_STYLE}}}")
+        self.raw_difference_button.toggled.connect(self.set_raw_difference)
+        bar.addWidget(self.raw_difference_button)
+        self._sync_raw_difference(s.raw_difference)
         bar.addSeparator()
 
         self.record_button = QPushButton("Record AVI")
@@ -3324,7 +3379,7 @@ class MainWindow(QMainWindow):
                     "processing and recording. Shortcut: Space. S saves the held image.")
         self.freeze_button.setStyleSheet(f"QPushButton:checked {{{FROZEN_STYLE}}}")
         self.freeze_button.toggled.connect(self.set_frozen)
-        self._hide_in_simple_ui(bar.addWidget(self.freeze_button))
+        self._mark_advanced(bar.addWidget(self.freeze_button))
         for label, tip, handler, basic in (
                 ("Save frame (S)",
                  "Save the displayed frame as a PNG, plus a notes file when the title "
@@ -3351,7 +3406,7 @@ class MainWindow(QMainWindow):
             button.clicked.connect(handler)
             action = bar.addWidget(button)
             if not basic:
-                self._hide_in_simple_ui(action)
+                self._mark_advanced(action)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -3384,18 +3439,97 @@ class MainWindow(QMainWindow):
         for widget in (zoom_icon, self.zoom_slider, self.zoom_label, fit_button,
                        actual_button):
             # Wheel zoom, the 0 and 1 keys and the View menu remain.
-            self._hide_in_simple_ui(bar.addWidget(widget))
+            self._mark_advanced(bar.addWidget(widget))
         self._show_zoom(self.view.zoom)
 
-    @staticmethod
-    def _hide_in_simple_ui(action):
-        """Hide a toolbar item while SIMPLE_UI is on.
+    def _mark_advanced(self, action):
+        """Register a toolbar item the simple UI hides, and show or hide it now.
 
         Args: action is the QAction QToolBar.addWidget returned.
         Returns: None.
         """
-        if SIMPLE_UI:
-            action.setVisible(False)
+        self._advanced_actions.append(action)
+        action.setVisible(not self.simple_ui)
+
+    def set_simple_ui(self, on):
+        """Switch the simple UI on or off while the window runs.
+
+        The choice is remembered for the next run. Hidden controls keep their
+        values and wiring, so nothing about the measurement changes.
+
+        Args: on is True to render only the basic controls.
+        Returns: None.
+        """
+        self.simple_ui = bool(on)
+        QSettings("ESPI", "espi_live").setValue(SIMPLE_UI_SETTING_KEY, self.simple_ui)
+        for action in self._advanced_actions:
+            action.setVisible(not self.simple_ui)
+        for toggle, body in self._advanced_sections:
+            toggle.setVisible(not self.simple_ui)
+            body.setVisible(not self.simple_ui and toggle.isChecked())
+        for entry in self._advanced_rows:
+            if self.simple_ui:
+                self._park_row(entry)
+            else:
+                self._place_row(entry)
+        self.tips_action.setVisible(not self.simple_ui)
+        self._show_tip()
+        self._align_sections()
+        self._fit_controls_width()
+        # Rows put back are shown by queued events, so measure once they are.
+        QTimer.singleShot(0, self._remeasure_controls)
+        self.log.write("Simple UI on: only the basic controls are shown."
+                       if self.simple_ui else "Simple UI off: every control is shown.")
+
+    def _remeasure_controls(self):
+        """Make the controls scroll area re-measure its panel.
+
+        It does not notice rows that came or went in one step, and would squeeze
+        the rows into the visible height instead of scrolling.
+
+        Args: None.
+        Returns: None.
+        """
+        self.controls_panel.layout().activate()
+        self.controls_scroll.setWidgetResizable(True)
+
+    def _place_row(self, entry):
+        """Put a controls row into its section's grid, with its label.
+
+        Args: entry is a ControlRow; placing a row already placed does nothing.
+        Returns: None.
+        """
+        if entry.placed:
+            return
+        entry.placed = True
+        if entry.label is None:
+            entry.grid.addWidget(entry.widget, entry.row, 0, 1, 2)
+            return
+        entry.name = QLabel(entry.label)
+        entry.name.setToolTip(entry.widget.toolTip())
+        entry.grid.addWidget(entry.name, entry.row, 0)
+        entry.grid.addWidget(entry.widget, entry.row, 1)
+        self._section_names.append(entry.name)
+
+    def _park_row(self, entry):
+        """Take a controls row out of its grid into the hidden holder.
+
+        The widget keeps its own show/hide state, so placing it again restores
+        the row as it was.
+
+        Args: entry is a ControlRow; parking a row already parked does nothing.
+        Returns: None.
+        """
+        if not entry.placed:
+            return
+        entry.placed = False
+        entry.grid.removeWidget(entry.widget)
+        entry.widget.setParent(self.hidden_controls)
+        if entry.name is not None:
+            entry.grid.removeWidget(entry.name)
+            self._section_names.remove(entry.name)
+            entry.name.deleteLater()
+            entry.name = None
 
     def _build_controls(self):
         """Create the controls dock as one aligned grid of settings.
@@ -3463,8 +3597,8 @@ class MainWindow(QMainWindow):
         # be collapsed without touching the visibility its widgets manage
         # themselves. _align_sections gives every grid the same label column,
         # so labels, sliders and values still line up across sections.
-        # Controls outside the basic set are parked in a hidden widget: created
-        # and wired up, but never rendered while SIMPLE_UI is on.
+        # Controls outside the basic set are parked in a hidden widget while the
+        # simple UI is on: created and wired up, but not rendered.
         self.hidden_controls = QWidget(panel)
         self.hidden_controls.setVisible(False)
         self._section_grids = []
@@ -3504,20 +3638,21 @@ class MainWindow(QMainWindow):
             self._section_grids.append(grid)
             self._section_toggles[text] = toggle
 
-            def show_section(on, body=body, toggle=toggle, text=text):
+            def show_section(on, body=body, toggle=toggle, text=text, basic=basic):
                 """Show or hide one section and remember the choice.
 
                 Args: on is True to show the section.
                 Returns: None.
                 """
-                body.setVisible(on)
+                body.setVisible(on and (basic or not self.simple_ui))
                 toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
                 QSettings("ESPI", "espi_live").setValue(
                     f"{SECTION_SETTING_PREFIX}{text}", not on)
             toggle.toggled.connect(show_section)
-            if SIMPLE_UI and not basic:
-                toggle.setVisible(False)
-                body.setVisible(False)
+            if not basic:
+                self._advanced_sections.append((toggle, body))
+                toggle.setVisible(not self.simple_ui)
+                body.setVisible(not self.simple_ui)
 
         def add(widget, label=None, basic=False):
             """Add a labeled setting, or a full-width widget when unlabeled.
@@ -3527,18 +3662,16 @@ class MainWindow(QMainWindow):
             Returns: None.
             """
             nonlocal row
-            if SIMPLE_UI and not basic:
-                widget.setParent(self.hidden_controls)
-                return
-            if label is None:
-                grid.addWidget(widget, row, 0, 1, 2)
-            else:
-                name = QLabel(label)
-                name.setToolTip(widget.toolTip())
-                grid.addWidget(name, row, 0)
-                grid.addWidget(widget, row, 1)
-                self._section_names.append(name)
+            entry = ControlRow(widget, label, grid, row)
             row += 1
+            if basic:
+                self._place_row(entry)
+                return
+            self._advanced_rows.append(entry)
+            if self.simple_ui:
+                widget.setParent(self.hidden_controls)
+            else:
+                self._place_row(entry)
 
         def note(label, basic=False):
             """Style a secondary, wrapping status line and add it full width.
@@ -4236,6 +4369,24 @@ class MainWindow(QMainWindow):
         self.labview_button.toggled.connect(self.set_labview_flow)
         add(self.labview_button)
 
+    def set_raw_difference(self, on):
+        """Turn the displayed camera's Raw difference view on or off.
+
+        Args: on is True to show |live - previous| of raw frames only.
+        Returns: None.
+        """
+        self.engine.update_settings(raw_difference=on)
+        self._sync_raw_difference(on)
+
+    def _sync_raw_difference(self, on):
+        """Grey out the view buttons while Raw difference overrides them.
+
+        Args: on is the Raw difference state.
+        Returns: None.
+        """
+        for button in self.mode_group.buttons():
+            button.setEnabled(not on)
+
     def set_labview_flow(self, on):
         """Swap the displayed camera between the user's and the LabVIEW settings.
 
@@ -4763,7 +4914,8 @@ class MainWindow(QMainWindow):
                    (self.clahe, s.clahe), (self.even_brightness, s.even_brightness),
                    (self.frames_first, s.average_frames_first),
                    (self.floor_subtract, s.floor_subtract),
-                   (self.record_button, s.record), (self.single_field, s.single_field))
+                   (self.record_button, s.record), (self.single_field, s.single_field),
+                   (self.raw_difference_button, s.raw_difference))
         combos = ((self.smoothing_combo, s.smoothing_method),
                   (self.palette_combo, s.palette),
                   (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
@@ -4777,6 +4929,7 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
         for button in self.mode_group.buttons():
             button.setChecked(button.text() == s.mode)
+        self._sync_raw_difference(s.raw_difference)
         self._sync_scaling_controls(s.scale_range, s.gain_before_average)
         self.rolling.setEnabled(not s.average_frames_first)
         self.labview_button.blockSignals(True)
