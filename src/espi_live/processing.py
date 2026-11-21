@@ -414,6 +414,23 @@ def single_field(frame):
     return np.repeat(frame[0::2], 2, axis=0)[:frame.shape[0]]
 
 
+def raw_difference(frame, previous):
+    """Subtract the previous raw camera frame from the live one, and nothing else.
+
+    No noise reduction, field selection, gain, averaging, stretch,
+    gamma or display tone: each output pixel is |live - previous| in the
+    camera's own grey levels.
+
+    Args: frame is the live 2-D uint8 frame; previous is the frame before
+        it, or None.
+    Returns: A new uint8 array, or None when there is no previous frame of
+        the same size yet.
+    """
+    if previous is None or previous.shape != frame.shape:
+        return None
+    return cv2.absdiff(frame, previous)
+
+
 def denoise_strength(percent):
     """Map the Noise reduction slider onto a history weight.
 
