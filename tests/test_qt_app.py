@@ -1605,7 +1605,13 @@ class SimpleUiTests(WindowTestCase):
         buttons = {b.text(): b for b in w.actions_bar.findChildren(qt_app.QPushButton)}
         for label in ("Save frame (S)", "Set reference (F)"):
             self.assertTrue(buttons[label].isVisibleTo(w), label)
-        for label in ("Compare (C)", "Reset last (R)", "Reset average (A)", "Fit",
+        # The basic toolbar is wider than this test window, so Qt may move the
+        # last button into its overflow menu: check the toolbar item, not the widget.
+        compare = next(a for a in w.actions_bar.actions()
+                       if w.actions_bar.widgetForAction(a) is buttons["Compare (C)"])
+        self.assertTrue(compare.isVisible())
+        self.assertNotIn(compare, w._advanced_actions)
+        for label in ("Reset last (R)", "Reset average (A)", "Fit",
                       "1:1", "Freeze (Space)"):
             self.assertFalse(buttons[label].isVisibleTo(w), label)
 
@@ -1666,7 +1672,7 @@ class SimpleUiTests(WindowTestCase):
                 self.assertTrue(toggle.isVisibleTo(w), toggle.text())
         # The window is too narrow for every toolbar item, so Qt moves the last
         # ones into its overflow menu; check the actions, not the widgets.
-        self.assertEqual(len(w._advanced_actions), 9)
+        self.assertEqual(len(w._advanced_actions), 8)
         self.assertTrue(all(a.isVisible() for a in w._advanced_actions))
         self.assertTrue(w.tips_action.isVisible())
         self.assertIn(("ui/simple", False), FakeSettings.store.items())
@@ -2332,6 +2338,7 @@ class ReferenceCompareTests(WindowTestCase):
                    if b.text() == "Compare (C)"]
         self.assertEqual(len(buttons), 1)
         self.assertIn("side by side", buttons[0].toolTip())
+        self.assertIn("Previous view", buttons[0].toolTip())
         dialog = self.open_dialog()
         self.assertTrue(dialog.isVisible())
         self.assertTrue(self.engine._compare.is_set())

@@ -29,6 +29,16 @@
 - The display is always grayscale, with the display gamma. **Palette** and **CLAHE** are gone from the controls, the presets, the guide and the settings, and the diagnostics line no longer reports CLAHE.
 - Saved PNGs and AVI recordings are unchanged: they hold the same gray values as the screen, written as before. `processing.apply_palette` and `palette_rgb_table` became `apply_display(image, gamma)` and `display_rgb_table(gamma)`.
 - The guide and help text now give the display order as brightness, gain and contrast, then gamma, which is what the program does.
+## 2026-11-21 — Compare button is shown in the Simple UI
+
+### Previous state
+
+- The Simple UI hid the **Compare (C)** toolbar button, so the window with the Previous, Current and Difference images (or the Reference, Current and Difference ones) could only be opened with the `C` key until **Simple UI** was turned off.
+
+### Current state
+
+- **Compare (C)** is shown in the Simple UI, next to **Set reference (F)**, and opens the same window. Its tooltip now describes both views: in Previous view the earlier frame being subtracted, the current frame and their difference; in Reference view the stored reference, the current frame and their difference.
+
 ## 2026-11-21 — Quieter difference images: frame averaging and a noise floor
 
 ### Previous state

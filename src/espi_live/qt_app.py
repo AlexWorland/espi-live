@@ -3427,10 +3427,12 @@ class MainWindow(QMainWindow):
                  "average of the next Ref. frames frames. Shortcut: F.",
                  lambda: self.engine.request("reference"), True),
                 ("Compare (C)",
-                 "Open a window with the stored reference, the current frame and "
-                 "their processed difference side by side, live, to check the "
-                 "reference. It has its own Freeze and saves all three. Shortcut: C.",
-                 self.show_compare, False),
+                 "Open a window with three live images side by side. In Previous "
+                 "view: the earlier frame being subtracted, the current frame and "
+                 "their difference. In Reference view: the stored reference, the "
+                 "current frame and their difference. It has its own Freeze and "
+                 "saves all three. Shortcut: C.",
+                 self.show_compare, True),
                 ("Reset last (R)",
                  "Restart the Previous view's difference from the next frame. Shortcut: R.",
                  lambda: self.engine.request("reset_previous"), False),
