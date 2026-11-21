@@ -643,8 +643,12 @@ class Engine:
             current frame, or starts averaging the next ref_frames frames),
             "reset_previous", "reset_average", "calibrate_noise" (measure a
             still scene's difference noise for 2 s, then set min_range and
-            send a "noise_calibrated" event) or "switch_live" (the
-            "switched_live" event then carries every detected CameraInfo).
+            send a "noise_calibrated" event), "switch_live" (the
+            "switched_live" event then carries every detected CameraInfo) or
+            "camera_command" (payload: phone-only settings such as
+            lens_position, width and height, crop_width and crop_height,
+            max_send_fps or refocus, sent to a source that takes them, the
+            iPhone; ignored by other cameras).
         Returns: None.
         """
         if action in ("save", "save_compare"):
@@ -913,6 +917,10 @@ class Engine:
                 if now - last_readback >= READBACK_INTERVAL_S:
                     values = self.camera.read_values()
                     resulting_fps = values["resulting"]
+                    take = getattr(self.camera, "take_settings_update", None)
+                    changed = take() if take is not None else None
+                    if changed:  # set on the phone itself, or clamped by it
+                        self.events.put(("camera_settings", changed))
                     counters.update(self.camera.read_stream_counters(), context)
                     self._set_status(
                         camera=self.camera.describe(values),
@@ -1342,6 +1350,23 @@ class Engine:
                                    f"{s.noise_reduction:g}.")
             elif action == "switch_live" and self.demo:
                 processor, frame = self._switch_live(processor, frame)
+            elif action == "camera_command":
+                self._camera_command(payload)
+
+    def _camera_command(self, fields):
+        """Send phone-only settings to a source that takes them.
+
+        Args: fields are the command keys and values.
+        Returns: None; a send failure is logged, and sources without
+            send_command (FLIR, capture, demo) ignore the command.
+        """
+        send = getattr(self.camera, "send_command", None)
+        if send is None:
+            return
+        try:
+            send(**fields)
+        except OSError as exc:
+            self.log.write(f"Could not send {fields} to the camera: {exc}")
 
     def _save_compare(self, payload):
         """Save a comparison's images as PNGs plus one notes file.

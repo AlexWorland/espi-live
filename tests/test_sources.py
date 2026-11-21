@@ -3,9 +3,10 @@
 import unittest
 from unittest import mock
 
-from espi_live import camera, capture, sources
+from espi_live import camera, capture, iphone, sources
 from espi_live.camera import CameraInfo, CameraSession
 from espi_live.capture import CaptureSession
+from espi_live.iphone import IPhoneSession
 from fake_capture import FakeCaptureFactory, FakeEnumerator, ListLog, usb_live2, webcam
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 
@@ -21,6 +22,10 @@ def capture_info(enumerated, position):
                       vid=enumerated.vid, pid=enumerated.pid, path=enumerated.path)
 
 
+PHONE = CameraInfo("iphone-4d5e801e", "iPhone (USB)", kind="iphone",
+                   path="00008110-001A2B3C4D5E801E")
+
+
 class SourcesTestCase(unittest.TestCase):
     """Base class: a fake PySpin, fake video devices and a log."""
 
@@ -34,10 +39,13 @@ class SourcesTestCase(unittest.TestCase):
         self.system = FakeSystem([FakeCamera(serial="1", model="BFS")])
         self.enumerator = FakeEnumerator()
         self.factory = FakeCaptureFactory()
+        self.phones = []  # iPhones over USB unless a test adds some
         for patcher in (mock.patch.object(camera, "PySpin", make_pyspin(self.system)),
                         mock.patch.object(capture, "load_enumerator",
                                           return_value=self.enumerator),
-                        mock.patch.object(capture.cv2, "VideoCapture", self.factory)):
+                        mock.patch.object(capture.cv2, "VideoCapture", self.factory),
+                        mock.patch.object(iphone, "list_iphones",
+                                          side_effect=lambda log: list(self.phones))):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -116,10 +124,43 @@ class ChoiceTests(SourcesTestCase):
         flir = sources.make_session(self.log, CameraInfo("1", "BFS"))
         self.assertIsInstance(flir, CameraSession)
         self.assertEqual(flir.serial, "1")
+        phone = sources.make_session(self.log, PHONE, 500.0, 6.0, 15.0)
+        self.assertIsInstance(phone, IPhoneSession)
+        self.assertEqual(phone.requested, {"exposure_us": 500.0, "gain_db": 6.0,
+                                           "fps": 15.0})
+
+    def test_iphones_are_listed_supported_and_tried_last(self):
+        """iPhones come after FLIR cameras and adapters, and are supported.
+
+        Args: None.
+        Returns: None.
+        """
+        self.phones = [PHONE]
+        self.enumerator.devices = [usb_live2(0)]
+        infos = sources.detect_cameras(self.log)
+        self.assertEqual([info.kind for info in infos], ["spinnaker", "capture", "iphone"])
+        self.assertTrue(sources.is_supported(PHONE))
+        self.assertEqual([info.kind for info in sources.auto_open_order(infos[::-1])],
+                         ["spinnaker", "capture", "iphone"])
 
 
 class OpenFirstLiveTests(SourcesTestCase):
     """Switching from demo mode to the first usable camera."""
+
+    def test_falls_back_to_iphone(self):
+        """Without a FLIR camera or adapter, a plugged-in iPhone is tried.
+
+        Args: None.
+        Returns: None.
+        """
+        self.system.camera_list.cameras.clear()
+        self.phones = [PHONE]
+        opened = []
+        with mock.patch.object(IPhoneSession, "open",
+                               lambda session: opened.append(session.info)):
+            session = sources.open_first_live(self.log)
+        self.assertIsInstance(session, IPhoneSession)
+        self.assertEqual(opened, [PHONE])
 
     def test_prefers_flir(self):
         """A FLIR camera wins over a capture adapter.

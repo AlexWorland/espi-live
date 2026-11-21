@@ -31,10 +31,12 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSl
                                QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QStyle, QTextEdit, QToolTip, QWidget)
 
-from espi_live import (camera, camera_reports, capture, feedback, paths, qt_app, sources, tips,
+from espi_live import (camera, camera_reports, capture, feedback, iphone, paths, qt_app,
+                       sources, tips,
                        ui_scale, updater)
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, integrated_webcam,
                           interlaced_frame, usb_live2, webcam)
+from fake_iphone import commands, phone_socket
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
@@ -4525,6 +4527,164 @@ class FakeReportWorker:
 ANALOG_TIP = "Set on the camera itself; not adjustable over analog video"
 
 
+class PhoneWindowTests(unittest.TestCase):
+    """A Blackfly and an iPhone (displayed, over a scripted USB link) in one window."""
+
+    def setUp(self):
+        """Build the window over a fake FLIR camera and a fake iPhone link.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        system = FakeSystem([FakeCamera(serial="1", model="Blackfly S BFS-U3-63S4M")])
+        phone = CameraInfo("iphone-4d5e801e", "iPhone (USB)", kind="iphone",
+                           path="00008110-001A2B3C4D5E801E")
+        self.links = []
+        real_make = sources.make_session
+
+        def make(log, info, exposure_us=8000.0, gain_db=0.0, fps=30.0):
+            """Give iPhones a scripted link; other cameras their real session.
+
+            Args: as sources.make_session.
+            Returns: An unopened session.
+            """
+            if info.kind != "iphone":
+                return real_make(log, info, exposure_us, gain_db, fps)
+            return iphone.IPhoneSession(log, info, exposure_us, gain_db, fps,
+                                        connector=self.connect)
+
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", make_dialogs()),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
+                mock.patch.object(camera, "PySpin", make_pyspin(system)),
+                mock.patch.object(capture, "load_enumerator",
+                                  return_value=FakeEnumerator([])),
+                mock.patch.object(iphone, "list_iphones", return_value=[phone]),
+                mock.patch.object(sources, "make_session", make)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        self.channels = [Channel(self.log, info) for info in sources.detect_cameras(self.log)]
+        self.flir, self.phone = self.channels
+        self.phone.open()
+        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
+        self.window.frame_timer.stop()
+        self.window.status_timer.stop()
+        self.window.tip_timer.stop()
+        self.addCleanup(self.cleanup_window)
+        self.window._handle_events()  # identity and limits queued by the open
+        self.phone.engine.start()  # the worker sends the phone's commands
+
+    def connect(self, info):
+        """Hand out a fresh scripted link that greets like the app.
+
+        Args: info is the phone's CameraInfo.
+        Returns: A FakeSocket.
+        """
+        self.links.append(phone_socket())
+        return self.links[-1]
+
+    def cleanup_window(self):
+        """Close the window, which stops and waits for every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.window.deleteLater()
+
+    def sent(self, command):
+        """Wait until the phone was sent a command.
+
+        Args: command is the dict expected.
+        Returns: True when it arrived.
+        """
+        return wait_for(lambda: command in commands(self.links[-1]))
+
+    def test_phone_section_shows_and_sends(self):
+        """The iPhone section appears for the phone and every control reaches it.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        toggle, body = window.phone_section
+        self.assertIs(window.current, self.phone)
+        self.assertFalse(toggle.isHidden())
+        self.assertFalse(body.isHidden())
+        for widget in (window.exposure, window.gain, window.fps):
+            self.assertTrue(widget.isEnabled())
+        self.assertIn("phone's ISO", " ".join(window.gain.toolTip().split()))
+        self.assertIn("ESPI Camera app", " ".join(window.exposure.toolTip().split()))
+        self.assertEqual(window.phone_size.count(), 2)
+        self.assertEqual(window.phone_fps.itemData(window.phone_fps.count() - 1), 60.0)
+        window.phone_crop.activated.emit(2)
+        window.phone_send_cap.activated.emit(2)
+        window.phone_size.activated.emit(0)
+        window.phone_autofocus.click()
+        window.phone_focus.spin.setValue(0.25)
+        for command in ({"crop_width": 1024, "crop_height": 1024}, {"max_send_fps": 15.0},
+                        {"width": 1280, "height": 720}, {"refocus": True},
+                        {"lens_position": 0.25}):
+            self.assertTrue(self.sent(command), command)
+        window.phone_fps.activated.emit(window.phone_fps.findData(15.0))
+        self.assertEqual(self.phone.engine.settings().fps, 15.0)
+        self.assertEqual(window.fps.spin.value(), 15.0)  # sent with the next frame
+        window.show_channel(self.flir)
+        self.assertTrue(toggle.isHidden())
+        self.assertTrue(body.isHidden())
+        self.assertNotIn("ISO", window.gain.toolTip())
+
+    def test_collapsed_section_stays_collapsed(self):
+        """Switching cameras keeps a collapsed iPhone section collapsed.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        toggle, body = window.phone_section
+        toggle.setChecked(False)
+        window.show_channel(self.flir)
+        window.show_channel(self.phone)
+        self.assertFalse(toggle.isHidden())
+        self.assertTrue(body.isHidden())
+
+    def test_phone_settings_follow_the_phone(self):
+        """Settings changed on the phone move the controls and the engine.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        window._handle_event(self.phone, "camera_settings", {
+            "exposure_us": 1234.0, "gain_db": 6.0, "fps": 12.0, "lens_position": 0.7,
+            "width": 1280, "height": 720, "crop_width": 512, "crop_height": 512,
+            "max_send_fps": 10.0})
+        settings = self.phone.engine.settings()
+        self.assertEqual((settings.exposure_us, settings.gain_db, settings.fps),
+                         (1234.0, 6.0, 12.0))
+        self.assertEqual((window.exposure.spin.value(), window.gain.spin.value()),
+                         (1234.0, 6.0))
+        self.assertEqual(window.phone_size.currentData(), (1280, 720))
+        self.assertEqual(window.phone_crop.currentData(), 512)
+        self.assertEqual(window.phone_send_cap.currentData(), 10.0)
+        self.assertEqual(window.phone_fps.currentData(), 12.0)  # added to the list
+        self.assertAlmostEqual(window.phone_focus.spin.value(), 0.7)
+        window.show_channel(self.flir)
+        window._handle_event(self.phone, "camera_settings", {"lens_position": 0.1})
+        self.assertEqual(self.phone.camera_settings["lens_position"], 0.1)
+        self.assertAlmostEqual(window.phone_focus.spin.value(), 0.7)  # not displayed
+        window.show_channel(self.phone)
+        self.assertAlmostEqual(window.phone_focus.spin.value(), 0.1)
+
+
 class CaptureWindowTests(unittest.TestCase):
     """A Blackfly, a USB-Live2 (displayed) and a webcam in one window."""
 
@@ -4553,7 +4713,8 @@ class CaptureWindowTests(unittest.TestCase):
                                   return_value=FakeEnumerator(
                                       [usb_live2(0), integrated_webcam(1), webcam(2)])),
                 mock.patch.object(capture.cv2, "VideoCapture",
-                                  FakeCaptureFactory(frames=[interlaced_frame()]))):
+                                  FakeCaptureFactory(frames=[interlaced_frame()])),
+                mock.patch.object(iphone, "list_iphones", return_value=[])):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.log = FakeLog()

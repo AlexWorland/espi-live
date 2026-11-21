@@ -505,6 +505,7 @@
         <li><a href="#several-cameras">Several cameras</a></li>
         <li><a href="#analog">Analog camera</a></li>
         <li><a href="#daq">Frequency generator and piezo (NI DAQ)</a></li>
+        <li><a href="#iphone">iPhone camera</a></li>
         <li><a href="#defaults">Defaults and limits</a></li>
         <li><a href="#operations">Common operations</a>
           <ol>
@@ -1426,6 +1427,36 @@ python -m espi_live</code></pre>
         the simulated device is offered, and the window says what is
         missing. The log records every setting applied, including the
         frequency the device really produces.</p>
+    </section>
+
+    <section id="iphone">
+      <h2>iPhone camera <a class="anchor" href="#iphone" aria-label="Link to iPhone camera">#</a></h2>
+      <p>An iPhone running the <strong>ESPI Camera</strong> app (from
+        TestFlight) is a camera over its USB cable: no Wi-Fi is involved, and
+        frames arrive uncompressed. On Windows, install iTunes from apple.com
+        once (not the Microsoft Store version); it provides the USB
+        connection. Plug the phone in, unlock it, tap <strong>Trust</strong>,
+        and keep the app open on screen. The phone appears in the camera list
+        as <strong>iPhone (USB)</strong>.</p>
+      <ul>
+        <li><strong>Exposure</strong> sets the phone's exposure in µs, and
+          <strong>Gain</strong> its ISO: 0 dB is its lowest ISO, +20 dB ten
+          times that. Nothing on the phone is automatic.</li>
+        <li>The <strong>iPhone</strong> section, shown only for a phone, sets
+          its <strong>Frame rate</strong>, <strong>Frame size</strong>, a
+          centre <strong>Crop</strong>, <strong>Send at most</strong> (a cap on
+          frames sent), the locked <strong>Focus</strong> and
+          <strong>Autofocus once, then lock</strong>. Changes made on the
+          phone show up here too.</li>
+        <li>USB 2 iPhones carry about 30 MB/s: 1920 × 1080 at about 15 fps,
+          or a 1024 × 1024 crop at 30 fps. When USB is busy the phone skips a
+          frame rather than compress it; the status line counts them.</li>
+        <li>If the app leaves the screen, the link is re-opened when it comes
+          back.</li>
+        <li>A phone camera has a rolling shutter, a colour filter and noise
+          reduction that cannot be turned off: use it for qualitative fringes
+          and check results against the Blackfly.</li>
+      </ul>
     </section>
 
     <section id="defaults">
