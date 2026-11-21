@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-21 — Raw difference: live minus previous, with no processing
+
+### Previous state
+
+- Every difference view went through the processing chain: noise reduction, single field, filters, averaging, Fixed gain or Auto stretch, palette, gamma and display tone. On the analog camera path there was no way to see the plain difference between two frames as captured.
+
+### Current state
+
+- A **Raw difference** toggle on the toolbar shows |live − previous| of the raw camera frames and nothing else: every processing step and display setting is bypassed while it is on. The button turns red and the view buttons grey out; turning it off returns to your view and settings unchanged.
+- The camera's own exposure and gain are not touched (the analog camera sets those on its switches). Recordings made in it are named `espi_rawdiff_*.avi`, and the comparison window shows the two raw frames that were subtracted.
+
 ## 2026-11-21 — Simple UI button
 
 ### Previous state

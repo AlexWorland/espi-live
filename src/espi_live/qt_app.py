@@ -409,6 +409,15 @@ PROCESSING_PRESETS = {
         "contrast": 30.0,
     },
 }
+RAW_DIFFERENCE_TIP = (
+    "Show only the difference between two raw camera frames: each pixel is "
+    "|live - previous| in the camera's own grey levels. Every other step is "
+    "bypassed while it is on: noise reduction, single field, filters, "
+    "averaging, difference gain, stretch, palette, gamma, flip and display "
+    "tone. The view buttons and your settings are kept and come back when "
+    "you turn it off. Exposure and gain on the camera itself are unchanged.")
+# The Raw difference button stands out while it overrides every setting.
+RAW_DIFFERENCE_STYLE = "background:#c03030;color:white;font-weight:bold;"
 LABVIEW_FLOW_TIP = (
     "Switch between your own settings and the LabVIEW ESPI 1.5 flow: Reference "
     "view with a reference captured now (and again whenever Reference view has "
@@ -3337,6 +3346,15 @@ class MainWindow(QMainWindow):
             bar.addWidget(button)
         self.mode_group.buttonClicked.connect(
             lambda button: self.engine.update_settings(mode=button.text()))
+        self.raw_difference_button = QPushButton("Raw difference")
+        self.raw_difference_button.setCheckable(True)
+        self.raw_difference_button.setChecked(s.raw_difference)
+        set_tooltip(self.raw_difference_button, RAW_DIFFERENCE_TIP)
+        self.raw_difference_button.setStyleSheet(
+            f"QPushButton:checked {{{RAW_DIFFERENCE_STYLE}}}")
+        self.raw_difference_button.toggled.connect(self.set_raw_difference)
+        bar.addWidget(self.raw_difference_button)
+        self._sync_raw_difference(s.raw_difference)
         bar.addSeparator()
 
         self.record_button = QPushButton("Record AVI")
@@ -4308,6 +4326,24 @@ class MainWindow(QMainWindow):
         self.labview_button.toggled.connect(self.set_labview_flow)
         add(self.labview_button)
 
+    def set_raw_difference(self, on):
+        """Turn the displayed camera's Raw difference view on or off.
+
+        Args: on is True to show |live - previous| of raw frames only.
+        Returns: None.
+        """
+        self.engine.update_settings(raw_difference=on)
+        self._sync_raw_difference(on)
+
+    def _sync_raw_difference(self, on):
+        """Grey out the view buttons while Raw difference overrides them.
+
+        Args: on is the Raw difference state.
+        Returns: None.
+        """
+        for button in self.mode_group.buttons():
+            button.setEnabled(not on)
+
     def set_labview_flow(self, on):
         """Swap the displayed camera between the user's and the LabVIEW settings.
 
@@ -4833,7 +4869,8 @@ class MainWindow(QMainWindow):
                    (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
                    (self.clahe, s.clahe), (self.even_brightness, s.even_brightness),
-                   (self.record_button, s.record), (self.single_field, s.single_field))
+                   (self.record_button, s.record), (self.single_field, s.single_field),
+                   (self.raw_difference_button, s.raw_difference))
         combos = ((self.smoothing_combo, s.smoothing_method),
                   (self.palette_combo, s.palette),
                   (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
@@ -4847,6 +4884,7 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
         for button in self.mode_group.buttons():
             button.setChecked(button.text() == s.mode)
+        self._sync_raw_difference(s.raw_difference)
         self._sync_scaling_controls(s.scale_range, s.gain_before_average)
         self.labview_button.blockSignals(True)
         self.labview_button.setChecked(self.current is not None and
