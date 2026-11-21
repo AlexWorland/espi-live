@@ -3455,8 +3455,22 @@ class MainWindow(QMainWindow):
         self._show_tip()
         self._align_sections()
         self._fit_controls_width()
+        # Rows put back are shown by queued events, so measure once they are.
+        QTimer.singleShot(0, self._remeasure_controls)
         self.log.write("Simple UI on: only the basic controls are shown."
                        if self.simple_ui else "Simple UI off: every control is shown.")
+
+    def _remeasure_controls(self):
+        """Make the controls scroll area re-measure its panel.
+
+        It does not notice rows that came or went in one step, and would squeeze
+        the rows into the visible height instead of scrolling.
+
+        Args: None.
+        Returns: None.
+        """
+        self.controls_panel.layout().activate()
+        self.controls_scroll.setWidgetResizable(True)
 
     def _place_row(self, entry):
         """Put a controls row into its section's grid, with its label.

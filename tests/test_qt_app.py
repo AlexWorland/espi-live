@@ -1596,6 +1596,9 @@ class SimpleUiTests(WindowTestCase):
         QApplication.processEvents()
         self.assertFalse(w.simple_ui)
         self.assertTrue(button.isVisibleTo(w))
+        # The panel scrolls at its full height instead of squeezing its rows.
+        self.assertGreaterEqual(w.controls_panel.height(),
+                                w.controls_panel.minimumSizeHint().height())
         for shown in (w.exposure, w.gain, w.fps, w.noise_reduction, w.average,
                       w.scaling, w.palette_combo, w.labview_button, w.frame_title):
             self.assertTrue(shown.isVisibleTo(w), shown)
