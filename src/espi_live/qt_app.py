@@ -4083,7 +4083,7 @@ class MainWindow(QMainWindow):
         Args: index is the drop-down position.
         Returns: None.
         """
-        width, height = self.phone_size.itemData(index)
+        width, height = (int(part) for part in self.phone_size.itemData(index).split("x"))
         self._phone_command(width=width, height=height)
 
     def _sync_phone_controls(self, channel):
@@ -4103,8 +4103,9 @@ class MainWindow(QMainWindow):
         settings = channel.camera_settings or {}
         self.phone_size.clear()
         for width, height, max_fps in formats:
+            # "WxH" text, not a tuple: findData cannot match Python tuples.
             self.phone_size.addItem(f"{width} × {height} (up to {max_fps:g} fps)",
-                                    (width, height))
+                                    f"{width}x{height}")
         top = max([entry[2] for entry in formats] + [30.0])
         self.phone_fps.clear()
         for fps in PHONE_FRAME_RATES:
@@ -4130,7 +4131,7 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(index)
 
         if "width" in settings and "height" in settings:
-            select(self.phone_size, (settings["width"], settings["height"]))
+            select(self.phone_size, f"{settings['width']}x{settings['height']}")
         if "crop_width" in settings:
             select(self.phone_crop, settings["crop_width"])
         if "max_send_fps" in settings:

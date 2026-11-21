@@ -4672,11 +4672,13 @@ class PhoneWindowTests(unittest.TestCase):
                          (1234.0, 6.0, 12.0))
         self.assertEqual((window.exposure.spin.value(), window.gain.spin.value()),
                          (1234.0, 6.0))
-        self.assertEqual(window.phone_size.currentData(), (1280, 720))
+        self.assertEqual(window.phone_size.currentData(), "1280x720")
         self.assertEqual(window.phone_crop.currentData(), 512)
         self.assertEqual(window.phone_send_cap.currentData(), 10.0)
         self.assertEqual(window.phone_fps.currentData(), 12.0)  # added to the list
         self.assertAlmostEqual(window.phone_focus.spin.value(), 0.7)
+        window._handle_event(self.phone, "camera_settings", {"width": 1920, "height": 1080})
+        self.assertEqual(window.phone_size.currentData(), "1920x1080")  # not the first item
         window.show_channel(self.flir)
         window._handle_event(self.phone, "camera_settings", {"lens_position": 0.1})
         self.assertEqual(self.phone.camera_settings["lens_position"], 0.1)
