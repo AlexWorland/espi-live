@@ -235,6 +235,39 @@ def hello(**overrides):
     return data
 
 
+LENSES = [{"id": "ultra_wide", "name": "Ultra Wide 0.5×"},
+          {"id": "wide", "name": "Wide 1×"},
+          {"id": "telephoto", "name": "Telephoto 5×"}]
+
+
+def lens_hello(lens="wide", lenses=None, **overrides):
+    """Build a HELLO from a phone with several back cameras.
+
+    Args: lens is the id of the camera in use; lenses is the list the app
+        reports (default LENSES); overrides replace top-level keys.
+    Returns: A dict whose "camera" names the lens in use.
+    """
+    offered = LENSES if lenses is None else lenses
+    names = {entry["id"]: entry["name"] for entry in offered}
+    return hello(lens=lens, lenses=offered, camera=f"Back {names.get(lens, lens)}",
+                 **overrides)
+
+
+def lens_socket(lens="wide"):
+    """Make a link socket whose app switches to a camera once told to.
+
+    The app greets with its main camera, then sends a new HELLO for the one
+    asked for, as it does after a lens command.
+
+    Args: lens is the id of the camera the session will ask for.
+    Returns: A FakeSocket holding both greetings.
+    """
+    data = iphone.encode_json(iphone.KIND_HELLO, lens_hello("wide"))
+    if lens != "wide":
+        data += iphone.encode_json(iphone.KIND_HELLO, lens_hello(lens))
+    return FakeSocket(data)
+
+
 def status(**overrides):
     """Build a STATUS payload.
 

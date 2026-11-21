@@ -21,9 +21,38 @@ ESPI Live, so nobody has to switch to the phone during a measurement.
 4. Open **ESPI Camera** on the phone and keep it on screen. iOS stops the
    camera when the app is in the background or the phone locks.
 5. Start ESPI Live. The phone appears in the camera list as
-   **iPhone (USB) (iphone-xxxxxxxx)**. With no FLIR camera or capture adapter,
-   ESPI Live opens it at startup, and **Switch to live capture** finds it from
-   demo mode.
+   **iPhone Wide 1× (USB) (iphone-xxxxxxxx)**, with one entry for each of its
+   other back cameras (see below). With no FLIR camera or capture adapter,
+   ESPI Live opens the main (wide) camera at startup, and **Switch to live
+   capture** finds it from demo mode.
+
+### Choosing a back camera
+
+A phone with more than one back camera is listed once per camera, in the
+**Display** drop-down: an iPhone 16 Pro Max has **Ultra Wide 0.5×**, **Wide
+1×** and **Telephoto 5×**; an iPhone with a single back camera is just
+**iPhone (USB)**. The app reports what the phone has (it discovers the
+physical cameras with `AVCaptureDevice.DiscoverySession` and names each by
+its zoom against the wide camera, rounded to the nearest half), and ESPI Live
+asks for the camera when it opens the link.
+
+- The phone streams **one camera at a time** over its one link. Choosing
+  another lens of the same phone turns the lens that was showing off (its
+  settings are kept, and the log says so) and the other lenses' **Process**
+  boxes stay unavailable while one is displayed.
+- Each lens has its **own saved profile**: the wide camera keeps the serial
+  (`iphone-xxxxxxxx`) it always had, so its saved settings carry over, and
+  the others add `-ultra-wide` or `-telephoto`.
+- Frame sizes, exposure and ISO limits, and focus belong to the camera, so
+  they are read again from the phone each time a lens opens, and focus is
+  re-locked on the new camera.
+- ESPI Live learns the list the first time it sees the phone, by asking the
+  app once (only when the phone is not already in use) and from then on from
+  the app's greeting. If the app is not open, the phone is listed as one
+  **iPhone (USB)** entry; open the app and the lenses appear the next time
+  the camera list is built (**Switch to live capture**, or restarting ESPI
+  Live).
+- Starting without being asked opens only the wide camera.
 
 ### Controls in ESPI Live
 
@@ -114,10 +143,10 @@ little-endian.
 
 | Kind | Direction | Payload |
 |---|---|---|
-| 1 HELLO | phone → PC, on connect | JSON: `protocol_version`, `app_version`, `device_model`, `system_version`, `camera`, `formats` (`width`, `height`, `min_fps`, `max_fps`, `binned`), `limits`, `settings` |
+| 1 HELLO | phone → PC, on connect | JSON: `protocol_version`, `app_version`, `device_model`, `system_version`, `camera`, `lens` (id of the camera in use), `lenses` (`id` and `name` of every back camera: `ultra_wide`, `wide`, `telephoto`), `formats` (`width`, `height`, `min_fps`, `max_fps`, `binned`), `limits`, `settings` |
 | 2 STATUS | phone → PC, every second and after each change | JSON: `settings`, `limits`, `thermal`, `interrupted`, `camera_fps`, `sent_fps`, `sent_frames`, `dropped_frames`, `focus_locked`, `error` |
 | 3 FRAME | phone → PC | 48-byte FRAME_META, then `stride × height` Mono8 bytes |
-| 4 COMMAND | PC → phone | JSON with any of `exposure_us`, `iso`, `fps`, `lens_position`, `width` + `height`, `crop_width` + `crop_height`, `max_send_fps`, `refocus` |
+| 4 COMMAND | PC → phone | JSON with any of `exposure_us`, `iso`, `fps`, `lens_position`, `width` + `height`, `crop_width` + `crop_height`, `max_send_fps`, `refocus`, `lens`; a `lens` command switches the camera and is answered by a new HELLO, since formats and limits belong to the camera |
 | 5 ERROR | phone → PC | JSON `message` |
 
 **FRAME_META** (`<IIIIQqfffI`): width, height, stride, pixel format (1 =
