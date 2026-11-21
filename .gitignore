@@ -43,3 +43,10 @@ update-token.txt
 .coverage
 .coverage.*
 htmlcov/
+
+# iOS app (ios/): XcodeGen output, Xcode user state, archives and keys
+ios/**/*.xcodeproj/
+xcuserdata/
+*.xcarchive
+*.ipa
+*.p8

@@ -132,6 +132,7 @@ class Channel:
                          else default_settings(info, demo))
         self.limits = {}  # last "camera_limits" payload: {node name: (low, high)}
         self.identity = None  # last "camera_identity" payload (CameraIdentity)
+        self.camera_settings = None  # phone settings from "camera_settings" events
         self.report = None  # last "camera_report" payload (camera_reports.Report)
         self.frozen = None  # FramePacket held on screen while the display is frozen
         self.frozen_at = None  # datetime the display was frozen
