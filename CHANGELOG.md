@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-21 — Quick release is offered to installed copies
+
+### Previous state
+
+- **Quick release** always made a pre-release tagged `vX.Y.Z-dev.N`, which installed copies are never offered, so a quick build had to be downloaded and unpacked by hand.
+- Each workflow numbered its builds with its own run number. The updater orders builds by that number, so a quick build could not simply be made a full release: its number (for example 3) was far below the installed copies' (the newest release was build 33), and no copy would have updated to it. A copy installed from one workflow's build could also rank above the other workflow's next build and never be offered it.
+
+### Current state
+
+- **Actions > Quick release** publishes like **Release**: a full release tagged `vX.Y.Z` (the version the draft proposes, else the next patch), marked latest, with GitHub's generated notes. Installed copies are offered it through **Check for updates** and the status-bar button, and the draft release is refreshed afterwards. The tests are still skipped, and the notes say so.
+- A new **Pre-release** checkbox keeps the old behavior: a `vX.Y.Z-dev.N` pre-release that installed copies are not offered. **Publish** still builds without releasing.
+- The `version` job of **Release** and **Quick release** now picks the build number: the run number, or one above the newest build any published release's notes name, whichever is higher. Both workflows share one sequence, so every build, tested or not, is newer than the ones before it. Pre-release tags (`-pre.N`, `-dev.N`) use this number, so they skip ahead of the old run numbers. Both workflows also share a concurrency group, so a run waits for the other's.
+- Installed copies, `build-info.json` and the release notes' build line are unchanged.
+
 ## 2026-11-21 — Compare works in Previous view
 
 ### Previous state
