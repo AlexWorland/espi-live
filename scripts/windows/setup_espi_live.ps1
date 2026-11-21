@@ -98,6 +98,8 @@ $moduleChecks = @{
     'numpy'          = 'numpy'
     'PySide6'        = 'PySide6.QtWidgets'
     'cv2_enumerate_cameras' = 'cv2_enumerate_cameras'
+    'pylablib-lightweight' = 'pylablib.devices.NI'
+    'nidaqmx'        = 'nidaqmx'
     'PySpin'         = 'PySpin'
 }
 $missing = [System.Collections.Generic.List[string]]::new()
@@ -134,6 +136,9 @@ if ($missing -contains 'opencv-python') { $pipPackages += 'opencv-python' }
 if ($missing -contains 'numpy') { $pipPackages += 'numpy' }
 if ($missing -contains 'PySide6') { $pipPackages += 'PySide6' }
 if ($missing -contains 'cv2_enumerate_cameras') { $pipPackages += 'cv2_enumerate_cameras' }
+# NI DAQ outputs; nidaqmx 1.8 and later need Python 3.11. The NI-DAQmx driver is installed from ni.com.
+if ($missing -contains 'pylablib-lightweight') { $pipPackages += 'pylablib-lightweight' }
+if ($missing -contains 'nidaqmx') { $pipPackages += 'nidaqmx>=1.4,<1.8' }
 
 if ($pipPackages.Count -gt 0) {
     if (Confirm-Action "Install or repair: $($pipPackages -join ', ')?") {

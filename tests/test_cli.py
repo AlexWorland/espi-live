@@ -229,6 +229,23 @@ class SelfCheckTests(unittest.TestCase):
             self.assertIn(expected, out.getvalue())
             listing.assert_not_called()
 
+    def test_check_reports_daq_support(self):
+        """The check says whether NI DAQ support is installed.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(cli.importlib, "import_module"), \
+                mock.patch.object(camera, "load_pyspin",
+                                  side_effect=ImportError("no PySpin")), \
+                mock.patch("espi_live.daq.support_text",
+                           return_value="NI DAQ: pyLabLib and nidaqmx available"):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                status = cli.self_check()
+        self.assertEqual(status, 0)
+        self.assertIn("NI DAQ: pyLabLib and nidaqmx available", out.getvalue())
+
     def test_fails_when_user_guide_is_missing(self):
         """A missing bundled user guide fails the self-check.
 
