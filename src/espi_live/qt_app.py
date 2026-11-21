@@ -3406,7 +3406,8 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(panel)
         self._sized(column.setContentsMargins, 10, 8, 10, 8)
 
-        # Shown only when there is more than one camera.
+        # The Display drop-down is always shown (it names the active camera);
+        # the per-camera Process rows only appear with more than one camera.
         self.cameras_box = QWidget()
         cameras = QVBoxLayout(self.cameras_box)
         self._sized(cameras.setContentsMargins, 0, 0, 0, 6)
@@ -3422,10 +3423,11 @@ class MainWindow(QMainWindow):
         self.camera_combo.currentIndexChanged.connect(self._camera_chosen)
         display_row.addWidget(self.camera_combo, 1)
         cameras.addLayout(display_row)
-        process_note = QLabel("Process (keeps acquiring and recording when not displayed)")
-        process_note.setWordWrap(True)
-        process_note.setStyleSheet("color: palette(placeholder-text);")
-        cameras.addWidget(process_note)
+        self.process_note = QLabel(
+            "Process (keeps acquiring and recording when not displayed)")
+        self.process_note.setWordWrap(True)
+        self.process_note.setStyleSheet("color: palette(placeholder-text);")
+        cameras.addWidget(self.process_note)
         self.camera_rows = QGridLayout()
         self.camera_rows.setColumnStretch(0, 1)
         self._sized(self.camera_rows.setVerticalSpacing, 2)
@@ -4582,6 +4584,9 @@ class MainWindow(QMainWindow):
     def _rebuild_cameras(self):
         """Fill the camera drop-down and process checkboxes from self.channels.
 
+        The drop-down is shown even for a single camera; the process checkboxes
+        and their note only matter when there is more than one.
+
         Args: None.
         Returns: None.
         """
@@ -4610,11 +4615,13 @@ class MainWindow(QMainWindow):
             state.setStyleSheet("color: palette(placeholder-text);")
             set_tooltip(state, "This camera's processed frame rate, REC while it "
                         "records, and frozen while its display is held.")
+            check.setVisible(several)
+            state.setVisible(several)
             self.camera_rows.addWidget(check, row, 0)
             self.camera_rows.addWidget(state, row, 1)
             self.camera_checks.append(check)
             self.camera_states.append(state)
-        self.cameras_box.setVisible(several)
+        self.process_note.setVisible(several)
         self._sync_cameras()
 
     def _sync_cameras(self):

@@ -3263,8 +3263,9 @@ class MultiCameraTests(unittest.TestCase):
         self.window.close()
         self.window.deleteLater()
 
-    def test_single_camera_hides_the_camera_list(self):
-        """With one camera there is no drop-down and no log prefix.
+    def test_single_camera_keeps_the_dropdown_but_not_the_process_rows(self):
+        """With one camera the drop-down names it; there is nothing to process
+        in the background and no log prefix.
 
         Args: None.
         Returns: None.
@@ -3274,7 +3275,13 @@ class MultiCameraTests(unittest.TestCase):
         window = demo_window(engine, self.log)
         self.addCleanup(window.deleteLater)
         self.addCleanup(window.close)
-        self.assertTrue(window.cameras_box.isHidden())
+        self.assertFalse(window.cameras_box.isHidden())
+        self.assertFalse(window.camera_combo.isHidden())
+        self.assertEqual(window.camera_combo.count(), 1)
+        self.assertEqual(window.camera_combo.itemText(0), "Synthetic camera (DEMO1)")
+        self.assertTrue(window.process_note.isHidden())
+        self.assertTrue(all(w.isHidden() for w in window.camera_checks + window.camera_states))
+        self.assertEqual(window.current.log.prefix, "")
         self.assertEqual(window.windowTitle(), f"{updater.app_title()} — DUMMY MODE")
 
     def test_cameras_are_listed_with_the_displayed_one_locked_on(self):
@@ -3285,6 +3292,8 @@ class MultiCameraTests(unittest.TestCase):
         """
         window = self.window
         self.assertFalse(window.cameras_box.isHidden())
+        self.assertFalse(window.process_note.isHidden())
+        self.assertFalse(any(w.isHidden() for w in window.camera_checks + window.camera_states))
         self.assertEqual(window.camera_combo.count(), 3)
         self.assertEqual([c.isChecked() for c in window.camera_checks], [True, False, False])
         self.assertEqual([c.isEnabled() for c in window.camera_checks], [False, True, True])

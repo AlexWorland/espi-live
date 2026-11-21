@@ -20,6 +20,30 @@
 - A lost link (the app left the screen, the cable was pulled) is re-opened automatically every 2 s.
 - The phone is a rolling-shutter colour camera with noise reduction that cannot be turned off, so the viewer marks it as a qualitative source. Details are in `docs/iphone/README.md`.
 
+## 2026-11-21 — The camera drop-down is always shown
+
+### Previous state
+
+- The **Cameras** section at the top of Controls, with the **Display** drop-down, was hidden unless two or more cameras were detected. With a single camera there was no camera list in the window, so it looked as if the camera switcher had been removed.
+
+### Current state
+
+- The **Display** drop-down is always shown. With one camera it lists that camera, so the window names the camera in use.
+- The **Process** note and the per-camera checkboxes (with their rate and `REC` readouts) still appear only when more than one camera is detected, since a single camera has nothing to run in the background.
+- Nothing else changes: choosing a camera in **Display** still shows it and starts its processing if it was off.
+
+## 2026-11-21 — Every merge into main publishes a quick release
+
+### Previous state
+
+- Merging into `main` released nothing: **Quick release** (and **Release**) had to be started by hand, and merges piled up in the draft release.
+
+### Current state
+
+- **Quick release** also runs on every push to `main` (every merged pull request) while the project is in active development. It is the same untested build as before, published as a full release, so installed copies are offered each merge: the tag is the next patch version and the notes are GitHub's generated notes.
+- If merges land faster than a build finishes, GitHub keeps only the newest waiting run, so one release can cover several merges. Running it by hand, with the **Pre-release** and **Publish** options, works as before, and **Release** from `main` is still the tested release.
+- Deleting the `push:` trigger in `quick-release.yml` restores hand-started releases only.
+
 ## 2026-11-21 — Frequency generator and piezo driver on an NI DAQ
 
 ### Previous state
