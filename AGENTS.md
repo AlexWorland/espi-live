@@ -32,6 +32,7 @@ A live viewer for a FLIR Blackfly (BFS-U3-63S4M-C) Mono8 camera used for ESPI me
 ./run.sh                                           # try a real camera; offers demo mode if none found
 PYTHONPATH=src python -m espi_live --check         # import everything (Qt, engine, PySpin if present), no window
 PYTHONPATH=src python -m unittest discover -s tests   # camera-free tests
+python scripts/run_tests.py                        # same suite in parallel (one worker per CPU core), merged coverage, 100% gate; --no-coverage skips it, -j N sets workers
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen python -m coverage run -m unittest discover -s tests && python -m coverage report   # must stay at 100% (.coveragerc)
 python -m py_compile src/espi_live/*.py            # required check after edits (no display or camera needed)
 ```
