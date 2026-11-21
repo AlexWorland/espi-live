@@ -46,6 +46,9 @@ struct StatusCard: View {
                 Text("Back camera: \(snapshot.lens) (chosen in ESPI Live)")
                     .foregroundStyle(.secondary)
             }
+            if s.raw {
+                Text("Bayer RAW · \(s.rawChannel) plane · 16-bit, no video processing")
+            }
             Text(String(format: "%d × %d%@ · %.0f µs · ISO %.0f · focus %@",
                         s.width, s.height, cropText(s), s.exposureUs, s.iso,
                         snapshot.focusLocked ? String(format: "%.2f locked", s.lensPosition)
@@ -111,6 +114,26 @@ struct ControlsForm: View {
                 Text("Camera (locked: no auto exposure)")
             } footer: {
                 Text("ESPI Live's exposure, gain (ISO) and frame-rate sliders change these too.")
+            }
+            Section {
+                Picker("Capture", selection: Binding(
+                    get: { s.raw },
+                    set: { model.apply(LinkCommand(raw: $0)) })) {
+                    Text("Video (processed luma)").tag(false)
+                    Text("Bayer RAW (sensor data)").tag(true)
+                }
+                Picker("RAW colour", selection: Binding(
+                    get: { s.rawChannel },
+                    set: { model.apply(LinkCommand(rawChannel: $0)) })) {
+                    Text("Red (633 nm laser)").tag("red")
+                    Text("Green (532 nm laser)").tag("green")
+                    Text("Blue").tag("blue")
+                }
+            } header: {
+                Text("Capture mode")
+            } footer: {
+                Text("RAW takes stills (about 5–10 per second) and sends one colour "
+                     + "plane of the sensor's data, without the phone's noise reduction.")
             }
             Section("Focus") {
                 LabeledContent("Lens position", value: String(format: "%.3f", lens))

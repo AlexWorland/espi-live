@@ -1,5 +1,8 @@
 // Captures the back camera with every automatic adjustment locked and serves
-// each frame's luma plane, uncompressed, to the computer over USB.
+// each frame's luma plane, uncompressed, to the computer over USB. In RAW mode
+// it instead takes Bayer RAW stills (the sensor's data, without the video
+// pipeline's noise reduction and tone mapping), keeps one colour plane of
+// each and sends it as 16-bit values.
 //
 // The computer reaches the TCP listener on the phone's loopback interface
 // through usbmuxd (the USB cable), so no network is involved. Everything —
@@ -9,6 +12,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import ImageIO
 import Network
 
 struct DeviceInfo: Sendable {
@@ -58,11 +62,23 @@ struct LensChoice {
     let device: AVCaptureDevice
 }
 
+/// A camera format that delivers Bayer RAW stills at about 12 MP.
+struct RawChoice: @unchecked Sendable {
+    var format: AVCaptureDevice.Format
+    var dimensions: CMVideoDimensions
+    var pixelFormat: OSType
+}
+
 final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
-                            @unchecked Sendable {
+                            AVCapturePhotoCaptureDelegate, @unchecked Sendable {
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "espi.camera", qos: .userInitiated)
     private let output = AVCaptureVideoDataOutput()
+    private let photoOutput = AVCapturePhotoOutput()
+    private var rawChoice: RawChoice?
+    private var rawSearched = false
+    private var rawInFlight = false
+    private var rawPending: DispatchWorkItem?
     private let deviceInfo: DeviceInfo
     private let onSnapshot: @Sendable (StreamerSnapshot) -> Void
 
@@ -149,6 +165,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         output.alwaysDiscardsLateVideoFrames = true
         output.setSampleBufferDelegate(self, queue: queue)
         if session.canAddOutput(output) { session.addOutput(output) }
+        if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
         session.commitConfiguration()
         selectLens(first)
     }
@@ -198,6 +215,8 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         session.commitConfiguration()
         device = choice.device
         lensId = choice.id
+        rawChoice = nil  // each camera has its own RAW formats
+        rawSearched = false
         formats = Self.formatList(choice.device)
         applyCameraSettings()
     }
@@ -250,22 +269,78 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }.first
     }
 
+    /// The most pixels a RAW still may have: the sensor's binned 12 MP readout.
+    /// (Apple only offers Bayer RAW binned; full resolution is processed ProRAW.)
+    private static let rawPixelLimit = 13_000_000
+
+    /// Finds a format whose photo output offers plain Bayer RAW (not ProRAW), and
+    /// the largest photo size up to 12 MP it supports. Makes each candidate the
+    /// active format to ask the photo output, so it runs once and the answer is kept.
+    private func findRawFormat(_ camera: AVCaptureDevice) -> RawChoice? {
+        rawSearched = true
+        photoOutput.isAppleProRAWEnabled = false
+        let candidates = camera.formats.compactMap { format -> (AVCaptureDevice.Format, CMVideoDimensions)? in
+            let sizes = format.supportedMaxPhotoDimensions.filter {
+                Int($0.width) * Int($0.height) <= Self.rawPixelLimit
+            }
+            guard let best = sizes.max(by: { Int($0.width) * Int($0.height)
+                                             < Int($1.width) * Int($1.height) })
+            else { return nil }
+            return (format, best)
+        }.sorted { Int($0.1.width) * Int($0.1.height) > Int($1.1.width) * Int($1.1.height) }
+        for (format, dimensions) in candidates {
+            do {
+                try camera.lockForConfiguration()
+                camera.activeFormat = format
+                camera.unlockForConfiguration()
+            } catch {
+                continue
+            }
+            let plain = photoOutput.availableRawPhotoPixelFormatTypes.first {
+                !AVCapturePhotoOutput.isAppleProRAWPixelFormat($0)
+                    && Self.bayerLayout($0) != nil
+            }
+            if let plain {
+                return RawChoice(format: format, dimensions: dimensions, pixelFormat: plain)
+            }
+        }
+        return nil
+    }
+
     // MARK: Camera settings
 
     /// Sets the format and locks every automatic adjustment that would change the image.
     private func applyCameraSettings() {
         guard let camera = device else { return }
+        if settings.raw {
+            if rawChoice == nil && !rawSearched { rawChoice = findRawFormat(camera) }
+            if rawChoice == nil {
+                lastError = "This camera has no Bayer RAW photo format; staying on video"
+                settings.raw = false
+            }
+        }
         if chooseFormat(camera) == nil, let fallback = formats.first(where: {
             $0.width == 1920 && $0.height == 1080 }) ?? formats.last {
             settings.width = fallback.width
             settings.height = fallback.height
         }
-        guard let format = chooseFormat(camera) else {
+        guard let format = settings.raw ? rawChoice?.format : chooseFormat(camera) else {
             lastError = "No \(settings.width) × \(settings.height) camera format"
             return
         }
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        defer {
+            session.commitConfiguration()
+            if settings.raw, let choice = rawChoice {
+                photoOutput.maxPhotoDimensions = choice.dimensions
+            }
+        }
+        // RAW takes stills, so the video output is detached while it runs.
+        if settings.raw {
+            if session.outputs.contains(output) { session.removeOutput(output) }
+        } else if !session.outputs.contains(output), session.canAddOutput(output) {
+            session.addOutput(output)
+        }
         do {
             try camera.lockForConfiguration()
             defer { camera.unlockForConfiguration() }
@@ -373,10 +448,23 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             settings.height = height
             reconfigure = true
         }
+        var modeChanged = false
+        if let value = command.raw, value != settings.raw {
+            settings.raw = value
+            modeChanged = true
+            reconfigure = true
+        }
+        if let value = command.rawChannel, ["red", "green", "blue"].contains(value) {
+            settings.rawChannel = value
+        }
         if let value = command.cropWidth { settings.cropWidth = max(0, value) }
         if let value = command.cropHeight { settings.cropHeight = max(0, value) }
         if let value = command.maxSendFps { settings.maxSendFps = max(0, value) }
         if reconfigure { applyCameraSettings() }
+        if modeChanged {
+            rawPending?.cancel()
+            if settings.raw { scheduleRawCapture(after: 0.3) }  // let the format settle
+        }
         if command.refocus == true { refocusOnQueue() }
         if switched { sendHello() }  // formats and limits belong to the camera
         sendStatus()
@@ -424,6 +512,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        if settings.raw { return }  // RAW mode takes stills instead
         capturedInWindow += 1
         guard let link = self.connection, connectionReady else { return }
         if inFlight {  // USB is still busy with the previous frame: skip, never queue
@@ -472,6 +561,164 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         sentInWindow += 1
         sentFrames += 1
         bytesInWindow += size
+    }
+
+    // MARK: Bayer RAW stills
+
+    /// Queues the next RAW still after `delay` seconds.
+    private func scheduleRawCapture(after delay: TimeInterval = 0) {
+        rawPending?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.captureRawOnQueue() }
+        rawPending = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Takes one RAW still when the link is ready and idle, else tries again soon.
+    private func captureRawOnQueue() {
+        guard settings.raw, let choice = rawChoice else { return }
+        guard connectionReady, session.isRunning, !rawInFlight, !inFlight else {
+            scheduleRawCapture(after: 0.05)
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        if settings.maxSendFps > 0 {
+            let wait = lastSend + 1.0 / settings.maxSendFps - now
+            if wait > 0.002 {
+                scheduleRawCapture(after: wait)
+                return
+            }
+        }
+        let photoSettings = AVCapturePhotoSettings(rawPixelFormatType: choice.pixelFormat)
+        photoSettings.maxPhotoDimensions = choice.dimensions
+        photoSettings.photoQualityPrioritization = .speed  // required for a Bayer RAW still
+        photoSettings.flashMode = .off
+        rawInFlight = true
+        photoOutput.capturePhoto(with: photoSettings, delegate: self)
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto,
+                     error: Error?) {
+        queue.async { self.rawPhotoFinished(photo, error: error) }
+    }
+
+    private func rawPhotoFinished(_ photo: AVCapturePhoto, error: Error?) {
+        rawInFlight = false
+        defer { if settings.raw { scheduleRawCapture() } }
+        capturedInWindow += 1
+        if let error {
+            lastError = "RAW capture: \(error.localizedDescription)"
+            return
+        }
+        guard settings.raw, let link = connection, connectionReady else { return }
+        guard !inFlight else {
+            droppedFrames += 1
+            return
+        }
+        guard photo.isRawPhoto, let pixels = photo.pixelBuffer,
+              let layout = Self.bayerLayout(CVPixelBufferGetPixelFormatType(pixels)) else {
+            lastError = "RAW capture returned no Bayer data"
+            return
+        }
+        let wanted: Character = ["red": "R", "green": "G", "blue": "B"][settings.rawChannel] ?? "R"
+        let sites = layout.letters.indices.filter { layout.letters[$0] == wanted }
+        let levels = Self.rawLevels(photo.metadata, sites: sites)
+        if !levels.found {
+            lastError = "RAW data has no black or white level; assuming 0 and 16383"
+        }
+
+        CVPixelBufferLockBaseAddress(pixels, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixels) else { return }
+        let plane = Self.extractPlane(
+            base: UnsafeRawPointer(base), rowBytes: CVPixelBufferGetBytesPerRow(pixels),
+            width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels),
+            sites: sites, cropWidth: settings.cropWidth, cropHeight: settings.cropHeight)
+
+        let stamp = photo.timestamp
+        sequence += 1
+        var message = Link.rawFrameStart(
+            width: plane.width, height: plane.height, sequence: sequence,
+            timestampNs: Int64(stamp.seconds * 1e9),
+            exposureUs: Float((device?.exposureDuration.seconds ?? 0) * 1e6),
+            iso: device?.iso ?? 0, lensPosition: device?.lensPosition ?? 0,
+            blackLevel: levels.black, whiteLevel: levels.white,
+            channel: ["R": 0, "G": 1, "B": 2][wanted] ?? 0, pattern: layout.pattern)
+        plane.values.withUnsafeBytes { message.append(contentsOf: $0) }  // little-endian
+        inFlight = true
+        lastSend = ProcessInfo.processInfo.systemUptime
+        let size = message.count
+        link.send(content: message, completion: .contentProcessed { [weak self] error in
+            guard let self else { return }
+            self.inFlight = false
+            if let error { self.lastError = "Send: \(error.localizedDescription)" }
+        })
+        sentInWindow += 1
+        sentFrames += 1
+        bytesInWindow += size
+    }
+
+    /// The colour layout of a Bayer pixel format: the pattern code the link
+    /// sends, and the colour at (0,0), (0,1), (1,0), (1,1) of each 2 × 2 cell.
+    static func bayerLayout(_ type: OSType) -> (pattern: UInt32, letters: [Character])? {
+        switch type {
+        case kCVPixelFormatType_14Bayer_RGGB: return (0, ["R", "G", "G", "B"])
+        case kCVPixelFormatType_14Bayer_GRBG: return (1, ["G", "R", "B", "G"])
+        case kCVPixelFormatType_14Bayer_GBRG: return (2, ["G", "B", "R", "G"])
+        case kCVPixelFormatType_14Bayer_BGGR: return (3, ["B", "G", "G", "R"])
+        default: return nil
+        }
+    }
+
+    /// Black and white levels (sensor counts) for the chosen colour sites, from
+    /// the photo's DNG metadata. `found` is false when it has none.
+    static func rawLevels(_ metadata: [String: Any], sites: [Int])
+        -> (black: Float, white: Float, found: Bool) {
+        func numbers(_ value: Any?) -> [Double] {
+            if let list = value as? [Any] { return list.compactMap { ($0 as? NSNumber)?.doubleValue } }
+            if let one = value as? NSNumber { return [one.doubleValue] }
+            return []
+        }
+        let dng = metadata[kCGImagePropertyDNGDictionary as String] as? [String: Any]
+        let blacks = numbers(dng?[kCGImagePropertyDNGBlackLevel as String])
+        let whites = numbers(dng?[kCGImagePropertyDNGWhiteLevel as String])
+        guard let white = whites.max(), !blacks.isEmpty else { return (0, 16383, false) }
+        let mine = blacks.count >= 4 ? sites.map { blacks[$0] } : [blacks[0]]
+        let black = mine.reduce(0, +) / Double(max(mine.count, 1))
+        return (Float(black), Float(white), true)
+    }
+
+    /// Cuts one colour's samples out of a Bayer buffer: a plane half the buffer's
+    /// width and height (two sites are averaged for green), optionally a
+    /// centre crop of `cropWidth` × `cropHeight` plane pixels (0 = all).
+    static func extractPlane(base: UnsafeRawPointer, rowBytes: Int, width: Int, height: Int,
+                             sites: [Int], cropWidth: Int, cropHeight: Int)
+        -> (values: [UInt16], width: Int, height: Int) {
+        let planeWidth = width / 2, planeHeight = height / 2
+        let outWidth = cropWidth > 0 ? min(cropWidth, planeWidth) : planeWidth
+        let outHeight = cropHeight > 0 ? min(cropHeight, planeHeight) : planeHeight
+        let left = (planeWidth - outWidth) / 2, top = (planeHeight - outHeight) / 2
+        let first = sites.first ?? 0
+        let second = sites.count > 1 ? sites[1] : nil
+        let values = [UInt16](unsafeUninitializedCapacity: outWidth * outHeight) { buffer, count in
+            for y in 0 ..< outHeight {
+                let row = top + y
+                let a = (base + (2 * row + first / 2) * rowBytes).assumingMemoryBound(to: UInt16.self)
+                let aOffset = 2 * left + first % 2
+                if let second {
+                    let b = (base + (2 * row + second / 2) * rowBytes)
+                        .assumingMemoryBound(to: UInt16.self)
+                    let bOffset = 2 * left + second % 2
+                    for x in 0 ..< outWidth {
+                        let sum = UInt32(a[aOffset + 2 * x]) + UInt32(b[bOffset + 2 * x])
+                        buffer[y * outWidth + x] = UInt16((sum + 1) / 2)
+                    }
+                } else {
+                    for x in 0 ..< outWidth { buffer[y * outWidth + x] = a[aOffset + 2 * x] }
+                }
+            }
+            count = outWidth * outHeight
+        }
+        return (values, outWidth, outHeight)
     }
 
     // MARK: USB listener
@@ -547,6 +794,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             lastError = nil
             sendHello()
             sendStatus()
+            if settings.raw { scheduleRawCapture() }
         case .failed, .cancelled:
             connection = nil
             connectionReady = false

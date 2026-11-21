@@ -71,6 +71,33 @@ The **iPhone** section appears only while an iPhone is displayed. Changes
 made on the phone's screen are sent back, and ESPI Live's controls follow
 them within a second or two.
 
+### Bayer RAW mode
+
+The **Capture** choice in ESPI Live's iPhone section (and on the phone's screen) switches
+from the video pipeline to **Bayer RAW**. Apple's video output is always processed (noise
+reduction, sharpening, tone mapping); the photo output can deliver the sensor's Bayer data
+with that pipeline bypassed, so RAW mode takes **stills** as fast as they come:
+
+- **Rate:** about 5–10 frames per second (Apple's figure; measure it on your phone).
+  Frame rate, frame size and the video crop sizes do not apply; **Send at most** and
+  **Crop** (in plane pixels) still do.
+- **Resolution:** Apple offers Bayer RAW only binned to about 12 MP (4032 × 3024); full
+  resolution is processed ProRAW, which is not used. One colour plane is half that size in
+  each direction (2016 × 1512).
+- **Colour:** the phone keeps the sites of one colour (**RAW colour**): red for a 633 nm
+  laser, green for 532 nm (both green sites averaged), or blue. Interpolated colours are
+  never mixed in, so each value is a real sensor reading.
+- **Values:** 16-bit counts, with the black and white level from the photo's DNG metadata
+  (if the phone reports none, the app uses 0 and 16383 and says so in its error line).
+  ESPI Live converts them to **deep frames**: float32 grey levels on the 8-bit scale
+  (black = 0, white = 255), negatives kept, so every processing step keeps its precision
+  and only the final picture is rounded to 8 bits (`processing.to_uint8`).
+- **Bandwidth:** a red plane is about 6 MB per frame, so 5–10 fps needs about 30–60 MB/s:
+  a USB 3 phone and cable, or a crop on USB 2.
+- **Limits:** the phone still has a rolling shutter, and stills arrive with uneven timing,
+  so RAW suits a continuous laser and not pulsed or phase-stepped capture. A shutter sound
+  may play where the phone's region requires it.
+
 ### Bandwidth
 
 Frames are never compressed. When USB is still busy with the previous frame,
@@ -152,6 +179,14 @@ little-endian.
 **FRAME_META** (`<IIIIQqfffI`): width, height, stride, pixel format (1 =
 Mono8), sequence, presentation time (ns), exposure (µs), ISO, lens position,
 reserved.
+
+**RAW frames** (pixel format 2 = Mono16): after FRAME_META comes a 16-byte
+**RAW_META** (`<ffII`): black level, white level (sensor counts), colour (0 red,
+1 green, 2 blue) and the sensor's pattern (0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR); then
+`stride × height` little-endian 16-bit values, one colour plane, rows unpadded
+(`stride` counts values). `settings` also carries `raw` (bool) and `raw_channel`
+(`"red"`, `"green"` or `"blue"`), and COMMAND accepts the same two keys. An older
+app ignores them, and an older ESPI Live rejects a Mono16 frame as "not Mono8".
 
 **settings:** `exposure_us`, `iso`, `fps`, `lens_position`, `width`,
 `height`, `crop_width`, `crop_height`, `max_send_fps`.

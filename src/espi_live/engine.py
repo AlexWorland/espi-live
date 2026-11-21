@@ -35,15 +35,15 @@ from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.capture_models import adapter_for
-from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
+from espi_live.processing import (DEEP_DTYPE, DEFAULT_DIFFERENCE_GAIN, DemoSource,
                                   ESPIProcessor, MAX_FRAMES_BACK,
                                   NoiseCalibration, NoiseFloorMap, PeakHold,
                                   RangeTracker, apply_display, apply_gain,
                                   apply_levels, denoise_strength, display_lut,
-                                  even_out_brightness, local_normalize,
+                                  even_out_brightness, is_deep, local_normalize,
                                   raw_difference, reject_outliers,
                                   single_field, smooth_speckle, stretch_levels,
-                                  subtract_floor, watermark_demo)
+                                  subtract_floor, to_uint8, watermark_demo)
 from espi_live.recording import (AVIRecorder, recording_path, save_frame,
                                  save_frame_set)
 
@@ -254,11 +254,13 @@ def previous_wording(s):
 def present(image, flip, demo, tone=None):
     """Apply the last steps every published image gets: tone, flip, watermark.
 
-    Args: image is a 2-D uint8 array; flip mirrors it left-right; demo
-        stamps the dummy-mode banner (after the flip, so its text reads
-        normally); tone is a display_lut table or None.
-    Returns: The image to publish (the input itself when none applies).
+    Args: image is a 2-D uint8 array, or a deep (float32) one that is rounded
+        to 8 bits here; flip mirrors it left-right; demo stamps the dummy-mode
+        banner (after the flip, so its text reads normally); tone is a
+        display_lut table or None.
+    Returns: The uint8 image to publish (the input itself when none applies).
     """
+    image = to_uint8(image)
     if tone is not None:  # a LUT makes a new array; the camera frame is untouched
         image = cv2.LUT(image, tone)
     if flip:
@@ -271,8 +273,8 @@ def present(image, flip, demo, tone=None):
 def condition_difference(difference, frame, s):
     """Run the steps before averaging: threshold, even brightness, gain, outliers.
 
-    Args: difference is the uint8 difference image; frame is the Mono8 frame
-        it came from; s is the Settings snapshot.
+    Args: difference is the uint8 (or deep) difference image; frame is the
+        frame it came from; s is the Settings snapshot.
     Returns: (difference, labview_order): the conditioned image, and whether
         the gain was applied already (LabVIEW order: Fixed gain only), so the
         later steps must not apply it again.
@@ -311,14 +313,32 @@ def floor_key(s, processor, shape):
             (s.difference_gain, s.average_multiplier) if labview else None)
 
 
+def level(value, image):
+    """Report a measured grey level in the form the status bar shows.
+
+    Args: value is a number from cv2.minMaxLoc; image is the array measured.
+    Returns: An int for uint8, a float rounded to three places for a deep image.
+    """
+    return round(float(value), 3) if is_deep(image) else int(value)
+
+
+def level_text(value):
+    """Write a grey level for the status bar.
+
+    Args: value is an int or a float level.
+    Returns: The number without trailing zeros (0.137, 12).
+    """
+    return f"{round(float(value), 3):g}"
+
+
 def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
                       now=0.0, sample=None, labview_order=False, floor=None,
                       floor_sample=None):
     """Run the steps after averaging: speckle filter, noise floor, peak hold,
     scaling, invert.
 
-    Args: averaged is a uint8 difference image; s is the Settings snapshot;
-        measure asks for the input range
+    Args: averaged is a uint8 or deep difference image; s is the Settings
+        snapshot; measure asks for the input range
         when Fixed gain or Local normalization is on (it costs a pass over
         the frame); peaks and ranges are the worker's PeakHold and
         RangeTracker, or None to leave out peak hold and the steady range
@@ -328,8 +348,9 @@ def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
         floor is a NoiseFloorMap result to subtract, or None; floor_sample is
         called with the filtered image and now before the floor is taken off
         (a noise floor measurement), or None.
-    Returns: (image, levels): the processed image (the display gamma is still
-        to apply) and (low, high, scaled_low,
+    Returns: (image, levels): the processed uint8 image (the display gamma is
+        still to apply; a deep difference is rounded to 8 bits only here) and
+        (low, high, scaled_low,
         scaled_high) for the status bar (scaled_low is None under Local
         normalization), or None when not measured.
     """
@@ -347,20 +368,20 @@ def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
         image = local_normalize(averaged, s.normalize_window, s.min_range)
         if measure:
             low, high, _, _ = cv2.minMaxLoc(averaged)
-            levels = (int(low), int(high), None, None)
+            levels = (level(low, averaged), level(high, averaged), None, None)
     elif s.scale_range:
         low, high = stretch_levels(averaged, s.clip_percent)
         low, high = (ranges or RangeTracker()).update(
-            low, high, s.min_range, s.steady_range_s, now)
+            low, high, s.min_range, s.steady_range_s, now, fine=is_deep(averaged))
         image = apply_levels(averaged, low, high)
         levels = (low, high, *((0, 255) if high > low else (0, 0)))
     else:
-        image = (averaged if labview_order
-                 else apply_gain(averaged, s.difference_gain))
+        image = to_uint8(averaged if labview_order
+                         else apply_gain(averaged, s.difference_gain))
         if measure:
             low, high, _, _ = cv2.minMaxLoc(averaged)
             top, bottom, _, _ = cv2.minMaxLoc(image)
-            levels = (int(low), int(high), int(top), int(bottom))
+            levels = (level(low, averaged), level(high, averaged), int(top), int(bottom))
     if s.invert:
         image = cv2.bitwise_not(image)
     return image, levels
@@ -373,6 +394,7 @@ def range_text(levels, s):
     Returns: Text such as "Input: 0–12    Scaled: 0–255".
     """
     low, high, scaled_low, scaled_high = levels
+    low, high = level_text(low), level_text(high)
     if scaled_low is None:
         return f"Input: {low}–{high}    Local normalization {s.normalize_window} px"
     return f"Input: {low}–{high}    Scaled: {scaled_low}–{scaled_high}"
@@ -993,8 +1015,9 @@ class Engine:
                     processor, frame = self._handle_actions(processor, None)
                     continue
                 frame = grabbed
-            if frame.ndim != 2 or frame.dtype != np.uint8:
-                raise RuntimeError("Expected a Mono8 image; check camera PixelFormat.")
+            if frame.ndim != 2 or frame.dtype not in (np.uint8, DEEP_DTYPE):
+                raise RuntimeError("Expected a Mono8 image (or a deep float32 one); "
+                                   "check camera PixelFormat.")
             if (s.single_field and not s.raw_difference and
                     self.camera is not None and self.camera.interlaced):
                 frame = single_field(frame)
