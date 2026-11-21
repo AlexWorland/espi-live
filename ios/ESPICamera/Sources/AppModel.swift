@@ -13,6 +13,8 @@ final class AppModel {
     var snapshot = StreamerSnapshot()
     var cameraAllowed: Bool?
     var previewOn = true
+    /// The full-screen on-phone difference view is showing.
+    var differenceOn = false
 
     @ObservationIgnored let streamer: CameraStreamer
 
@@ -34,5 +36,11 @@ final class AppModel {
 
     func apply(_ command: LinkCommand) {
         streamer.apply(command)
+    }
+
+    /// Opens or closes the on-phone difference view.
+    func setDifferenceView(_ on: Bool) {
+        differenceOn = on
+        streamer.setDifferenceView(on)
     }
 }

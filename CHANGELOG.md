@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-21 — Difference view on the iPhone
+
+### Previous state
+
+- The ESPI Camera app only sent the camera image to ESPI Live over USB; seeing fringes needed the computer.
+
+### Current state
+
+- A **Difference view** button on the phone shows `|image(n) − image(n−1)|` full screen, computed on the phone's GPU with no computer or cable, and no gain, averaging or filtering.
+- It uses the rawest data the selected back camera has: back-to-back Bayer RAW stills (red photosites only, for the 633 nm laser; about 5–10 a second, with the photo's white minus black level as white), otherwise 10-bit, then 8-bit luma video. The source, its bit depth, size and rate are always shown on screen.
+- Exposure, ISO and focus can be changed in the view. While it is on, no frames go to the computer and ESPI Live is told why; **Done** restores streaming.
+
 ## 2026-11-21 — iPhone Bayer RAW mode
 
 ### Previous state
