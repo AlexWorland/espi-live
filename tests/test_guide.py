@@ -55,7 +55,7 @@ class GuideTest(unittest.TestCase):
                        "Requested FPS", "Average N", "Scaling", "Fixed gain",
                        "Auto stretch", "Difference gain", "Frames back",
                        "Outlier filter", "LabVIEW flow",
-                       "Palette", "Gamma", "CLAHE", "Record AVI",
+                       "Gamma", "Record AVI",
                        "Save frame", "Set reference", "Reset last",
                        "Reset average", "Switch to live capture",
                        "Fit to window", "Actual size", "F1"):

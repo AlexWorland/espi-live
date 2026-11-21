@@ -4,8 +4,8 @@ The window is one QMainWindow: the image in the center, a dockable controls
 panel and log, and a status bar. Docks can be floated as separate windows.
 
 Display path: the engine publishes a Mono8 FramePacket; the GPU view uploads
-it as a single-channel texture, and a fragment shader applies gamma and the
-palette through a 256-entry lookup table built by processing.palette_rgb_table
+it as a single-channel texture, and a fragment shader applies the display
+gamma through a 256-entry gray lookup table built by processing.display_rgb_table
 (the same function saved frames use). Scaling to the window is done by the
 GPU with mipmaps. Machines without OpenGL 3.3 (for example some remote-desktop
 sessions) fall back to a CPU-drawn view with identical controls.
@@ -58,9 +58,9 @@ from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
 from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, MAX_DENOISE_PERCENT,
-                                  MAX_FRAMES_BACK, MAX_REFERENCE_FRAMES, PALETTES,
-                                  SCALING_MODES,
-                                  SMOOTHING_METHODS, VIEW_MODES, palette_rgb_table)
+                                  MAX_FRAMES_BACK, MAX_REFERENCE_FRAMES,
+                                  SCALING_MODES, SMOOTHING_METHODS,
+                                  VIEW_MODES, display_rgb_table)
 
 # Wide enough that a full help tip and the DUMMY MODE badge both fit. A saved
 # layout is kept; a narrower window keeps the badge and elides the tip. Either
@@ -120,7 +120,7 @@ FRAGMENT_SHADER = """#version 330 core
 in vec2 uv;
 out vec4 color;
 uniform sampler2D image;  // R8 Mono8 measurement
-uniform sampler2D lut;    // 256x1 RGB: gamma + palette
+uniform sampler2D lut;    // 256x1 RGB: display gamma
 void main() {
     int index = int(texture(image, uv).r * 255.0 + 0.5);
     color = vec4(texelFetch(lut, ivec2(index, 0), 0).rgb, 1.0);
@@ -288,7 +288,7 @@ FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
 # The longest view hint the engine reports (the status bar measures it), and the
 # least width the tip keeps beside it. The hint is information and gets its whole
 # sentence; the tip takes what is left and is shortened with an ellipsis.
-LONGEST_HINT = "ESPI difference view; min/max range is before gamma and palette"
+LONGEST_HINT = "Reference was taken at noise reduction 100; press F to retake"
 # QSettings key prefix; "<prefix><section heading>" is true while that
 # Controls section is collapsed.
 SECTION_SETTING_PREFIX = "controls/collapsed/"
@@ -297,7 +297,7 @@ MESSAGE_TIP_WIDTH = 120
 PIPELINE = ("noise reduction → difference (N frames back) → noise threshold → "
             "beam brightness → outlier filter → average → speckle filter → "
             "peak hold → fixed gain, stretch or local normalization → invert → "
-            "gamma/CLAHE → brightness, gain and contrast → palette")
+            "brightness, gain and contrast → gamma")
 # Fringe-enhancement and display-tone values every preset sets unless it
 # overrides them, so a preset never inherits peak hold or a threshold from the
 # last one. The sensitivity floor is not here: it is per camera (analog capture
@@ -329,9 +329,7 @@ PROCESSING_PRESETS = {
         "gain_before_average": False,
         "clip_percent": 0.0,
         "invert": False,
-        "palette": "Gray",
         "gamma": 1.0,
-        "clahe": False,
     },
     "Measurement": {
         **FRINGE_TOOLS_OFF,
@@ -348,9 +346,7 @@ PROCESSING_PRESETS = {
         "gain_before_average": False,
         "clip_percent": 0.5,
         "invert": False,
-        "palette": "Gray",
         "gamma": 1.0,
-        "clahe": True,
     },
     # A vibrating object seen through a noisy analog camera (Sony XC-ST50 on
     # a USB-Live2): each pixel keeps its largest frame-to-frame change for 1 s,
@@ -372,9 +368,7 @@ PROCESSING_PRESETS = {
         "gain_before_average": False,
         "clip_percent": 0.5,
         "invert": False,
-        "palette": "Gray",
         "gamma": 1.0,
-        "clahe": False,
         "threshold": 6,
         "steady_range_s": 1.0,
         "peak_hold_s": 1.0,
@@ -385,7 +379,7 @@ LABVIEW_FLOW_TIP = (
     "Switch between your own settings and the LabVIEW ESPI 1.5 flow: Reference "
     "view with a reference captured now (and again whenever Reference view has "
     "none), full frames, Fixed gain applied to each frame before averaging, and "
-    "no noise reduction, speckle filter, CLAHE or invert. Difference gain, "
+    "no noise reduction, speckle filter or invert. Difference gain, "
     "exposure, gain, frame rate and recording stay as they are. On by default "
     "for an analog camera. Turning it off puts back your own settings; changes "
     "made while it is on are dropped."
@@ -408,7 +402,7 @@ Live preview — while you aim the camera and check that fringes form.
   View: Previous. Average N: 1 (off). Rolling average: off.
   Noise reduction: 0. Speckle filter: off. Ref. refresh: 0.
   Frames back: 1. Outlier filter: off.
-  Scaling: Auto stretch. Palette: Gray. Gamma: 1.0. CLAHE: off.
+  Scaling: Auto stretch. Gamma: 1.0.
   Switch the view to Raw to frame the object. Raw skips difference processing but still applies display gamma.
 
 Measurement — a still object, compared with one reference.
@@ -419,7 +413,7 @@ Measurement — a still object, compared with one reference.
   Ref. refresh: 2 s. That cancels slow drift (air, heat). Motion slower than the refresh disappears; use 0 and press F when you need one fixed before/after.
   Noise reduction: 0. Raise it only when the camera is noisy and the object is still, and set it before pressing F: the reference keeps the setting it was taken at, and a change afterwards leaves a frozen grain until you press F again.
   Scaling: Auto stretch, clip 0.5% so a few speckles don't flatten the contrast.
-  Palette: Gray, gamma 1.0. CLAHE is on but only affects a color palette; switch to Turbo if faint fringes are hard to see.
+  Gamma: 1.0.
 
 Peak hold — a vibrating object through a noisy analog camera (Sony XC-ST50 on the USB-Live2).
   View: Previous. Each pixel shows its largest frame-to-frame change over the last second, so a steadily driven object's ring pattern builds up instead of flickering.
@@ -427,12 +421,12 @@ Peak hold — a vibrating object through a noisy analog camera (Sony XC-ST50 on 
   Peak hold window: 1 s. Longer fills in fainter rings but trails changes in the drive.
   Scaling: Auto stretch, clip 0.5%, steady range 1 s so the contrast does not pump.
   Sensitivity floor: unchanged. Analog cameras start at 30; press Calibrate noise with the drive off to measure your own.
-  S-curve contrast: 30%. Palette: Gray, gamma 1.0, CLAHE off. Noise reduction, averaging and Ref. refresh: off.
+  S-curve contrast: 30%. Gamma 1.0. Noise reduction, averaging and Ref. refresh: off.
 
 Processing order (Previous and Reference views):
   {PIPELINE}
 
-Raw view applies noise reduction and display gamma, without scaling or palette.
+Raw view applies noise reduction and display gamma, without scaling.
 
 Analog camera (Sony XC-ST50): it starts in the LabVIEW flow, the LabVIEW ESPI 1.5 VI's processing with its saved defaults: Reference view with an automatic reference, Fixed gain 42× (the VI's Constant) on each frame, no averaging or filters. Turn LabVIEW flow off for your own settings, which also use Fixed gain: Auto stretch would blow the camera's few grey levels of noise up to full-contrast grain. Lower Difference gain when noise shows as grey grain. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths, including its N + 1 frames divided by N.
 
@@ -619,7 +613,7 @@ ZOOM_SLIDER_TIP = ("Drag, click or scroll to zoom. The mouse wheel and "
                    "drag-to-pan on the image still work.")
 MODE_TIPS = {
     "Raw": ("Raw: the camera's Mono8 image, for aiming and focusing. "
-            "Gamma applies; no difference, stretch or palette."),
+            "Gamma applies; no difference or stretch."),
     "Previous": ("Previous: the difference from the last frame, so fringes show "
                  "what just changed. Shortcut: R restarts that difference."),
     "Reference": ("Reference: the difference from a stored frame. Shortcut: F "
@@ -1163,7 +1157,7 @@ class ViewNavigation:
 
 
 class GLImageView(ViewNavigation, QOpenGLWidget):
-    """Draw Mono8 frames with GPU scaling, gamma and palette."""
+    """Draw Mono8 frames with GPU scaling and gamma."""
 
     hovered = Signal(int, int)
     zoomChanged = Signal(float)  # zoom relative to fit-to-window
@@ -1210,7 +1204,7 @@ class GLImageView(ViewNavigation, QOpenGLWidget):
         self.update()
 
     def initializeGL(self):
-        """Compile the shaders and create the image and palette textures.
+        """Compile the shaders and create the image and lookup-table textures.
 
         Args: None.
         Returns: None. Raises RuntimeError if the shaders cannot be built.
@@ -1704,7 +1698,7 @@ class SettingsGuideDialog(QDialog):
 COMPARE_PANELS = (
     ("reference", "Reference",
      "The stored reference frame, as Raw view would show it: gamma only, no "
-     "stretch or palette. F or Set reference retakes it; Ref. frames averages "
+     "stretch. F or Set reference retakes it; Ref. frames averages "
      "several frames into it."),
     ("current", "Current frame",
      "The camera frame being compared, after single field and noise reduction, "
@@ -1878,9 +1872,9 @@ class ReferenceCompareDialog(QDialog):
             if part is None:
                 self.stacks[name].setCurrentWidget(self.messages[name])
                 continue
-            key = (part.palette, round(part.gamma, 4))
+            key = round(part.gamma, 4)
             if key not in self.tables:
-                self.tables[key] = palette_rgb_table(part.palette, part.gamma)
+                self.tables[key] = display_rgb_table(part.gamma)
             self.views[name].show_packet(part, self.tables[key], key)
             self.stacks[name].setCurrentWidget(self.views[name])
 
@@ -3249,15 +3243,6 @@ class MainWindow(QMainWindow):
         self.flip_button.toggled.connect(
             lambda on: self.engine.update_settings(flip_horizontal=on))
         add(self.flip_button)
-        self.palette_combo = QComboBox()
-        self.palette_combo.addItems(PALETTES)
-        self.palette_combo.setCurrentText(s.palette)
-        set_tooltip(self.palette_combo,
-            "Colors the stretched image. Gray shows brightness and is what you "
-            "want for a measurement. A color palette (Turbo, Jet and the others) "
-            "makes small steps easier to see; pair it with CLAHE. Start with Gray.")
-        self.palette_combo.currentTextChanged.connect(
-            lambda name: self.engine.update_settings(palette=name))
         self.gamma = SliderSpin(0.1, 3.0, 0.1, 1, s.gamma)
         self.gamma.set_description(GAMMA_TIP + " Start at 1.0.")
         self.gamma.valueChanged.connect(lambda v: self.engine.update_settings(gamma=v))
@@ -3283,20 +3268,10 @@ class MainWindow(QMainWindow):
             "black. 0 = off. Try 30–60%.")
         self.contrast.valueChanged.connect(
             lambda v: self.engine.update_settings(contrast=v))
-        self.clahe = QCheckBox("CLAHE (color palettes only)")
-        set_tooltip(self.clahe,
-            "Boosts local contrast so faint fringes show up in a color palette. "
-            "It does nothing while the palette is Gray. Turn it on when a color "
-            "palette still looks flat; leave it off when the gray values must "
-            "stay as they are. Start on with a color palette, and off with Gray.")
-        self.clahe.setChecked(s.clahe)
-        self.clahe.toggled.connect(lambda on: self.engine.update_settings(clahe=on))
-        add(self.palette_combo, "Palette")
         add(self.gamma, "Gamma")
         add(self.brightness, "Brightness")
         add(self.display_gain, "Gain")
         add(self.contrast, "S-curve contrast")
-        add(self.clahe)
         self.ui_scale_row = SliderSpin(
             ui_scale.MIN_PERCENT, ui_scale.MAX_PERCENT, ui_scale.STEP_PERCENT, 0,
             ui_scale.percent(), "%")
@@ -3557,7 +3532,7 @@ class MainWindow(QMainWindow):
                                        "Raw Mono8: no brightness scaling")
         set_tooltip(self.range_status,
                     "Brightness before and after Scaling (Fixed gain or Auto "
-                    "stretch), measured before gamma and the palette. Raw view is "
+                    "stretch), measured before gamma. Raw view is "
                     "not scaled.")
         self.camera_fps_status = FixedLabel(  # sensor rate, then what the app keeps up with
             "Camera: 999.9 fps (simulated)")
@@ -3920,10 +3895,9 @@ class MainWindow(QMainWindow):
         toggles = ((self.rolling, s.rolling),
                    (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
-                   (self.clahe, s.clahe), (self.even_brightness, s.even_brightness),
+                   (self.even_brightness, s.even_brightness),
                    (self.record_button, s.record), (self.single_field, s.single_field))
         combos = ((self.smoothing_combo, s.smoothing_method),
-                  (self.palette_combo, s.palette),
                   (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
         for widget, _ in toggles + combos:
             widget.blockSignals(True)
@@ -4282,9 +4256,9 @@ class MainWindow(QMainWindow):
         Args: packet is the FramePacket to show.
         Returns: None.
         """
-        key = (packet.palette, round(packet.gamma, 4))
+        key = round(packet.gamma, 4)
         if key != getattr(self, "table_key", None):
-            self.table = palette_rgb_table(packet.palette, packet.gamma)
+            self.table = display_rgb_table(packet.gamma)
             self.table_key = key
         self.view.show_packet(packet, self.table, key)
         self.shown_packet = packet

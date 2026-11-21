@@ -93,7 +93,7 @@ def settings_summary(settings):
             f"outlier_filter={outliers} average={averaging} smoothing={smoothing} "
             f"scaling={scaling} "
             f"exposure={settings.exposure_us:g}us gain={settings.gain_db:g}dB "
-            f"fps={settings.fps:g} clahe={'on' if settings.clahe else 'off'}")
+            f"fps={settings.fps:g}")
 
 
 def sharpness(image):

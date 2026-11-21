@@ -16,10 +16,10 @@ from espi_live import paths
 from espi_live.camera import CameraInfo
 from espi_live.engine import (LABVIEW_FLOW, Engine, default_settings, is_analog,
                               own_settings)
-from espi_live.processing import (PALETTES, SMOOTHING_METHODS, ESPIProcessor,
+from espi_live.processing import (SMOOTHING_METHODS, ESPIProcessor,
                                   NoiseCalibration,
-                                  apply_palette, normalize_min_max,
-                                  palette_rgb_table, smooth_speckle,
+                                  apply_display, display_rgb_table, normalize_min_max,
+                                  smooth_speckle,
                                   stretch_contrast)
 from list_log import ListLog
 
@@ -60,22 +60,19 @@ class ProcessingTests(unittest.TestCase):
             self.assertTrue(all(r is None for r in results[:-1]))
             np.testing.assert_array_equal(results[-1], expected)
 
-    def test_gpu_table_matches_cpu_palette(self):
-        """The GPU lookup table must reproduce the exported colors.
+    def test_gpu_table_matches_cpu_display(self):
+        """The GPU lookup table must reproduce the exported gray values.
 
         Args: None.
         Returns: None.
         """
         image = np.arange(256, dtype=np.uint8).reshape(16, 16)
-        for palette in PALETTES:
-            for gamma in (1.0, 0.6, 2.2):
-                table = palette_rgb_table(palette, gamma)
-                cpu = apply_palette(image, palette, gamma)
-                if cpu.ndim == 2:
-                    cpu_rgb = np.repeat(cpu[..., None], 3, axis=2)
-                else:
-                    cpu_rgb = cpu[..., ::-1]
-                np.testing.assert_array_equal(table[image], cpu_rgb)
+        for gamma in (1.0, 0.6, 2.2):
+            table = display_rgb_table(gamma)
+            cpu = apply_display(image, gamma)
+            self.assertEqual(cpu.ndim, 2)
+            np.testing.assert_array_equal(table[image],
+                                          np.repeat(cpu[..., None], 3, axis=2))
 
     def test_stretch_contrast(self):
         """0% clip matches min/max; a clip ignores a few hot pixels.
@@ -153,14 +150,14 @@ class EngineDemoTests(unittest.TestCase):
         self.assertEqual(packet.image.dtype, np.uint8)
         self.assertEqual(packet.image.ndim, 2)
         self.assertTrue(packet.demo)
-        self.assertEqual((packet.palette, packet.gamma), ("Gray", 1.0))
+        self.assertEqual(packet.gamma, 1.0)
         self.assertEqual(int(packet.image[:20, :].min()), 0)  # banner background
         self.assertEqual(int(packet.image[:42, :].max()), 255)  # banner text
 
     def test_gamma_reaches_every_view_and_changes_midtones(self):
         """Raw, Previous and Reference publish the display gamma.
 
-        Raw stays gray even when a color palette is selected. A gamma other
+        A gamma other
         than 1.0 changes rendered pixels that are not already black or white.
 
         Args: None.
@@ -168,8 +165,7 @@ class EngineDemoTests(unittest.TestCase):
         """
         self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
         for mode in ("Raw", "Previous", "Reference"):
-            self.engine.update_settings(mode=mode, gamma=0.5, clahe=False,
-                                        palette="Turbo", scale_range=True)
+            self.engine.update_settings(mode=mode, gamma=0.5, scale_range=True)
             if mode == "Reference":
                 self.engine.request("reference")
 
@@ -186,9 +182,7 @@ class EngineDemoTests(unittest.TestCase):
 
             self.assertTrue(wait_until(ready))
             packet = self.engine.latest_packet()
-            self.assertEqual(packet.palette, "Gray" if mode == "Raw" else "Turbo")
-            plain = apply_palette(packet.image, packet.palette, 1.0)
-            self.assertFalse(np.array_equal(packet.render(), plain))
+            self.assertFalse(np.array_equal(packet.render(), packet.image))
 
     def test_noise_reduction_filters_the_raw_feed(self):
         """Noise reduction runs on camera frames, so Raw view uses it too.
@@ -228,7 +222,7 @@ class EngineDemoTests(unittest.TestCase):
         self.engine.demo_source.next_frame = next_frame
         self.engine.update_settings(
             fps=120, mode="Previous", scale_range=False, difference_gain=8.0,
-            outlier_filter=3, clahe=False, palette="Gray", average=1)
+            outlier_filter=3, average=1)
 
         def pixel_is(value):
             """Wait for a published Previous frame with this pixel value.
@@ -294,7 +288,7 @@ class EngineDemoTests(unittest.TestCase):
         self.engine.update_settings(
             fps=120, mode="Previous", threshold=3, even_brightness=True,
             peak_hold_s=1.0, normalize_window=9, display_gain=2.0, contrast=30,
-            brightness=5, clahe=False)
+            brightness=5)
         self.assertTrue(wait_until(lambda: "Local normalization 9 px"
                                    in self.engine.status()["range"]))
         packet = self.engine.latest_packet()
@@ -367,9 +361,9 @@ class EngineDemoTests(unittest.TestCase):
 
         self.engine.demo_source.next_frame = next_frame
         self.engine.update_settings(
-            fps=120, scale_range=False, difference_gain=1.0, clahe=False,
+            fps=120, scale_range=False, difference_gain=1.0,
             smoothing=0, average=1,
-            rolling=False, invert=False, palette="Gray", mode="Raw",
+            rolling=False, invert=False, mode="Raw",
             noise_reduction=0)
 
         def body():
@@ -417,15 +411,13 @@ class EngineDemoTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        self.engine.update_settings(mode="Previous", average=3,
-                                    palette="Turbo", gamma=1.5)
+        self.engine.update_settings(mode="Previous", average=3, gamma=1.5)
         self.assertTrue(wait_until(lambda: (
             self.engine.latest_packet() is not None and
             self.engine.latest_packet().mode == "Previous")))
         packet = self.engine.latest_packet()
-        self.assertEqual(packet.palette, "Turbo")
-        self.assertEqual(packet.gamma, 1.0)  # CLAHE on: gamma applied on CPU
-        self.assertEqual(packet.render().ndim, 3)
+        self.assertEqual(packet.gamma, 1.5)
+        self.assertEqual(packet.render().ndim, 2)  # always grayscale
 
         self.engine.request("save", title="test run/1", notes="hello")
         frames = os.path.join(self.tmp.name, "frames")
@@ -469,8 +461,7 @@ class EngineDemoTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        self.engine.update_settings(mode="Reference", average=1, clahe=False,
-                                    palette="Gray", gamma=2.0)
+        self.engine.update_settings(mode="Reference", average=1, gamma=2.0)
         self.engine.request("reference")
         self.engine.request("reset_average")
         self.engine.request("reset_previous")
@@ -480,7 +471,7 @@ class EngineDemoTests(unittest.TestCase):
             self.engine.latest_packet() is not None and
             self.engine.latest_packet().mode == "Reference")))
         packet = self.engine.latest_packet()
-        self.assertEqual((packet.palette, packet.gamma), ("Gray", 2.0))
+        self.assertEqual(packet.gamma, 2.0)
         self.assertEqual(self.engine.status()["demo"], True)
 
     def test_flip_horizontal_mirrors_the_published_frame(self):
@@ -527,7 +518,7 @@ class EngineDemoTests(unittest.TestCase):
         self.engine.update_settings(
             mode="Reference", average=4, rolling=True, ref_refresh_s=0.2,
             smoothing=5, smoothing_method="Median", clip_percent=1.0,
-            invert=True, clahe=False)
+            invert=True)
         self.assertTrue(wait_until(lambda: any(
             "Reference auto-refresh: every 0.2 s" in line for line in self.log.lines)))
         self.assertTrue(wait_until(lambda: (

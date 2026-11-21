@@ -109,7 +109,7 @@ depend on it.
 | Average, Number of frames to average | **Average N** (block) |
 | Gain before the sum; N + 1 frames × Multiplier ÷ N to U8 | **Gain before averaging (LabVIEW order)**, **Average multiplier** (also sums N + 1 frames and divides by N) |
 | Full frames from the grabber | **Single field** off (the default) |
-| Palette | Palette |
+| Palette | None: the viewer's display is always grayscale, the VI's setting (Gray) |
 | Save AVI | Record AVI |
 | Save Frame (ends the run, writes a JPEG) | Save frame (keeps running, writes a PNG) |
 
@@ -118,10 +118,10 @@ displayed camera to this processing with the saved defaults above and back to
 the user's own settings. It is on by default for the Sony XC-ST50. It sets
 Reference view and captures a reference at once (and whenever Reference view
 has none), full frames, Fixed gain 42 applied to each frame, the outlier
-filter off, Average N 1, Average multiplier 1, Frames back 1, Gray, and turns
+filter off, Average N 1, Average multiplier 1, Frames back 1, and turns
 off everything the VI does not have (noise reduction, noise threshold,
 beam-brightness correction, speckle filter, peak hold, local normalization,
-stretch, invert, gamma, display brightness, gain and contrast, CLAHE). Exposure, gain, frame rate, recording and the image
+stretch, invert, gamma, display brightness, gain and contrast). Exposure, gain, frame rate, recording and the image
 flip are not changed.
 
 What it cannot reproduce:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-21 — Color palettes and CLAHE removed
+
+### Previous state
+
+- The Display section offered a **Palette** list (Gray, Turbo, Jet, Hot, Viridis, Plasma, Inferno) and a **CLAHE (color palettes only)** checkbox. CLAHE did nothing while the palette was Gray, and the Measurement preset turned it on.
+
+### Current state
+
+- The display is always grayscale, with the display gamma. **Palette** and **CLAHE** are gone from the controls, the presets, the guide and the settings, and the diagnostics line no longer reports CLAHE.
+- Saved PNGs and AVI recordings are unchanged: they hold the same gray values as the screen, written as before. `processing.apply_palette` and `palette_rgb_table` became `apply_display(image, gamma)` and `display_rgb_table(gamma)`.
+- The guide and help text now give the display order as brightness, gain and contrast, then gamma, which is what the program does.
+
 ## 2026-11-21 — Basic controls only, and a quick release
 
 ### Previous state

@@ -13,15 +13,6 @@ from collections import deque
 import cv2
 import numpy as np
 
-COLOR_MAPS = {
-    "Turbo": cv2.COLORMAP_TURBO,
-    "Jet": cv2.COLORMAP_JET,
-    "Hot": cv2.COLORMAP_HOT,
-    "Viridis": cv2.COLORMAP_VIRIDIS,
-    "Plasma": cv2.COLORMAP_PLASMA,
-    "Inferno": cv2.COLORMAP_INFERNO,
-}
-PALETTES = ("Gray", *COLOR_MAPS)
 VIEW_MODES = ("Raw", "Previous", "Reference")
 SMOOTHING_METHODS = ("Gaussian", "Median")
 # OpenCV's vectorized median handles widths up to 5; wider uint8 medians take
@@ -491,36 +482,31 @@ def display_lut(gain=1.0, contrast=0.0, brightness=0):
     return np.clip(np.rint(x * 255.0 + brightness), 0, 255).astype(np.uint8)
 
 
-def apply_palette(image, palette, gamma):
-    """Apply gamma and a named palette to a uint8 measurement image.
+def apply_display(image, gamma):
+    """Apply the display gamma to a uint8 measurement image.
 
-    This is the single definition of display color: the Qt viewer builds its
+    This is the single definition of display tone: the Qt viewer builds its
     GPU lookup table by passing 0..255 through it, and saved frames and
     recordings call it directly, so the screen and the files always match.
+    The display is always grayscale.
 
-    Args: image is a 2-D uint8 array; palette is "Gray" or a COLOR_MAPS key;
-        gamma is the display gamma.
-    Returns: The 2-D gray image for "Gray", otherwise a BGR uint8 image.
+    Args: image is a 2-D uint8 array; gamma is the display gamma.
+    Returns: The 2-D uint8 gray image (the input itself when gamma is 1).
     """
     lut = gamma_lut(gamma)
     if lut is not None:
         image = cv2.LUT(image, lut)
-    if palette == "Gray":
-        return image
-    return cv2.applyColorMap(image, COLOR_MAPS[palette])
+    return image
 
 
-def palette_rgb_table(palette, gamma):
-    """Describe gamma plus palette as a 256-entry RGB table for the GPU.
+def display_rgb_table(gamma):
+    """Describe the display gamma as a 256-entry gray RGB table for the GPU.
 
-    Args: palette is "Gray" or a COLOR_MAPS key; gamma is the display gamma.
-    Returns: A (256, 3) uint8 RGB array; entry i is the color of value i.
+    Args: gamma is the display gamma.
+    Returns: A (256, 3) uint8 RGB array; entry i is the gray of value i.
     """
     ramp = np.arange(256, dtype=np.uint8).reshape(1, 256)
-    colored = apply_palette(ramp, palette, gamma)
-    if colored.ndim == 2:
-        return np.repeat(colored.reshape(256, 1), 3, axis=1)
-    return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB).reshape(256, 3)
+    return np.repeat(apply_display(ramp, gamma).reshape(256, 1), 3, axis=1)
 
 
 # The Reference frames control runs from 1 (one frame, as before) to this.

@@ -147,29 +147,23 @@ class ReferenceHelperTests(unittest.TestCase):
                          "average of 8 frames, noise reduction 0, 0 s old")
 
     def test_finish_difference_steps(self):
-        """Stretch, measured or unmeasured raw range, invert and CLAHE.
+        """Stretch, measured or unmeasured raw range and invert.
 
         Args: None.
         Returns: None.
         """
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         diff = np.tile(np.arange(0, 6, dtype=np.uint8), (64, 16))
-        image, palette, gamma, levels = finish_difference(
-            diff, Settings(clahe=False), clahe)
-        self.assertEqual((palette, gamma, levels), ("Gray", 1.0, (0, 5, 0, 255)))
+        image, levels = finish_difference(diff, Settings())
+        self.assertEqual(levels, (0, 5, 0, 255))
         self.assertEqual(int(image.max()), 255)
-        image, _, _, levels = finish_difference(
-            flat(3), Settings(clahe=False), clahe)
+        image, levels = finish_difference(
+            flat(3), Settings())
         self.assertEqual(levels, (3, 3, 0, 0))
-        raw = Settings(scale_range=False, difference_gain=1.0, invert=True, clahe=False)
-        image, _, _, levels = finish_difference(diff, raw, clahe)
+        raw = Settings(scale_range=False, difference_gain=1.0, invert=True)
+        image, levels = finish_difference(diff, raw)
         self.assertEqual(levels, (0, 5, 0, 5))
         np.testing.assert_array_equal(image, cv2.bitwise_not(diff))
-        self.assertIsNone(finish_difference(diff, raw, clahe, measure=False)[3])
-        for gamma_in in (1.0, 2.0):
-            _, palette, gamma, _ = finish_difference(
-                diff, Settings(palette="Turbo", gamma=gamma_in), clahe)
-            self.assertEqual((palette, gamma), ("Turbo", 1.0))
+        self.assertIsNone(finish_difference(diff, raw, measure=False)[1])
 
     def test_finish_difference_main_steps(self):
         """Fixed gain, local normalization, peak hold, the sampler and the steady range.
@@ -177,30 +171,29 @@ class ReferenceHelperTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         diff = np.tile(np.arange(0, 6, dtype=np.uint8), (64, 16))
-        gained = Settings(scale_range=False, difference_gain=10.0, clahe=False)
-        image, _, _, levels = finish_difference(diff, gained, clahe)
+        gained = Settings(scale_range=False, difference_gain=10.0)
+        image, levels = finish_difference(diff, gained)
         self.assertEqual(levels, (0, 5, 0, 50))
         self.assertEqual(int(image.max()), 50)
-        image, _, _, levels = finish_difference(diff, gained, clahe, labview_order=True)
+        image, levels = finish_difference(diff, gained, labview_order=True)
         np.testing.assert_array_equal(image, diff)  # gain was applied before averaging
-        normalized = Settings(normalize_window=15, clahe=False)
-        image, _, _, levels = finish_difference(diff, normalized, clahe)
+        normalized = Settings(normalize_window=15)
+        image, levels = finish_difference(diff, normalized)
         self.assertEqual(levels, (0, 5, None, None))
-        self.assertIsNone(finish_difference(diff, normalized, clahe, measure=False)[3])
+        self.assertIsNone(finish_difference(diff, normalized, measure=False)[1])
         self.assertEqual(image.shape, diff.shape)
         seen = []
         peaks = PeakHold()
-        finish_difference(diff, Settings(peak_hold_s=1.0), clahe, peaks=peaks,
+        finish_difference(diff, Settings(peak_hold_s=1.0), peaks=peaks,
                           now=1.0, sample=lambda img, now: seen.append((img.shape, now)))
         self.assertEqual(seen, [(diff.shape, 1.0)])
         ranges = RangeTracker()
         loud = np.full((8, 8), 100, np.uint8)
         loud[0, 0] = 0
-        finish_difference(loud, Settings(steady_range_s=10.0), clahe, ranges=ranges, now=0.0)
-        _, _, _, levels = finish_difference(
-            diff, Settings(steady_range_s=10.0), clahe, ranges=ranges, now=0.1)
+        finish_difference(loud, Settings(steady_range_s=10.0), ranges=ranges, now=0.0)
+        _, levels = finish_difference(
+            diff, Settings(steady_range_s=10.0), ranges=ranges, now=0.1)
         self.assertGreater(levels[1], 5)  # the range shrinks only slowly
 
     def test_range_text(self):
@@ -386,19 +379,17 @@ class EngineReferenceTests(unittest.TestCase):
         """
         self.assertIsNone(self.engine.latest_compare())
         self.engine.set_compare(True)
-        clahe = cv2.createCLAHE()
         s = Settings(mode="Reference", gamma=1.5, average=4)
         self.processor.set_reference(flat(20), 0.0, 0.0, frames=8)
         self.processor.start_reference(8, 0.0, 0.0)
-        packet = FramePacket(7, flat(99), "Gray", 1.5, "Reference", False)
-        self.engine._publish_compare(self.processor, flat(30), s, packet, clahe, 4.0)
+        packet = FramePacket(7, flat(99), 1.5, "Reference", False)
+        self.engine._publish_compare(self.processor, flat(30), s, packet, 4.0)
         compare = self.engine.latest_compare()
         self.assertIs(compare.difference, packet)
         self.assertEqual(compare.sequence, 7)
         np.testing.assert_array_equal(compare.reference.image, flat(20))
         np.testing.assert_array_equal(compare.current.image, flat(30))
-        self.assertEqual((compare.reference.palette, compare.reference.gamma,
-                          compare.current.gamma), ("Gray", 1.5, 1.5))
+        self.assertEqual((compare.reference.gamma, compare.current.gamma), (1.5, 1.5))
         self.assertEqual(compare.reference_info, "capturing 0/8; in use: average "
                          "of 8 frames, noise reduction 0, 4 s old")
         self.assertEqual(compare.difference_info, "the Reference view, average 4")
@@ -411,15 +402,14 @@ class EngineReferenceTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        clahe = cv2.createCLAHE()
         ramp = np.tile(np.arange(0, 120, dtype=np.uint8), (80, 1))
-        s = Settings(mode="Previous", flip_horizontal=True, clahe=False)
+        s = Settings(mode="Previous", flip_horizontal=True)
         self.processor.set_reference(flat(10), 0.0, 0.0)
         self.engine.demo_source = object()  # demo: watermark every image
-        packet = FramePacket(3, flat(0), "Gray", 1.0, "Previous", True)
-        self.engine._publish_compare(self.processor, ramp, s, packet, clahe, 1.0)
+        packet = FramePacket(3, flat(0), 1.0, "Previous", True)
+        self.engine._publish_compare(self.processor, ramp, s, packet, 1.0)
         compare = self.engine.latest_compare()
-        expected, _, _, _ = finish_difference(cv2.absdiff(ramp, flat(10)), s, clahe)
+        expected, _ = finish_difference(cv2.absdiff(ramp, flat(10)), s)
         np.testing.assert_array_equal(compare.difference.image,
                                       watermark_demo(expected[:, ::-1]))
         np.testing.assert_array_equal(compare.current.image, watermark_demo(ramp[:, ::-1]))
@@ -427,14 +417,14 @@ class EngineReferenceTests(unittest.TestCase):
         self.assertIn("no averaging (the view is Previous)", compare.difference_info)
         s = Settings(mode="Reference", average=3, rolling=True)
         self.processor.set_reference(flat(10, (40, 120)), 0.0, 0.0)  # other size
-        self.engine._publish_compare(self.processor, ramp, s, packet, clahe, 1.0)
+        self.engine._publish_compare(self.processor, ramp, s, packet, 1.0)
         compare = self.engine.latest_compare()
         self.assertIsNone(compare.reference)
         self.assertIsNone(compare.difference)
         self.assertEqual(compare.difference_info, "the Reference view, average 3 rolling")
         self.processor.clear_reference()
         self.engine._publish_compare(self.processor, ramp, Settings(mode="Reference"),
-                                     packet, clahe, 1.0)
+                                     packet, 1.0)
         self.assertEqual(self.engine.latest_compare().reference_info, "none yet")
         self.assertIn("no averaging", self.engine.latest_compare().difference_info)
 
@@ -445,9 +435,9 @@ class EngineReferenceTests(unittest.TestCase):
         Returns: None.
         """
         diff = FramePacket(1, np.tile(np.arange(0, 256, 4, dtype=np.uint8), (8, 1)),
-                           "Turbo", 1.0, "Reference", False)
-        ref = FramePacket(1, flat(50, (8, 64)), "Gray", 2.0, "Reference frame", False)
-        cur = FramePacket(1, flat(60, (8, 64)), "Gray", 2.0, "Current", False)
+                           1.0, "Reference", False)
+        ref = FramePacket(1, flat(50, (8, 64)), 2.0, "Reference frame", False)
+        cur = FramePacket(1, flat(60, (8, 64)), 2.0, "Current", False)
         compare = ComparePacket(1, cur, ref, diff, "1 frame", "the Reference view", False)
         self.engine.request("save_compare", packet=compare, title="run 2", notes="n")
         self.assertTrue(self.engine.save_pending())
@@ -552,7 +542,7 @@ class EngineLoopReferenceTests(unittest.TestCase):
         counter = iter(range(10 ** 9))
         self.engine.demo_source.next_frame = (
             lambda exposure_us, gain_db, now: frames[next(counter) % 4].copy())
-        self.engine.update_settings(fps=200, mode="Reference", clahe=False)
+        self.engine.update_settings(fps=200, mode="Reference")
         self.engine.start()
 
     def tearDown(self):

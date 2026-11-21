@@ -202,14 +202,14 @@ def make_dialogs(answer=None):
     return dialogs
 
 
-def make_packet(sequence=1, width=64, height=48, palette="Gray", gamma=1.0):
+def make_packet(sequence=1, width=64, height=48, gamma=1.0):
     """Build a FramePacket with a horizontal ramp image.
 
-    Args: sequence, width, height and palette/gamma describe the frame.
+    Args: sequence, width, height and gamma describe the frame.
     Returns: A FramePacket.
     """
     image = np.tile(np.arange(width, dtype=np.uint8) * 3, (height, 1))
-    return FramePacket(sequence, image, palette, gamma, "Raw", True)
+    return FramePacket(sequence, image, gamma, "Raw", True)
 
 
 def wait_for(predicate, timeout=5.0):
@@ -658,7 +658,7 @@ class CpuImageViewPaintTests(unittest.TestCase):
         Returns: None.
         """
         image = np.full((1500, 2000), 200, np.uint8)
-        packet = FramePacket(1, image, "Gray", 1.0, "Raw", True)
+        packet = FramePacket(1, image, 1.0, "Raw", True)
         self.view.show_packet(packet, self.table, None)
         self.assertEqual(self.center_pixel(), 200)
 
@@ -669,7 +669,7 @@ class CpuImageViewPaintTests(unittest.TestCase):
         Returns: None.
         """
         image = np.full((20, 20), 90, np.uint8)
-        packet = FramePacket(1, image, "Gray", 1.0, "Raw", True)
+        packet = FramePacket(1, image, 1.0, "Raw", True)
         self.view.show_packet(packet, self.table, None)
         self.view.set_zoom(3.0)
         self.assertEqual(self.center_pixel(), 90)
@@ -681,7 +681,7 @@ class CpuImageViewPaintTests(unittest.TestCase):
         Returns: None.
         """
         image = np.full((100, 100), 255, np.uint8)
-        packet = FramePacket(1, image, "Gray", 1.0, "Raw", True)
+        packet = FramePacket(1, image, 1.0, "Raw", True)
         self.view.show_packet(packet, self.table, None)
         self.view.zoom, self.view.center = 2.0, (-100000.0, -100000.0)
         self.assertLess(self.center_pixel(), 255)
@@ -1272,18 +1272,14 @@ class MainWindowBuildTests(WindowTestCase):
         w.gain_before_average.setChecked(not before.gain_before_average)
         w.invert.setChecked(not before.invert)
         w.flip_button.setChecked(not before.flip_horizontal)
-        w.clahe.setChecked(not before.clahe)
         w.smoothing_combo.setCurrentIndex(w.smoothing_combo.count() - 1)
-        w.palette_combo.setCurrentIndex(w.palette_combo.count() - 1)
         after = self.engine.settings()
         self.assertEqual(after.rolling, not before.rolling)
         self.assertEqual(after.scale_range, not before.scale_range)
         self.assertEqual(after.gain_before_average, not before.gain_before_average)
         self.assertEqual(after.invert, not before.invert)
         self.assertEqual(after.flip_horizontal, not before.flip_horizontal)
-        self.assertEqual(after.clahe, not before.clahe)
         self.assertEqual(after.smoothing_method, w.smoothing_combo.currentText())
-        self.assertEqual(after.palette, w.palette_combo.currentText())
 
     def test_fringe_and_display_controls_update_engine(self):
         """Sensitivity, threshold, steady range, peak hold, normalization, tone.
@@ -1366,7 +1362,7 @@ class MainWindowBuildTests(WindowTestCase):
         """
         w = self.window
         self.engine.update_settings(mode="Previous", noise_reduction=40, smoothing=5,
-                                    palette="Turbo", difference_gain=12, exposure_us=3000)
+                                    gamma=1.4, difference_gain=12, exposure_us=3000)
         w._load_settings(self.engine.settings(), w.current.limits)
         with mock.patch.object(self.engine, "request") as request:
             w.labview_button.setChecked(True)
@@ -1381,8 +1377,8 @@ class MainWindowBuildTests(WindowTestCase):
         w.smoothing.spin.setValue(7)  # a change made in the LabVIEW flow is dropped
         w.labview_button.setChecked(False)
         s = self.engine.settings()
-        self.assertEqual((s.mode, s.noise_reduction, s.smoothing, s.palette),
-                         ("Previous", 40, 5, "Turbo"))
+        self.assertEqual((s.mode, s.noise_reduction, s.smoothing, s.gamma),
+                         ("Previous", 40, 5, 1.4))
         self.assertEqual(s.difference_gain, 12)
         self.assertIsNone(w.current.labview_saved)
         self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
@@ -1552,8 +1548,8 @@ class SimpleUiTests(WindowTestCase):
             self.assertTrue(shown.isVisibleTo(w), shown)
         for hidden in (w.fps, w.noise_reduction, w.average, w.rolling, w.ref_refresh,
                        w.frames_back, w.smoothing_combo, w.smoothing, w.scaling,
-                       w.invert, w.clip, w.palette_combo, w.gamma, w.brightness,
-                       w.clahe, w.flip_button, w.labview_button, w.ui_scale_row,
+                       w.invert, w.clip, w.gamma, w.brightness,
+                       w.flip_button, w.labview_button, w.ui_scale_row,
                        w.frame_title, w.frame_notes, w.zoom_slider, w.zoom_label):
             self.assertFalse(hidden.isVisibleTo(w), hidden)
         for toggle in w._section_toggles.values():
@@ -1618,9 +1614,7 @@ class SettingsGuideTests(WindowTestCase):
             w.invert: ("bright and dark", "Start off"),
             w.flip_button: ("left to right", "Start off"),
             w.clip: ("speckles", "Start at 0"),
-            w.palette_combo: ("Start with Gray",),
             w.gamma: ("Start at 1.0",),
-            w.clahe: ("color palette", "Gray"),
         }
         for widget, phrases in expected.items():
             tip = " ".join(widget.toolTip().split())
@@ -1645,7 +1639,7 @@ class SettingsGuideTests(WindowTestCase):
         self.assertEqual(s.mode, "Reference")
         self.assertEqual((s.average, s.rolling, s.ref_refresh_s), (8, False, 2.0))
         self.assertEqual((s.smoothing, s.smoothing_method), (3, "Median"))
-        self.assertEqual((s.noise_reduction, s.clip_percent, s.clahe), (0.0, 0.5, True))
+        self.assertEqual((s.noise_reduction, s.clip_percent), (0.0, 0.5))
         self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
         self.assertFalse(s.single_field)
         self.assertEqual(w.average.value(), 8)
@@ -1653,7 +1647,7 @@ class SettingsGuideTests(WindowTestCase):
         buttons["Live preview"].click()
         s = self.engine.settings()
         self.assertEqual(qt_app.PROCESSING_PRESETS["Live preview"]["mode"], s.mode)
-        self.assertEqual((s.average, s.smoothing, s.clahe, s.ref_refresh_s), (1, 0, False, 0.0))
+        self.assertEqual((s.average, s.smoothing, s.ref_refresh_s), (1, 0, 0.0))
         self.assertEqual((s.exposure_us, s.gain_db, s.fps, s.record), (1234, 2.5, 15, True))
         self.assertEqual(w.mode_group.checkedButton().text(), "Previous")
         self.assertIn("Preset applied: Live preview", self.log.lines)
@@ -2095,8 +2089,8 @@ class ReferenceCompareTests(WindowTestCase):
         Returns: The ComparePacket.
         """
         image = np.full((40, 60), 80, dtype=np.uint8)
-        part = FramePacket(sequence, image, "Gray", 1.0, "Current", demo)
-        diff = FramePacket(sequence, image, "Turbo", 1.0, "Reference", demo)
+        part = FramePacket(sequence, image, 1.0, "Current", demo)
+        diff = FramePacket(sequence, image, 1.0, "Reference", demo)
         return ComparePacket(sequence, part, part if reference else None,
                              diff if reference else None,
                              "1 frame, noise reduction 0, 2 s old" if reference
@@ -2379,7 +2373,7 @@ class PollingTests(WindowTestCase):
         self.assertEqual(self.window.drawn_frames, 2)
         self.assertIs(self.window.table, first_table)
         self.assertEqual(self.window.view.image_size, (64, 48))
-        self.engine._packet = make_packet(sequence=3, palette="Jet")
+        self.engine._packet = make_packet(sequence=3, gamma=2.0)
         self.window._poll_frame()
         self.assertIsNot(self.window.table, first_table)
 
@@ -2487,6 +2481,7 @@ class PollingTests(WindowTestCase):
         """
         window = self.window
         window.show()
+        window.resize(1600, 800)  # wide enough that no status item wraps or is dropped
         QApplication.processEvents()
         names = {window.check_button: "Check for updates",
                  window.feature_button: "Request feature",
@@ -2507,8 +2502,15 @@ class PollingTests(WindowTestCase):
                              "Request feature: Send a feature request to the developers "
                              "as a GitHub issue."))
         # Reading order (row, then left to right): the buttons, the rule, then the source.
+        # The window is wide, so they share one row; a narrow one wraps the source down.
         def reading_order(widget):
-            return (widget.y(), widget.x())
+            """Place a status item in reading order: its row, then its x.
+
+            Args: widget is a status-bar item.
+            Returns: (row, x), where the row is its vertical centre in button heights.
+            """
+            row_height = window.codex_button.height()
+            return (widget.geometry().center().y() // row_height, widget.x())
 
         self.assertLess(reading_order(window.codex_button),
                         reading_order(window.status_actions_rule))
@@ -3211,7 +3213,7 @@ class MultiCameraTests(unittest.TestCase):
         """
         window, second = self.window, self.channels[1]
         second.settings = replace(second.settings, exposure_us=2500.0, mode="Previous",
-                                  palette="Jet", rolling=True, noise_reduction=40.0)
+                                  gamma=2.0, rolling=True, noise_reduction=40.0)
         second.limits = {"Gain": (0.0, 12.0)}
         window.exposure.set_value(4000.0)
         window.exposure.valueChanged.emit(4000.0)
@@ -3221,7 +3223,7 @@ class MultiCameraTests(unittest.TestCase):
         self.assertEqual(window.exposure.value(), 2500.0)
         self.assertEqual(window.noise_reduction.value(), 40.0)
         self.assertEqual(window.gain.spin.maximum(), 12.0)
-        self.assertEqual(window.palette_combo.currentText(), "Jet")
+        self.assertEqual(window.gamma.value(), 2.0)
         self.assertTrue(window.rolling.isChecked())
         checked = [b.text() for b in window.mode_group.buttons() if b.isChecked()]
         self.assertEqual(checked, ["Previous"])
@@ -5204,7 +5206,7 @@ class FreezeTests(WindowTestCase):
         frozen = make_packet(sequence=1)
         self.show(frozen)
         self.window.freeze_button.click()
-        self.show(make_packet(sequence=2, palette="Jet"))
+        self.show(make_packet(sequence=2, gamma=2.0))
         return frozen
 
     def test_freeze_holds_the_shown_frame_while_the_engine_continues(self):
@@ -5364,8 +5366,7 @@ class FreezeTests(WindowTestCase):
         Returns: None.
         """
         frozen = self.freeze_on_first_frame()
-        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), "Gray",
-                                          1.0, "Raw", True)
+        self.engine._packet = FramePacket(3, np.zeros((48, 64), np.uint8), 1.0, "Raw", True)
         self.window.hover = (10, 5)
         self.window._poll_status()
         self.assertEqual(self.window.pixel_status.text(),
