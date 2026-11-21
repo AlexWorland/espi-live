@@ -1,16 +1,25 @@
 # Changelog
 
-## 2026-11-21 — Compare button is shown again, and an All controls toggle
+## 2026-11-21 — Compare button is shown in the Simple UI
 
 ### Previous state
 
-- The basic-controls build hid the **Compare (C)** toolbar button, so the window with the Previous, Current and Difference images (or the Reference, Current and Difference ones) could only be opened with the `C` key.
-- The basic-controls build could only be changed in the source (`SIMPLE_UI` in `qt_app.py`); there was no way to see the hidden controls in a running program.
+- The Simple UI hid the **Compare (C)** toolbar button, so the window with the Previous, Current and Difference images (or the Reference, Current and Difference ones) could only be opened with the `C` key until **Simple UI** was turned off.
 
 ### Current state
 
-- **Compare (C)** is rendered next to **Set reference (F)** in the toolbar and opens the same window. Its tooltip now describes both views: in Previous view the earlier frame being subtracted, the current frame and their difference; in Reference view the stored reference, the current frame and their difference.
-- A new **All controls** button, first in the toolbar and always rendered, switches between the basic controls and every control and toolbar button. Pressing it moves the hidden controls into their rows, shows the other sections, Freeze, the reset buttons, the zoom bar and the Help tips menu item, and refits the Controls panel; pressing it again hides them. A section collapsed earlier stays collapsed, and every control keeps its value either way. The program still starts in the basic view (`SIMPLE_UI`), and the choice is not remembered between runs.
+- **Compare (C)** is shown in the Simple UI, next to **Set reference (F)**, and opens the same window. Its tooltip now describes both views: in Previous view the earlier frame being subtracted, the current frame and their difference; in Reference view the stored reference, the current frame and their difference.
+
+## 2026-11-21 — Simple UI button
+
+### Previous state
+
+- The simple interface (only the basic controls) was fixed at build time by `SIMPLE_UI` in `qt_app.py`; showing every control meant editing the source.
+
+### Current state
+
+- A **Simple UI** button at the left of the toolbar switches between the basic controls and every control, while the program runs. Nothing is rebuilt or reset: settings, collapsed sections and the camera keep their state, and the hidden controls keep working in both modes. **View > Help tips** and the rotating tip return with the full interface.
+- The choice is remembered for the next run. A new install still starts in the simple interface (`SIMPLE_UI` is now only that default).
 
 ## 2026-11-21 — iPhone camera over USB
 
