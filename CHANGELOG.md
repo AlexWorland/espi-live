@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-21 — Compare button is shown again, and an All controls toggle
+
+### Previous state
+
+- The basic-controls build hid the **Compare (C)** toolbar button, so the window with the Previous, Current and Difference images (or the Reference, Current and Difference ones) could only be opened with the `C` key.
+- The basic-controls build could only be changed in the source (`SIMPLE_UI` in `qt_app.py`); there was no way to see the hidden controls in a running program.
+
+### Current state
+
+- **Compare (C)** is rendered next to **Set reference (F)** in the toolbar and opens the same window. Its tooltip now describes both views: in Previous view the earlier frame being subtracted, the current frame and their difference; in Reference view the stored reference, the current frame and their difference.
+- A new **All controls** button, first in the toolbar and always rendered, switches between the basic controls and every control and toolbar button. Pressing it moves the hidden controls into their rows, shows the other sections, Freeze, the reset buttons, the zoom bar and the Help tips menu item, and refits the Controls panel; pressing it again hides them. A section collapsed earlier stays collapsed, and every control keeps its value either way. The program still starts in the basic view (`SIMPLE_UI`), and the choice is not remembered between runs.
+
 ## 2026-11-21 — Quick release is offered to installed copies
 
 ### Previous state

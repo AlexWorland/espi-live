@@ -2434,7 +2434,10 @@ class MainWindow(QMainWindow):
         self.reporting = reporting
         self.report_outcomes = {}  # fingerprint -> latest error_reports.Outcome
         self.fatal_boxes = {}  # fingerprint -> (open "ESPI stopped" box, its message)
-        self.simple_ui = SIMPLE_UI  # read once: the layout is built for it
+        self.simple_ui = SIMPLE_UI  # starting state; the toolbar's All controls button flips it
+        self._simple_actions = []  # toolbar items shown only when simple_ui is off
+        self._extra_sections = []  # (toggle, body) of each section the simple UI leaves out
+        self._extra_rows = []  # (grid, row, name, widget) of each control it leaves out
         self.closing = False
         self.updates = updater.UpdateWorker()
         self.update_info = None
@@ -2771,6 +2774,20 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, bar)
         self.actions_bar = bar
 
+        # First, and never passed to _hide_in_simple_ui: Qt moves the last items of a
+        # full toolbar into its overflow menu, and this is the way back out of the
+        # simple UI.
+        self.simple_button = QPushButton("All controls")
+        self.simple_button.setCheckable(True)
+        self.simple_button.setChecked(not self.simple_ui)
+        set_tooltip(self.simple_button,
+                    "Show every control and toolbar button, not only the basic "
+                    "ones. Click again to go back to the basic controls. The "
+                    "hidden controls keep working at their settings either way.")
+        self.simple_button.toggled.connect(lambda on: self.set_simple_ui(not on))
+        bar.addWidget(self.simple_button)
+        bar.addSeparator()
+
         self.mode_group = QButtonGroup(self)
         for mode in VIEW_MODES:
             button = QPushButton(mode)
@@ -2813,10 +2830,12 @@ class MainWindow(QMainWindow):
                  "average of the next Ref. frames frames. Shortcut: F.",
                  lambda: self.engine.request("reference"), True),
                 ("Compare (C)",
-                 "Open a window with the stored reference, the current frame and "
-                 "their processed difference side by side, live, to check the "
-                 "reference. It has its own Freeze and saves all three. Shortcut: C.",
-                 self.show_compare, False),
+                 "Open a window with three live images side by side. In Previous "
+                 "view: the earlier frame being subtracted, the current frame and "
+                 "their difference. In Reference view: the stored reference, the "
+                 "current frame and their difference. It has its own Freeze and "
+                 "saves all three. Shortcut: C.",
+                 self.show_compare, True),
                 ("Reset last (R)",
                  "Restart the Previous view's difference from the next frame. Shortcut: R.",
                  lambda: self.engine.request("reset_previous"), False),
@@ -2865,14 +2884,14 @@ class MainWindow(QMainWindow):
             self._hide_in_simple_ui(bar.addWidget(widget))
         self._show_zoom(self.view.zoom)
 
-    @staticmethod
-    def _hide_in_simple_ui(action):
-        """Hide a toolbar item while SIMPLE_UI is on.
+    def _hide_in_simple_ui(self, action):
+        """Hide a toolbar item while the simple UI is on, and remember it.
 
         Args: action is the QAction QToolBar.addWidget returned.
         Returns: None.
         """
-        if SIMPLE_UI:
+        self._simple_actions.append(action)
+        if self.simple_ui:
             action.setVisible(False)
 
     def _build_controls(self):
@@ -2939,8 +2958,10 @@ class MainWindow(QMainWindow):
         # be collapsed without touching the visibility its widgets manage
         # themselves. _align_sections gives every grid the same label column,
         # so labels, sliders and values still line up across sections.
-        # Controls outside the basic set are parked in a hidden widget: created
-        # and wired up, but never rendered while SIMPLE_UI is on.
+        # Controls outside the basic set are parked in a hidden widget while
+        # the simple UI is on: created and wired up, but not rendered. The
+        # toolbar's All controls button (set_simple_ui) moves them in and out
+        # of their grid rows.
         self.hidden_controls = QWidget(panel)
         self.hidden_controls.setVisible(False)
         self._section_grids = []
@@ -2991,9 +3012,11 @@ class MainWindow(QMainWindow):
                 QSettings("ESPI", "espi_live").setValue(
                     f"{SECTION_SETTING_PREFIX}{text}", not on)
             toggle.toggled.connect(show_section)
-            if SIMPLE_UI and not basic:
-                toggle.setVisible(False)
-                body.setVisible(False)
+            if not basic:
+                self._extra_sections.append((toggle, body))
+                if self.simple_ui:
+                    toggle.setVisible(False)
+                    body.setVisible(False)
 
         def add(widget, label=None, basic=False):
             """Add a labeled setting, or a full-width widget when unlabeled.
@@ -3003,17 +3026,20 @@ class MainWindow(QMainWindow):
             Returns: None.
             """
             nonlocal row
-            if SIMPLE_UI and not basic:
-                widget.setParent(self.hidden_controls)
-                return
-            if label is None:
-                grid.addWidget(widget, row, 0, 1, 2)
-            else:
+            name = None
+            if label is not None:
                 name = QLabel(label)
                 name.setToolTip(widget.toolTip())
-                grid.addWidget(name, row, 0)
-                grid.addWidget(widget, row, 1)
-                self._section_names.append(name)
+            if basic:
+                self._place_row(grid, row, name, widget)
+                if name is not None:
+                    self._section_names.append(name)
+            else:
+                self._extra_rows.append((grid, row, name, widget))
+                if self.simple_ui:
+                    self._park_row(grid, name, widget)
+                else:
+                    self._place_row(grid, row, name, widget)
             row += 1
 
         def note(label, basic=False):
@@ -3447,6 +3473,62 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self._tip_dock_buttons(self.controls_dock)
 
+    @staticmethod
+    def _place_row(grid, row, name, widget):
+        """Put one setting on a controls-grid row, labeled when it has a name.
+
+        Args: grid is the section's QGridLayout; row its row; name the QLabel
+            (or None for a full-width widget); widget the control.
+        Returns: None.
+        """
+        if name is None:
+            grid.addWidget(widget, row, 0, 1, 2)
+        else:
+            grid.addWidget(name, row, 0)
+            grid.addWidget(widget, row, 1)
+
+    def _park_row(self, grid, name, widget):
+        """Take one setting out of its grid and hide it with its label.
+
+        Args: grid is the section's QGridLayout; name and widget as _place_row.
+        Returns: None.
+        """
+        for item in (name, widget):
+            if item is not None:
+                grid.removeWidget(item)
+                item.setParent(self.hidden_controls)
+
+    def set_simple_ui(self, on):
+        """Show only the basic controls (True) or every control (False).
+
+        Moves each non-basic control between its section grid and the hidden
+        holder, hides or shows the non-basic sections and toolbar items, and
+        refits the Controls panel. A section the user collapsed stays collapsed.
+
+        Args: on is True for the simple UI.
+        Returns: None.
+        """
+        self.simple_ui = on
+        for grid, row, name, widget in self._extra_rows:
+            if on:
+                self._park_row(grid, name, widget)
+            else:
+                self._place_row(grid, row, name, widget)
+        for toggle, body in self._extra_sections:
+            toggle.setVisible(not on)
+            body.setVisible(not on and toggle.isChecked())
+        for action in self._simple_actions:
+            action.setVisible(not on)
+        self.tips_action.setVisible(not on)
+        self._show_tip()
+        self._align_sections()
+        self._fit_controls_width()
+        self.simple_button.blockSignals(True)
+        self.simple_button.setChecked(not on)
+        self.simple_button.blockSignals(False)
+        self.log.write("Showing the basic controls only." if on
+                       else "Showing every control.")
+
     def _align_sections(self):
         """Give every controls section the same label-column width.
 
@@ -3456,7 +3538,10 @@ class MainWindow(QMainWindow):
         Args: None.
         Returns: None.
         """
-        width = max((name.sizeHint().width() for name in self._section_names), default=0)
+        names = list(self._section_names)
+        if not self.simple_ui:
+            names += [name for _, _, name, _ in self._extra_rows if name is not None]
+        width = max((name.sizeHint().width() for name in names), default=0)
         for grid in self._section_grids:
             grid.setColumnMinimumWidth(0, width)
 

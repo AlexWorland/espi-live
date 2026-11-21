@@ -1560,11 +1560,96 @@ class SimpleUiTests(WindowTestCase):
             self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
                              toggle.text())
         buttons = {b.text(): b for b in w.actions_bar.findChildren(qt_app.QPushButton)}
-        for label in ("Save frame (S)", "Set reference (F)"):
+        for label in ("Save frame (S)", "Set reference (F)", "Compare (C)"):
             self.assertTrue(buttons[label].isVisibleTo(w), label)
-        for label in ("Compare (C)", "Reset last (R)", "Reset average (A)", "Fit",
+        for label in ("Reset last (R)", "Reset average (A)", "Fit",
                       "1:1", "Freeze (Space)"):
             self.assertFalse(buttons[label].isVisibleTo(w), label)
+
+    def test_all_controls_button_is_always_shown(self):
+        """The toggle is rendered in both modes, so the user can always switch.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        self.assertTrue(w.simple_button.isVisibleTo(w))
+        self.assertFalse(w.simple_button.isChecked())
+        self.assertIn("basic", w.simple_button.toolTip())
+        w.simple_button.click()
+        self.assertTrue(w.simple_button.isVisibleTo(w))
+        self.assertTrue(w.simple_button.isChecked())
+
+    def test_all_controls_button_renders_every_control_and_goes_back(self):
+        """Switching shows the hidden controls in their rows, and back hides them again.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        extras = (w.fps, w.noise_reduction, w.average, w.smoothing_combo, w.scaling,
+                  w.palette_combo, w.gamma, w.labview_button, w.frame_title)
+        bar = w.actions_bar
+
+        def toolbar_item_shown(widget):
+            """Whether the toolbar item holding widget is switched on.
+
+            Args: widget is a widget added to the actions toolbar.
+            Returns: The item's QAction visibility. The widget's own isVisible
+                is not used: a full toolbar on a small screen overflows.
+            """
+            return next(a for a in bar.actions()
+                        if bar.widgetForAction(a) is widget).isVisible()
+
+        w.simple_button.click()
+        self.assertFalse(w.simple_ui)
+        QApplication.processEvents()
+        for shown in extras:
+            self.assertTrue(shown.isVisibleTo(w), shown)
+        for toggle in w._section_toggles.values():
+            self.assertTrue(toggle.isVisibleTo(w), toggle.text())
+        buttons = {b.text(): b for b in bar.findChildren(qt_app.QPushButton)}
+        for label in ("Compare (C)", "Reset last (R)", "Reset average (A)", "Fit",
+                      "1:1", "Freeze (Space)", "All controls"):
+            self.assertTrue(toolbar_item_shown(buttons[label]), label)
+        self.assertTrue(toolbar_item_shown(w.zoom_slider))
+        self.assertTrue(toolbar_item_shown(w.zoom_label))
+        self.assertTrue(w.tips_action.isVisible())
+        self.assertTrue(any("every control" in line for line in self.log.lines))
+        w.simple_button.click()
+        self.assertTrue(w.simple_ui)
+        for hidden in extras:
+            self.assertFalse(hidden.isVisibleTo(w), hidden)
+        for toggle in w._section_toggles.values():
+            self.assertEqual(toggle.isVisibleTo(w), toggle.text() == "Camera",
+                             toggle.text())
+        for label in ("Compare (C)", "Reset last (R)", "Freeze (Space)", "Fit"):
+            self.assertEqual(toolbar_item_shown(buttons[label]), label == "Compare (C)",
+                             label)
+        self.assertFalse(toolbar_item_shown(w.zoom_slider))
+        self.assertTrue(toolbar_item_shown(buttons["All controls"]))
+        self.assertFalse(w.tips_action.isVisible())
+        self.assertTrue(any("basic controls" in line for line in self.log.lines))
+
+    def test_switching_keeps_collapsed_sections_and_values(self):
+        """A collapsed section stays collapsed, and a hidden control keeps its value.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.show()
+        w.noise_reduction.set_value(7)
+        toggle = next(t for name, t in w._section_toggles.items() if name != "Camera")
+        toggle.setChecked(False)
+        w.set_simple_ui(False)
+        self.assertTrue(toggle.isVisibleTo(w))
+        self.assertFalse(toggle.isChecked())
+        self.assertEqual(w.noise_reduction.value(), 7)
+        w.set_simple_ui(True)
+        self.assertEqual(w.noise_reduction.value(), 7)
 
     def test_help_tips_stay_hidden(self):
         """Tips advertise hidden controls, so neither the tip nor its menu item shows.
@@ -2140,6 +2225,7 @@ class ReferenceCompareTests(WindowTestCase):
                    if b.text() == "Compare (C)"]
         self.assertEqual(len(buttons), 1)
         self.assertIn("side by side", buttons[0].toolTip())
+        self.assertIn("Previous view", buttons[0].toolTip())
         dialog = self.open_dialog()
         self.assertTrue(dialog.isVisible())
         self.assertTrue(self.engine._compare.is_set())
