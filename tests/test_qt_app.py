@@ -43,6 +43,7 @@ from espi_live.camera import CameraInfo
 from espi_live.camera_models import CameraIdentity
 from espi_live.channels import Channel, demo_channels
 from espi_live.engine import ComparePacket, Engine, FramePacket
+from espi_live.pixel_square import SquarePacket
 from list_log import ListLog
 
 APP = QApplication.instance() or QApplication(sys.argv)
@@ -7525,6 +7526,334 @@ class ScaledStyleTests(unittest.TestCase):
             icon = qt_app._status_icon(kind, qt_app.QColor("black"), 24)
             self.assertEqual(icon.actualSize(QSize(64, 64)), QSize(24, 24), kind)
         self.assertEqual(qt_app._paint_status_icon("idea", qt_app.QColor("black")).width(), 16)
+
+
+
+def click_event(x, y, button=Qt.LeftButton):
+    """Build a stand-in mouse event for click tests.
+
+    Args: x and y are the widget position; button is the Qt button.
+    Returns: A mock event.
+    """
+    event = mock.MagicMock()
+    event.position.return_value = QPointF(x, y)
+    event.button.return_value = button
+    return event
+
+
+def square(values=None, view="Reference", left=4, top=6, size=2, demo=False):
+    """Build a SquarePacket.
+
+    Args: values is the array (default a 2×2 with a 7), or None for waiting;
+        view, left, top, size and demo are its fields.
+    Returns: The SquarePacket.
+    """
+    if values is None and size == 2 and view != "waiting":
+        values = np.array([[0, 1], [2, 7]], np.uint8)
+    return SquarePacket(values, "Reference" if view == "waiting" else view,
+                        left, top, size, demo)
+
+
+class ViewClickAndOutlineTests(unittest.TestCase):
+    """Clicks on the image and the pixel square's outline."""
+
+    def setUp(self):
+        """Create a 400x300 CPU view showing a 2000x1500 image (scale 0.2).
+
+        Args: None.
+        Returns: None.
+        """
+        self.view = qt_app.CpuImageView()
+        self.view.resize(400, 300)
+        self.view.show_packet(make_packet(width=2000, height=1500),
+                              np.zeros((256, 3), np.uint8), None)
+        self.clicks = []
+        self.view.imageClicked.connect(lambda x, y: self.clicks.append((x, y)))
+
+    def tearDown(self):
+        """Delete the view.
+
+        Args: None.
+        Returns: None.
+        """
+        self.view.deleteLater()
+
+    def test_a_click_reports_the_image_pixel(self):
+        """Press and release in place reports the pixel under the pointer.
+
+        Args: None.
+        Returns: None.
+        """
+        self.view.mousePressEvent(click_event(100, 60))
+        self.view.mouseReleaseEvent(click_event(101, 61))
+        self.assertEqual(self.clicks, [(505, 305)])
+
+    def test_drags_other_buttons_and_outside_clicks_are_not_clicks(self):
+        """A drag, a right click, a release without press or a click off the
+        image reports nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.view.mousePressEvent(click_event(100, 60))
+        self.view.mouseReleaseEvent(click_event(140, 60))
+        self.view.mousePressEvent(click_event(100, 60, Qt.RightButton))
+        self.view.mouseReleaseEvent(click_event(100, 60, Qt.RightButton))
+        self.view.mouseReleaseEvent(click_event(100, 60))
+        self.view.set_zoom(1.0)
+        self.view.resize(800, 300)  # the image no longer fills the width
+        self.view.mousePressEvent(click_event(5, 100))
+        self.view.mouseReleaseEvent(click_event(5, 100))
+        self.assertEqual(self.clicks, [])
+
+    def outline_pixels(self):
+        """Render the view and count outline-colored pixels.
+
+        Args: None.
+        Returns: The number of pixels in BOX_COLOR.
+        """
+        image = self.view.grab().toImage()
+        return sum(image.pixelColor(x, y) == qt_app.BOX_COLOR
+                   for x in range(image.width()) for y in range(image.height()))
+
+    def test_outline_is_drawn_and_a_one_pixel_square_still_shows(self):
+        """A square is outlined; a 1×1 square gets the minimum outline.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.outline_pixels(), 0)
+        self.view.set_box((500, 500, 1000, 1000))
+        self.assertGreater(self.outline_pixels(), 300)
+        with mock.patch.object(self.view, "update") as update:
+            self.view.set_box((500, 500, 1000, 1000))
+        update.assert_not_called()
+        self.view.set_box((500, 500, 501, 501))
+        self.assertGreaterEqual(self.outline_pixels(), 4 * (qt_app.BOX_MIN_SIZE - 1))
+
+    def test_gl_view_overlays_the_outline_only_when_there_is_one(self):
+        """paintGL opens a painter for the outline and ends it.
+
+        Args: None.
+        Returns: None.
+        """
+        view = qt_app.GLImageView()
+        self.addCleanup(view.deleteLater)
+        view.context = mock.MagicMock()
+        view.program, view.vao = mock.MagicMock(), mock.MagicMock()
+        view.image_texture, view.lut_texture = 7, 9
+        view.show_packet(make_packet(), np.zeros((256, 3), np.uint8), "k")
+        view.texture_shape, view.pending = (48, 64), None
+        with mock.patch.object(qt_app, "QPainter") as painter, \
+                mock.patch.object(view, "paint_box") as paint_box:
+            view.paintGL()
+            painter.assert_not_called()
+            view.set_box((1, 1, 5, 5))
+            view.paintGL()
+        paint_box.assert_called_once_with(painter.return_value)
+        painter.return_value.end.assert_called_once()
+
+
+class PixelGridTests(unittest.TestCase):
+    """PixelGrid paints shaded, numbered cells, rendered offscreen."""
+
+    def setUp(self):
+        """Create a 200x200 grid.
+
+        Args: None.
+        Returns: None.
+        """
+        self.grid = qt_app.PixelGrid()
+        self.grid.resize(200, 200)
+
+    def tearDown(self):
+        """Delete the grid.
+
+        Args: None.
+        Returns: None.
+        """
+        self.grid.deleteLater()
+
+    def color_at(self, x, y):
+        """Render the grid and read one pixel.
+
+        Args: x and y are the widget position.
+        Returns: The QColor there.
+        """
+        return self.grid.grab().toImage().pixelColor(x, y)
+
+    def test_without_values_there_is_no_cell(self):
+        """No packet, or one waiting for a baseline, draws only the message.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.grid.cell_size(), 0)
+        self.grid.grab()
+        self.grid.set_packet(square(view="waiting"))
+        self.assertEqual(self.grid.cell_size(), 0)
+        self.grid.grab()
+
+    def test_cells_are_shaded_relative_to_the_largest_value(self):
+        """The largest value is white, 0 is black, and both carry numbers.
+
+        Args: None.
+        Returns: None.
+        """
+        self.grid.set_packet(square())
+        self.assertEqual(self.grid.cell_size(), 100)
+        self.assertEqual(self.color_at(190, 190).red(), 255)  # the 7, away from its digit
+        self.assertEqual(self.color_at(10, 10).red(), 0)
+        with mock.patch.object(qt_app.QPainter, "drawText") as draw:
+            self.grid.grab()
+        self.assertEqual(sorted(call.args[2] for call in draw.call_args_list),
+                         ["0", "1", "2", "7"])
+
+    def test_all_zero_square_is_black_and_small_cells_have_no_numbers(self):
+        """A still square is all black; 64×64 in 200 px is too small for text.
+
+        Args: None.
+        Returns: None.
+        """
+        self.grid.set_packet(square(np.zeros((2, 2), np.uint8)))
+        self.assertEqual(self.color_at(150, 150).red(), 0)
+        self.grid.set_packet(square(np.zeros((64, 64), np.uint8), size=64))
+        with mock.patch.object(qt_app.QPainter, "drawText") as draw:
+            self.grid.grab()
+        draw.assert_not_called()
+
+
+class PixelSquareWindowTests(WindowTestCase):
+    """The Pixels window: opening, size, moving, freezing and following."""
+
+    def open_dialog(self):
+        """Open the window with the P key.
+
+        Args: None.
+        Returns: The PixelSquareDialog.
+        """
+        self.assertTrue(self.window.handle_key(Qt.Key_P))
+        dialog = self.window.pixels_dialog
+        self.addCleanup(dialog.hide)
+        return dialog
+
+    def test_button_and_key_open_one_window_that_asks_for_squares(self):
+        """Pixels (P) opens the window once; closing stops the squares.
+
+        Args: None.
+        Returns: None.
+        """
+        buttons = [b for b in self.window.actions_bar.findChildren(QPushButton)
+                   if b.text() == "Pixels (P)"]
+        self.assertEqual(len(buttons), 1)
+        dialog = self.open_dialog()
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(self.engine._square_request, (8, None))
+        buttons[0].click()
+        self.assertIs(self.window.pixels_dialog, dialog)
+        self.assertEqual(sum("Pixel values opened" in line for line in self.log.lines), 1)
+        dialog.reject()
+        self.assertIsNone(self.engine._square_request)
+        self.assertIsNone(self.window.view.box)
+        self.assertTrue(any("Pixel values closed" in line for line in self.log.lines))
+
+    def test_square_is_shown_and_outlined(self):
+        """A new square fills the grid and summary and outlines the image.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.poll()  # nothing yet
+        self.assertIsNone(dialog.shown)
+        packet = square(demo=True)
+        self.engine._square_packet = packet
+        dialog.poll()
+        self.assertIs(dialog.grid.packet, packet)
+        self.assertIn("difference min 0, mean 2.50, max 7", dialog.summary.text())
+        self.assertEqual(self.window.view.box, (4, 6, 6, 8))
+        self.assertIn("DUMMY MODE", dialog.windowTitle())
+        self.assertFalse(dialog.demo_label.isHidden())
+        dialog.poll()  # the same square again changes nothing
+        self.assertIs(dialog.shown, packet)
+
+    def test_size_choice_is_sent_and_remembered(self):
+        """Choosing 32×32 asks the engine for it and is saved for next time.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.size_combo.setCurrentIndex(qt_app.SQUARE_SIZES.index(32))
+        self.assertEqual(self.engine._square_request, (32, None))
+        self.assertEqual(FakeSettings.store[qt_app.PIXELS_SIZE_SETTING], 32)
+        reopened = qt_app.PixelSquareDialog(self.window)
+        self.addCleanup(reopened.deleteLater)
+        self.assertEqual(reopened.size, 32)
+
+    def test_unreadable_or_unknown_saved_size_falls_back_to_the_default(self):
+        """A saved size that is not a number or not offered uses the default.
+
+        Args: None.
+        Returns: None.
+        """
+        for saved in ("big", 3):
+            FakeSettings.store[qt_app.PIXELS_SIZE_SETTING] = saved
+            dialog = qt_app.PixelSquareDialog(self.window)
+            self.addCleanup(dialog.deleteLater)
+            self.assertEqual(dialog.size, qt_app.DEFAULT_SQUARE_SIZE)
+
+    def test_clicking_the_image_moves_the_square_only_while_open(self):
+        """A click moves the square while the window is open, and unfreezes.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window._image_clicked(3, 4)  # no window yet
+        dialog = self.open_dialog()
+        dialog.freeze_button.setChecked(True)
+        self.window.view.imageClicked.emit(30, 40)
+        self.assertEqual(self.engine._square_request, (8, (30, 40)))
+        self.assertFalse(dialog.freeze_button.isChecked())
+        dialog.hide()
+        self.window._image_clicked(50, 60)
+        self.assertEqual(dialog.center, (30, 40))
+
+    def test_freeze_holds_the_shown_values(self):
+        """Frozen, a newer square is not shown; the log records both states.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        first = square()
+        self.engine._square_packet = first
+        dialog.poll()
+        dialog.freeze_button.setChecked(True)
+        self.engine._square_packet = square(left=9)
+        dialog.poll()
+        self.assertIs(dialog.shown, first)
+        dialog.freeze_button.setChecked(False)
+        self.assertEqual(self.log.lines[-2:], ["Pixel values frozen.",
+                                               "Pixel values live again."])
+
+    def test_window_follows_the_displayed_camera(self):
+        """When the displayed engine changes, the request moves with it.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        other = Engine(self.log)
+        other.use_demo()
+        self.addCleanup(other.wait, 1.0)
+        dialog.freeze_button.setChecked(True)
+        with mock.patch.object(type(self.window), "engine",
+                               new_callable=mock.PropertyMock, return_value=other):
+            dialog.poll()
+        self.assertIsNone(self.engine._square_request)
+        self.assertEqual(other._square_request, (8, None))
+        self.assertFalse(dialog.freeze_button.isChecked())
 
 
 if __name__ == "__main__":

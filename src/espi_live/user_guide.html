@@ -512,6 +512,7 @@
           <ol>
             <li><a href="#op-position">Position and focus</a></li>
             <li><a href="#op-freeze">Freeze and inspect</a></li>
+            <li><a href="#op-pixels">Read pixel values</a></li>
             <li><a href="#op-reference">Capture a reference</a></li>
             <li><a href="#op-previous">Measure frame-to-frame change</a></li>
             <li><a href="#op-average">Average and rolling average</a></li>
@@ -702,7 +703,7 @@ python -m espi_live</code></pre>
           </thead>
           <tbody>
             <tr><td><strong>Toolbar</strong></td><td>View modes, Record, Freeze,
-              Save frame, Set reference, Reset last, Reset average, and the
+              Save frame, Set reference, Compare, Pixels, Reset last, Reset average, and the
               Zoom slider with Fit and 1:1.</td></tr>
             <tr><td>Image area</td><td>The live, frozen or processed
               measurement. This is where the mouse shortcuts, zoom and pan
@@ -752,8 +753,8 @@ python -m espi_live</code></pre>
         <h3>Toolbar <a class="anchor" href="#toolbar" aria-label="Link to Toolbar">#</a></h3>
         <ul>
           <li><strong>Simple UI</strong> — on, only the basic controls are shown
-            (views, Record AVI, Save frame, Set reference, Compare, the camera, Exposure
-            and Gain); off, every control, section and toolbar button is shown.
+            (views, Record AVI, Save frame, Set reference, Compare, Pixels, the
+            camera, Exposure and Gain); off, every control, section and toolbar button is shown.
             Switching changes only what is displayed: settings and the camera
             are untouched, and the choice is remembered for the next run.</li>
           <li><strong>View modes</strong> — <strong>Raw</strong>,
@@ -778,7 +779,8 @@ python -m espi_live</code></pre>
             <kbd>Space</kbd> again to return to live. Save frame saves the held
             image, and Set reference still uses the live camera frame.</li>
           <li><strong>Save frame (S)</strong>, <strong>Set reference (F)</strong>,
-            <strong>Reset last (R)</strong>, <strong>Reset average (A)</strong>
+            <strong>Pixels (P)</strong> (see <a href="#op-pixels">Read pixel
+            values</a>), <strong>Reset last (R)</strong>, <strong>Reset average (A)</strong>
             — the same actions as the measurement and capture sections.</li>
           <li><strong>Zoom</strong> — drag, click or use the arrow keys on the slider to zoom
             from fit (100%) up to 64×; <strong>Fit</strong> (<kbd>0</kbd>) and
@@ -1697,6 +1699,39 @@ python -m espi_live</code></pre>
         </ol>
       </section>
 
+      <section id="op-pixels">
+        <h3>Read pixel values <a class="anchor" href="#op-pixels" aria-label="Link to Read pixel values">#</a></h3>
+        <ol>
+          <li>Choose <strong>Reference</strong> (press <kbd>F</kbd> for a
+            reference) or <strong>Previous</strong>.</li>
+          <li>Click <strong>Pixels (P)</strong> or press <kbd>P</kbd>. A window
+            opens with a square of the image enlarged, each camera pixel a cell
+            with its value written on it. The square starts in the middle of
+            the image and is outlined in yellow on the main image.</li>
+          <li>Choose the <strong>Square</strong> size: 1 × 1, 2 × 2, 4 × 4 …
+            up to 64 × 64 pixels (8 × 8 at first; the choice is remembered).
+            Click the main image to move the square there.</li>
+          <li>Read the values. In Previous and Reference view each is the raw
+            absolute difference in camera levels (0–255), taken
+            <em>before</em> the noise threshold, Difference gain, averaging and
+            Scaling, so display settings do not change it: <code>0</code> means
+            the pixel did not change, sensor noise gives a few levels at most,
+            and movement or deformation raises it. With averaging before the
+            difference on, they are the difference of the averaged frames. In
+            <strong>Raw difference</strong> they are that view's
+            |live − previous|; in Raw view they are the camera levels. Cells are shaded from black (0) to white (the
+            largest value in the square), and the line above the grid gives the
+            square's place and its min, mean and max.</li>
+          <li>The values refresh ten times a second; click
+            <strong>Freeze</strong> to hold them while you read. Large squares
+            show numbers only when each cell is at least 16 screen pixels:
+            enlarge the window.</li>
+          <li>Without a reference the window says <code>no reference yet (press
+            F)</code>. The window follows the displayed camera; the outline is
+            not part of saved frames or recordings.</li>
+        </ol>
+      </section>
+
       <section id="op-reference">
         <h3>Capture a reference and see a difference measurement <a class="anchor" href="#op-reference" aria-label="Link to Capture a reference">#</a></h3>
         <ol>
@@ -1955,6 +1990,8 @@ python -m espi_live</code></pre>
             <tr><td><kbd>C</kbd></td><td>Compare: the reference (or, in Previous view,
               the earlier frame), the current frame and their difference side
               by side</td></tr>
+            <tr><td><kbd>P</kbd></td><td>Pixel values: a square of the image
+              enlarged, with each pixel's value written on it</td></tr>
             <tr><td><kbd>R</kbd></td><td>Reset the stored previous frame</td></tr>
             <tr><td><kbd>A</kbd></td><td>Reset partial averaging</td></tr>
             <tr><td><kbd>Q</kbd> or <kbd>Esc</kbd></td><td>Quit (Esc in a text
@@ -1967,6 +2004,8 @@ python -m espi_live</code></pre>
             <tr><td>Mouse wheel over a slider or number box</td><td>Scrolls the
               Controls panel; the value does not change</td></tr>
             <tr><td>Drag</td><td>Pan while zoomed</td></tr>
+            <tr><td>Click</td><td>With the Pixels window open, move its square
+              to the clicked pixel</td></tr>
             <tr><td>Double-click</td><td>Toggle between fit and 4× zoom</td></tr>
             <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd> (or <kbd>Ctrl</kbd>+<kbd>=</kbd>),
               <kbd>Ctrl</kbd>+<kbd>−</kbd></td><td>Make the whole interface
