@@ -3441,9 +3441,13 @@ class MultiCameraTests(unittest.TestCase):
         """
         window, first, second = self.window, self.channels[0], self.channels[1]
         window.camera_checks[1].setChecked(True)
-        for channel in (first, second):  # pretend both are real cameras
-            source, channel.engine.demo_source = channel.engine.demo_source, None
-            self.addCleanup(setattr, channel.engine, "demo_source", source)
+        # Pretend both are real cameras without touching the engines: their
+        # worker threads are running, and one that finds no source mid-frame
+        # dies with a fatal event, which made this test depend on timing.
+        patcher = mock.patch.object(Channel, "demo", new_callable=mock.PropertyMock,
+                                    return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         first.engine.events.put(("camera_identity", CameraIdentity(
             model="Blackfly S BFS-U3-63S4M", serial="DEMO1")))
         second.engine.events.put(("camera_identity", CameraIdentity(
