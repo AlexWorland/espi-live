@@ -1633,6 +1633,28 @@ class SimulatedObjectTests(WindowTestCase):
         self.assertIn("627.6 Hz sine, 0.10 V", w.simulated_note.text())
         self.assertIn(("drive", {"drive": drive}), self.queued())
 
+    def test_reference_piezo_toggle(self):
+        """The piezo box sends demo_piezo, names the triangle in the note and explains itself.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertFalse(w.simulated_piezo.isChecked())
+        w.simulated_object.setCurrentText("Vibration")
+        w.simulated_piezo.setChecked(True)
+        self.assertTrue(self.engine.settings().demo_piezo)
+        self.assertEqual(w.simulated_note.text(), qt_app.simulation.object_note(
+            "Vibration", w.daq_drive, piezo=True))
+        tip = " ".join(w.simulated_piezo.toolTip().split())
+        for phrase in ("triangle", "reference", "decorrelat", "nodal"):
+            self.assertIn(phrase, tip)
+        other = replace(self.engine.settings(), demo_piezo=False)
+        w._load_settings(other, {})
+        self.assertFalse(w.simulated_piezo.isChecked())
+        self.assertTrue(self.engine.settings().demo_piezo)
+        self.assertNotIn("reference piezo", w.simulated_note.text())
+
     def test_loading_settings_shows_without_sending(self):
         """Showing another camera's settings sets the control quietly.
 

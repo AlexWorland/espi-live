@@ -670,6 +670,17 @@ python -m espi_live</code></pre>
           The exposure average is exact for any number of drive cycles per
           exposure, and frames follow an ideal sensor clock at the requested
           frame rate.</p>
+        <p><strong>Reference piezo (triangle, decorrelation)</strong> (a
+          checkbox under the note; off by default) ramps the simulated
+          reference mirror with a slow triangle wave, 1 Hz and 1.2 µm peak to
+          peak, as a piezo on the reference beam does on the bench. The
+          reference phase then changes between frames (about 90° at 30 fps),
+          so the speckle decorrelates: in <strong>Previous</strong> view a
+          still area shows bright speckle, and a vibration shows |J0|
+          fringes with a <strong>white nodal line</strong> where the drum
+          does not move (without it, a steady vibration's Previous view is
+          black). A rolling Average N smooths the speckle into clean fringes.
+          It works with every object and adds to the DAQ piezo.</p>
         <div class="warn">
           <p><strong>Demo data is clearly marked.</strong> A red
             <strong>DUMMY MODE</strong> banner (in the Controls panel) and a
@@ -886,7 +897,9 @@ python -m espi_live</code></pre>
           <li><strong>Simulated object</strong> — demo cameras only: what the
             simulated drumhead does (Still, Slow deformation, Vibration or
             Follow DAQ; see <a href="#start-demo">demo mode</a>). Saved with
-            that demo camera's settings.</li>
+            that demo camera's settings. <strong>Reference piezo</strong>
+            under it adds the reference-beam triangle wave for
+            decorrelation.</li>
           <li><strong>Noise reduction</strong> — blends each camera frame with
             the previous ones (0 = off, 95 = strongest; each step adds the same
             amount of memory, so 10 keeps about three frames and 95 about
@@ -1642,6 +1655,8 @@ python -m espi_live</code></pre>
             <tr><td>Simulated object</td><td>Slow deformation (demo only)</td>
               <td>Still / Slow deformation / Vibration / Follow DAQ</td>
               <td>What the simulated drumhead does.</td></tr>
+            <tr><td>Reference piezo</td><td>Off (demo only)</td><td>On / off</td>
+              <td>1 Hz triangle, 1.2 µm peak to peak on the reference mirror.</td></tr>
             <tr><td>Average N</td><td>1 (off)</td><td>1–60, step 1</td>
               <td>Ignored in Raw view.</td></tr>
             <tr><td>Rolling average</td><td>Off</td><td>On / off</td>

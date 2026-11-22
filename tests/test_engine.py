@@ -637,6 +637,19 @@ class SimulatedObjectEngineTests(EngineDemoTests):
         self.assertTrue(wait_until(lambda: self.engine.demo_source.object == "Still"))
         self.assertTrue(wait_until(lambda: self.log.has("Simulated object: Still")))
 
+    def test_reference_piezo_reaches_the_source(self):
+        """Turning the reference piezo on reaches the source and is logged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertFalse(self.engine.settings().demo_piezo)
+        self.engine.update_settings(demo_piezo=True)
+        self.assertTrue(wait_until(lambda: self.engine.demo_source.piezo_on))
+        self.assertTrue(wait_until(lambda: self.log.has("Reference piezo: triangle on")))
+        self.engine.update_settings(demo_piezo=False)
+        self.assertTrue(wait_until(lambda: self.log.has("Reference piezo: off")))
+
     def test_drive_action_reaches_a_demo_source(self):
         """The DAQ drive is handed to the source on the worker.
 

@@ -103,6 +103,7 @@ class Settings:
     floor_subtract: bool = False  # take the measured per-pixel noise floor off each difference
     raw_difference: bool = False  # |live - previous| raw frames; every other step off
     demo_object: str = DEFAULT_OBJECT  # what the simulated drumhead does (demo only)
+    demo_piezo: bool = False      # demo only: the reference piezo's triangle (decorrelation)
 
 
 # The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
@@ -983,6 +984,10 @@ class Engine:
                 if s.demo_object != self.demo_source.object:
                     self.demo_source.set_object(s.demo_object)
                     self.log.write(f"Simulated object: {s.demo_object}")
+                if s.demo_piezo != self.demo_source.piezo_on:
+                    self.demo_source.set_piezo(s.demo_piezo)
+                    self.log.write("Reference piezo: triangle on (decorrelation)"
+                                   if s.demo_piezo else "Reference piezo: off")
                 frame = self.demo_source.next_frame(s.exposure_us, s.gain_db, s.fps)
             else:
                 grabbed, state = self.camera.grab(CAMERA_TIMEOUT_MS)

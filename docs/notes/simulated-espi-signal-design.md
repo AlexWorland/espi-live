@@ -92,6 +92,15 @@ All of this lives in a new GUI-free module, `src/espi_live/simulation.py`, with 
 - **Net harmonic path difference:** Z(x, y) = W − P (nm, complex), so Δφ_h(t) = K·|Z|·sin(ωt + arg Z). Reference modulation moves the zero-order fringe to where W = P, as Høgmoen and Løkberg describe.
 - **Which DAQ:** the object follows whatever the DAQ window has applied, whether the Simulated device or real hardware. The status text says which. When nothing is connected or applied, or the outputs are zeroed, or the DAQ fails or closes, the drive is "off": no generator, piezo at 0 V.
 
+### 5.4b Reference piezo for decorrelation (triangle)
+
+*Added on 2026-11-21 at the user's request: "the piezo is on the reference beam and driven at a low triangle wave frequency. It's for decorrelation. The two-zone (1, 1) image should have a white line down the middle, not a dark line."*
+
+- A demo-only checkbox, **Reference piezo (triangle, decorrelation)**: `Settings.demo_piezo`, off by default and saved per demo camera. It works in every object and adds to the DAQ piezo.
+- The reference mirror moves in a triangle wave: PIEZO_TRIANGLE_HZ = 1 Hz, PIEZO_TRIANGLE_NM = 1200 nm peak to peak, so the phase spans K·1200 ≈ 23.8 rad, about 91° per frame at 30 fps. *These are my calls; the lab's generator settings were not given.*
+- **Exposure average:** the reference beam is uniform, so the ramp contributes one complex number per frame, R = ⟨e^(−iφ_tri(t))⟩ over the exposure. It is exact in closed form for each linear piece (a sinc), across any number of turning points. The frame is B + M·Re(e^(i(ψ + K·d − K·p_static))·F·R). The ramp (tens of rad/s) is far slower than any vibration (kHz), so its cross terms with the k ≠ 0 vibration terms are below 1 %. A brute-force test holds the result to 1 grey level, including exposures that straddle a turning point.
+- **Result:** consecutive frames differ by Δφ, so the Previous difference is 2M·|J0(K|Z|)|·|sin(Δφ/2)|·|sin(…)|. Nodes are bright (a white nodal line) and J0 zeros are dark; the still mount is bright too. Without the piezo, a steady whole-cycle vibration's Previous view is exactly black.
+
 ### 5.5 Exposure average (the core formula)
 
 Let the exposure start at t₀ and last Tₑ, with n = f·Tₑ cycles. Everything except the harmonic term is constant within an exposure:
@@ -131,6 +140,7 @@ On the dev Mac at 960×640: at most 8 ms per frame in every behaviour, and at mo
 - **Still:** Previous view is exactly black, and Measure noise floor reads 0. A piezo step (the DAQ window's Step) flashes a uniform fringe-free change in Previous view and a uniform offset against a reference.
 - **Slow deformation:** Reference view shows closed rings around the pad (at R/3, 30°), growing to 8 and back, always black outside the drum. A membrane's dent is logarithmic, so the rings crowd toward the pad and spread toward the rim (the reverse of a plate).
 - **Vibration:** against a still reference, drum mode (1, 1): 1 − J0 bands in two lobes either side of a dark nodal diameter at 120° (perpendicular to the drive axis). Previous view stays black at 8000 µs (8 whole cycles) and flickers at, say, 8700 µs (8.7 cycles).
+- **Reference piezo on, Vibration, Previous view:** |J0| fringes with a white nodal diameter between the two lobes; a rolling Average N smooths the speckle.
 - **Follow DAQ:** sweeping the generator through 628 Hz (0, 1: rings), 1000 Hz (1, 1: one nodal diameter), 1340 Hz (2, 1: a nodal cross), 1441 Hz (0, 2: a nodal circle), 1665 Hz (3, 1: six lobes) … makes successive drum modes appear. A whole number of cycles per exposure keeps them steady. The piezo sine at the drive frequency moves the zero-order fringe.
 
 ## 8. Tests (camera-free, 100 % line coverage)

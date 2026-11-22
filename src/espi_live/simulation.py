@@ -71,6 +71,12 @@ GENERATOR_PEAK_RAD = 16.0
 GENERATOR_REFERENCE_V = 0.1
 TTL_HIGH_V = 5.0  # a counter's square wave; only its fundamental is simulated
 PIEZO_NM_PER_V = 1500.0  # 100 nm/V stack behind a gain-15 amplifier
+# Reference piezo (the demo toggle): a low triangle wave moves the reference
+# mirror PIEZO_TRIANGLE_NM peak to peak, so the reference phase changes
+# between frames and the speckle decorrelates (about 90 degrees per frame at
+# 30 fps). A vibration's still nodes then light up in Previous view.
+PIEZO_TRIANGLE_HZ = 1.0
+PIEZO_TRIANGLE_NM = 1200.0
 
 # Ideal sensor: the spot centre averages SPOT_LEVEL grey levels at the
 # default exposure and gain; brightness is proportional to both.
@@ -296,12 +302,65 @@ def mode_frequency_hz(m, n):
     return VIBRATION_HZ * bessel_zero(m, n) / bessel_zero(*VIBRATION_MODE)
 
 
-def object_note(name, drive):
+def triangle_phase(t_s):
+    """The reference piezo's phase shift at a moment, for the triangle toggle.
+
+    Args: t_s is the time on the sensor clock in seconds.
+    Returns: K times the mirror's displacement: 0 at the start of each
+        period, K * PIEZO_TRIANGLE_NM half a period later, linear between.
+    """
+    cycles = t_s * PIEZO_TRIANGLE_HZ
+    return K_PER_NM * PIEZO_TRIANGLE_NM * 2 * abs(cycles - math.floor(cycles + 0.5))
+
+
+def reference_ramp_average(t0, duration):
+    """Average exp(-i triangle_phase(t)) over an exposure, exactly.
+
+    The triangle is linear between its turning points, and each linear
+    piece integrates in closed form (a sinc), so an exposure that crosses a
+    turning point, or several, is exact too.
+
+    Args: t0 is the exposure's start (s); duration is its length (s).
+    Returns: The complex average; exp(-i phase(t0)) for a zero duration.
+    """
+    if duration <= 0:
+        return complex(np.exp(-1j * triangle_phase(t0)))
+    half = 0.5 / PIEZO_TRIANGLE_HZ
+    slope = K_PER_NM * PIEZO_TRIANGLE_NM / half
+    total, start, end = 0j, t0, t0 + duration
+    while start < end:
+        # The nudge keeps a start that rounding left a hair below a turning
+        # point in the next piece (it misplaces at most 1e-9 of a half period).
+        piece = math.floor(start / half + 1e-9)
+        stop = min((piece + 1) * half, end)
+        rate = slope if piece % 2 == 0 else -slope
+        length = stop - start
+        middle = triangle_phase(start) + rate * length / 2
+        total += length * np.exp(-1j * middle) * np.sinc(rate * length / (2 * math.pi))
+        start = stop
+    return complex(total / duration)
+
+
+def object_note(name, drive, piezo=False):
     """Say in a line what the simulation is doing, for the note under the control.
 
-    Args: name is a SIMULATED_OBJECTS name; drive is the DAQ's Drive.
+    Args: name is a SIMULATED_OBJECTS name; drive is the DAQ's Drive; piezo
+        is True while the reference piezo's triangle wave is on.
     Returns: The text. A held piezo level is named in every object; the
         piezo's sine only in Follow DAQ, which it is locked to.
+    """
+    text = _object_text(name, drive)
+    if piezo:
+        text = (f"{text[:-1]}; reference piezo: {PIEZO_TRIANGLE_HZ:g} Hz triangle, "
+                f"{PIEZO_TRIANGLE_NM / 1000:g} µm peak to peak (decorrelation).")
+    return text
+
+
+def _object_text(name, drive):
+    """Describe the object and the DAQ drive, for object_note.
+
+    Args: name is a SIMULATED_OBJECTS name; drive is the DAQ's Drive.
+    Returns: One sentence ending in a full stop.
     """
     if name == "Still":
         parts = ["Nothing moves"]
@@ -364,6 +423,7 @@ class DemoSource:
         self.log = log
         self.object = DEFAULT_OBJECT
         self.drive = Drive()
+        self.piezo_on = False  # the reference piezo's triangle wave
         self.clock_s = 0.0
         self._harmonic = None   # (key, frequency, Z, u map, arg Z map)
         self._table = None      # (key, FringeTable, prepared lookup, fixed F or None)
@@ -460,6 +520,14 @@ class DemoSource:
         if name not in SIMULATED_OBJECTS:
             raise ValueError(f"Unknown simulated object: {name!r}")
         self.object = name
+
+    def set_piezo(self, on):
+        """Turn the reference piezo's triangle wave on or off.
+
+        Args: on is True to ramp the reference mirror (decorrelation).
+        Returns: None.
+        """
+        self.piezo_on = bool(on)
 
     def set_drive(self, drive):
         """Follow what the DAQ outputs produce.
@@ -580,12 +648,19 @@ class DemoSource:
         if self.object == "Slow deformation":
             phase = phase + np.float32(K_PER_NM * deformation_nm(self.clock_s)) * self.load_shape
         state = self._harmonic_state()
-        if state[2] is None:
+        # The triangle is a scalar on the uniform reference beam, and far
+        # slower than any vibration, so its exposure average multiplies F.
+        ramp = (reference_ramp_average(self.clock_s, exposure_us * 1e-6)
+                if self.piezo_on else None)
+        if state[2] is None and ramp is None:
             intensity = self.background + self.modulation * np.cos(phase)
         else:
-            fringe = self._fringe_map(state, exposure_us, self.clock_s)
+            fringe = (self._fringe_map(state, exposure_us, self.clock_s)
+                      if state[2] is not None else np.complex64(1.0))
+            if ramp is not None:
+                fringe = fringe * np.complex64(ramp)
             intensity = self.background + self.modulation * (
-                fringe.real * np.cos(phase) - fringe.imag * np.sin(phase))
+                np.real(fringe) * np.cos(phase) - np.imag(fringe) * np.sin(phase))
         scale = exposure_us / REFERENCE_EXPOSURE_US * 10.0 ** (gain_db / 20.0)
         self.clock_s += 1.0 / max(float(fps), 1.0)
         return cv2.convertScaleAbs(intensity, alpha=scale)

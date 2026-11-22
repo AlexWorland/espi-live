@@ -13,8 +13,10 @@ import numpy as np
 from espi_live import simulation
 from espi_live.daq import HOLD, SINE, Drive
 from espi_live.simulation import (DEFAULT_OBJECT, K_PER_NM, SIMULATED_OBJECTS,
-                                  DemoSource, FringeTable, bessel_j, bessel_zero,
-                                  deformation_nm, mode_frequency_hz, object_note)
+                                  PIEZO_TRIANGLE_HZ, PIEZO_TRIANGLE_NM, DemoSource,
+                                  FringeTable, bessel_j, bessel_zero, deformation_nm,
+                                  mode_frequency_hz, object_note,
+                                  reference_ramp_average, triangle_phase)
 from list_log import ListLog
 
 
@@ -377,8 +379,10 @@ def brute_frame(source, exposure_us, t0, samples=8000):
     total = np.zeros(static.shape)
     for step in range(samples):
         t = t0 + (step + 0.5) * duration / samples
-        motion = K_PER_NM * np.imag(path * np.exp(2j * np.pi * frequency * t))
-        total += np.cos(static + motion)
+        motion = (K_PER_NM * np.imag(path * np.exp(2j * np.pi * frequency * t))
+                  if path is not None else 0.0)
+        ramp = triangle_phase(t) if source.piezo_on else 0.0
+        total += np.cos(static + motion - ramp)
     intensity = source.background + source.modulation * total / samples
     return intensity * exposure_us / 8000
 
@@ -634,6 +638,119 @@ class VibrationTests(unittest.TestCase):
         self.assertIn("generator off",
                       object_note("Follow DAQ", Drive(piezo_mode=HOLD, piezo_v=0.05,
                                                       device="Sim")))
+
+
+class ReferencePiezoTests(unittest.TestCase):
+    """The reference piezo's triangle wave: decorrelation between frames."""
+
+    def source(self, obj, piezo=True, width=96, height=64):
+        """Make a small simulated source with the triangle on or off.
+
+        Args: obj is a SIMULATED_OBJECTS name; piezo turns the triangle on;
+            width and height are the frame size.
+        Returns: The DemoSource.
+        """
+        source = DemoSource(width, height, "DEMO1")
+        source.set_object(obj)
+        source.set_piezo(piezo)
+        return source
+
+    def test_triangle_phase(self):
+        """The mirror ramps up for half a period and back down, linearly.
+
+        Args: None.
+        Returns: None.
+        """
+        peak = K_PER_NM * PIEZO_TRIANGLE_NM
+        period = 1 / PIEZO_TRIANGLE_HZ
+        self.assertEqual((PIEZO_TRIANGLE_HZ, PIEZO_TRIANGLE_NM), (1.0, 1200.0))
+        self.assertAlmostEqual(triangle_phase(0.0), 0.0)
+        self.assertAlmostEqual(triangle_phase(period / 2), peak)
+        self.assertAlmostEqual(triangle_phase(period / 4), peak / 2)
+        self.assertAlmostEqual(triangle_phase(3 * period / 4), peak / 2)
+        self.assertAlmostEqual(triangle_phase(period), 0.0)
+        self.assertAlmostEqual(triangle_phase(5.3 * period), triangle_phase(0.3 * period))
+
+    def test_ramp_average_matches_brute_force(self):
+        """The exposure average of the reference ramp is exact, turning points included.
+
+        Args: None.
+        Returns: None.
+        """
+        for t0, duration in ((0.1, 0.008), (0.496, 0.008), (0.998, 0.004),
+                             (0.2, 1.7), (0.37, 0.0001)):
+            t = t0 + (np.arange(200000) + 0.5) * duration / 200000
+            expected = np.exp(-1j * np.vectorize(triangle_phase)(t)).mean()
+            self.assertLess(abs(reference_ramp_average(t0, duration) - expected), 1e-6,
+                            (t0, duration))
+        self.assertLess(abs(reference_ramp_average(0.3, 0.0)
+                            - np.exp(-1j * triangle_phase(0.3))), 1e-12)
+
+    def test_still_frames_decorrelate_and_match(self):
+        """With the triangle on, a still drum's frames change and match the exposure integral.
+
+        Args: None.
+        Returns: None.
+        """
+        source = self.source("Still")
+        self.assertTrue(source.piezo_on)
+        source.clock_s = 0.0123
+        frame = source.next_frame(8000, 0, 30)
+        expected = expected_frame(brute_frame(source, 8000, 0.0123))
+        self.assertLessEqual(max_error(frame, expected), 1)
+        self.assertFalse(np.array_equal(frame, source.next_frame(8000, 0, 30)))
+
+    def test_vibration_with_piezo_matches_brute_force(self):
+        """Vibration and the ramp together, whole and fractional cycles, across a turning point.
+
+        Args: None.
+        Returns: None.
+        """
+        for exposure, t0 in ((8000, 0.0123), (8700, 0.2), (8000, 0.4985), (8700, 0.997)):
+            source = self.source("Vibration")
+            source.clock_s = t0
+            frame = source.next_frame(exposure, 0, 30)
+            expected = expected_frame(brute_frame(source, exposure, t0))
+            self.assertLessEqual(max_error(frame, expected), 1, (exposure, t0))
+
+    def test_nodal_line_turns_white(self):
+        """Frame-to-frame, the (1, 1) mode's still nodal line is bright with the piezo, black without.
+
+        Args: None.
+        Returns: None.
+        """
+        source = self.source("Vibration", width=240, height=160)
+        _, path = source.harmonic_path_nm()
+        amplitude = K_PER_NM * np.abs(path)
+        node = source.drum_mask & (amplitude < 1.0)
+        dark = source.drum_mask & (np.abs(amplitude - 2.405) < 0.25)
+        source.clock_s = 0.1
+        first = source.next_frame(8000, 0, 30).astype(np.float32)
+        second = source.next_frame(8000, 0, 30).astype(np.float32)
+        change = np.abs(second - first)
+        self.assertGreater(float(change[node].mean()), 4 * float(change[dark].mean()))
+        self.assertGreater(float(change[node].mean()), 10)
+        still = self.source("Vibration", piezo=False, width=240, height=160)
+        frames = [still.next_frame(8000, 0, 30) for _ in range(2)]
+        np.testing.assert_array_equal(frames[0], frames[1])
+
+    def test_piezo_toggles_and_is_named_in_the_note(self):
+        """The toggle switches the ramp; the note names it in every object.
+
+        Args: None.
+        Returns: None.
+        """
+        source = self.source("Still", piezo=False)
+        self.assertFalse(source.piezo_on)
+        first = source.next_frame(8000, 0, 30)
+        np.testing.assert_array_equal(first, source.next_frame(8000, 0, 30))
+        source.set_piezo(True)
+        self.assertTrue(source.piezo_on)
+        for obj in SIMULATED_OBJECTS:
+            note = object_note(obj, Drive(), piezo=True)
+            self.assertIn("reference piezo", note)
+            self.assertIn("1 Hz triangle", note)
+            self.assertNotIn("reference piezo", object_note(obj, Drive()))
 
 
 if __name__ == "__main__":

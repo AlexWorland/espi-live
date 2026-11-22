@@ -702,6 +702,13 @@ SIMULATED_OBJECT_TIP = (
     "→ NI DAQ…, the Simulated device works). The DAQ piezo moves the reference "
     "mirror in every case. Only shown for demo cameras.")
 SIMULATED_NOTE_TIP = "What the simulated drumhead is doing now, and what drives it."
+SIMULATED_PIEZO_TIP = (
+    "Ramp the simulated reference mirror with a slow triangle wave (1 Hz, 1.2 µm "
+    "peak to peak), as a piezo on the reference beam does on the bench. The "
+    "reference phase then changes between frames (about 90° at 30 fps), which "
+    "decorrelates the speckle: in Previous view a vibration's still nodal lines "
+    "turn bright and its J0 fringes dark, instead of a dark nodal line. Adds to "
+    "the DAQ piezo. Off by default; demo cameras only.")
 ZOOM_SLIDER_TIP = ("Drag, click or scroll to zoom. The mouse wheel and "
                    "drag-to-pan on the image still work.")
 MODE_TIPS = {
@@ -4151,6 +4158,11 @@ class MainWindow(QMainWindow):
         simulated_grid.addWidget(simulated_name, 0, 0)
         simulated_grid.addWidget(self.simulated_object, 0, 1)
         simulated_grid.addWidget(self.simulated_note, 1, 0, 1, 2)
+        self.simulated_piezo = QCheckBox("Reference piezo (triangle, decorrelation)")
+        self.simulated_piezo.setChecked(s.demo_piezo)
+        set_tooltip(self.simulated_piezo, SIMULATED_PIEZO_TIP)
+        self.simulated_piezo.toggled.connect(self._choose_simulated_piezo)
+        simulated_grid.addWidget(self.simulated_piezo, 2, 0, 1, 2)
         self._show_simulated_note()
         add(self.simulated_box, basic=True)
         self.single_field = QCheckBox("Single field (interlaced camera)")
@@ -5548,7 +5560,8 @@ class MainWindow(QMainWindow):
                    (self.frames_first, s.average_frames_first),
                    (self.floor_subtract, s.floor_subtract),
                    (self.record_button, s.record), (self.single_field, s.single_field),
-                   (self.raw_difference_button, s.raw_difference))
+                   (self.raw_difference_button, s.raw_difference),
+                   (self.simulated_piezo, s.demo_piezo))
         combos = ((self.smoothing_combo, s.smoothing_method),
                   (self.simulated_object, s.demo_object),
                   (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
@@ -6076,6 +6089,15 @@ class MainWindow(QMainWindow):
         self.engine.update_settings(demo_object=name)
         self._show_simulated_note()
 
+    def _choose_simulated_piezo(self, on):
+        """Turn the displayed demo camera's reference piezo triangle on or off.
+
+        Args: on is the checkbox state.
+        Returns: None.
+        """
+        self.engine.update_settings(demo_piezo=on)
+        self._show_simulated_note()
+
     def _show_simulated_note(self):
         """Say under the control what the simulated drumhead is doing.
 
@@ -6083,7 +6105,8 @@ class MainWindow(QMainWindow):
         Returns: None.
         """
         self.simulated_note.setText(simulation.object_note(
-            self.simulated_object.currentText(), self.daq_drive))
+            self.simulated_object.currentText(), self.daq_drive,
+            piezo=self.simulated_piezo.isChecked()))
 
     def set_daq_drive(self, drive):
         """Follow what the NI DAQ outputs produce, for every demo camera.
