@@ -5141,7 +5141,9 @@ class RunTests(unittest.TestCase):
                          (True, False, self.reporting, store))
         self.window.show.assert_called_once()
         self.engine.start.assert_called_once()
-        self.reporting.start_uploads.assert_called_once_with()
+        self.reporting.start_uploads.assert_called_once()
+        channels = self.reporting.start_uploads.call_args.args[0]
+        self.assertIs(channels(), self.window.channels)  # the window's channel list, read live
         self.finish.assert_called_once_with(self.window, self.log)
         self.assertIn("closed", self.log.lines)
         self.assertIn("Display: GPU (OpenGL 4.1 on X)", self.log.lines)
@@ -6160,7 +6162,7 @@ class ReportingClassTests(unittest.TestCase):
                 mock.patch.object(reporting.worker, "start") as start:
             try:
                 reporting.start(self.log)
-                self.assertIn("Error reports: off", self.log.lines[-2])
+                self.assertIn("Error reports: off", self.log.lines[-3])
                 collect.assert_called_once_with(None)
                 start.assert_called_once()
                 handler.assert_called_once_with(qt_app.handle_qt_message)
@@ -6219,11 +6221,12 @@ class ReportingClassTests(unittest.TestCase):
         self.assertEqual(reporting.uploads.uploader.folder,
                          os.path.join(paths.OUTPUT_DIR, "logs"))
         with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: ""}), \
+                mock.patch.object(qt_app.capture_uploads, "captures_token", return_value=""), \
                 mock.patch.object(reporting.worker, "start"), \
                 mock.patch.object(reporting.uploads, "start") as start:
             reporting.start(self.log)
             start.assert_not_called()  # not before the cameras are open
-            reporting.start_uploads()
+            reporting.start_uploads(lambda: [])
         start.assert_called_once()
         reporting.stop()
         self.assertTrue(reporting.uploads.stopping.is_set())
@@ -6254,6 +6257,87 @@ class ReportingClassTests(unittest.TestCase):
                 reporting.choose(False, self.log)
                 reporting.choose(True, self.log)
             kick.assert_not_called()
+
+
+    def test_start_uploads_starts_the_capture_worker_with_a_token(self):
+        """With a captures token the scheduler starts over this run's channels and stops with it.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        channels = lambda: []  # noqa: E731
+        with mock.patch.object(qt_app.capture_uploads, "captures_token", return_value="t"), \
+                mock.patch.object(reporting.uploads, "start"), \
+                mock.patch.object(qt_app.capture_uploads.CaptureWorker, "start") as start:
+            reporting.start_uploads(channels)
+        start.assert_called_once()
+        worker = reporting.captures
+        self.assertIs(worker.channels, channels)
+        self.assertEqual(worker.folder, os.path.join(paths.OUTPUT_DIR, "captures"))
+        self.assertRegex(worker.machine, "^[0-9a-f]{8}$")
+        self.assertEqual(worker.build, qt_app.updater.current_build())
+        reporting.stop()
+        self.assertTrue(worker.stopping.is_set())
+
+    def test_an_uncreatable_captures_folder_does_not_stop_the_program(self):
+        """If output/captures cannot be made, uploads of captures are off and the run goes on.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        real = paths.output_folder
+
+        def folder(name):
+            """Refuse the captures folder only.
+
+            Args: name is the output subfolder.
+            Returns: The folder; raises OSError for "captures".
+            """
+            if name == "captures":
+                raise OSError("read-only")
+            return real(name)
+
+        with mock.patch.object(qt_app.capture_uploads, "captures_token", return_value="t"), \
+                mock.patch.object(qt_app.paths, "output_folder", folder), \
+                mock.patch.object(reporting.uploads, "start") as start:
+            reporting.start_uploads(lambda: [])
+        start.assert_called_once()  # the log uploads still started
+        self.assertIsNone(reporting.captures)
+
+    def test_no_capture_worker_runs_without_a_token(self):
+        """A copy without the captures token never builds or starts the scheduler.
+
+        Args: None.
+        Returns: None.
+        """
+        reporting = self.reporting()
+        with mock.patch.object(qt_app.capture_uploads, "captures_token", return_value=""), \
+                mock.patch.object(reporting.uploads, "start"), \
+                mock.patch.object(qt_app.capture_uploads.CaptureWorker, "start") as start:
+            reporting.start_uploads(lambda: [])
+        start.assert_not_called()
+        self.assertIsNone(reporting.captures)
+        reporting.stop()
+
+    def test_startup_log_says_whether_capture_uploads_are_on(self):
+        """The startup log names the capture-upload state, whatever the error-report switch.
+
+        Args: None.
+        Returns: None.
+        """
+        for reports, token, expected in (
+                ("0", "t", "Capture uploads: on"),
+                ("1", "", "Capture uploads: off (no captures token in this copy)")):
+            with mock.patch.dict(os.environ, {qt_app.error_reports.ENABLE_ENV: reports}), \
+                    mock.patch.object(qt_app.capture_uploads, "captures_token",
+                                      return_value=token):
+                reporting = self.reporting()
+                with mock.patch.object(reporting.worker, "start"):
+                    reporting.start(self.log)
+                reporting.stop()
+            self.assertIn(expected, self.log.lines)
 
 
 class SessionDescriptionTests(unittest.TestCase):

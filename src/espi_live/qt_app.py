@@ -55,8 +55,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QTextEdit, QToolBar, QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
-from espi_live import (camera, camera_reports, codex, daq, error_reports, feedback, iphone,
-                       log_uploads, paths, phase, profiles, simulation, source_code, tips,
+from espi_live import (camera, camera_reports, capture_uploads, codex, daq, error_reports,
+                       feedback, iphone, log_uploads, paths, phase, profiles, simulation, source_code, tips,
                        ui_scale, updater)
 from espi_live.channels import demo_channels, open_camera_channels, restore_channel
 from espi_live.engine import LABVIEW_FLOW
@@ -246,6 +246,7 @@ class Reporting:
         # Log uploads have no switch: every copy with the logs token sends them.
         self.uploads = log_uploads.LogUploadWorker(log_uploads.LogUploader(
             paths.output_folder("logs"), self.reporter.serials))
+        self.captures = None  # the CaptureWorker, built by start_uploads when a token exists
         self.hooks = None
         self.previous_handler = None
 
@@ -261,16 +262,36 @@ class Reporting:
                                       f"off ({self.forced or 'turned off in the Help menu'})"))
         log.info("Log uploads: " + ("on" if log_uploads.logs_token()
                                     else "off (no logs token in this copy)"))
+        log.info("Capture uploads: " + ("on" if capture_uploads.captures_token()
+                                        else "off (no captures token in this copy)"))
         self.reporter.collect_native_crashes(log.crash_path)
         self.worker.start()
 
-    def start_uploads(self):
-        """Start the log uploads, once the cameras are open and their serials known.
+    def start_uploads(self, channels):
+        """Start the log and capture uploads, once the cameras are open and their serials known.
 
-        Args: None.
+        Capture uploads, like log uploads, have no switch: a copy with the
+        captures token sends scheduled stills and clips from its real cameras.
+
+        Args: channels is a zero-argument callable returning the window's
+            current channel list.
         Returns: None.
         """
         self.uploads.start()
+        if not capture_uploads.captures_token():
+            return
+        try:
+            folder = paths.output_folder("captures")
+            logs_folder = paths.output_folder("logs")
+        except OSError as exc:  # a silent feature must never stop the instrument
+            logging.getLogger(__name__).debug("Capture uploads off: %s", exc)
+            return
+        queue = capture_uploads.CaptureQueue(folder, capture_uploads.MAX_QUEUE_BYTES)
+        self.captures = capture_uploads.CaptureWorker(
+            channels, folder, capture_uploads.CaptureUploader(queue),
+            capture_uploads.CaptureLedger(folder), queue,
+            log_uploads.machine_id(logs_folder), updater.current_build())
+        self.captures.start()
 
     def choose(self, on, log):
         """Apply the Help menu choice.
@@ -297,6 +318,8 @@ class Reporting:
             self.hooks = None
         self.worker.stop()
         self.uploads.stop()
+        if self.captures is not None:
+            self.captures.stop()
 
 
 def describe_session(channels, display):
@@ -7218,7 +7241,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
         for channel in channels:
             if channel.active:
                 channel.engine.start()
-        reporting.start_uploads()  # after the cameras opened, so their serials are scrubbed
+        # After the cameras opened, so their serials are scrubbed.
+        reporting.start_uploads(lambda: window.channels)
         return app.exec()
     except Exception as exc:  # the hooks are restored below, before Python's own hook runs
         error_reports.caught(log, exc, "main_thread", "ESPI live stopped", fatal=True)
