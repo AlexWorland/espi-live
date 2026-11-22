@@ -100,6 +100,7 @@ def self_check():
     from espi_live.capture import import_enumerator  # imports only; lists nothing
     from espi_live.daq import support_text  # imports pyLabLib; opens no device
     from espi_live.feedback import feedback_token
+    from espi_live.capture_uploads import captures_token
     from espi_live.log_uploads import logs_token
     enumerator, problem = import_enumerator()
     video = ("Video devices: cv2_enumerate_cameras "
@@ -107,11 +108,12 @@ def self_check():
     # Present or absent only: the token itself stays out of the log.
     token = "present" if feedback_token() else "absent"
     logs = "present" if logs_token() else "absent"
+    captures = "present" if captures_token() else "absent"
     print(f"Self-check OK: Python {sys.version.split()[0]}, NumPy {numpy.__version__}, "
           f"OpenCV {cv2.__version__}, PySide6 {PySide6.__version__}; {pyspin}; "
           f"{video}; {support_text()}; {updater.describe_build()}; "
           f"feedback token: {token}; "
-          f"logs token: {logs}")
+          f"logs token: {logs}; captures token: {captures}")
     return 0
 
 

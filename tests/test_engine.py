@@ -159,6 +159,47 @@ class EngineDemoTests(unittest.TestCase):
         self.assertEqual(int(packet.image[:20, :].min()), 0)  # banner background
         self.assertEqual(int(packet.image[:42, :].max()), 255)  # banner text
 
+    def test_raw_tap_off_stores_nothing(self):
+        """Without the tap the worker keeps no raw frame.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        self.assertIsNone(self.engine.latest_raw())
+
+    def test_raw_tap_on_publishes_copy_before_processing(self):
+        """The raw frame is a private copy, newer on every read, taken before processing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.set_raw_tap(True)
+        self.assertTrue(wait_until(lambda: self.engine.latest_raw() is not None))
+        first = self.engine.latest_raw()
+        self.assertEqual(first.image.dtype, np.uint8)
+        self.assertEqual(first.image.ndim, 2)
+        self.assertIsNot(first.image, self.engine.latest_packet().image)
+        before = first.image.copy()
+        first.image[:] = 7  # a reader scribbling on it must not reach the engine
+        self.assertTrue(wait_until(
+            lambda: self.engine.latest_raw().sequence > first.sequence))
+        self.assertFalse(np.array_equal(self.engine.latest_raw().image, first.image))
+        self.assertEqual(before.shape, first.image.shape)
+
+    def test_raw_tap_off_clears_stored_frame(self):
+        """Turning the tap off drops the stored raw frame.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.set_raw_tap(True)
+        self.assertTrue(wait_until(lambda: self.engine.latest_raw() is not None))
+        self.engine.set_raw_tap(False)
+        self.assertIsNone(self.engine.latest_raw())
+        time.sleep(0.2)
+        self.assertIsNone(self.engine.latest_raw())
+
     def test_gamma_reaches_every_view_and_changes_midtones(self):
         """Raw, Previous and Reference publish the display gamma.
 
@@ -532,7 +573,10 @@ class EngineDemoTests(unittest.TestCase):
         names = sorted(os.listdir(frames))
         self.assertTrue(names[0].startswith("dummy_frame_"))
         self.assertTrue(names[0].endswith("_test_run_1.png"))
-        with open(os.path.join(frames, names[1]), encoding="utf-8") as info:
+        notes_path = os.path.join(frames, names[1])
+        # The notes file exists (empty) a moment before its text is written.
+        self.assertTrue(wait_until(lambda: os.path.getsize(notes_path) > 0))
+        with open(notes_path, encoding="utf-8") as info:
             self.assertIn("Source: Demo", info.read())
 
         self.engine.update_settings(record=True)

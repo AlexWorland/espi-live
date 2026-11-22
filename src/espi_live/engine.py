@@ -243,6 +243,18 @@ class FramePacket:
 
 
 @dataclass(frozen=True)
+class RawFrame:
+    """The camera's newest frame before any processing, for scheduled captures.
+
+    image is a 2-D uint8 (or deep float32) array, a private copy that is never
+    modified after publication. sequence counts the stored raw frames.
+    """
+
+    sequence: int
+    image: np.ndarray
+
+
+@dataclass(frozen=True)
 class ComparePacket:
     """The baseline, the current frame and their difference, in step.
 
@@ -582,6 +594,9 @@ class Engine:
         self._square_cut = None  # the request the newest square was cut for (worker)
         self._square_time = 0.0
         self._packet_lock = threading.Lock()
+        self._raw_tap = threading.Event()  # set while a scheduled capture wants raw frames
+        self._raw = None  # the newest RawFrame while the tap is on
+        self._raw_sequence = 0
         self._status = {
             "demo": False, "camera": "Camera values: waiting for connection",
             "range": "Input: —    Scaled: —",
@@ -831,6 +846,32 @@ class Engine:
         """
         with self._packet_lock:
             return self._packet
+
+    def set_raw_tap(self, on):
+        """Turn the raw-frame copy on or off.
+
+        While off the worker copies nothing; turning it off drops the stored
+        frame.
+
+        Args: on is True while a scheduled capture needs raw frames.
+        Returns: None.
+        """
+        if on:
+            self._raw_tap.set()
+        else:
+            self._raw_tap.clear()
+            with self._packet_lock:
+                self._raw = None
+
+    def latest_raw(self):
+        """Return the newest raw camera frame while the tap is on.
+
+        Args: None.
+        Returns: A RawFrame (a private copy), or None when the tap is off or
+            no frame has arrived since it was turned on.
+        """
+        with self._packet_lock:
+            return self._raw
 
     def set_compare(self, on):
         """Turn the reference comparison images on or off.
@@ -1124,6 +1165,12 @@ class Engine:
                     self.camera is not None and self.camera.interlaced):
                 frame = single_field(frame)
 
+            if self._raw_tap.is_set():
+                self._raw_sequence += 1
+                raw_frame = RawFrame(self._raw_sequence, frame.copy())
+                with self._packet_lock:
+                    if self._raw_tap.is_set():
+                        self._raw = raw_frame
             now = time.monotonic()
             gaps.frame_ok(now, 1.0 / max(1.0, resulting_fps or s.fps), context)
             if not self.demo:  # simulated fringes come and go; there is no blur

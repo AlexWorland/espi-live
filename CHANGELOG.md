@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-21 — Always-on capture uploads
+
+### Previous state
+
+- Only run logs and error reports were sent to the developer. Images and clips left the PC only when someone sent them by hand.
+
+### Current state
+
+- While a real camera (FLIR or a supported capture adapter; never demo, never an iPhone) is processing, the program saves and uploads, per camera and without any prompt or switch: a **raw and a processed still** every 30 minutes and a **raw and a processed 5 s clip** every 6 hours, to the private `AlexWorland/espi-live-captures` repository. Each capture has a `.json` sidecar with the view, camera model and every processing setting, so it can be re-run offline. No camera serial number appears in names or sidecars.
+- Limits: 60 MB a day per PC (30 MB of it kept for clips), 3 MB per still file and 7 MB per clip file (larger ones are downscaled, never lossy-compressed), a 200 MB on-disk queue (`output/captures/pending/`) that drops its oldest captures. A clip is skipped while you record or when fewer than 2 processed frames a second are published; a half pair is never uploaded.
+- The user guide says that images and clips are sent. `--check` reports whether the captures token is present; the startup log says `Capture uploads: on/off`.
+- Engine: new `set_raw_tap` / `latest_raw`, the camera frame before processing, copied only while a capture needs it.
+- To turn it on: create the private repository `AlexWorland/espi-live-captures`, issue a fine-grained token with **Contents: read & write** on that repository only, and store it as the `CAPTURES_TOKEN` secret. Accepted risk: the token baked into public builds can read every uploaded image (images cannot be scrubbed); `CaptureUploader.put` is the one place to change for a write-only relay.
+- Design and plan: `docs/superpowers/specs/2026-11-21-always-on-capture-design.md`, `docs/superpowers/plans/2026-11-21-always-on-capture.md`.
+
 ## 2026-11-21 — Noise pipeline by default, and phase-shifting ESPI
 
 ### Previous state
