@@ -57,6 +57,17 @@ MAX_TRIANGLE_HZ = 1000.0
 MAX_VOLTS = 10.0  # the AO range
 MIN_WRITE_S = 0.001  # pyLabLib writes at least this much waveform per start
 
+# The USB-6251 BNC's sockets, as printed on its panel. PFI 8-15, P0.0-7, +5 V
+# and D GND are on its screw terminals only.
+BNC_GROUPS = (("ANALOG INPUTS", tuple(f"ai{index}" for index in range(8))),
+              ("ANALOG OUTPUTS", ("ao0", "ao1")),
+              ("APFI", ("apfi0",)),
+              ("PFI (DIGITAL / TIMING)", tuple(f"pfi{index}" for index in range(8))),
+              ("USER", ("user1", "user2")))
+BNC_TERMINALS = tuple(name for _, names in BNC_GROUPS for name in names)
+PIEZO_AMPLIFIER = "Thorlabs MDT694A EXT INPUT"
+PIEZO_ROLE, GENERATOR_ROLE = "Piezo driver", "Frequency generator"
+
 INSTALL_HINT = 'pip install pylablib-lightweight "nidaqmx>=1.4,<1.8"'
 _NI = None  # pylablib.devices.NI once loaded
 
@@ -112,6 +123,76 @@ def unavailable_reason(exc):
     if name == "DaqNotSupportedError":
         return "NI-DAQmx runs on Windows and Linux only."
     return f"NI devices could not be listed: {exc}"
+
+
+@dataclass(frozen=True)
+class Connection:
+    """One cable to plug in: a DAQ socket, the role it serves and where it goes."""
+
+    terminal: str  # "ao1", "pfi4", ...
+    role: str  # PIEZO_ROLE or GENERATOR_ROLE
+    target: str  # what the other end of the cable plugs into
+    note: str = ""
+
+    @property
+    def bnc(self):
+        """Tell whether the socket is a BNC on the USB-6251 BNC.
+
+        Args: None.
+        Returns: True for a BNC, False for a screw terminal or another device's output.
+        """
+        return self.terminal in BNC_TERMINALS
+
+    @property
+    def label(self):
+        """Name the socket as printed on the device.
+
+        Args: None.
+        Returns: Text such as "AO 1", "PFI 4" or "USER 1".
+        """
+        return socket_label(self.terminal)
+
+
+def socket_label(name):
+    """Name any socket as printed on the device: letters, a space, the number.
+
+    Args: name is a socket such as "ai0", "apfi0", "user2" or "ctr1".
+    Returns: Text such as "AI 0", "APFI 0", "USER 2"; counters as output_label
+        names them ("Counter 1").
+    """
+    if name.startswith("ctr"):
+        return output_label(name)
+    stem = name.rstrip("0123456789")
+    return f"{stem.upper()} {name[len(stem):]}".strip()
+
+
+def wiring(settings):
+    """List the cables the settings need, for the "Where to plug in" window.
+
+    Args: settings is DaqSettings.
+    Returns: A list of Connection, the piezo driver first; empty when no
+        role is assigned.
+    """
+    s = settings
+    found = []
+    if s.piezo_output != OFF:
+        found.append(Connection(
+            s.piezo_output, PIEZO_ROLE, PIEZO_AMPLIFIER,
+            f"0–{MAX_VOLTS:g} V in; the amplifier adds its OUTPUT ADJ knob, so turn "
+            "the knob to zero. Its OUTPUT stays on the piezo."))
+    if s.generator_output.startswith("ctr"):
+        note = "0–5 V square wave (TTL)."
+        if s.generator_terminal not in BNC_TERMINALS:
+            note += (f" {terminal_label(s.generator_terminal)} is a screw terminal: "
+                     "choose PFI 0–7 for a BNC socket.")
+        found.append(Connection(s.generator_terminal, GENERATOR_ROLE,
+                                "the specimen drive's input (shaker or tone amplifier)",
+                                note))
+    elif s.generator_output != OFF:
+        found.append(Connection(s.generator_output, GENERATOR_ROLE,
+                                "the specimen drive's input (shaker or tone amplifier)",
+                                f"Sine, at most the {s.generator_limit_v:g} V safety limit."))
+    return found
 
 
 def output_label(output):

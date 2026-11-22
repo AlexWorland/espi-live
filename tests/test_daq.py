@@ -73,6 +73,59 @@ class LabelTests(unittest.TestCase):
         self.assertIn("no hardware", daq.SIMULATED_DEVICE.label)
 
 
+class WiringTests(unittest.TestCase):
+    """Which socket each role uses, and where its cable goes."""
+
+    def test_socket_labels(self):
+        """Every socket is named as printed on the device.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual([daq.socket_label(name) for name in
+                          ("ai7", "ao1", "apfi0", "pfi12", "user2", "ctr0")],
+                         ["AI 7", "AO 1", "APFI 0", "PFI 12", "USER 2", "Counter 0"])
+        self.assertEqual(len(daq.BNC_TERMINALS), 8 + 2 + 1 + 8 + 2)
+
+    def test_piezo_and_sine_generator(self):
+        """The default roles: AO 1 to the MDT694A first, then AO 0.
+
+        Args: None.
+        Returns: None.
+        """
+        piezo, generator = daq.wiring(daq.DaqSettings(generator_limit_v=2.5))
+        self.assertEqual((piezo.terminal, piezo.role, piezo.target, piezo.label),
+                         ("ao1", daq.PIEZO_ROLE, daq.PIEZO_AMPLIFIER, "AO 1"))
+        self.assertIn("0–10 V", piezo.note)
+        self.assertTrue(piezo.bnc)
+        self.assertEqual((generator.terminal, generator.role), ("ao0", daq.GENERATOR_ROLE))
+        self.assertIn("2.5 V safety limit", generator.note)
+
+    def test_counter_terminals(self):
+        """A counter's cable goes on its PFI terminal; PFI 8-15 have no BNC.
+
+        Args: None.
+        Returns: None.
+        """
+        (square,) = daq.wiring(daq.DaqSettings(piezo_output=daq.OFF, generator_output="ctr0",
+                                               generator_terminal="pfi4"))
+        self.assertEqual((square.terminal, square.label, square.bnc), ("pfi4", "PFI 4", True))
+        self.assertEqual(square.note, "0–5 V square wave (TTL).")
+        (screw,) = daq.wiring(daq.DaqSettings(piezo_output=daq.OFF, generator_output="ctr1",
+                                              generator_terminal="pfi12"))
+        self.assertFalse(screw.bnc)
+        self.assertIn("PFI 12 is a screw terminal", screw.note)
+
+    def test_nothing_assigned(self):
+        """No roles, no cables.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(daq.wiring(daq.DaqSettings(piezo_output=daq.OFF,
+                                                    generator_output=daq.OFF)), [])
+
+
 class LoadingTests(unittest.TestCase):
     """The lazy import and the reasons NI devices can be unavailable."""
 

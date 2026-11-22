@@ -223,6 +223,62 @@ class DaqDialogTests(DaqWindowTestCase):
         self.assertEqual((dialog.piezo_bottom.value(), dialog.piezo_top.value(),
                           dialog.piezo_frequency.value()), (0.0, 1.0, 0.25))
 
+    def test_where_to_plug_in(self):
+        """The help window marks the sockets in use and follows the form.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertIsNone(dialog.wiring)
+        dialog.wiring_button.click()
+        wiring = dialog.wiring
+        self.assertTrue(wiring.isVisible())
+        self.assertEqual(wiring.windowTitle(), qt_app.WIRING_TITLE)
+        orange, blue = (qt_app.ROLE_COLORS[role] for role in (daq.PIEZO_ROLE,
+                                                               daq.GENERATOR_ROLE))
+        self.assertEqual(wiring.panel.marks, {"ao1": (1, orange), "ao0": (2, blue)})
+        self.assertIn("1. AO 1", wiring.legend.text())
+        self.assertIn(daq.PIEZO_AMPLIFIER, wiring.legend.text())
+        self.assertIn("Connected: Dev1: USB-6251", wiring.device_note.text())
+        # It follows the form while open, including a screw-terminal PFI.
+        dialog._set_combo(dialog.generator_output, "ctr0")
+        self.assertEqual(wiring.panel.marks["pfi4"], (2, blue))
+        dialog._set_combo(dialog.generator_terminal, "pfi12")
+        self.assertNotIn("pfi12", wiring.panel.marks)
+        self.assertIn("screw terminal, not drawn", wiring.legend.text())
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog._set_combo(dialog.piezo_output, daq.OFF)
+        self.assertEqual(wiring.panel.marks, {})
+        self.assertIn("Nothing to plug in yet", wiring.legend.text())
+        # The drawing paints at any size and keeps its proportions.
+        dialog._set_combo(dialog.piezo_output, "ao1")
+        wiring.panel.resize(700, 340)
+        self.assertFalse(wiring.panel.grab().isNull())
+        self.assertTrue(wiring.panel.hasHeightForWidth())
+        self.assertEqual(wiring.panel.heightForWidth(940), 450)
+        # A second press reuses the window.
+        wiring.hide()
+        dialog.wiring_button.click()
+        self.assertIs(dialog.wiring, wiring)
+        self.assertTrue(wiring.isVisible())
+
+    def test_where_to_plug_in_names_the_device(self):
+        """The note says when there is no device, a simulated one or another model.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.show_wiring()
+        settings = daq.DaqSettings()
+        dialog.wiring.show_settings(settings, None)
+        self.assertIn("simulated device has no sockets", dialog.wiring.device_note.text())
+        dialog.wiring.show_settings(settings, daq.SIMULATED_DEVICE)
+        self.assertIn("simulated device has no sockets", dialog.wiring.device_note.text())
+        dialog.wiring.show_settings(settings, daq.DeviceInfo("Dev2", "USB-6009"))
+        self.assertIn("sockets may differ", dialog.wiring.device_note.text())
+
     def test_problems_block_apply(self):
         """A clash or an unsafe level is explained and disables Apply.
 

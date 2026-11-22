@@ -2681,6 +2681,11 @@ class DaqDialog(QDialog):
                                              QDialogButtonBox.ActionRole)
         set_tooltip(self.zero_button,
                     "Stop the generator and set every assigned output to 0 V.")
+        self.wiring_button = buttons.addButton("Where to plug in…",
+                                               QDialogButtonBox.HelpRole)
+        set_tooltip(self.wiring_button,
+                    "Show a drawing of the NI USB-6251 with the sockets these settings "
+                    "use, and where each cable goes.")
         close = buttons.addButton(QDialogButtonBox.Close)
         set_tooltip(close, "Hide this window. The outputs keep running.")
         for button in buttons.buttons():
@@ -2702,6 +2707,8 @@ class DaqDialog(QDialog):
         self.device_box.activated.connect(self._connect_selected)
         self.apply_button.clicked.connect(self.apply)
         self.zero_button.clicked.connect(lambda: self.controller.request("zero"))
+        self.wiring = None  # the "Where to plug in" window, built on first use
+        self.wiring_button.clicked.connect(self.show_wiring)
         self.step_down.clicked.connect(lambda: self.step(-1))
         self.step_up.clicked.connect(lambda: self.step(1))
         close.clicked.connect(self.reject)
@@ -2886,6 +2893,22 @@ class DaqDialog(QDialog):
         self.apply_button.setEnabled(self.outputs is not None and not found)
         self.generator_result.setText(self._preview(s, outputs, found))
         self.piezo_result.setText(self._piezo_preview(s, outputs, found))
+        if self.wiring is not None:
+            self.wiring.show_settings(s, self.outputs and self.outputs.device)
+
+    def show_wiring(self):
+        """Open the "Where to plug in" window for the settings in the form.
+
+        It follows the form while it stays open.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.wiring is None:
+            self.wiring = DaqWiringDialog(self)
+        self.wiring.show_settings(self.settings(), self.outputs and self.outputs.device)
+        self.wiring.show()
+        self.wiring.raise_()
 
     @staticmethod
     def _preview(settings, outputs, found):
@@ -3051,6 +3074,256 @@ class DaqDialog(QDialog):
         if not self._set_combo(self.device_box, self.wanted_device):
             self.device_box.setCurrentIndex(0)
         self._connect_selected()
+
+WIRING_TITLE = "Where to plug in (NI USB-6251)"
+ROLE_COLORS = {daq.PIEZO_ROLE: "#d9480f", daq.GENERATOR_ROLE: "#1c7ed6"}
+PANEL_SIZE = (940.0, 450.0)  # the drawing's own units; it is scaled to the widget
+BNC_RADIUS = 22.0
+# Group boxes (x, y, width, height) and the sockets in each, in drawing units.
+PANEL_BOXES = (("ANALOG INPUTS", (20, 50, 340, 240)),
+               ("ANALOG OUTPUTS", (380, 50, 180, 115)),
+               ("APFI", (380, 175, 180, 115)),
+               ("USER", (380, 300, 180, 100)),
+               ("PFI (DIGITAL / TIMING)", (580, 50, 340, 240)))
+
+
+def panel_positions():
+    """Place every BNC socket of the USB-6251 BNC in the drawing.
+
+    Args: None.
+    Returns: A dict from socket name ("ai0", "ao1", "pfi4", ...) to its
+        centre (x, y) in drawing units.
+    """
+    places = {}
+    for index in range(8):
+        column, row = index % 4, index // 4
+        places[f"ai{index}"] = (65 + 80 * column, 115 + 110 * row)
+        places[f"pfi{index}"] = (625 + 80 * column, 115 + 110 * row)
+    places.update(ao0=(430, 115), ao1=(510, 115), apfi0=(470, 240),
+                  user1=(430, 345), user2=(510, 345))
+    return places
+
+
+class DaqPanelView(QWidget):
+    """A drawing of the USB-6251 BNC's panel with the sockets to use marked.
+
+    The drawing is schematic: socket names as printed on the device,
+    positions approximate. Each socket in use gets its role's colour and
+    the number of its line in the legend.
+    """
+
+    def __init__(self, parent=None):
+        """Start with nothing marked.
+
+        Args: parent is the owning widget.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.marks = {}  # socket -> (number, colour)
+        self.setMinimumSize(ui_scale.px(470), ui_scale.px(225))
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def set_connections(self, connections):
+        """Mark the sockets a list of connections uses.
+
+        Args: connections is a list of daq.Connection, numbered from 1 in order.
+        Returns: None.
+        """
+        self.marks = {item.terminal: (number, ROLE_COLORS[item.role])
+                      for number, item in enumerate(connections, 1) if item.bnc}
+        self.update()
+
+    def heightForWidth(self, width):
+        """Keep the drawing's proportions.
+
+        Args: width is the offered width in pixels.
+        Returns: The matching height.
+        """
+        return round(width * PANEL_SIZE[1] / PANEL_SIZE[0])
+
+    def hasHeightForWidth(self):
+        """Tell layouts that the height follows the width.
+
+        Args: None.
+        Returns: True.
+        """
+        return True
+
+    def paintEvent(self, event):
+        """Draw the panel, its groups and sockets, and the marks.
+
+        Args: event is the Qt paint event.
+        Returns: None.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        scale = min(self.width() / PANEL_SIZE[0], self.height() / PANEL_SIZE[1])
+        painter.translate((self.width() - PANEL_SIZE[0] * scale) / 2,
+                          (self.height() - PANEL_SIZE[1] * scale) / 2)
+        painter.scale(scale, scale)
+        painter.setPen(QPen(QColor("#5a6470"), 3))
+        painter.setBrush(QColor("#e6e9ed"))
+        painter.drawRoundedRect(QRectF(4, 4, PANEL_SIZE[0] - 8, PANEL_SIZE[1] - 8), 18, 18)
+        font = QFont(self.font())
+        font.setPixelSize(15)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#202830"))
+        painter.drawText(QPointF(24, 36), "NI USB-6251 BNC")
+        font.setPixelSize(12)
+        painter.setFont(font)
+        for title, (x, y, w, h) in PANEL_BOXES:
+            painter.setPen(QPen(QColor("#8a94a0"), 1.5))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(x, y, w, h), 8, 8)
+            painter.setPen(QColor("#3a4450"))
+            painter.drawText(QRectF(x, y + 4, w, 16), Qt.AlignHCenter, title)
+        self._draw_extras(painter, font)
+        font.setBold(False)
+        font.setPixelSize(13)
+        for name, (x, y) in panel_positions().items():
+            self._draw_socket(painter, font, name, x, y)
+        painter.end()
+
+    @staticmethod
+    def _draw_extras(painter, font):
+        """Draw the screw terminals, the USB socket and the caption.
+
+        Args: painter is the active QPainter (in drawing units); font is the
+            group-title font.
+        Returns: None.
+        """
+        painter.setPen(QPen(QColor("#8a94a0"), 1.5))
+        painter.setBrush(QColor("#d3d8de"))
+        painter.drawRoundedRect(QRectF(580, 300, 340, 100), 8, 8)
+        painter.setBrush(QColor("#9aa3ad"))
+        for index in range(16):
+            painter.drawRect(QRectF(592 + 20.5 * index, 330, 14, 14))
+        painter.setPen(QColor("#3a4450"))
+        painter.drawText(QRectF(580, 304, 340, 16), Qt.AlignHCenter, "SCREW TERMINALS")
+        painter.drawText(QRectF(580, 352, 340, 40), Qt.AlignHCenter | Qt.TextWordWrap,
+                         "PFI 8–15, P0.0–7, +5 V, D GND (no BNC)")
+        painter.setPen(QPen(QColor("#8a94a0"), 1.5))
+        painter.setBrush(QColor("#d3d8de"))
+        painter.drawRoundedRect(QRectF(20, 300, 340, 100), 8, 8)
+        painter.setBrush(QColor("#5a6470"))
+        painter.drawRect(QRectF(160, 330, 60, 26))
+        painter.setPen(QColor("#3a4450"))
+        painter.drawText(QRectF(20, 304, 340, 16), Qt.AlignHCenter, "USB AND POWER")
+        painter.drawText(QRectF(20, 362, 340, 20), Qt.AlignHCenter, "USB to the PC")
+        caption = QFont(font)
+        caption.setBold(False)
+        caption.setItalic(True)
+        painter.setFont(caption)
+        painter.drawText(QRectF(20, 410, 900, 30), Qt.AlignLeft | Qt.AlignVCenter,
+                         "Schematic: socket names as printed on the device; "
+                         "positions approximate.")
+        painter.setFont(font)
+
+    def _draw_socket(self, painter, font, name, x, y):
+        """Draw one BNC socket, its name, and its mark when it is in use.
+
+        Args: painter is the active QPainter; font is the label font; name
+            is the socket ("ao1"); x and y are its centre.
+        Returns: None.
+        """
+        mark = self.marks.get(name)
+        centre = QPointF(x, y)
+        painter.setPen(QPen(QColor(mark[1]) if mark else QColor("#6b7580"), 7 if mark else 2))
+        painter.setBrush(QColor("#c4c9cf"))
+        painter.drawEllipse(centre, BNC_RADIUS, BNC_RADIUS)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#2a2f35"))
+        painter.drawEllipse(centre, BNC_RADIUS * 0.55, BNC_RADIUS * 0.55)
+        painter.setBrush(QColor("#d8b45a"))
+        painter.drawEllipse(centre, 3.5, 3.5)
+        label = QFont(font)
+        label.setBold(mark is not None)
+        painter.setFont(label)
+        painter.setPen(QColor(mark[1]) if mark else QColor("#202830"))
+        painter.drawText(QRectF(x - 40, y + BNC_RADIUS + 4, 80, 18), Qt.AlignHCenter,
+                         daq.socket_label(name))
+        if mark:
+            badge = QPointF(x + BNC_RADIUS, y - BNC_RADIUS)
+            painter.setPen(QPen(QColor("white"), 2))
+            painter.setBrush(QColor(mark[1]))
+            painter.drawEllipse(badge, 12, 12)
+            number = QFont(font)
+            number.setBold(True)
+            painter.setFont(number)
+            painter.drawText(QRectF(badge.x() - 12, badge.y() - 12, 24, 24),
+                             Qt.AlignCenter, str(mark[0]))
+
+
+class DaqWiringDialog(QDialog):
+    """Show where each cable goes, for the DAQ window's current settings."""
+
+    def __init__(self, parent):
+        """Build the drawing, the numbered list and the safety notes.
+
+        Args: parent is the DaqDialog.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle(WIRING_TITLE)
+        room = parent.screen().availableGeometry()  # a large interface size must fit
+        self.resize(min(ui_scale.px(720), room.width() * 9 // 10),
+                    min(ui_scale.px(640), room.height() * 9 // 10))
+        self.panel = DaqPanelView(self)
+        self.legend = QLabel()
+        self.legend.setWordWrap(True)
+        self.legend.setTextFormat(Qt.RichText)
+        self.device_note = QLabel()
+        self.device_note.setWordWrap(True)
+        self.device_note.setStyleSheet("color: gray;")
+        safety = QLabel(
+            "<b>Never connect the MDT694A's OUTPUT (up to 150 V) to the DAQ.</b> "
+            "Switch the MDT694A on after ESPI live is running and the device is "
+            "connected, and off before you unplug the DAQ: its outputs are undefined "
+            "for a moment while it powers up. The Wavetek function generator is not "
+            "needed in the piezo chain: the DAQ makes the triangle.")
+        safety.setWordWrap(True)
+        safety.setStyleSheet("color:#c00000;")
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.panel)
+        layout.addWidget(self.legend)
+        layout.addWidget(self.device_note)
+        layout.addWidget(safety)
+        layout.addStretch(1)
+        layout.addWidget(buttons)
+
+    def show_settings(self, settings, device=None):
+        """Mark the sockets and list the cables for these settings.
+
+        Args: settings is daq.DaqSettings; device is the connected
+            daq.DeviceInfo, or None.
+        Returns: None.
+        """
+        connections = daq.wiring(settings)
+        self.panel.set_connections(connections)
+        lines = []
+        for number, item in enumerate(connections, 1):
+            colour = ROLE_COLORS[item.role]
+            where = "" if item.bnc else " (screw terminal, not drawn)"
+            lines.append(f'<p><span style="color:{colour}; font-weight:bold;">'
+                         f"{number}. {item.label}{where}</span> → {item.target} "
+                         f"<i>({item.role.lower()})</i><br>{item.note}</p>")
+        self.legend.setText("".join(lines) or
+                            "<p>Nothing to plug in yet: assign the piezo driver or the "
+                            "frequency generator to an output.</p>")
+        model = device.model if device is not None else ""
+        if device is None or device.simulated:
+            self.device_note.setText("Drawn for the USB-6251 BNC. The simulated device "
+                                     "has no sockets: this is where the real one's are.")
+        elif "6251" in model:
+            self.device_note.setText(f"Connected: {device.label}.")
+        else:
+            self.device_note.setText(f"Connected: {device.label}. The drawing shows the "
+                                     "USB-6251 BNC; this device's sockets may differ.")
 
 
 class StatusLayout(QLayout):
