@@ -330,7 +330,8 @@ class PiezoStepperTests(unittest.TestCase):
         self.assertEqual(phase.PiezoStepper(controller, PIEZO).problems(5), [])
         cases = ((daq.replace(PIEZO, piezo_output=daq.OFF), "Assign the piezo"),
                  (daq.replace(PIEZO, piezo_step_v=0.0), "above 0 V"),
-                 (daq.replace(PIEZO, piezo_step_v=0.3), "safety limit"))
+                 (daq.replace(PIEZO, piezo_step_v=0.3), "safety limit"),
+                 (daq.replace(PIEZO, piezo_voltage_v=-0.1), "below 0 V"))
         for settings, words in cases:
             found = phase.PiezoStepper(controller, settings).problems(5)
             self.assertEqual(len(found), 1)

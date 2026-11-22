@@ -73,6 +73,59 @@ class LabelTests(unittest.TestCase):
         self.assertIn("no hardware", daq.SIMULATED_DEVICE.label)
 
 
+class WiringTests(unittest.TestCase):
+    """Which socket each role uses, and where its cable goes."""
+
+    def test_socket_labels(self):
+        """Every socket is named as printed on the device.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual([daq.socket_label(name) for name in
+                          ("ai7", "ao1", "apfi0", "pfi12", "user2", "ctr0")],
+                         ["AI 7", "AO 1", "APFI 0", "PFI 12", "USER 2", "Counter 0"])
+        self.assertEqual(len(daq.BNC_TERMINALS), 8 + 2 + 1 + 8 + 2)
+
+    def test_piezo_and_sine_generator(self):
+        """The default roles: AO 1 to the MDT694A first, then AO 0.
+
+        Args: None.
+        Returns: None.
+        """
+        piezo, generator = daq.wiring(daq.DaqSettings(generator_limit_v=2.5))
+        self.assertEqual((piezo.terminal, piezo.role, piezo.target, piezo.label),
+                         ("ao1", daq.PIEZO_ROLE, daq.PIEZO_AMPLIFIER, "AO 1"))
+        self.assertIn("0–10 V", piezo.note)
+        self.assertTrue(piezo.bnc)
+        self.assertEqual((generator.terminal, generator.role), ("ao0", daq.GENERATOR_ROLE))
+        self.assertIn("2.5 V safety limit", generator.note)
+
+    def test_counter_terminals(self):
+        """A counter's cable goes on its PFI terminal; PFI 8-15 have no BNC.
+
+        Args: None.
+        Returns: None.
+        """
+        (square,) = daq.wiring(daq.DaqSettings(piezo_output=daq.OFF, generator_output="ctr0",
+                                               generator_terminal="pfi4"))
+        self.assertEqual((square.terminal, square.label, square.bnc), ("pfi4", "PFI 4", True))
+        self.assertEqual(square.note, "0–5 V square wave (TTL).")
+        (screw,) = daq.wiring(daq.DaqSettings(piezo_output=daq.OFF, generator_output="ctr1",
+                                              generator_terminal="pfi12"))
+        self.assertFalse(screw.bnc)
+        self.assertIn("PFI 12 is a screw terminal", screw.note)
+
+    def test_nothing_assigned(self):
+        """No roles, no cables.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(daq.wiring(daq.DaqSettings(piezo_output=daq.OFF,
+                                                    generator_output=daq.OFF)), [])
+
+
 class LoadingTests(unittest.TestCase):
     """The lazy import and the reasons NI devices can be unavailable."""
 
@@ -164,6 +217,11 @@ class SettingsTests(unittest.TestCase):
                                    generator_on=True, generator_frequency_hz=250.0,
                                    piezo_mode=daq.SINE, piezo_phase_deg=45.0)
         self.assertEqual(daq.DaqSettings.from_dict(settings.to_dict()), settings)
+        triangle = daq.DaqSettings(piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.5,
+                                   piezo_top_v=9.5, piezo_frequency_hz=0.281)
+        self.assertEqual(daq.DaqSettings.from_dict(triangle.to_dict()), triangle)
+        older = daq.DaqSettings.from_dict({"piezo_mode": daq.HOLD})  # before triangles
+        self.assertEqual(older.piezo_frequency_hz, daq.DaqSettings().piezo_frequency_hz)
 
     def test_bad_values_keep_defaults(self):
         """Unknown keys, wrong types and non-finite numbers are ignored.
@@ -288,9 +346,53 @@ class ProblemTests(unittest.TestCase):
         self.check("piezo driver would reach", piezo_mode=daq.SINE, piezo_voltage_v=0.5,
                    piezo_amplitude_v=0.6)
         self.check("Unknown piezo mode", piezo_mode="ramp")
+        self.check("go down to -0.1 V", piezo_voltage_v=-0.1)
+        self.check("go down to -0.2 V", piezo_mode=daq.SINE, piezo_voltage_v=0.1,
+                   piezo_amplitude_v=0.3)
+        self.check("go down to -0.5 V", piezo_mode=daq.TRIANGLE, piezo_bottom_v=-0.5)
+        self.check("piezo driver would reach 2 V", piezo_mode=daq.TRIANGLE,
+                   piezo_top_v=2.0)
+        self.check("top must be above its bottom", piezo_mode=daq.TRIANGLE,
+                   piezo_bottom_v=0.5, piezo_top_v=0.5)
+        self.check("triangle's frequency must be between", piezo_mode=daq.TRIANGLE,
+                   piezo_frequency_hz=0.001)
+        self.check("triangle's frequency must be between", piezo_mode=daq.TRIANGLE,
+                   piezo_frequency_hz=5000.0)
+        self.check("share one sample clock", piezo_mode=daq.TRIANGLE, piezo_on=True,
+                   generator_on=True)
         self.check("follows the frequency generator", piezo_mode=daq.SINE, piezo_on=True)
         self.check("follows the frequency generator", piezo_mode=daq.SINE, piezo_on=True,
                    generator_on=True, generator_output="ctr0")
+
+    def test_triangle_beside_a_counter_or_an_idle_generator(self):
+        """A triangle runs while the generator is a counter, off or unassigned.
+
+        Args: None.
+        Returns: None.
+        """
+        triangle = dict(piezo_mode=daq.TRIANGLE, piezo_on=True, piezo_bottom_v=0.0,
+                        piezo_top_v=1.0)
+        for generator in (dict(generator_output="ctr0", generator_on=True),
+                          dict(generator_on=False), dict(generator_output=daq.OFF)):
+            self.assertEqual(daq.problems(daq.DaqSettings(**generator, **triangle)), [])
+        # Unassigned, the piezo's levels are not checked.
+        self.assertEqual(daq.problems(daq.DaqSettings(piezo_output=daq.OFF,
+                                                      piezo_voltage_v=-1.0)), [])
+
+    def test_piezo_range(self):
+        """Each mode's lowest and highest level.
+
+        Args: None.
+        Returns: None.
+        """
+        s = daq.DaqSettings(piezo_voltage_v=0.4, piezo_amplitude_v=-0.1,
+                            piezo_bottom_v=0.9, piezo_top_v=0.2)
+        self.assertEqual(daq.piezo_range(s), (0.4, 0.4))
+        low, high = daq.piezo_range(daq.replace(s, piezo_mode=daq.SINE))
+        self.assertAlmostEqual(low, 0.3)
+        self.assertAlmostEqual(high, 0.5)
+        self.assertEqual(daq.piezo_range(daq.replace(s, piezo_mode=daq.TRIANGLE)), (0.2, 0.9))
+        self.assertEqual(daq.piezo_range(daq.replace(s, piezo_mode="ramp")), (0.4, 0.4))
 
     def test_square_wave_allows_high_frequencies_and_ignores_volts(self):
         """A counter goes to 1 MHz and its amplitude does not matter.
@@ -354,13 +456,49 @@ class PlanTests(unittest.TestCase):
         Returns: None.
         """
         settings = daq.DaqSettings(generator_on=True, piezo_on=True, piezo_mode=daq.SINE,
-                                   piezo_voltage_v=0.2, piezo_amplitude_v=0.3,
+                                   piezo_voltage_v=0.5, piezo_amplitude_v=0.3,
                                    piezo_phase_deg=90.0)
         p = daq.plan(settings)
         piezo = p.values["ao1"]
         self.assertEqual(len(piezo), p.samples_per_cycle)
-        self.assertAlmostEqual(piezo[0], 0.5)
+        self.assertAlmostEqual(piezo[0], 0.8)
+        self.assertEqual(p.piezo_frequency_hz, 0.0)
         self.assertIn("at 90°", p.summary)
+
+    def test_triangle_wave_shape(self):
+        """The triangle starts at its bottom, peaks half-way and is symmetric.
+
+        Args: None.
+        Returns: None.
+        """
+        wave = daq.triangle_wave(1.0, 9.0, 8)
+        np.testing.assert_allclose(wave, [1, 3, 5, 7, 9, 7, 5, 3])
+
+    def test_piezo_triangle_on_its_own_clock(self):
+        """The THOR's slow ramp: a positive triangle at its own frequency on AO 1.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(piezo_on=True, piezo_mode=daq.TRIANGLE,
+                                   piezo_bottom_v=0.5, piezo_top_v=9.5,
+                                   piezo_frequency_hz=0.281, piezo_limit_v=10.0)
+        p = daq.plan(settings)
+        self.assertEqual(p.analog, ("ao0", "ao1"))
+        self.assertEqual(p.values["ao0"], 0.0)  # the generator, off
+        wave = p.values["ao1"]
+        self.assertEqual(len(wave), p.samples_per_cycle)
+        self.assertEqual(p.buffer_samples % p.samples_per_cycle, 0)
+        self.assertEqual(wave[0], 0.5)
+        self.assertAlmostEqual(wave.max(), 9.5)
+        self.assertGreaterEqual(wave.min(), 0.0)
+        self.assertLessEqual(abs(p.piezo_frequency_hz - 0.281) / 0.281, daq.CLOSE_ENOUGH)
+        self.assertAlmostEqual(p.piezo_frequency_hz, p.rate / p.samples_per_cycle)
+        self.assertEqual(p.frequency_hz, 0.0)
+        self.assertIn("piezo AO 1 triangle 0.5–9.5 V", p.summary)
+        self.assertIn("generator AO 0 off", p.summary)
+        alone = daq.plan(daq.replace(settings, generator_output=daq.OFF))
+        self.assertEqual(alone.analog, ("ao1",))
 
     def test_square_wave_and_off_outputs(self):
         """A counter generator needs no AO clock; an off piezo sits at 0 V.
@@ -431,11 +569,30 @@ class DriveTests(unittest.TestCase):
         Returns: None.
         """
         s = daq.DaqSettings(generator_on=True, piezo_on=True, piezo_mode=daq.SINE,
-                            piezo_voltage_v=0.01, piezo_amplitude_v=0.2,
+                            piezo_voltage_v=0.3, piezo_amplitude_v=0.2,
                             piezo_phase_deg=90.0)
         drive = daq.plan(s).drive
         self.assertEqual((drive.piezo_mode, drive.piezo_v, drive.piezo_amplitude_v,
-                          drive.piezo_phase_deg), (daq.SINE, 0.01, 0.2, 90.0))
+                          drive.piezo_phase_deg, drive.piezo_frequency_hz),
+                         (daq.SINE, 0.3, 0.2, 90.0, 0.0))
+
+    def test_triangle_piezo(self):
+        """A piezo triangle is described by its centre, half its span and its frequency.
+
+        Args: None.
+        Returns: None.
+        """
+        s = daq.DaqSettings(generator_output="ctr0", generator_on=True, piezo_on=True,
+                            piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.1, piezo_top_v=0.9,
+                            piezo_frequency_hz=0.5)
+        p = daq.plan(s)
+        drive = p.drive
+        self.assertEqual(drive.piezo_mode, daq.TRIANGLE)
+        self.assertAlmostEqual(drive.piezo_v, 0.5)
+        self.assertAlmostEqual(drive.piezo_amplitude_v, 0.4)
+        self.assertEqual(drive.piezo_frequency_hz, p.piezo_frequency_hz)
+        self.assertAlmostEqual(drive.piezo_frequency_hz, 0.5)
+        self.assertEqual(drive.waveform, "square")
 
     def test_off_is_inactive(self):
         """Outputs that are off describe no drive.
@@ -542,6 +699,22 @@ class PylablibBackendTests(unittest.TestCase):
         self.assertAlmostEqual(wave.max(), 0.5, places=3)
         np.testing.assert_allclose(self.hardware.ao["ao1"], 0.25)
 
+    def test_triangle_reaches_the_piezo_output(self):
+        """The triangle is streamed on its own clock while a counter keeps running.
+
+        Args: None.
+        Returns: None.
+        """
+        p = self.apply(generator_output="ctr0", generator_on=True, piezo_on=True,
+                       piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.2, piezo_top_v=0.8,
+                       piezo_frequency_hz=2.0)
+        self.assertTrue(self.hardware.ao_running)
+        self.assertEqual(self.hardware.ao_rate, p.rate)
+        wave = self.hardware.ao["ao1"]
+        self.assertEqual(len(wave) % p.samples_per_cycle, 0)
+        self.assertAlmostEqual(wave.min(), 0.2)
+        self.assertAlmostEqual(wave.max(), 0.8)
+
     def test_held_levels_stop_the_clock(self):
         """With only constant levels, the AO task runs on demand.
 
@@ -549,9 +722,9 @@ class PylablibBackendTests(unittest.TestCase):
         Returns: None.
         """
         self.apply(generator_on=True)
-        self.apply(generator_on=False, piezo_on=True, piezo_voltage_v=-0.3)
+        self.apply(generator_on=False, piezo_on=True, piezo_voltage_v=0.3)
         self.assertFalse(self.hardware.ao_running)
-        self.assertEqual(self.hardware.ao, {"ao0": 0.0, "ao1": -0.3})
+        self.assertEqual(self.hardware.ao, {"ao0": 0.0, "ao1": 0.3})
 
     def test_reassigning_reconnects_at_zero(self):
         """A change of AO channels zeroes the old ones and reconnects.
@@ -901,3 +1074,315 @@ class ControllerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeClock:
+    """A clock the tests move by hand."""
+
+    def __init__(self):
+        """Start at zero.
+
+        Args: None.
+        Returns: None.
+        """
+        self.now = 0.0
+
+    def __call__(self):
+        """Read the clock.
+
+        Args: None.
+        Returns: Seconds.
+        """
+        return self.now
+
+
+class RealLikeBackend(daq.SimulatedBackend):
+    """A simulated backend that reports itself as a real USB-6251 (it needs the checklist)."""
+
+    simulated = False
+
+    def open(self, device):
+        """Pretend to connect to Dev1.
+
+        Args: device is ignored.
+        Returns: DeviceOutputs for a USB-6251 named Dev1.
+        """
+        self.outputs = daq.DeviceOutputs(daq.DeviceInfo("Dev1", "USB-6251"))
+        return self.outputs
+
+
+class SafetyRuleTests(unittest.TestCase):
+    """The GUI-free pieces of the checklist and the readback check."""
+
+    def test_checklist_follows_what_is_switched_on(self):
+        """Only roles switched on get their checks; the watcher check is always asked.
+
+        Args: None.
+        Returns: None.
+        """
+        both = daq.DaqSettings(piezo_limit_v=10.0, piezo_on=True, generator_on=True)
+        items = daq.checklist_items(both)
+        self.assertEqual(len(items), 6)
+        self.assertIn("OUTPUT ADJ knob", items[0])
+        self.assertIn("AO 1 cable goes to the MDT694A's EXT INPUT", items[1])
+        self.assertIn("about 150 V at the piezo", items[3])
+        self.assertIn("AO 0 cable", items[4])
+        counter = daq.checklist_items(daq.DaqSettings(generator_output="ctr0",
+                                                      generator_terminal="pfi4",
+                                                      generator_on=True))
+        self.assertEqual(len(counter), 2)  # the piezo is assigned but off: no piezo checks
+        self.assertIn("PFI 4 cable", counter[0])
+        piezo_only = daq.checklist_items(daq.DaqSettings(piezo_on=True))
+        self.assertEqual(len(piezo_only), 5)
+        self.assertNotIn("generator", " ".join(piezo_only))
+        alone = daq.checklist_items(daq.DaqSettings(piezo_output=daq.OFF,
+                                                    generator_output=daq.OFF,
+                                                    piezo_on=True, generator_on=True))
+        self.assertEqual(len(alone), 1)
+        self.assertIn("All outputs to 0 V", alone[0])
+
+    def test_drives_and_driven_roles(self):
+        """Only an assigned, switched-on role drives; the terminal counts for counters.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertFalse(daq.drives(daq.DaqSettings()))
+        self.assertTrue(daq.drives(daq.DaqSettings(piezo_on=True)))
+        self.assertTrue(daq.drives(daq.DaqSettings(generator_on=True)))
+        self.assertFalse(daq.drives(daq.DaqSettings(piezo_on=True, piezo_output=daq.OFF)))
+        self.assertEqual(daq.driven_roles(daq.DaqSettings()), frozenset())
+        self.assertEqual(daq.driven_roles(daq.DaqSettings(piezo_on=True, generator_on=True,
+                                                          generator_output="ctr1",
+                                                          generator_terminal="pfi2")),
+                         {(daq.PIEZO_ROLE, "ao1", ""), (daq.GENERATOR_ROLE, "ctr1", "pfi2")})
+
+    def test_expected_levels_and_readback(self):
+        """Readings within the written range pass; others name the channel and both values.
+
+        Args: None.
+        Returns: None.
+        """
+        plan = daq.plan(daq.DaqSettings(piezo_on=True, piezo_mode=daq.TRIANGLE,
+                                        piezo_bottom_v=0.5, piezo_top_v=0.9))
+        expected = daq.expected_levels(plan)
+        self.assertEqual(expected["ao0"], (0.0, 0.0))
+        self.assertAlmostEqual(expected["ao1"][1], 0.9)
+        good = {"ao0": np.zeros(5), "ao1": np.linspace(0.5, 0.9, 5)}
+        self.assertEqual(daq.readback_problem(expected, good), "")
+        high = dict(good, ao1=np.full(5, 3.0))
+        self.assertEqual(daq.readback_problem(expected, high),
+                         "AO 1 read 3 V where 0.5–0.9 V was written")
+        noisy = dict(good, ao0=np.array([-0.5, 0.2]))
+        self.assertEqual(daq.readback_problem(expected, noisy),
+                         "AO 0 read -0.5–0.2 V where 0 V was written")
+        self.assertIn("could not be read back", daq.readback_problem(expected, {}))
+
+
+class BackendReadbackTests(unittest.TestCase):
+    """Zeroing everything, holding levels and reading the outputs back."""
+
+    def test_simulated_backend_reads_what_it_holds(self):
+        """The stand-in reads back its levels and waveforms, plus any injected shift.
+
+        Args: None.
+        Returns: None.
+        """
+        backend = daq.SimulatedBackend()
+        backend.open(daq.SIMULATED)
+        backend.apply(daq.plan(daq.DaqSettings(piezo_on=True, piezo_voltage_v=0.4)))
+        readings = backend.read_outputs(["ao0", "ao1"])
+        self.assertEqual(len(readings["ao1"]), daq.READBACK_SAMPLES)
+        np.testing.assert_allclose(readings["ao1"], 0.4)
+        backend.set_levels({"ao0": 0.5})
+        backend.shift["ao0"] = 0.25
+        np.testing.assert_allclose(backend.read_outputs(["ao0"])["ao0"], 0.75)
+        backend.zero_all()
+        self.assertEqual((backend.zeroed_all, backend.zeroed), (1, 0))
+        np.testing.assert_allclose(backend.read_outputs(["ao1"])["ao1"], 0.0)
+
+    def test_pylablib_backend_zeroes_everything_and_reads_back(self):
+        """On the fake nidaqmx: both AOs to 0 V, levels held, internal channels read.
+
+        Args: None.
+        Returns: None.
+        """
+        hardware = fake_nidaqmx.install(self)
+        backend = daq.PylablibBackend()
+        backend.open("Dev1")
+        hardware.ao = {"ao0": 3.0, "ao1": 7.0}  # left by a crash
+        backend.zero_all()
+        self.assertEqual(hardware.ao, {"ao0": 0.0, "ao1": 0.0})
+        backend.set_levels({"ao1": 0.5})
+        hardware.readback_shift["ao1"] = 0.01
+        readings = backend.read_outputs(["ao0", "ao1"])
+        np.testing.assert_allclose(readings["ao0"], 0.0)
+        np.testing.assert_allclose(readings["ao1"], 0.51)
+        self.assertEqual(len(backend.read_outputs(["ao1"])["ao1"]), daq.READBACK_SAMPLES)
+        self.assertEqual(hardware.reads, 2)
+        # A waveform reads back within its range; a running counter is stopped.
+        p = daq.plan(daq.DaqSettings(device="Dev1", generator_output="ctr0",
+                                     generator_on=True, piezo_on=True,
+                                     piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.2,
+                                     piezo_top_v=0.8), backend.outputs)
+        backend.apply(p)
+        wave = backend.read_outputs(["ao1"])["ao1"]
+        self.assertGreaterEqual(wave.min(), 0.2)
+        self.assertLessEqual(wave.max(), 0.8)
+        backend.zero_all()
+        self.assertFalse(hardware.counters["ctr0"]["running"])
+        self.assertEqual(hardware.ao, {"ao0": 0.0, "ao1": 0.0})
+
+
+class SelfCheckTests(unittest.TestCase):
+    """The controller's checklist gate, readback, watchdog and self-test."""
+
+    def setUp(self):
+        """Make a controller with a hand-moved clock.
+
+        Args: None.
+        Returns: None.
+        """
+        self.log = ListLog()
+        self.clock = FakeClock()
+        self.backend = RealLikeBackend()
+        self.controller = daq.DaqController(self.log, lambda device: self.backend,
+                                            clock=self.clock)
+        self.addCleanup(self.controller.shutdown, 5.0)
+
+    def connect(self):
+        """Connect to the real-like device.
+
+        Args: None.
+        Returns: The DeviceOutputs.
+        """
+        self.controller.request("connect", device="Dev1")
+        return wait_event(self.controller, "connected")[0]
+
+    def test_connecting_sets_every_output_to_zero(self):
+        """Whatever was left on, a connection starts with every AO written to 0 V.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect()
+        self.assertEqual(self.backend.zeroed_all, 1)
+
+    def test_real_device_needs_the_checklist(self):
+        """No drive signal before arm(); a reassignment or reconnection asks again.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(piezo_on=True, piezo_voltage_v=0.2)
+        self.assertFalse(self.controller.is_armed(settings))  # no device yet
+        self.assertFalse(self.controller.checklist_done())
+        self.connect()
+        self.controller.request("apply", settings=settings)
+        self.assertEqual(wait_event(self.controller, "rejected")[0], [daq.CHECKLIST_REQUIRED])
+        with self.assertRaisesRegex(daq.PiezoMoveError, "safety checklist"):
+            self.controller.move_piezo(settings, 0.3, 5.0)
+        self.controller.request("apply", settings=daq.DaqSettings())  # nothing on: fine
+        wait_event(self.controller, "applied")
+        self.controller.arm(settings)
+        self.assertTrue(self.controller.is_armed(settings))
+        self.controller.request("apply", settings=settings)
+        wait_event(self.controller, "applied")
+        self.controller.move_piezo(settings, 0.3, 5.0)
+        moved = daq.replace(settings, piezo_output="ao0", generator_output=daq.OFF)
+        self.assertFalse(self.controller.is_armed(moved))  # another socket: ask again
+        both = daq.replace(settings, generator_on=True)
+        self.assertFalse(self.controller.is_armed(both))  # the generator was not covered
+        self.controller.arm(both)
+        self.assertTrue(self.controller.is_armed(both))
+        self.assertTrue(self.controller.is_armed(settings))  # earlier ticks still count
+        self.assertTrue(self.controller.checklist_done())
+        self.connect()
+        self.assertFalse(self.controller.is_armed(settings))
+        self.assertFalse(self.controller.checklist_done())
+
+    def test_readback_fault_sets_everything_to_zero_once(self):
+        """An output that reads back wrong stops everything, and is reported once.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect()
+        settings = daq.DaqSettings(piezo_on=True, piezo_voltage_v=0.2)
+        self.controller.arm(settings)
+        self.controller.request("apply", settings=settings)
+        wait_event(self.controller, "applied")
+        self.controller.request("check")  # all well: nothing happens
+        self.backend.shift["ao1"] = 1.0
+        self.controller.request("check")
+        reason = wait_event(self.controller, "fault")[0]
+        self.assertEqual(reason, "AO 1 read 1.2 V where 0.2 V was written")
+        self.assertEqual(self.backend.zeroed_all, 2)
+        status = self.controller.status()
+        self.assertFalse(status["active"])
+        self.assertIn("Stopped by the self-check", status["summary"])
+        self.assertTrue(self.log.has("NI DAQ self-check: AO 1 read"))
+        self.controller.request("check")  # still shifted, but reported only once
+        self.controller.request("scan")
+        with mock.patch.object(daq, "list_devices", return_value=([], None)):
+            _, seen = wait_event(self.controller, "devices")
+        self.assertNotIn("fault", [kind for kind, _ in seen])
+
+    def test_watchdog_needs_a_heartbeat_and_an_active_output(self):
+        """A silent window stops active outputs; without heartbeats there is no watchdog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect()
+        settings = daq.DaqSettings(generator_on=True)
+        self.controller.arm(settings)
+        self.controller.request("apply", settings=settings)
+        wait_event(self.controller, "applied")
+        self.clock.now = 10.0
+        self.controller.request("check")  # never had a heartbeat: no watchdog
+        self.controller.heartbeat()
+        self.clock.now = 11.0
+        self.controller.request("check")  # 1 s quiet: fine
+        self.clock.now = 13.5
+        self.controller.request("check")
+        reason = wait_event(self.controller, "fault")[0]
+        self.assertEqual(reason, "the window stopped responding for 3.5 s")
+
+    def test_failing_check_is_reported_and_zeroes(self):
+        """A device error during the readback is reported like any other.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect()
+        with mock.patch.object(self.backend, "read_outputs",
+                               side_effect=fake_nidaqmx.daq_error("gone", -50405)):
+            self.controller.request("check")
+            self.assertIn("gone", wait_event(self.controller, "failed")[0])
+        self.assertTrue(self.log.has("NI DAQ self-check failed"))
+
+    def test_self_test(self):
+        """Each output is stepped and read back; a wrong reading fails the test.
+
+        Args: None.
+        Returns: None.
+        """
+        self.controller.request("self_test")
+        self.assertEqual(wait_event(self.controller, "self_test")[0],
+                         (False, ["Connect to a device first."]))
+        self.connect()
+        self.controller.request("self_test")
+        passed, lines = wait_event(self.controller, "self_test")[0]
+        self.assertTrue(passed)
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("AO 0 at 0.5 V: OK"))
+        self.assertTrue(lines[2].startswith("every output at 0 V: OK"))
+        self.assertEqual(self.controller.status()["summary"],
+                         "Self-test passed; all outputs at 0 V")
+        self.backend.shift["ao1"] = 0.3
+        self.controller.request("self_test")
+        passed, lines = wait_event(self.controller, "self_test")[0]
+        self.assertFalse(passed)
+        self.assertIn("FAILED, AO 1 read", lines[0])
+        self.assertTrue(self.log.has("NI DAQ self-test FAILED"))

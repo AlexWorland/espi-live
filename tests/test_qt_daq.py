@@ -16,6 +16,9 @@ import time
 import unittest
 from unittest import mock
 
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+
 from espi_live import daq, qt_app
 from test_qt_app import APP, FakeSettings, WindowTestCase
 
@@ -86,6 +89,18 @@ class DaqWindowTestCase(WindowTestCase):
         self.settle(dialog, lambda: dialog.outputs is not None)
         return dialog
 
+    def allow(self, dialog):
+        """Tick off the safety checklist the last Apply opened, allowing drive signals.
+
+        Args: dialog is the DaqDialog.
+        Returns: None.
+        """
+        checklist = dialog.checklist
+        self.assertIsNotNone(checklist)
+        for box in checklist.boxes:
+            box.setChecked(True)
+        checklist.allow_button.click()
+
     def settle(self, dialog, predicate, timeout=5.0):
         """Poll the dialog until a condition holds.
 
@@ -100,7 +115,9 @@ class DaqWindowTestCase(WindowTestCase):
             if predicate():
                 return
             time.sleep(0.01)
-        self.fail("the DAQ window never reached the expected state")
+        self.fail("the DAQ window never reached the expected state: device "
+                  f"{dialog.device_status.text()!r}, outputs {dialog.state_label.text()!r}, "
+                  f"problems {dialog.problem_label.text()!r}")
 
 
 class DaqMenuTests(DaqWindowTestCase):
@@ -132,6 +149,7 @@ class DaqMenuTests(DaqWindowTestCase):
         dialog = self.open_dialog()
         dialog.generator_on.setChecked(True)
         dialog.apply()
+        self.allow(dialog)
         self.settle(dialog, lambda: "sine" in dialog.state_label.text())
         self.window.close()
         self.assertTrue(self.log.has("NI DAQ: outputs at 0 V, device released"))
@@ -176,9 +194,239 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog._set_combo(dialog.piezo_mode, daq.SINE)
         self.assertTrue(dialog.piezo_phase.isEnabled())
         self.assertFalse(dialog.step_up.isEnabled())
+        self.assertFalse(dialog.piezo_bottom.isEnabled())
+        dialog._set_combo(dialog.piezo_mode, daq.TRIANGLE)
+        for widget in (dialog.piezo_bottom, dialog.piezo_top, dialog.piezo_frequency):
+            self.assertTrue(widget.isEnabled())
+        self.assertFalse(dialog.piezo_voltage.isEnabled())
+        self.assertFalse(dialog.piezo_phase.isEnabled())
+        self.assertFalse(dialog.step_up.isEnabled())
         dialog._set_combo(dialog.piezo_output, daq.OFF)
         self.assertFalse(dialog.piezo_on.isEnabled())
         self.assertFalse(dialog.piezo_amplitude.isEnabled())
+        self.assertFalse(dialog.piezo_bottom.isEnabled())
+        self.assertEqual(dialog.piezo_result.text(), "")
+
+    def test_triangle_for_the_thor(self):
+        """The THOR's 0-10 V triangle is previewed, refused beside a sine, and applied.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertEqual(dialog.piezo_voltage.minimum(), 0.0)
+        self.assertEqual(dialog.piezo_bottom.minimum(), 0.0)
+        self.assertEqual(dialog.piezo_top.maximum(), daq.MAX_VOLTS)
+        dialog._set_combo(dialog.piezo_mode, daq.TRIANGLE)
+        dialog.piezo_limit.setValue(10.0)
+        dialog.piezo_bottom.setValue(0.5)
+        dialog.piezo_top.setValue(9.5)
+        dialog.piezo_frequency.setValue(0.281)
+        self.assertIn("0.281001 Hz triangle from 0.5 V to 9.5 V", dialog.piezo_result.text())
+        self.assertIn("2000 samples per cycle", dialog.piezo_result.text())
+        self.assertTrue(dialog.apply_button.isEnabled())
+        dialog.piezo_on.setChecked(True)
+        dialog.generator_on.setChecked(True)
+        self.assertIn("share one sample clock", dialog.problem_label.text())
+        self.assertEqual(dialog.piezo_result.text(), "")
+        self.assertFalse(dialog.apply_button.isEnabled())
+        dialog.generator_on.setChecked(False)
+        s = dialog.settings()
+        self.assertEqual((s.piezo_mode, s.piezo_bottom_v, s.piezo_top_v, s.piezo_frequency_hz),
+                         (daq.TRIANGLE, 0.5, 9.5, 0.281))
+        dialog.load(daq.DaqSettings())
+        self.assertEqual(dialog.piezo_mode.currentData(), daq.HOLD)
+        self.assertEqual((dialog.piezo_bottom.value(), dialog.piezo_top.value(),
+                          dialog.piezo_frequency.value()), (0.0, 1.0, 0.25))
+
+    def test_where_to_plug_in(self):
+        """The help window marks the sockets in use and follows the form.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertIsNone(dialog.wiring)
+        dialog.wiring_button.click()
+        wiring = dialog.wiring
+        self.assertTrue(wiring.isVisible())
+        self.assertEqual(wiring.windowTitle(), qt_app.WIRING_TITLE)
+        orange, blue = (qt_app.ROLE_COLORS[role] for role in (daq.PIEZO_ROLE,
+                                                               daq.GENERATOR_ROLE))
+        self.assertEqual(wiring.panel.marks, {"ao1": (1, orange), "ao0": (2, blue)})
+        self.assertIn("1. AO 1", wiring.legend.text())
+        self.assertIn(daq.PIEZO_AMPLIFIER, wiring.legend.text())
+        self.assertIn("Connected: Dev1: USB-6251", wiring.device_note.text())
+        # It follows the form while open, including a screw-terminal PFI.
+        dialog._set_combo(dialog.generator_output, "ctr0")
+        self.assertEqual(wiring.panel.marks["pfi4"], (2, blue))
+        dialog._set_combo(dialog.generator_terminal, "pfi12")
+        self.assertEqual(wiring.panel.marks["pfi12"], (2, blue))  # its screw-terminal row
+        self.assertIn("PFI 12 (screw terminal)", wiring.legend.text())
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog._set_combo(dialog.piezo_output, daq.OFF)
+        self.assertEqual(wiring.panel.marks, {})
+        self.assertIn("Nothing to plug in yet", wiring.legend.text())
+        # The drawing paints at any size and keeps its proportions.
+        dialog._set_combo(dialog.piezo_output, "ao1")
+        dialog._set_combo(dialog.generator_output, "ctr0")  # a marked screw row is drawn
+        wiring.panel.resize(400, 640)
+        self.assertFalse(wiring.panel.grab().isNull())
+        self.assertTrue(wiring.panel.hasHeightForWidth())
+        self.assertEqual(wiring.panel.heightForWidth(1270), 2010)
+        # A socket the USB-6251 BNC does not have is listed but not marked.
+        wiring.show_settings(daq.DaqSettings(piezo_output="ao2", generator_output=daq.OFF))
+        self.assertEqual(wiring.panel.marks, {})
+        self.assertIn("AO 2 (not on the USB-6251 BNC)", wiring.legend.text())
+        # A second press reuses the window.
+        wiring.hide()
+        dialog.wiring_button.click()
+        self.assertIs(dialog.wiring, wiring)
+        self.assertTrue(wiring.isVisible())
+
+    def test_panel_follows_the_ni_figure(self):
+        """Every socket the device prints has a place: BNCs and the PFI screw rows.
+
+        Args: None.
+        Returns: None.
+        """
+        places = qt_app.panel_positions()
+        self.assertEqual(set(places), set(daq.BNC_TERMINALS))
+        self.assertEqual(places["pfi0"][2], "PFI 0/P1.0")
+        self.assertEqual(len(qt_app.SCREW_ROWS), 30)
+        self.assertEqual(sorted(qt_app.SCREW_TERMINALS),
+                         sorted(f"pfi{index}" for index in range(8, 16)))
+        self.assertEqual([qt_app.panel_place(name) for name in ("ao1", "pfi12", "ao2")],
+                         ["bnc", "screw", ""])
+
+    def test_where_to_plug_in_names_the_device(self):
+        """The note says when there is no device, a simulated one or another model.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.show_wiring()
+        settings = daq.DaqSettings()
+        dialog.wiring.show_settings(settings, None)
+        self.assertIn("simulated device has no sockets", dialog.wiring.device_note.text())
+        dialog.wiring.show_settings(settings, daq.SIMULATED_DEVICE)
+        self.assertIn("simulated device has no sockets", dialog.wiring.device_note.text())
+        dialog.wiring.show_settings(settings, daq.DeviceInfo("Dev2", "USB-6009"))
+        self.assertIn("sockets may differ", dialog.wiring.device_note.text())
+
+    def test_safety_checklist_before_the_first_drive(self):
+        """Apply opens the checklist; Allow stays off until all are ticked; once per connection.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertIn("shown before a drive signal", dialog.safety_label.text())
+        dialog.apply()  # nothing switched on: no checklist needed
+        self.settle(dialog, lambda: "off" in dialog.state_label.text())
+        self.assertIsNone(dialog.checklist)
+        dialog.piezo_on.setChecked(True)
+        dialog.apply()
+        checklist = dialog.checklist
+        self.assertTrue(checklist.isVisible())
+        self.assertEqual(len(checklist.boxes), 5)  # the generator is off: no check for it
+        self.assertFalse(checklist.allow_button.isEnabled())
+        for box in checklist.boxes[:-1]:
+            box.setChecked(True)
+        self.assertFalse(checklist.allow_button.isEnabled())
+        checklist.labels[-1].mouseReleaseEvent(
+            QMouseEvent(QEvent.MouseButtonRelease, QPointF(1, 1), QPointF(1, 1),
+                        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        self.assertTrue(checklist.boxes[-1].isChecked())  # clicking the sentence ticks it
+        self.assertTrue(checklist.allow_button.isEnabled())
+        checklist.allow_button.click()
+        self.settle(dialog, lambda: "holds" in dialog.state_label.text())
+        self.assertIn("ticked off for what is switched on", dialog.safety_label.text())
+        self.assertTrue(self.log.has("safety checklist ticked off for Dev1: USB-6251"))
+        dialog.apply()  # already ticked for this connection
+        self.assertIs(dialog.checklist, checklist)
+        dialog.piezo_on.setChecked(False)  # nothing on: still ticked for this connection
+        self.assertIn("ticked off for what is switched on", dialog.safety_label.text())
+        dialog.piezo_on.setChecked(True)
+        dialog.generator_on.setChecked(True)  # a role not yet covered asks again
+        self.assertIn("shown before a drive signal", dialog.safety_label.text())
+        dialog.apply()
+        self.assertIsNot(dialog.checklist, checklist)
+        self.assertEqual(len(dialog.checklist.boxes), 6)
+        self.allow(dialog)
+        self.settle(dialog, lambda: "sine" in dialog.state_label.text())
+        checklist = dialog.checklist
+        dialog.generator_on.setChecked(False)
+        # Reassigning the piezo asks again; cancelling sends nothing.
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog._set_combo(dialog.piezo_output, "ao0")
+        dialog.apply()
+        self.assertIsNot(dialog.checklist, checklist)
+        again = dialog.checklist
+        dialog.apply()  # a second Apply replaces the open checklist
+        self.assertFalse(again.isVisible())
+        dialog.checklist.reject()
+        self.assertEqual(self.window.daq.status()["settings"].piezo_output, "ao1")
+
+    def test_simulated_device_needs_no_checklist(self):
+        """The simulated device drives nothing, so it never asks.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.device_box.setCurrentIndex(dialog.device_box.findData(daq.SIMULATED))
+        dialog._connect_selected()
+        self.settle(dialog, lambda: dialog.outputs is not None
+                    and dialog.outputs.device.simulated)
+        self.assertEqual(dialog.safety_label.text(), "")
+        dialog.piezo_on.setChecked(True)
+        dialog.apply()
+        self.assertIsNone(dialog.checklist)
+        self.settle(dialog, lambda: dialog.state_label.text().startswith("Simulated"))
+
+    def test_self_test_button(self):
+        """Test outputs asks first, then shows the result; a fault is explained.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertTrue(dialog.test_button.isEnabled())
+        dialog.test_button.click()  # answered No
+        self.assertEqual(dialog.test_label.text(), "")
+        self.dialogs.question.return_value = self.dialogs.Yes
+        dialog.test_button.click()
+        self.settle(dialog, lambda: "Self-test passed" in dialog.test_label.text())
+        self.assertIn("AO 1 at 0.5 V: OK", dialog.test_label.text())
+        self.assertIn("after the self-test", dialog.state_label.text())
+        dialog.handle("self_test", (False, ["AO 1 at 0.5 V: FAILED, AO 1 read 0.8 V"]))
+        self.assertIn("Self-test FAILED", dialog.test_label.text())
+        dialog.piezo_on.setChecked(True)
+        dialog.handle("fault", "AO 1 read 3 V where 0.2 V was written")
+        self.assertFalse(dialog.piezo_on.isChecked())
+        self.assertIn("Self-check: AO 1 read 3 V", dialog.problem_label.text())
+        self.assertIn("stopped by the self-check", dialog.state_label.text())
+        dialog._connect_selected()  # nothing chosen changes nothing; no device: disabled
+        dialog.connected(None)
+        self.assertFalse(dialog.test_button.isEnabled())
+
+    def test_window_beats_and_follows_faults(self):
+        """Polling sends the heartbeat; a fault drops the drive and is logged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.open_dialog()
+        daq_controller = self.window.daq
+        with mock.patch.object(daq_controller, "heartbeat") as beat:
+            self.window.poll_daq()
+        beat.assert_called_once_with()
+        self.window.set_daq_drive(daq.Drive("sine", 1000.0, 0.1))
+        self.window._daq_event("fault", "the window stopped responding for 3.0 s")
+        self.assertEqual(self.window.daq_drive, daq.Drive())
+        self.assertTrue(self.log.has("NI DAQ self-check: the window stopped responding"))
 
     def test_problems_block_apply(self):
         """A clash or an unsafe level is explained and disables Apply.
@@ -205,6 +453,7 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog.piezo_on.setChecked(True)
         dialog.piezo_voltage.setValue(0.25)
         dialog.apply()
+        self.allow(dialog)
         self.settle(dialog, lambda: "holds 0.25 V" in dialog.state_label.text())
         self.assertTrue(dialog.state_label.text().startswith("Outputs: "))
         saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
@@ -287,7 +536,10 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog = self.open_dialog()
         dialog.rescan_button.click()
         self.assertEqual(dialog.device_status.text(), "Looking for NI devices…")
-        self.settle(dialog, lambda: dialog.outputs is not None)
+        # Wait for the rescan's own list and connection, not the one from opening:
+        # a late list would reconnect to Dev1 after the simulated device is chosen.
+        self.settle(dialog, lambda: dialog.outputs is not None
+                    and dialog.device_status.text() != "Looking for NI devices…")
         dialog.device_box.setCurrentIndex(dialog.device_box.findData(daq.SIMULATED))
         dialog._connect_selected()
         self.settle(dialog, lambda: dialog.outputs is not None
@@ -334,6 +586,7 @@ class DriveHandOffTests(DaqWindowTestCase):
         dialog.frequency.setValue(1000.0)
         dialog.generator_on.setChecked(True)
         dialog.apply()
+        self.allow(dialog)
         self.settle(dialog, lambda: self.window.daq_drive.waveform == "sine")
         self.assertAlmostEqual(self.window.daq_drive.frequency_hz, 1000.0, delta=0.01)
         self.assertIs(self.window.current.drive, self.window.daq_drive)
@@ -476,6 +729,12 @@ class PhaseWindowTests(DaqWindowTestCase):
                   generator_on=True)
         w._auto_connect_daq()
         self.assertTrue(self.log.has("looking for Dev1"))
+        # A real device takes no drive signal before the checklist: no stepping yet.
+        self.pump(lambda: self.log.has("waits for the safety checklist"))
+        self.assertIsNone(w.phase_stepper)
+        saved = qt_app.DaqDialog._saved_settings()
+        w.daq.arm(daq.replace(saved, piezo_on=True))  # the checklist covered the piezo
+        w._daq_event("connected", daq.DeviceOutputs(REAL))
         self.pump(lambda: w.phase_stepper is not None)
         stepper = w.phase_stepper
         self.assertIs(self.engine.phase_stepper, stepper)

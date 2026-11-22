@@ -409,6 +409,10 @@ class PiezoStepper:
             return ["Assign the piezo driver to an analog output in the NI DAQ window."]
         if s.piezo_step_v <= 0:
             return ["Set a piezo step voltage above 0 V in the NI DAQ window."]
+        if self.level(0) < daq.PIEZO_FLOOR_V:
+            return [f"Phase steps would start at {self.level(0):.4g} V, below 0 V: the "
+                    f"piezo amplifier's input takes 0–{daq.MAX_VOLTS:g} V. Raise the "
+                    "piezo voltage in the NI DAQ window."]
         peak = max(abs(self.level(0)), abs(self.level(steps - 1)))
         if peak > s.piezo_limit_v:
             return [f"Phase steps would reach {peak:.4g} V, above the piezo's "

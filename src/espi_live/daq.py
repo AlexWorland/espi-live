@@ -2,10 +2,13 @@
 
 The frequency generator excites the specimen (a sine on an analog output, or
 a square TTL wave from a counter on a PFI terminal). The piezo driver sets the
-reference piezo's voltage: a held level for manual phase steps, or a sine
-locked to the generator's frequency and phase. Each role is assigned to its
-own output, and every voltage is clamped to a limit the user sets for the
-amplifier behind it.
+reference piezo's voltage: a held level for manual phase steps, a sine locked
+to the generator's frequency and phase, or a triangle at its own frequency
+(the slow ramp a function generator used to feed the piezo amplifier). Each
+role is assigned to its own output, and every voltage is clamped to a limit
+the user sets for the amplifier behind it. The piezo driver never goes below
+0 V: the piezo amplifier (a Thorlabs MDT694A) takes 0-10 V on its EXT INPUT,
+and a negative input would drive the piezo below 0 V.
 
 pyLabLib's NIDAQ class does the device work on top of NI's ``nidaqmx``
 package; both are imported lazily, so the program runs without them. The
@@ -22,6 +25,7 @@ import importlib
 import math
 import queue
 import threading
+import time
 from dataclasses import asdict, dataclass, field, fields, replace
 
 import numpy as np
@@ -33,8 +37,9 @@ COUNTER_OUTPUTS = ("ctr0", "ctr1")
 OFF = ""  # an unassigned role
 PFI_TERMINALS = tuple(f"pfi{index}" for index in range(16))
 SIMULATED = "Simulated"  # device name of the stand-in that drives no hardware
-HOLD, SINE = "hold", "sine"  # piezo modes
-PIEZO_MODES = (HOLD, SINE)
+HOLD, SINE, TRIANGLE = "hold", "sine", "triangle"  # piezo modes
+PIEZO_MODES = (HOLD, SINE, TRIANGLE)
+PIEZO_FLOOR_V = 0.0  # the piezo amplifier's input takes 0-10 V: never below this
 
 TIMEBASE_HZ = 20e6  # AO sample clock timebase; the rate is this divided by a whole number
 COUNTER_TIMEBASE_HZ = 80e6  # fastest counter timebase (estimates the square wave's frequency)
@@ -48,8 +53,32 @@ CLOSE_ENOUGH = 1e-4  # relative frequency error accepted (the clock itself is 50
 MIN_FREQUENCY_HZ = 0.1
 MAX_SINE_HZ = 100_000.0
 MAX_SQUARE_HZ = 1_000_000.0
+MIN_TRIANGLE_HZ = 0.01
+MAX_TRIANGLE_HZ = 1000.0
 MAX_VOLTS = 10.0  # the AO range
 MIN_WRITE_S = 0.001  # pyLabLib writes at least this much waveform per start
+
+# The USB-6251 BNC's sockets, as printed on its panel. PFI 8-15, P0.0-7, +5 V
+# and D GND are on its screw terminals only.
+BNC_GROUPS = (("ANALOG INPUTS", tuple(f"ai{index}" for index in range(8))),
+              ("ANALOG OUTPUTS", ("ao0", "ao1")),
+              ("APFI", ("apfi0",)),
+              ("PFI (DIGITAL / TIMING)", tuple(f"pfi{index}" for index in range(8))),
+              ("USER", ("user1", "user2")))
+BNC_TERMINALS = tuple(name for _, names in BNC_GROUPS for name in names)
+PIEZO_AMPLIFIER = "Thorlabs MDT694A EXT INPUT"
+PIEZO_ROLE, GENERATOR_ROLE = "Piezo driver", "Frequency generator"
+
+# Self-checks. The USB-6251 measures its own analog outputs through the
+# internal channels "_ao0_vs_aognd" and "_ao1_vs_aognd", with no wiring.
+READBACK_SAMPLES = 50
+READBACK_RATE = 10_000.0  # S/s: 5 ms per check
+READBACK_TOLERANCE_V = 0.1  # how far a reading may be from what was written
+CHECK_INTERVAL_S = 1.0  # readback and watchdog period while connected
+WATCHDOG_S = 2.0  # outputs go to 0 V when the window has not polled for this long
+SELF_TEST_V = 0.5  # the level each output is stepped to by the self-test
+CHECKLIST_REQUIRED = ("Tick off the safety checklist in the NI DAQ window first: no drive "
+                      "signal goes to this device until it is done for this connection.")
 
 INSTALL_HINT = 'pip install pylablib-lightweight "nidaqmx>=1.4,<1.8"'
 _NI = None  # pylablib.devices.NI once loaded
@@ -106,6 +135,111 @@ def unavailable_reason(exc):
     if name == "DaqNotSupportedError":
         return "NI-DAQmx runs on Windows and Linux only."
     return f"NI devices could not be listed: {exc}"
+
+
+@dataclass(frozen=True)
+class Connection:
+    """One cable to plug in: a DAQ socket, the role it serves and where it goes."""
+
+    terminal: str  # "ao1", "pfi4", ...
+    role: str  # PIEZO_ROLE or GENERATOR_ROLE
+    target: str  # what the other end of the cable plugs into
+    note: str = ""
+
+    @property
+    def bnc(self):
+        """Tell whether the socket is a BNC on the USB-6251 BNC.
+
+        Args: None.
+        Returns: True for a BNC, False for a screw terminal or another device's output.
+        """
+        return self.terminal in BNC_TERMINALS
+
+    @property
+    def label(self):
+        """Name the socket as printed on the device.
+
+        Args: None.
+        Returns: Text such as "AO 1", "PFI 4" or "USER 1".
+        """
+        return socket_label(self.terminal)
+
+
+def socket_label(name):
+    """Name any socket as printed on the device: letters, a space, the number.
+
+    Args: name is a socket such as "ai0", "apfi0", "user2" or "ctr1".
+    Returns: Text such as "AI 0", "APFI 0", "USER 2"; counters as output_label
+        names them ("Counter 1").
+    """
+    if name.startswith("ctr"):
+        return output_label(name)
+    stem = name.rstrip("0123456789")
+    return f"{stem.upper()} {name[len(stem):]}".strip()
+
+
+def wiring(settings):
+    """List the cables the settings need, for the "Where to plug in" window.
+
+    Args: settings is DaqSettings.
+    Returns: A list of Connection, the piezo driver first; empty when no
+        role is assigned.
+    """
+    s = settings
+    found = []
+    if s.piezo_output != OFF:
+        found.append(Connection(
+            s.piezo_output, PIEZO_ROLE, PIEZO_AMPLIFIER,
+            f"0–{MAX_VOLTS:g} V in; the amplifier adds its OUTPUT ADJ knob, so turn "
+            "the knob to zero. Its OUTPUT stays on the piezo."))
+    if s.generator_output.startswith("ctr"):
+        note = "0–5 V square wave (TTL)."
+        if s.generator_terminal not in BNC_TERMINALS:
+            note += (f" {terminal_label(s.generator_terminal)} is a screw terminal: "
+                     "choose PFI 0–7 for a BNC socket.")
+        found.append(Connection(s.generator_terminal, GENERATOR_ROLE,
+                                "the specimen drive's input (shaker or tone amplifier)",
+                                note))
+    elif s.generator_output != OFF:
+        found.append(Connection(s.generator_output, GENERATOR_ROLE,
+                                "the specimen drive's input (shaker or tone amplifier)",
+                                f"Sine, at most the {s.generator_limit_v:g} V safety limit."))
+    return found
+
+
+MDT694A_GAIN = 15.0  # V/V at its 150 V limit
+
+
+def checklist_items(settings):
+    """List what the user must confirm before drive signals reach a real device.
+
+    Args: settings is DaqSettings: only the roles it switches on get their
+        checks (an output that stays off is held at 0 V).
+    Returns: A list of sentences, one checkbox each; the last is always asked.
+    """
+    s = settings
+    items = []
+    if s.piezo_on and s.piezo_output != OFF:
+        piezo = socket_label(s.piezo_output)
+        items += [
+            "The MDT694A's OUTPUT ADJ knob is turned to zero (it adds to the DAQ's "
+            "voltage).",
+            f"Only the DAQ's {piezo} cable goes to the MDT694A's EXT INPUT: the Wavetek "
+            "is unplugged from it.",
+            "The MDT694A's OUTPUT goes only to the piezo, never to the DAQ (it reaches "
+            "150 V).",
+            f"The piezo's safety limit here ({s.piezo_limit_v:g} V at the DAQ, about "
+            f"{s.piezo_limit_v * MDT694A_GAIN:.0f} V at the piezo) and the MDT694A's "
+            "VOLT LIMIT suit this piezo.",
+        ]
+    if s.generator_on and s.generator_output != OFF:
+        where = socket_label(s.generator_terminal if s.generator_output.startswith("ctr")
+                             else s.generator_output)
+        items.append(f"The generator's {where} cable goes to the specimen drive's input, "
+                     f"which accepts its {s.generator_limit_v:g} V safety limit.")
+    items.append("Someone is watching the setup and knows that “All outputs to 0 V” "
+                 "stops everything.")
+    return items
 
 
 def output_label(output):
@@ -197,6 +331,9 @@ class DaqSettings:
     piezo_voltage_v: float = 0.0  # the held level, or the sine's centre
     piezo_amplitude_v: float = 0.0  # sine peak
     piezo_phase_deg: float = 0.0  # sine phase relative to the generator
+    piezo_bottom_v: float = 0.0  # triangle's lowest level
+    piezo_top_v: float = 1.0  # triangle's highest level
+    piezo_frequency_hz: float = 0.25  # triangle frequency, on its own clock
     piezo_step_v: float = 0.05  # what one Step button press adds
     piezo_limit_v: float = 1.0
 
@@ -250,9 +387,10 @@ class Drive:
 
     The generator's waveform is "sine", "square" or "" (off or unassigned),
     at the frequency the device really produces; the piezo's mode is HOLD,
-    SINE or "" (off or unassigned), with piezo_v its held level or its sine's
-    centre. device is the label of the device that applied it. Drive() is
-    "nothing driven".
+    SINE, TRIANGLE or "" (off or unassigned), with piezo_v its held level or
+    its sine's or triangle's centre, piezo_amplitude_v the swing either side
+    of it, and piezo_frequency_hz the triangle's real frequency. device is
+    the label of the device that applied it. Drive() is "nothing driven".
     """
 
     waveform: str = ""
@@ -265,6 +403,7 @@ class Drive:
     piezo_phase_deg: float = 0.0
     device: str = ""
     simulated: bool = False
+    piezo_frequency_hz: float = 0.0
 
     @property
     def active(self):
@@ -287,6 +426,7 @@ class OutputPlan:
     values: dict = field(default_factory=dict)  # channel -> float or 1-D array
     counter: CounterPlan = None
     frequency_hz: float = 0.0  # what the generator really produces (0 when off)
+    piezo_frequency_hz: float = 0.0  # what the piezo triangle really produces (0 otherwise)
     summary: str = ""
     drive: Drive = Drive()  # the same, described for the ESPI simulation
 
@@ -335,6 +475,106 @@ def square_frequency(frequency):
     return COUNTER_TIMEBASE_HZ / (2 * ticks)
 
 
+def triangle_wave(bottom, top, samples):
+    """Build one cycle of a symmetric triangle that starts at its bottom.
+
+    Starting at the bottom means the first sample after a held level is the
+    lowest one, never a jump to the top.
+
+    Args: bottom and top are the lowest and highest volts; samples is the
+        number of samples in the cycle.
+    Returns: A 1-D float array of samples: bottom, rising to top half-way,
+        falling back.
+    """
+    position = np.arange(samples) / samples
+    return bottom + (top - bottom) * (1.0 - np.abs(2.0 * position - 1.0))
+
+
+def piezo_range(settings):
+    """Work out the lowest and highest voltage the piezo driver produces.
+
+    Args: settings is DaqSettings (an unknown mode counts as a held level).
+    Returns: (lowest, highest) in volts at the DAQ.
+    """
+    s = settings
+    if s.piezo_mode == SINE:
+        swing = abs(s.piezo_amplitude_v)
+        return s.piezo_voltage_v - swing, s.piezo_voltage_v + swing
+    if s.piezo_mode == TRIANGLE:
+        return min(s.piezo_bottom_v, s.piezo_top_v), max(s.piezo_bottom_v, s.piezo_top_v)
+    return s.piezo_voltage_v, s.piezo_voltage_v
+
+
+def drives(settings):
+    """Tell whether settings send any drive signal.
+
+    Args: settings is DaqSettings.
+    Returns: True when the generator or the piezo is switched on and assigned.
+    """
+    s = settings
+    return (s.generator_on and s.generator_output != OFF) or (
+        s.piezo_on and s.piezo_output != OFF)
+
+
+def driven_roles(settings):
+    """Name each role the settings switch on, with the socket it drives.
+
+    Args: settings is DaqSettings.
+    Returns: A frozenset of (PIEZO_ROLE, AO channel) and (GENERATOR_ROLE,
+        output, PFI terminal or ""); the safety checklist must cover each one.
+    """
+    s = settings
+    roles = set()
+    if s.piezo_on and s.piezo_output != OFF:
+        roles.add((PIEZO_ROLE, s.piezo_output, ""))
+    if s.generator_on and s.generator_output != OFF:
+        terminal = s.generator_terminal if s.generator_output.startswith("ctr") else ""
+        roles.add((GENERATOR_ROLE, s.generator_output, terminal))
+    return frozenset(roles)
+
+
+def expected_levels(output_plan):
+    """Work out the range each written AO channel may read back in.
+
+    Args: output_plan is the OutputPlan written.
+    Returns: A dict from channel to (lowest, highest) volts.
+    """
+    found = {}
+    for channel in output_plan.analog:
+        values = np.asarray(output_plan.values.get(channel, 0.0), dtype=float)
+        found[channel] = (float(values.min()), float(values.max()))
+    return found
+
+
+def readback_problem(expected, readings):
+    """Compare readings of the outputs with what was written.
+
+    Args: expected maps a channel to (lowest, highest) volts; readings maps
+        a channel to its read samples.
+    Returns: A sentence describing the first channel out of range, or "".
+    """
+    for channel, (low, high) in expected.items():
+        samples = np.asarray(readings.get(channel, ()), dtype=float)
+        if not samples.size:
+            return f"{output_label(channel)} could not be read back"
+        lowest, highest = float(samples.min()), float(samples.max())
+        if lowest < low - READBACK_TOLERANCE_V or highest > high + READBACK_TOLERANCE_V:
+            wanted = f"{low:.3g} V" if low == high else f"{low:.3g}–{high:.3g} V"
+            seen = f"{lowest:.3g} V" if abs(highest - lowest) < 1e-3 \
+                else f"{lowest:.3g}–{highest:.3g} V"
+            return f"{output_label(channel)} read {seen} where {wanted} was written"
+    return ""
+
+
+def _buffer_samples(rate, samples):
+    """Size an AO buffer: whole cycles, at least MIN_WRITE_S of waveform.
+
+    Args: rate is the sample rate; samples is the number per cycle.
+    Returns: Samples per channel.
+    """
+    return math.ceil(max(rate * MIN_WRITE_S, samples) / samples) * samples
+
+
 def problems(settings, outputs=None):
     """List what is wrong with the settings, in words for the user.
 
@@ -373,17 +613,45 @@ def problems(settings, outputs=None):
             found.append(f"The generator would reach {peak:g} V, above its "
                          f"{s.generator_limit_v:g} V limit.")
     if s.piezo_output != OFF:
-        swing = abs(s.piezo_amplitude_v) if s.piezo_mode == SINE else 0.0
-        peak = abs(s.piezo_voltage_v) + swing
+        lowest, highest = piezo_range(s)
+        peak = max(abs(lowest), abs(highest))
         if peak > s.piezo_limit_v:
             found.append(f"The piezo driver would reach {peak:g} V, above its "
                          f"{s.piezo_limit_v:g} V limit.")
-        if s.piezo_mode not in PIEZO_MODES:
-            found.append(f"Unknown piezo mode {s.piezo_mode!r}.")
-        elif s.piezo_mode == SINE and s.piezo_on and not (
-                s.generator_on and s.generator_output in outputs.analog):
-            found.append("A piezo sine follows the frequency generator: put the "
-                         "generator on an analog output and switch it on.")
+        if lowest < PIEZO_FLOOR_V:
+            found.append(f"The piezo driver would go down to {lowest:g} V. The piezo "
+                         f"amplifier's input takes 0–{MAX_VOLTS:g} V (a negative input "
+                         "drives the piezo below 0 V): keep every level at 0 V or above.")
+        found.extend(_piezo_mode_problems(s, outputs))
+    return found
+
+
+def _piezo_mode_problems(settings, outputs):
+    """Check the rules of the piezo driver's mode.
+
+    Args: settings is DaqSettings with the piezo assigned; outputs is the
+        device's DeviceOutputs.
+    Returns: A list of sentences; empty when the mode can run.
+    """
+    s = settings
+    sine_generator = s.generator_on and s.generator_output in outputs.analog
+    if s.piezo_mode not in PIEZO_MODES:
+        return [f"Unknown piezo mode {s.piezo_mode!r}."]
+    if s.piezo_mode == SINE and s.piezo_on and not sine_generator:
+        return ["A piezo sine follows the frequency generator: put the "
+                "generator on an analog output and switch it on."]
+    if s.piezo_mode != TRIANGLE:
+        return []
+    found = []
+    if s.piezo_top_v <= s.piezo_bottom_v:
+        found.append("The piezo triangle's top must be above its bottom.")
+    if not MIN_TRIANGLE_HZ <= s.piezo_frequency_hz <= MAX_TRIANGLE_HZ:
+        found.append(f"The piezo triangle's frequency must be between "
+                     f"{MIN_TRIANGLE_HZ:g} Hz and {MAX_TRIANGLE_HZ:,.0f} Hz.")
+    if s.piezo_on and sine_generator:
+        found.append("A piezo triangle runs at its own frequency, but both analog "
+                     "outputs share one sample clock: switch the frequency generator "
+                     "off, or put it on a counter output.")
     return found
 
 
@@ -404,14 +672,14 @@ def plan(settings, outputs=None):
     sine = s.generator_on and s.generator_output in outputs.analog
     values = {channel: 0.0 for channel in analog}
     rate, samples, frequency, buffer_samples = 0.0, 0, 0.0, 0
+    piezo_frequency = 0.0
     parts = []
     if sine:
         rate, samples, frequency = choose_timing(s.generator_frequency_hz, len(analog))
         phase = 2 * math.pi * np.arange(samples) / samples
         values[s.generator_output] = (s.generator_offset_v
                                       + s.generator_amplitude_v * np.sin(phase))
-        cycles = math.ceil(max(rate * MIN_WRITE_S, samples) / samples)
-        buffer_samples = cycles * samples
+        buffer_samples = _buffer_samples(rate, samples)
         parts.append(f"generator {output_label(s.generator_output)} sine "
                      f"{frequency:.6g} Hz (asked {s.generator_frequency_hz:g}), "
                      f"{s.generator_amplitude_v:g} V peak, offset "
@@ -438,21 +706,31 @@ def plan(settings, outputs=None):
             parts.append(f"piezo {output_label(s.piezo_output)} sine "
                          f"{s.piezo_amplitude_v:g} V peak at "
                          f"{s.piezo_phase_deg:g}°, centre {s.piezo_voltage_v:g} V")
+        elif s.piezo_mode == TRIANGLE:
+            rate, samples, piezo_frequency = choose_timing(s.piezo_frequency_hz, len(analog))
+            values[s.piezo_output] = triangle_wave(s.piezo_bottom_v, s.piezo_top_v, samples)
+            buffer_samples = _buffer_samples(rate, samples)
+            parts.append(f"piezo {output_label(s.piezo_output)} triangle "
+                         f"{s.piezo_bottom_v:g}–{s.piezo_top_v:g} V at "
+                         f"{piezo_frequency:.6g} Hz (asked {s.piezo_frequency_hz:g}); "
+                         f"{samples} samples per cycle at {rate:,.0f} S/s")
         else:
             values[s.piezo_output] = float(s.piezo_voltage_v)
             parts.append(f"piezo {output_label(s.piezo_output)} holds "
                          f"{s.piezo_voltage_v:g} V")
     summary = "; ".join(parts) if parts else "no outputs assigned"
     return OutputPlan(analog, rate, samples, buffer_samples, values, counter,
-                      frequency, summary, describe_drive(s, outputs, frequency))
+                      frequency, piezo_frequency, summary,
+                      describe_drive(s, outputs, frequency, piezo_frequency))
 
 
-def describe_drive(settings, outputs, frequency):
+def describe_drive(settings, outputs, frequency, piezo_frequency=0.0):
     """Describe what valid settings make the outputs produce.
 
     Args: settings is the DaqSettings plan() accepted; outputs is the
         device's DeviceOutputs; frequency is the generator's real frequency
-        (0 when it is off).
+        (0 when it is off); piezo_frequency is the piezo triangle's real
+        frequency (0 for other modes).
     Returns: A Drive.
     """
     s = settings
@@ -463,12 +741,16 @@ def describe_drive(settings, outputs, frequency):
         waveform = "square"
     mode = s.piezo_mode if s.piezo_on and s.piezo_output != OFF else ""
     sine = mode == SINE
+    centre, swing = (s.piezo_voltage_v if mode else 0.0,
+                     s.piezo_amplitude_v if sine else 0.0)
+    if mode == TRIANGLE:
+        centre = (s.piezo_bottom_v + s.piezo_top_v) / 2
+        swing = (s.piezo_top_v - s.piezo_bottom_v) / 2
     return Drive(waveform, frequency if waveform else 0.0, amplitude,
                  s.generator_offset_v if waveform == "sine" else 0.0, mode,
-                 s.piezo_voltage_v if mode else 0.0,
-                 s.piezo_amplitude_v if sine else 0.0,
-                 s.piezo_phase_deg if sine else 0.0,
-                 outputs.device.label, outputs.device.simulated)
+                 centre, swing, s.piezo_phase_deg if sine else 0.0,
+                 outputs.device.label, outputs.device.simulated,
+                 piezo_frequency if mode == TRIANGLE else 0.0)
 
 
 class SimulatedBackend:
@@ -484,7 +766,10 @@ class SimulatedBackend:
         """
         self.outputs = None
         self.applied = None  # the last OutputPlan
-        self.zeroed = 0  # how many times every output was set to 0 V
+        self.zeroed = 0  # how many times the outputs in use were set to 0 V
+        self.zeroed_all = 0  # how many times every output of the device was
+        self.levels = {}  # channel -> the value or waveform it holds
+        self.shift = {}  # channel -> volts added to its readback (fault injection in tests)
 
     def open(self, device):
         """Pretend to connect.
@@ -502,6 +787,27 @@ class SimulatedBackend:
         Returns: None.
         """
         self.applied = output_plan
+        self.levels.update(output_plan.values)
+
+    def set_levels(self, levels):
+        """Pretend to hold constant levels.
+
+        Args: levels maps an AO channel to volts.
+        Returns: None.
+        """
+        self.levels.update(levels)
+
+    def read_outputs(self, channels):
+        """Read back what each output holds (exactly, plus any injected shift).
+
+        Args: channels are AO channel names.
+        Returns: A dict from channel to an array of READBACK_SAMPLES volts.
+        """
+        found = {}
+        for channel in channels:
+            held = np.asarray(self.levels.get(channel, 0.0), dtype=float).ravel()
+            found[channel] = np.resize(held, READBACK_SAMPLES) + self.shift.get(channel, 0.0)
+        return found
 
     def zero(self):
         """Pretend to set every output to 0 V and stop the counter.
@@ -510,7 +816,18 @@ class SimulatedBackend:
         Returns: None.
         """
         self.applied = None
+        self.levels = {}
         self.zeroed += 1
+
+    def zero_all(self):
+        """Pretend to set every analog output of the device to 0 V.
+
+        Args: None.
+        Returns: None.
+        """
+        self.applied = None
+        self.levels = {}
+        self.zeroed_all += 1
 
     def close(self):
         """Pretend to disconnect.
@@ -557,7 +874,10 @@ class PylablibBackend:
         self.outputs = DeviceOutputs(
             DeviceInfo(info.name, info.model, info.serial_number),
             analog=tuple(_short(name) for name in dev.ao_physical_chans.channel_names),
-            counters=tuple(_short(name) for name in dev.co_physical_chans.channel_names),
+            # Counters only: the USB-6251 also lists "freqout" here, which
+            # cannot make the generator's square wave.
+            counters=tuple(name for name in map(_short, dev.co_physical_chans.channel_names)
+                           if name.startswith("ctr")),
             terminals=tuple(name for name in (_short(t) for t in dev.terminals)
                             if name.startswith("pfi")))
         return self.outputs
@@ -618,6 +938,57 @@ class PylablibBackend:
             self.nidaq.add_voltage_output(channel, channel, rng=(-MAX_VOLTS, MAX_VOLTS))
         self.analog = tuple(analog)
 
+    def zero_all(self):
+        """Set every analog output of the device to 0 V, not only those in use.
+
+        Used on connecting, so a level left by a crash or another program is
+        cleared before anything else is written.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.counter is not None:
+            self.nidaq.stop_pulse_output(self.GENERATOR)
+        self.set_levels({channel: 0.0 for channel in self.outputs.analog})
+
+    def set_levels(self, levels):
+        """Hold constant levels on every analog output (unlisted ones at 0 V).
+
+        Args: levels maps an AO channel to volts.
+        Returns: None.
+        """
+        channels = tuple(self.outputs.analog)
+        if self.analog != channels:
+            self._reconnect(channels)
+        self.nidaq.setup_voltage_output_clock(rate=0)
+        self.nidaq.set_voltage_outputs(list(channels),
+                                       [float(levels.get(c, 0.0)) for c in channels])
+
+    def read_outputs(self, channels):
+        """Measure the analog outputs through the device's internal channels.
+
+        M Series devices read each AO against AO GND on "_aoN_vs_aognd"
+        through their own ADC, so no cable is needed.
+
+        Args: channels are AO channel names.
+        Returns: A dict from channel to an array of READBACK_SAMPLES volts.
+        """
+        nidaqmx = load_ni().daq.nidaqmx
+        task = nidaqmx.Task()
+        try:
+            for channel in channels:
+                task.ai_channels.add_ai_voltage_chan(f"{self.device}/_{channel}_vs_aognd",
+                                                     min_val=-MAX_VOLTS, max_val=MAX_VOLTS)
+            task.timing.cfg_samp_clk_timing(
+                READBACK_RATE, sample_mode=nidaqmx.constants.AcquisitionType.FINITE,
+                samps_per_chan=READBACK_SAMPLES)
+            data = np.asarray(task.read(number_of_samples_per_channel=READBACK_SAMPLES,
+                                        timeout=1.0), dtype=float)
+        finally:
+            task.close()
+        rows = data.reshape(len(channels), -1)
+        return dict(zip(channels, rows))
+
     def zero(self):
         """Set every AO channel to 0 V and stop the counter output.
 
@@ -677,24 +1048,41 @@ class DaqController:
 
     request() queues work: "scan" (list devices), "connect" (device: a
     DAQmx name or SIMULATED), "apply" (settings: DaqSettings), "zero" (every
-    output to 0 V) and "close" (0 V, disconnect, end the thread). Results
+    output to 0 V), "self_test" (step each AO to SELF_TEST_V and back,
+    reading it back) and "close" (0 V, disconnect, end the thread). Results
     arrive on the events queue as (kind, payload): "devices" ((list of
     DeviceInfo, reason or None)), "connected" (DeviceOutputs), "applied"
-    (OutputPlan), "rejected" (list of problems), "zeroed", "failed" (text)
-    and "closed". move_piezo() is the one blocking call: the camera engine
-    uses it to step the piezo between frames for phase-shifting ESPI.
+    (OutputPlan), "rejected" (list of problems), "zeroed", "failed" (text),
+    "fault" (text: a self-check set every output to 0 V), "self_test"
+    ((passed, list of lines)) and "closed". move_piezo() is the one blocking
+    call: the camera engine uses it to step the piezo between frames for
+    phase-shifting ESPI.
+
+    Self-checks, while a device is connected: every AO is set to 0 V on
+    connecting; about once a second the outputs are read back through the
+    device's internal channels and compared with what was written; and when
+    heartbeat() has been called (by the window) but not for WATCHDOG_S while
+    an output is on, everything goes to 0 V. A real device takes no drive
+    signal until arm() has recorded the safety checklist for this connection
+    and output assignment.
     """
 
-    def __init__(self, log, backend_factory=None):
+    def __init__(self, log, backend_factory=None, clock=time.monotonic):
         """Create an idle controller; the thread starts with the first request.
 
         Args: log is an AppLog or PrefixedLog; backend_factory, given a device
             name, returns the backend for it (default: SimulatedBackend for
-            SIMULATED, otherwise PylablibBackend).
+            SIMULATED, otherwise PylablibBackend); clock gives seconds (tests
+            pass their own).
         Returns: None.
         """
         self.log = log
         self.backend_factory = backend_factory or default_backend
+        self.clock = clock
+        self._beat = None  # when the window last called heartbeat()
+        self._armed = (None, frozenset())  # device name, roles the checklist covered
+        self.expected = {}  # worker thread only: channel -> (lowest, highest) volts
+        self._faulted = False  # worker thread only: a self-check fault is reported once
         self.events = queue.SimpleQueue()
         self._commands = queue.SimpleQueue()
         self._thread = None
@@ -720,6 +1108,58 @@ class DaqController:
                                                 daemon=True)
                 self._thread.start()
             self._commands.put((action, payload))
+
+    def heartbeat(self):
+        """Tell the controller the window is still responding.
+
+        Once called, a window that stops calling it for WATCHDOG_S while an
+        output is on gets every output set to 0 V.
+
+        Args: None.
+        Returns: None.
+        """
+        self._beat = self.clock()
+
+    def arm(self, settings):
+        """Record that the safety checklist was ticked off for the roles switched on.
+
+        Each role it covered (and the socket it drives) stays allowed for the
+        connected device until the next connection.
+
+        Args: settings is the DaqSettings the checklist was shown for.
+        Returns: None.
+        """
+        with self._lock:
+            device = self._status["device"]
+            name = device.name if device else None
+            covered = self._armed[1] if self._armed[0] == name else frozenset()
+            self._armed = (name, covered | driven_roles(settings))
+
+    def is_armed(self, settings):
+        """Tell whether drive signals may go to the device with these settings.
+
+        Args: settings is DaqSettings.
+        Returns: True for the simulated device, or when the checklist covered
+            every role these settings switch on (with its socket) for the
+            connected device.
+        """
+        with self._lock:
+            device = self._status["device"]
+            if device is not None and device.simulated:
+                return True
+            return device is not None and self._armed[0] == device.name and \
+                driven_roles(settings) <= self._armed[1]
+
+    def checklist_done(self):
+        """Tell whether the checklist was ticked off for anything on this connection.
+
+        Args: None.
+        Returns: True once arm() covered at least one role of the connected device.
+        """
+        with self._lock:
+            device = self._status["device"]
+            return device is not None and self._armed[0] == device.name and \
+                bool(self._armed[1])
 
     def status(self):
         """Report the device and what it is producing.
@@ -787,18 +1227,71 @@ class DaqController:
         Args: None.
         Returns: None.
         """
+        next_check = self.clock() + CHECK_INTERVAL_S
         while True:
-            action, payload = self._commands.get()
             try:
-                if action == "close":
-                    self._disconnect()
-                    self.events.put(("closed", None))
-                    return
-                getattr(self, f"_do_{action}")(**payload)
-            except Exception as exc:  # report, make the outputs safe, carry on
-                error_reports.caught(self.log, exc, "daq", f"NI DAQ {action} failed")
-                self._make_safe()
-                self.events.put(("failed", f"{type(exc).__name__}: {exc}"))
+                action, payload = self._commands.get(
+                    timeout=max(0.0, next_check - self.clock()))
+            except queue.Empty:
+                action, payload = None, {}
+            if action == "close":
+                self._handle("close", self._disconnect)
+                self.events.put(("closed", None))
+                return
+            if action is not None:
+                name = "self-check" if action == "check" else action
+                self._handle(name, getattr(self, f"_do_{action}"), **payload)
+            if self.clock() >= next_check:  # also between busy phase steps
+                next_check = self.clock() + CHECK_INTERVAL_S
+                self._handle("self-check", self._do_check)
+
+    def _handle(self, name, work, **payload):
+        """Run one piece of work; on any failure report it and go to 0 V.
+
+        Args: name names the work in the log; work is a bound method;
+            payload its keyword arguments.
+        Returns: None.
+        """
+        try:
+            work(**payload)
+        except Exception as exc:  # report, make the outputs safe, carry on
+            error_reports.caught(self.log, exc, "daq", f"NI DAQ {name} failed")
+            self._make_safe()
+            self.events.put(("failed", f"{type(exc).__name__}: {exc}"))
+
+    def _do_check(self):
+        """Run the self-checks: the freeze watchdog, then the output readback.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.backend is None or self._faulted:
+            return
+        beat = self._beat
+        if beat is not None and self.status()["active"]:
+            silent = self.clock() - beat
+            if silent > WATCHDOG_S:
+                self._fault(f"the window stopped responding for {silent:.1f} s")
+                return
+        if self.expected:
+            problem = readback_problem(self.expected,
+                                       self.backend.read_outputs(list(self.expected)))
+            if problem:
+                self._fault(problem)
+
+    def _fault(self, reason):
+        """Set every output to 0 V after a failed self-check, and say why once.
+
+        Args: reason is a sentence fragment naming what was wrong.
+        Returns: None.
+        """
+        self._faulted = True
+        self.log.warning(f"NI DAQ self-check: {reason}. Every output was set to 0 V.")
+        self.backend.zero_all()
+        self.expected = {channel: (0.0, 0.0) for channel in self.outputs.analog}
+        self._set_status(active=False, summary=f"Stopped by the self-check: {reason}",
+                         settings=None)
+        self.events.put(("fault", reason))
 
     def _do_scan(self):
         """List devices.
@@ -821,6 +1314,11 @@ class DaqController:
         backend = self.backend_factory(device)
         self.outputs = backend.open(device)
         self.backend = backend
+        with self._lock:
+            self._armed = (None, frozenset())  # the checklist is ticked again per connection
+        backend.zero_all()  # clear anything a crash or another program left on
+        self.expected = {channel: (0.0, 0.0) for channel in self.outputs.analog}
+        self._faulted = False
         info = self.outputs.device
         self.log.info(f"NI DAQ: connected to {info.label}; outputs "
                       f"{', '.join(self.outputs.analog + self.outputs.counters)}")
@@ -837,6 +1335,8 @@ class DaqController:
             self.events.put(("rejected", ["Connect to a device first."]))
             return
         found = problems(settings, self.outputs)
+        if not found and drives(settings) and not self.is_armed(settings):
+            found = [CHECKLIST_REQUIRED]
         if found:
             self.events.put(("rejected", found))
             return
@@ -853,6 +1353,8 @@ class DaqController:
         """
         output_plan = plan(settings, self.outputs)
         self.backend.apply(output_plan)
+        self.expected = expected_levels(output_plan)
+        self._faulted = False
         active = (settings.generator_on and settings.generator_output != OFF) or (
             settings.piezo_on and settings.piezo_output != OFF)
         self._set_status(active=active, summary=output_plan.summary, settings=settings)
@@ -870,6 +1372,8 @@ class DaqController:
             reply.put((False, "the NI DAQ is not connected"))
             return
         found = problems(settings, self.outputs)
+        if not found and not self.is_armed(settings):
+            found = [CHECKLIST_REQUIRED]
         if found:
             reply.put((False, " ".join(found)))
             return
@@ -889,9 +1393,45 @@ class DaqController:
         """
         if self.backend is not None:
             self.backend.zero()
+            self.expected = {channel: (0.0, 0.0) for channel in self.expected}
             self.log.info("NI DAQ: every output set to 0 V")
         self._set_status(active=False, summary="All outputs at 0 V", settings=None)
         self.events.put(("zeroed", None))
+
+    def _do_self_test(self):
+        """Step each analog output to SELF_TEST_V and back to 0 V, reading it back.
+
+        Every output is left at 0 V afterwards. Needs no checklist: the
+        window asks for the piezo amplifier to be off first.
+
+        Args: None.
+        Returns: None; the result is a "self_test" event (passed, lines).
+        """
+        if self.backend is None:
+            self.events.put(("self_test", (False, ["Connect to a device first."])))
+            return
+        channels = list(self.outputs.analog)
+        lines, passed = [], True
+        for channel in channels + [None]:  # None: every output back at 0 V
+            levels = {c: (SELF_TEST_V if c == channel else 0.0) for c in channels}
+            self.backend.set_levels(levels)
+            readings = self.backend.read_outputs(channels)
+            problem = readback_problem({c: (v, v) for c, v in levels.items()}, readings)
+            step = f"{output_label(channel)} at {SELF_TEST_V:g} V" if channel \
+                else "every output at 0 V"
+            means = ", ".join(f"{output_label(c)} {float(np.mean(readings[c])):.3f} V"
+                              for c in channels)
+            lines.append(f"{step}: {'FAILED, ' + problem if problem else 'OK'} ({means})")
+            passed = passed and not problem
+        self.backend.zero_all()
+        self.expected = {channel: (0.0, 0.0) for channel in channels}
+        self._faulted = False
+        self._set_status(active=False, settings=None,
+                         summary="Self-test " + ("passed" if passed else "FAILED")
+                         + "; all outputs at 0 V")
+        self.log.info(f"NI DAQ self-test {'passed' if passed else 'FAILED'}: "
+                      + "; ".join(lines))
+        self.events.put(("self_test", (passed, lines)))
 
     def _disconnect(self):
         """Set the outputs to 0 V and release the device, if one is open.
@@ -901,6 +1441,7 @@ class DaqController:
         """
         backend, self.backend = self.backend, None
         self.outputs = None
+        self.expected = {}
         self._set_status(device=None, active=False, summary="Not connected", settings=None)
         if backend is not None:
             backend.close()
@@ -913,6 +1454,7 @@ class DaqController:
         Returns: None. A second failure is logged and the device released.
         """
         self._set_status(active=False, summary="Stopped after an error", settings=None)
+        self.expected = {}
         if self.backend is None:
             return
         try:

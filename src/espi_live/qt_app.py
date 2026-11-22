@@ -2480,7 +2480,8 @@ DAQ_SETTINGS_KEY = "daq/settings"
 DAQ_TITLE = "Frequency generator and piezo (NI DAQ)"
 GENERATOR_KINDS = {"ao": "sine", "ctr": "square, 5 V TTL"}
 PIEZO_MODE_TEXT = ((daq.HOLD, "Hold a voltage"),
-                   (daq.SINE, "Sine at the generator's frequency"))
+                   (daq.SINE, "Sine at the generator's frequency"),
+                   (daq.TRIANGLE, "Triangle at its own frequency"))
 PHASE_STEP_TEXT = ((5, "5-step (Hariharan)"), (4, "4-step"))
 PHASE_MESSAGE_MS = 10000  # how long phase-step notices stay in the status bar
 
@@ -2603,9 +2604,11 @@ class DaqDialog(QDialog):
         for mode, text in PIEZO_MODE_TEXT:
             self.piezo_mode.addItem(text, mode)
         set_tooltip(self.piezo_mode,
-                    "Hold a voltage (step it by hand for phase steps), or follow the "
-                    "generator with a sine at the same frequency and a set phase.")
-        self.piezo_voltage = daq_spin(-daq.MAX_VOLTS, daq.MAX_VOLTS, 4, " V", 0.01)
+                    "Hold a voltage (step it by hand for phase steps), follow the "
+                    "generator with a sine at the same frequency and a set phase, or "
+                    "sweep a triangle between two voltages at its own frequency (the "
+                    "ramp a function generator would feed the piezo amplifier).")
+        self.piezo_voltage = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
         set_tooltip(self.piezo_voltage,
                     "The held voltage, or the centre of the sine, at the DAQ.")
         self.piezo_amplitude = daq_spin(0.0, daq.MAX_VOLTS, 4, " V", 0.01)
@@ -2613,6 +2616,22 @@ class DaqDialog(QDialog):
         self.piezo_phase = daq_spin(-360.0, 360.0, 1, "°", 5.0)
         set_tooltip(self.piezo_phase,
                     "Phase of the piezo sine relative to the generator. Sine mode only.")
+        self.piezo_bottom = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.piezo_bottom,
+                    "The triangle's lowest voltage (its DC offset). At 0 V or above, "
+                    "so the piezo amplifier's input never goes negative. Triangle mode "
+                    "only.")
+        self.piezo_top = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.piezo_top,
+                    "The triangle's highest voltage, at most the safety limit. "
+                    "Triangle mode only.")
+        self.piezo_frequency = daq_spin(daq.MIN_TRIANGLE_HZ, daq.MAX_TRIANGLE_HZ, 3,
+                                        " Hz", 0.01)
+        set_tooltip(self.piezo_frequency,
+                    "How many times a second the triangle goes up and down. The device "
+                    "rounds it slightly; the value it produces is shown below. Needs "
+                    "the frequency generator off or on a counter, because both analog "
+                    "outputs share one sample clock. Triangle mode only.")
         self.piezo_step = daq_spin(0.0001, daq.MAX_VOLTS, 4, " V", 0.01)
         set_tooltip(self.piezo_step,
                     "How far one Step press moves the held voltage (for example the "
@@ -2627,8 +2646,11 @@ class DaqDialog(QDialog):
         step_row.addWidget(self.step_up)
         self.piezo_limit = daq_spin(0.01, daq.MAX_VOLTS, 2, " V", 0.1)
         set_tooltip(self.piezo_limit,
-                    "Safety limit: the piezo driver never exceeds this many volts either "
-                    "way. Set it to the piezo amplifier's largest safe input.")
+                    "Safety limit: the piezo driver stays between 0 V and this many "
+                    "volts. Set it to the piezo amplifier's largest safe input (10 V "
+                    "for the Thorlabs MDT694A's EXT INPUT).")
+        self.piezo_result = QLabel()
+        self.piezo_result.setWordWrap(True)
         piezo = QGroupBox("Piezo driver")
         piezo_form = QFormLayout(piezo)
         piezo_form.addRow(self.piezo_on)
@@ -2636,14 +2658,23 @@ class DaqDialog(QDialog):
         piezo_form.addRow("Voltage", self.piezo_voltage)
         piezo_form.addRow("Amplitude", self.piezo_amplitude)
         piezo_form.addRow("Phase", self.piezo_phase)
+        piezo_form.addRow("Bottom", self.piezo_bottom)
+        piezo_form.addRow("Top", self.piezo_top)
+        piezo_form.addRow("Frequency", self.piezo_frequency)
         piezo_form.addRow("Step", step_row)
         piezo_form.addRow("Safety limit", self.piezo_limit)
+        piezo_form.addRow(self.piezo_result)
 
         self.problem_label = QLabel()
         self.problem_label.setWordWrap(True)
         self.problem_label.setStyleSheet("color:#c00000;")
         self.state_label = QLabel("Outputs: not connected")
         self.state_label.setWordWrap(True)
+        self.safety_label = QLabel()
+        self.safety_label.setWordWrap(True)
+        self.test_label = QLabel()
+        self.test_label.setWordWrap(True)
+        self.test_label.setTextFormat(Qt.RichText)
         note = QLabel("Volts are at the DAQ, before your amplifiers. Closing this window "
                       "leaves the outputs running; they go to 0 V when ESPI live closes.")
         note.setWordWrap(True)
@@ -2655,6 +2686,16 @@ class DaqDialog(QDialog):
                                              QDialogButtonBox.ActionRole)
         set_tooltip(self.zero_button,
                     "Stop the generator and set every assigned output to 0 V.")
+        self.test_button = buttons.addButton("Test outputs…", QDialogButtonBox.ActionRole)
+        set_tooltip(self.test_button,
+                    "Self-test: step each analog output to "
+                    f"{daq.SELF_TEST_V:g} V and back, and read it back through the "
+                    "device's internal channels (no wiring). Switch the MDT694A off first.")
+        self.wiring_button = buttons.addButton("Where to plug in…",
+                                               QDialogButtonBox.HelpRole)
+        set_tooltip(self.wiring_button,
+                    "Show a drawing of the NI USB-6251 with the sockets these settings "
+                    "use, and where each cable goes.")
         close = buttons.addButton(QDialogButtonBox.Close)
         set_tooltip(close, "Hide this window. The outputs keep running.")
         for button in buttons.buttons():
@@ -2668,6 +2709,8 @@ class DaqDialog(QDialog):
         layout.addWidget(piezo)
         layout.addWidget(self.problem_label)
         layout.addWidget(self.state_label)
+        layout.addWidget(self.safety_label)
+        layout.addWidget(self.test_label)
         layout.addStretch(1)
         layout.addWidget(note)
         layout.addWidget(buttons)
@@ -2676,6 +2719,10 @@ class DaqDialog(QDialog):
         self.device_box.activated.connect(self._connect_selected)
         self.apply_button.clicked.connect(self.apply)
         self.zero_button.clicked.connect(lambda: self.controller.request("zero"))
+        self.wiring = None  # the "Where to plug in" window, built on first use
+        self.wiring_button.clicked.connect(self.show_wiring)
+        self.checklist = None  # the safety checklist, while it is open
+        self.test_button.clicked.connect(self.run_self_test)
         self.step_down.clicked.connect(lambda: self.step(-1))
         self.step_up.clicked.connect(lambda: self.step(1))
         close.clicked.connect(self.reject)
@@ -2686,6 +2733,7 @@ class DaqDialog(QDialog):
             box.currentIndexChanged.connect(self.refresh)
         for spin in (self.frequency, self.amplitude, self.offset, self.generator_limit,
                      self.piezo_voltage, self.piezo_amplitude, self.piezo_phase,
+                     self.piezo_bottom, self.piezo_top, self.piezo_frequency,
                      self.piezo_step, self.piezo_limit):
             spin.valueChanged.connect(self.refresh)
         for check in (self.generator_on, self.piezo_on):
@@ -2792,6 +2840,9 @@ class DaqDialog(QDialog):
         self.piezo_voltage.setValue(s.piezo_voltage_v)
         self.piezo_amplitude.setValue(s.piezo_amplitude_v)
         self.piezo_phase.setValue(s.piezo_phase_deg)
+        self.piezo_bottom.setValue(s.piezo_bottom_v)
+        self.piezo_top.setValue(s.piezo_top_v)
+        self.piezo_frequency.setValue(s.piezo_frequency_hz)
         self.piezo_step.setValue(s.piezo_step_v)
         self.piezo_limit.setValue(s.piezo_limit_v)
         self.wanted_device = s.device
@@ -2817,6 +2868,9 @@ class DaqDialog(QDialog):
             piezo_voltage_v=self.piezo_voltage.value(),
             piezo_amplitude_v=self.piezo_amplitude.value(),
             piezo_phase_deg=self.piezo_phase.value(),
+            piezo_bottom_v=self.piezo_bottom.value(),
+            piezo_top_v=self.piezo_top.value(),
+            piezo_frequency_hz=self.piezo_frequency.value(),
             piezo_step_v=self.piezo_step.value(),
             piezo_limit_v=self.piezo_limit.value())
 
@@ -2838,17 +2892,39 @@ class DaqDialog(QDialog):
             widget.setEnabled(has_generator)
         has_piezo = s.piezo_output != daq.OFF
         sine_piezo = has_piezo and s.piezo_mode == daq.SINE
-        for widget in (self.piezo_on, self.piezo_mode, self.piezo_voltage,
-                       self.piezo_limit):
+        triangle_piezo = has_piezo and s.piezo_mode == daq.TRIANGLE
+        for widget in (self.piezo_on, self.piezo_mode, self.piezo_limit):
             widget.setEnabled(has_piezo)
+        self.piezo_voltage.setEnabled(has_piezo and not triangle_piezo)
         for widget in (self.piezo_amplitude, self.piezo_phase):
             widget.setEnabled(sine_piezo)
+        for widget in (self.piezo_bottom, self.piezo_top, self.piezo_frequency):
+            widget.setEnabled(triangle_piezo)
         for widget in (self.piezo_step, self.step_down, self.step_up):
             widget.setEnabled(has_piezo and s.piezo_mode == daq.HOLD)
         found = daq.problems(s, outputs)
         self.problem_label.setText("\n".join(found))
         self.apply_button.setEnabled(self.outputs is not None and not found)
+        self.test_button.setEnabled(self.outputs is not None)
+        self.safety_label.setText(self._safety_text(s))
         self.generator_result.setText(self._preview(s, outputs, found))
+        self.piezo_result.setText(self._piezo_preview(s, outputs, found))
+        if self.wiring is not None:
+            self.wiring.show_settings(s, self.outputs and self.outputs.device)
+
+    def show_wiring(self):
+        """Open the "Where to plug in" window for the settings in the form.
+
+        It follows the form while it stays open.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.wiring is None:
+            self.wiring = DaqWiringDialog(self)
+        self.wiring.show_settings(self.settings(), self.outputs and self.outputs.device)
+        self.wiring.show()
+        self.wiring.raise_()
 
     @staticmethod
     def _preview(settings, outputs, found):
@@ -2867,6 +2943,23 @@ class DaqDialog(QDialog):
         channels = len({settings.generator_output, settings.piezo_output} - {daq.OFF})
         rate, samples, actual = daq.choose_timing(settings.generator_frequency_hz, channels)
         return (f"Produces {actual:.6g} Hz: {samples} samples per cycle at "
+                f"{rate:,.0f} samples/s.")
+
+    @staticmethod
+    def _piezo_preview(settings, outputs, found):
+        """Say what the piezo triangle will produce once applied.
+
+        Args: settings is daq.DaqSettings; outputs the device's outputs;
+            found is the list of problems.
+        Returns: One line of text ("" outside triangle mode or with problems).
+        """
+        s = settings
+        if found or s.piezo_output == daq.OFF or s.piezo_mode != daq.TRIANGLE:
+            return ""
+        channels = len({s.generator_output, s.piezo_output} & set(outputs.analog))
+        rate, samples, actual = daq.choose_timing(s.piezo_frequency_hz, channels)
+        return (f"Produces a {actual:.6g} Hz triangle from {s.piezo_bottom_v:g} V to "
+                f"{s.piezo_top_v:g} V: {samples} samples per cycle at "
                 f"{rate:,.0f} samples/s.")
 
     def _connect_selected(self, *_):
@@ -2891,8 +2984,76 @@ class DaqDialog(QDialog):
         settings = self.settings()
         QSettings("ESPI", "espi_live").setValue(DAQ_SETTINGS_KEY,
                                                 json.dumps(settings.to_dict()))
+        if daq.drives(settings) and not self.controller.is_armed(settings):
+            self._ask_checklist(settings)
+            return
+        self._send(settings)
+
+    def _send(self, settings):
+        """Send settings to the device.
+
+        Args: settings is daq.DaqSettings.
+        Returns: None.
+        """
         self.state_label.setText("Outputs: applying…")
         self.controller.request("apply", settings=settings)
+
+    def _ask_checklist(self, settings):
+        """Show the safety checklist; once it is ticked off, apply the settings.
+
+        Args: settings is the daq.DaqSettings waiting to be applied.
+        Returns: None.
+        """
+        if self.checklist is not None:
+            self.checklist.close()
+        self.checklist = DaqChecklistDialog(self, settings)
+        self.checklist.accepted.connect(lambda: self._checklist_done(settings))
+        self.checklist.open()
+
+    def _checklist_done(self, settings):
+        """Record the ticked checklist with the controller and apply.
+
+        Args: settings is the daq.DaqSettings the checklist was shown for.
+        Returns: None.
+        """
+        self.controller.arm(settings)
+        self.window.log.write("NI DAQ: safety checklist ticked off for "
+                              f"{self.outputs.device.label if self.outputs else 'the device'}.")
+        self.refresh()
+        self._send(settings)
+
+    def _safety_text(self, settings):
+        """Say where the safety checklist stands for the connected device.
+
+        Args: settings is the form's daq.DaqSettings.
+        Returns: One line ("" with no device or the simulated one).
+        """
+        if self.outputs is None or self.outputs.device.simulated:
+            return ""
+        if daq.drives(settings) and self.controller.is_armed(settings) or (
+                not daq.drives(settings) and self.controller.checklist_done()):
+            return "Safety checklist: ticked off for what is switched on."
+        return ("Safety checklist: shown before a drive signal to this device, for the "
+                "outputs switched on (once per connection, and again for an output "
+                "switched on or reassigned later).")
+
+    def run_self_test(self):
+        """Ask for the amplifiers to be off, then run the output self-test.
+
+        Args: None.
+        Returns: None.
+        """
+        answer = QMessageBox.question(
+            self, "Test outputs",
+            f"Each analog output goes to {daq.SELF_TEST_V:g} V for a moment and back to "
+            "0 V, read back through the device's own internal channels.\n\n"
+            "Switch the MDT694A off (or unplug its EXT INPUT) and the specimen drive "
+            "before you start. Run the test?")
+        if answer != QMessageBox.Yes:
+            return
+        self._switch_off()
+        self.test_label.setText("Testing outputs…")
+        self.controller.request("self_test")
 
     def step(self, direction):
         """Move the held piezo voltage by one step, and apply it if the piezo is on.
@@ -2966,6 +3127,20 @@ class DaqDialog(QDialog):
         elif kind == "zeroed":
             self._switch_off()
             self.state_label.setText("Outputs: all at 0 V.")
+        elif kind == "fault":
+            self._switch_off()
+            self.problem_label.setText(
+                f"Self-check: {payload}. Every output was set to 0 V; find the cause "
+                "before switching anything on again.")
+            self.state_label.setText("Outputs: stopped by the self-check.")
+        elif kind == "self_test":
+            passed, lines = payload
+            colour = "#2b8a3e" if passed else "#c00000"
+            heading = "Self-test passed" if passed else "Self-test FAILED"
+            self.test_label.setText(f'<span style="color:{colour}"><b>{heading}.</b><br>'
+                                    + "<br>".join(html.escape(line) for line in lines)
+                                    + "</span>")
+            self.state_label.setText("Outputs: all at 0 V after the self-test.")
         elif kind == "failed":
             self._switch_off()
             self.problem_label.setText(
@@ -2997,6 +3172,442 @@ class DaqDialog(QDialog):
         if not self._set_combo(self.device_box, self.wanted_device):
             self.device_box.setCurrentIndex(0)
         self._connect_selected()
+
+WIRING_TITLE = "Where to plug in (NI USB-6251)"
+ROLE_COLORS = {daq.PIEZO_ROLE: "#d9480f", daq.GENERATOR_ROLE: "#1c7ed6"}
+# The drawing follows NI's "NI USB-6251 BNC Front Panel and Pinout" figure
+# (NI 6251 Specifications), in its own units; it is scaled to the widget.
+PANEL_SIZE = (1270.0, 2010.0)
+PANEL_TOP = 40.0  # below the blue end cap
+BNC_RADIUS = 64.0
+PANEL_INK, PANEL_FACE, PANEL_CAP = "#24405f", "#f6f6f2", "#2f5d9b"
+# Boxes printed on the panel: (title, x, y, width, height).
+PANEL_BOXES = (("DIGITAL AND TIMING I/O", 12, 88, 750, 372),
+               ("APFI", 12, 470, 310, 206),
+               ("ANALOG OUTPUT", 12, 686, 482, 205),
+               ("ANALOG INPUT", 12, 902, 750, 918),
+               ("POWER (+5 V)", 772, 88, 168, 108),
+               ("DIGITAL AND TIMING I/O", 772, 208, 486, 1612))
+# The screw terminals from top to bottom: (label as printed, socket name or "").
+SCREW_ROWS = (("USER 1", "user1"), ("USER 2", "user2"), ("D GND", ""), ("+5 V", ""),
+              ("D GND", ""), ("P0.0", ""), ("P0.1", ""), ("P0.2", ""), ("P0.3", ""),
+              ("D GND", ""), ("P0.4", ""), ("P0.5", ""), ("P0.6", ""), ("P0.7", ""),
+              ("D GND", ""), ("PFI 8/P2.0", "pfi8"), ("PFI 9/P2.1", "pfi9"),
+              ("PFI 10/P2.2", "pfi10"), ("PFI 11/P2.3", "pfi11"), ("D GND", ""),
+              ("PFI 12/P2.4", "pfi12"), ("PFI 13/P2.5", "pfi13"),
+              ("PFI 14/P2.6", "pfi14"), ("PFI 15/P2.7", "pfi15"), ("D GND", ""),
+              ("D GND", ""), ("AI GND", ""), ("AI SENSE", ""), ("NC", ""), ("CHS GND", ""))
+SCREW_TOP, SCREW_PITCH = 572.0, 38.66  # first row's centre and the row spacing
+SCREW_TERMINALS = {name: index for index, (_, name) in enumerate(SCREW_ROWS)
+                   if name.startswith("pfi")}
+
+
+def panel_positions():
+    """Place every BNC socket of the USB-6251 BNC in the drawing.
+
+    Args: None.
+    Returns: A dict from socket name ("ai0", "ao1", "pfi4", ...) to
+        (centre x, centre y, label as printed) in drawing units.
+    """
+    columns = (168, 340, 512, 684)
+    places = {}
+    for index in range(4):
+        x = columns[index]
+        places[f"pfi{index}"] = (x, 213, f"PFI {index}/P1.{index}")
+        places[f"pfi{index + 4}"] = (x, 380, f"PFI {index + 4}/P1.{index + 4}")
+        places[f"ai{index}"] = (x, 1027, f"AI {index}")
+        places[f"ai{index + 4}"] = (x, 1243, f"AI {index + 4}")
+    places.update(apfi0=(168, 597, "APFI 0"), ao0=(168, 812, "AO 0"),
+                  ao1=(340, 812, "AO 1"), user1=(938, 380, "USER 1"),
+                  user2=(1112, 380, "USER 2"))
+    return places
+
+
+def panel_place(terminal):
+    """Say where a socket is on the USB-6251 BNC.
+
+    Args: terminal is a socket name such as "ao1" or "pfi12".
+    Returns: "bnc", "screw" (PFI 8-15 on the terminal strip) or "" when
+        the USB-6251 BNC has no such socket.
+    """
+    if terminal in panel_positions():
+        return "bnc"
+    return "screw" if terminal in SCREW_TERMINALS else ""
+
+
+class DaqPanelView(QWidget):
+    """A drawing of the USB-6251 BNC's front panel with the sockets to use marked.
+
+    It follows NI's front-panel figure: the PFI BNCs at the top, APFI 0,
+    the analog outputs, the analog inputs with their FS/GS switches, and
+    on the right USER 1/2 and the screw-terminal strip. Each socket in use
+    gets its role's colour and the number of its line in the legend.
+    """
+
+    def __init__(self, parent=None):
+        """Start with nothing marked.
+
+        Args: parent is the owning widget.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.marks = {}  # socket -> (number, colour)
+        self.setMinimumSize(ui_scale.px(290), ui_scale.px(459))
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def set_connections(self, connections):
+        """Mark the sockets a list of connections uses.
+
+        Args: connections is a list of daq.Connection, numbered from 1 in order;
+            sockets this panel does not have are left out.
+        Returns: None.
+        """
+        self.marks = {item.terminal: (number, ROLE_COLORS[item.role])
+                      for number, item in enumerate(connections, 1)
+                      if panel_place(item.terminal)}
+        self.update()
+
+    def heightForWidth(self, width):
+        """Keep the drawing's proportions.
+
+        Args: width is the offered width in pixels.
+        Returns: The matching height.
+        """
+        return round(width * PANEL_SIZE[1] / PANEL_SIZE[0])
+
+    def hasHeightForWidth(self):
+        """Tell layouts that the height follows the width.
+
+        Args: None.
+        Returns: True.
+        """
+        return True
+
+    @staticmethod
+    def _font(base, size, bold=False):
+        """Make a font in drawing units.
+
+        Args: base is the widget's font; size is the pixel size in drawing
+            units; bold makes it bold.
+        Returns: A QFont.
+        """
+        font = QFont(base)
+        font.setPixelSize(size)
+        font.setBold(bold)
+        return font
+
+    def paintEvent(self, event):
+        """Draw the panel, its printed boxes and labels, the sockets and the marks.
+
+        Args: event is the Qt paint event.
+        Returns: None.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        scale = min(self.width() / PANEL_SIZE[0], self.height() / PANEL_SIZE[1])
+        painter.translate((self.width() - PANEL_SIZE[0] * scale) / 2,
+                          (self.height() - PANEL_SIZE[1] * scale) / 2)
+        painter.scale(scale, scale)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(PANEL_CAP))
+        painter.drawRoundedRect(QRectF(0, 0, PANEL_SIZE[0], PANEL_SIZE[1]), 40, 40)
+        painter.setBrush(QColor(PANEL_FACE))
+        painter.setPen(QPen(QColor(PANEL_INK), 3))
+        painter.drawRect(QRectF(0, PANEL_TOP, PANEL_SIZE[0], PANEL_SIZE[1] - 2 * PANEL_TOP))
+        painter.translate(0, PANEL_TOP)
+        self._draw_printing(painter)
+        for name, (x, y, label) in panel_positions().items():
+            self._draw_bnc(painter, name, x, y, label)
+        self._draw_terminals(painter)
+        painter.end()
+
+    def _draw_printing(self, painter):
+        """Draw the boxes, titles, switches, model text and logo printed on the panel.
+
+        Args: painter is the active QPainter, in drawing units.
+        Returns: None.
+        """
+        base = self.font()
+        for title, x, y, w, h in PANEL_BOXES:
+            painter.setPen(QPen(QColor(PANEL_INK), 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(x, y, w, h), 8, 8)
+            painter.setFont(self._font(base, 19, True))
+            painter.drawText(QRectF(x, y + 6, w, 26), Qt.AlignHCenter, title)
+        painter.setBrush(QColor("#9fd59a"))
+        painter.drawEllipse(QPointF(856, 158), 17, 17)  # the power light
+        for x, y in ((47, 242), (1224, 246), (47, 1785), (1224, 1785)):
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPointF(x, y), 23, 23)  # mounting screws
+        painter.setFont(self._font(base, 16))
+        for x in (168, 340, 512, 684):
+            for y in (1128, 1344):  # the FS/GS switch under each AI
+                painter.drawRect(QRectF(x - 34, y - 14, 68, 28))
+                painter.drawText(QRectF(x - 74, y - 12, 36, 24), Qt.AlignRight, "FS")
+                painter.drawText(QRectF(x + 40, y - 12, 36, 24), Qt.AlignLeft, "GS")
+        painter.drawText(QRectF(60, 1500, 300, 24), Qt.AlignHCenter, "Floating Source (FS)")
+        painter.drawText(QRectF(390, 1500, 300, 24), Qt.AlignHCenter,
+                         "Ground Ref. Source (GS)")
+        painter.drawText(QRectF(560, 552, 80, 50), Qt.AlignCenter, "⚠")
+        painter.setFont(self._font(base, 24, True))
+        painter.drawText(QRectF(940, 104, 318, 30), Qt.AlignRight, "NI USB-6251")
+        painter.setFont(self._font(base, 17))
+        painter.drawText(QRectF(900, 136, 358, 70), Qt.AlignRight,
+                         "8 Inputs, 16-bit, 1.25 MS/s\nMultifunction I/O with\n"
+                         "Correlated Digital I/O for USB")
+        for x in (864, 1038):  # the write-on name boxes under USER 1/2
+            painter.drawRect(QRectF(x, 478, 148, 48))
+            painter.drawText(QRectF(x, 452, 148, 24), Qt.AlignHCenter, "NAME")
+        painter.setPen(QPen(QColor(PANEL_INK), 2))
+        painter.drawPolyline([QPointF(876, 388), QPointF(832, 428), QPointF(832, 572),
+                              QPointF(878, 572)])
+        painter.drawPolyline([QPointF(1174, 388), QPointF(1215, 428), QPointF(1215, 608),
+                              QPointF(1110, 608)])
+        painter.setFont(self._font(base, 44, True))
+        painter.setPen(QColor(PANEL_INK))
+        painter.drawText(QRectF(0, 1835, PANEL_SIZE[0], 100), Qt.AlignCenter,
+                         "NATIONAL INSTRUMENTS")
+
+    def _draw_bnc(self, painter, name, x, y, label):
+        """Draw one BNC socket with its printed name, and its mark when in use.
+
+        Args: painter is the active QPainter; name is the socket ("ao1");
+            x and y are its centre; label is the name printed above it.
+        Returns: None.
+        """
+        mark = self.marks.get(name)
+        centre = QPointF(x, y)
+        if mark:
+            painter.setPen(QPen(QColor(mark[1]), 14))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(centre, BNC_RADIUS + 12, BNC_RADIUS + 12)
+        painter.setPen(QPen(QColor(PANEL_INK), 3))
+        painter.setBrush(QColor("#c9cdd2"))
+        painter.drawEllipse(centre, BNC_RADIUS, BNC_RADIUS)
+        painter.setBrush(QColor("#a7adb4"))
+        painter.drawEllipse(centre, BNC_RADIUS * 0.78, BNC_RADIUS * 0.78)
+        painter.setBrush(QColor("#2a2f35"))
+        painter.drawEllipse(centre, BNC_RADIUS * 0.47, BNC_RADIUS * 0.47)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#d8b45a"))
+        painter.drawEllipse(centre, 9, 9)
+        font = self._font(self.font(), 17, mark is not None)
+        painter.setFont(font)
+        # As on NI's figure: the name sits just above the socket, under the box title.
+        box = QRectF(x - 110, y - 93, 220, 26)
+        if mark:  # a tag in the role's colour, so the ring cannot hide the name
+            width = QFontMetrics(font).horizontalAdvance(label) + 16
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(mark[1]))
+            painter.drawRoundedRect(QRectF(x - width / 2, box.y(), width, box.height()), 6, 6)
+        painter.setPen(QColor("white") if mark else QColor(PANEL_INK))
+        painter.drawText(box, Qt.AlignCenter, label)
+        if mark:
+            self._draw_badge(painter, QPointF(x + BNC_RADIUS * 0.9, y - BNC_RADIUS * 0.9),
+                             mark)
+
+    def _draw_badge(self, painter, centre, mark):
+        """Draw a numbered badge in a role's colour.
+
+        Args: painter is the active QPainter; centre is a QPointF; mark is
+            (number, colour).
+        Returns: None.
+        """
+        painter.setPen(QPen(QColor("white"), 4))
+        painter.setBrush(QColor(mark[1]))
+        painter.drawEllipse(centre, 28, 28)
+        painter.setFont(self._font(self.font(), 30, True))
+        painter.drawText(QRectF(centre.x() - 28, centre.y() - 28, 56, 56), Qt.AlignCenter,
+                         str(mark[0]))
+
+    def _draw_terminals(self, painter):
+        """Draw the screw-terminal strip with its printed labels and any marks.
+
+        Args: painter is the active QPainter, in drawing units.
+        Returns: None.
+        """
+        top = SCREW_TOP - SCREW_PITCH / 2
+        painter.setPen(QPen(QColor(PANEL_INK), 3))
+        painter.setBrush(QColor("#2f3338"))
+        painter.drawRect(QRectF(878, top - 6, 150, SCREW_PITCH * len(SCREW_ROWS) + 30))
+        for index, (label, name) in enumerate(SCREW_ROWS):
+            y = SCREW_TOP + index * SCREW_PITCH
+            mark = self.marks.get(name) if name else None
+            if mark:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(mark[1]))
+                painter.drawRect(QRectF(880, y - SCREW_PITCH / 2, 146, SCREW_PITCH))
+            painter.setPen(QPen(QColor("#9aa1a8"), 2))
+            painter.setBrush(QColor("#4a4f55"))
+            painter.drawRect(QRectF(902, y - 14, 50, 28))  # the wire opening
+            painter.setBrush(QColor("#b9bec4"))
+            painter.drawEllipse(QPointF(976, y), 13, 13)  # the screw
+            painter.drawLine(QPointF(967, y - 9), QPointF(985, y + 9))
+            painter.setFont(self._font(self.font(), 17, mark is not None))
+            painter.setPen(QColor(mark[1]) if mark else QColor(PANEL_INK))
+            painter.drawText(QRectF(1045, y - 13, 210, 26), Qt.AlignLeft | Qt.AlignVCenter,
+                             label)
+            if mark:
+                self._draw_badge(painter, QPointF(848, y), mark)
+
+
+class CheckLabel(QLabel):
+    """A wrapping label that ticks its checkbox when clicked, as a checkbox's own text does."""
+
+    def __init__(self, text, box):
+        """Show text beside a checkbox.
+
+        Args: text is the sentence; box is the QCheckBox it belongs to.
+        Returns: None.
+        """
+        super().__init__(text)
+        self.box = box
+        self.setWordWrap(True)
+        self.setBuddy(box)
+
+    def mouseReleaseEvent(self, event):
+        """Toggle the checkbox on a click.
+
+        Args: event is the Qt mouse event.
+        Returns: None.
+        """
+        self.box.toggle()
+        super().mouseReleaseEvent(event)
+
+
+class DaqChecklistDialog(QDialog):
+    """The safety checklist the user ticks off before drive signals reach a real device.
+
+    "Allow drive signals" stays disabled until every box is ticked. It is
+    shown once per connection, and again when the outputs are reassigned.
+    """
+
+    def __init__(self, parent, settings):
+        """List the checks for these settings' output assignment.
+
+        Args: parent is the DaqDialog; settings is the daq.DaqSettings about
+            to be applied.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Before the DAQ drives anything")
+        self.resize(ui_scale.px(520), ui_scale.px(380))
+        intro = QLabel("Tick off each check for the outputs you are switching on. Until "
+                       "you do, ESPI live sends no drive signal to this device; this is "
+                       "asked once per connection, and again for an output switched on or "
+                       "reassigned later.")
+        intro.setWordWrap(True)
+        self.boxes, self.labels = [], []
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        for text in daq.checklist_items(settings):  # long sentences wrap beside each box
+            box = QCheckBox()
+            box.toggled.connect(self._update)
+            label = CheckLabel(text, box)
+            row = QHBoxLayout()
+            row.addWidget(box, 0, Qt.AlignTop)
+            row.addWidget(label, 1)
+            layout.addLayout(row)
+            self.boxes.append(box)
+            self.labels.append(label)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox()
+        self.allow_button = buttons.addButton("Allow drive signals",
+                                              QDialogButtonBox.AcceptRole)
+        cancel = buttons.addButton(QDialogButtonBox.Cancel)
+        for button in buttons.buttons():
+            button.setAutoDefault(False)
+        buttons.accepted.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+        self._update()
+
+    def _update(self, *_):
+        """Enable "Allow drive signals" once every box is ticked.
+
+        Args: _ is the toggled state (ignored).
+        Returns: None.
+        """
+        self.allow_button.setEnabled(all(box.isChecked() for box in self.boxes))
+
+
+class DaqWiringDialog(QDialog):
+    """Show where each cable goes, for the DAQ window's current settings."""
+
+    def __init__(self, parent):
+        """Build the drawing, the numbered list and the safety notes.
+
+        Args: parent is the DaqDialog.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle(WIRING_TITLE)
+        room = parent.screen().availableGeometry()  # a large interface size must fit
+        self.resize(min(ui_scale.px(920), room.width() * 9 // 10),
+                    min(ui_scale.px(720), room.height() * 9 // 10))
+        self.panel = DaqPanelView(self)
+        self.legend = QLabel()
+        self.legend.setWordWrap(True)
+        self.legend.setTextFormat(Qt.RichText)
+        self.legend.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.device_note = QLabel()
+        self.device_note.setWordWrap(True)
+        self.device_note.setStyleSheet("color: gray;")
+        source = QLabel("Drawn from NI's “NI USB-6251 BNC Front Panel and Pinout” figure.")
+        source.setWordWrap(True)
+        source.setStyleSheet("color: gray;")
+        safety = QLabel(
+            "<b>Never connect the MDT694A's OUTPUT (up to 150 V) to the DAQ.</b> "
+            "Switch the MDT694A on after ESPI live is running and the device is "
+            "connected, and off before you unplug the DAQ: its outputs are undefined "
+            "for a moment while it powers up. The Wavetek function generator is not "
+            "needed in the piezo chain: the DAQ makes the triangle.")
+        safety.setWordWrap(True)
+        safety.setStyleSheet("color:#c00000;")
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        side = QVBoxLayout()
+        side.addWidget(self.legend)
+        side.addWidget(self.device_note)
+        side.addWidget(safety)
+        side.addStretch(1)
+        side.addWidget(source)
+        side.addWidget(buttons)
+        layout = QHBoxLayout(self)
+        layout.addWidget(self.panel, 3)
+        layout.addLayout(side, 2)
+
+    def show_settings(self, settings, device=None):
+        """Mark the sockets and list the cables for these settings.
+
+        Args: settings is daq.DaqSettings; device is the connected
+            daq.DeviceInfo, or None.
+        Returns: None.
+        """
+        connections = daq.wiring(settings)
+        self.panel.set_connections(connections)
+        lines = []
+        for number, item in enumerate(connections, 1):
+            colour = ROLE_COLORS[item.role]
+            where = {"bnc": "", "screw": " (screw terminal)"}.get(
+                panel_place(item.terminal), " (not on the USB-6251 BNC)")
+            lines.append(f'<p><span style="color:{colour}; font-weight:bold;">'
+                         f"{number}. {item.label}{where}</span> → {item.target} "
+                         f"<i>({item.role.lower()})</i><br>{item.note}</p>")
+        self.legend.setText("".join(lines) or
+                            "<p>Nothing to plug in yet: assign the piezo driver or the "
+                            "frequency generator to an output.</p>")
+        model = device.model if device is not None else ""
+        if device is None or device.simulated:
+            self.device_note.setText("Drawn for the USB-6251 BNC. The simulated device "
+                                     "has no sockets: this is where the real one's are.")
+        elif "6251" in model:
+            self.device_note.setText(f"Connected: {device.label}.")
+        else:
+            self.device_note.setText(f"Connected: {device.label}. The drawing shows the "
+                                     "USB-6251 BNC; this device's sockets may differ.")
 
 
 class StatusLayout(QLayout):
@@ -6096,6 +6707,7 @@ class MainWindow(QMainWindow):
         """
         if self.daq is None or self.closing:
             return
+        self.daq.heartbeat()  # the DAQ zeroes the outputs if this stops while they are on
         later = []
         while True:
             try:
@@ -6141,6 +6753,11 @@ class MainWindow(QMainWindow):
             # Everything is at 0 V after connecting, so the generator stays off.
             base = replace(saved, device=payload.device.name, generator_on=False,
                            piezo_on=False)
+            if not self.daq.is_armed(replace(base, piezo_on=True)):
+                self._attach_stepper(None)
+                self.log.write("Phase view: the NI DAQ piezo waits for the safety checklist "
+                               "(Devices > NI DAQ…, then Apply with the piezo on).")
+                return
             self._attach_stepper(phase.PiezoStepper(self.daq, base,
                                                     payload.device.simulated))
         elif kind == "applied":
@@ -6152,7 +6769,9 @@ class MainWindow(QMainWindow):
                     self.daq, applied, device is not None and device.simulated))
             else:
                 self._attach_stepper(None)
-        elif kind in ("zeroed", "failed", "closed"):
+        elif kind in ("zeroed", "failed", "closed", "fault"):
+            if kind == "fault":
+                self.log.write(f"NI DAQ self-check: {payload}. Every output was set to 0 V.")
             self.set_daq_drive(daq.Drive())
             if self.phase_stepper is not None:
                 self.log.write("Phase view: piezo stepping stopped (the NI DAQ outputs "

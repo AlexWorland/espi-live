@@ -1,8 +1,9 @@
 """In-memory stand-in for NI's nidaqmx package, under the real pyLabLib NIDAQ.
 
 Only the surface pyLabLib's NIDAQ uses for analog voltage outputs and
-counter pulse outputs is modelled: Task (AO and CO channels, timing, output
-stream, write, start, stop, close), system.Device, system.System and the real
+counter pulse outputs is modelled, plus the finite AI read of the internal
+"_aoN_vs_aognd" channels the self-check uses: Task (AO, CO and AI channels,
+timing, output stream, write, read, start, stop, close), system.Device, system.System and the real
 nidaqmx constants and errors. A FakeHardware records what reaches each
 output, so tests can check the volts and waveforms a device would produce.
 Install it with install(), which patches pyLabLib's module-level nidaqmx.
@@ -38,6 +39,8 @@ class FakeHardware:
         self.tristated = []  # terminals released by pyLabLib
         self.fail = {}  # operation name -> exception to raise once
         self.closed_tasks = 0
+        self.readback_shift = {}  # "ao1" -> volts added to what the AO reads back as
+        self.reads = 0  # AI reads of the outputs
 
     def check(self, operation):
         """Raise an injected failure for an operation, once.
@@ -102,6 +105,18 @@ class FakeChannels(list):
         Returns: The channel.
         """
         self.task.hardware.check("add_ao")
+        channel = FakeAOChannel(physical_channel, name_to_assign_to_channel)
+        self.append(channel)
+        return channel
+
+    def add_ai_voltage_chan(self, physical_channel, name_to_assign_to_channel="",
+                            terminal_config=None, min_val=-5.0, max_val=5.0):
+        """Add an AI channel; only the internal "_aoN_vs_aognd" ones read anything.
+
+        Args: physical_channel such as "Dev1/_ao1_vs_aognd"; the rest as in nidaqmx.
+        Returns: The channel.
+        """
+        self.task.hardware.check("add_ai")
         channel = FakeAOChannel(physical_channel, name_to_assign_to_channel)
         self.append(channel)
         return channel
@@ -174,7 +189,7 @@ class FakeTask:
         self.hardware.check("task")
         self.ao_channels = FakeChannels(self)
         self.co_channels = FakeChannels(self)
-        self.ai_channels = []
+        self.ai_channels = FakeChannels(self)
         self.di_channels = []
         self.timing = FakeTiming()
         self.out_stream = SimpleNamespace(regen_mode=None)
@@ -196,6 +211,23 @@ class FakeTask:
         if auto_start:
             self.start()
         return rows.shape[1]
+
+    def read(self, number_of_samples_per_channel=1, timeout=10.0):
+        """Read the AI channels: each internal channel reads its AO's output.
+
+        Args: number_of_samples_per_channel and timeout as in nidaqmx.
+        Returns: A list of samples for one channel, else one list per channel.
+        """
+        self.hardware.check("read")
+        self.hardware.reads += 1
+        rows = []
+        for channel in self.ai_channels:
+            name = _short(channel.physical_channel.name)  # "_ao1_vs_aognd"
+            output = name.strip("_").split("_")[0]
+            held = np.asarray(self.hardware.ao.get(output, 0.0), dtype=float).ravel()
+            samples = np.resize(held, number_of_samples_per_channel)
+            rows.append(list(samples + self.hardware.readback_shift.get(output, 0.0)))
+        return rows[0] if len(rows) == 1 else rows
 
     def _counter(self):
         """Find this task's counter record.
@@ -275,7 +307,8 @@ class FakeDevice:
         self.ao_physical_chans = SimpleNamespace(
             channel_names=[f"{name}/ao0", f"{name}/ao1"])
         self.co_physical_chans = SimpleNamespace(
-            channel_names=[f"{name}/ctr0", f"{name}/ctr1"])
+            # The real USB-6251 also lists its frequency output here.
+            channel_names=[f"{name}/ctr0", f"{name}/ctr1", f"{name}/freqout"])
         self.terminals = ([f"/{name}/PFI{index}" for index in range(16)]
                           + [f"/{name}/20MHzTimebase", f"/{name}/ao/SampleClock"])
 

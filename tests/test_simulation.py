@@ -11,7 +11,7 @@ from unittest import mock
 import numpy as np
 
 from espi_live import simulation
-from espi_live.daq import HOLD, SINE, Drive
+from espi_live.daq import HOLD, SINE, TRIANGLE, Drive
 from espi_live.simulation import (DEFAULT_OBJECT, K_PER_NM, SIMULATED_OBJECTS,
                                   PIEZO_TRIANGLE_HZ, PIEZO_TRIANGLE_NM, DemoSource,
                                   FringeTable, bessel_j, bessel_zero, deformation_nm,
@@ -678,6 +678,11 @@ class VibrationTests(unittest.TestCase):
         self.assertIn("piezo sine 0.20 V at 90°", piezo)
         self.assertIn("piezo holds 0.05 V",
                       object_note("Still", Drive(piezo_mode=HOLD, piezo_v=0.05)))
+        triangle = object_note("Follow DAQ", Drive(device="Sim", piezo_mode=TRIANGLE,
+                                                   piezo_v=5.0, piezo_amplitude_v=4.5,
+                                                   piezo_frequency_hz=0.281))
+        self.assertIn("piezo triangle 0.50–9.50 V at 0.281 Hz", triangle)
+        self.assertIn("not simulated", triangle)
         self.assertIn("piezo holds 0.01 V",
                       object_note("Vibration", Drive(piezo_mode=SINE, piezo_v=0.01,
                                                      piezo_amplitude_v=0.2)))

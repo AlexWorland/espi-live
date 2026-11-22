@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-11-22 — The NI DAQ drives the piezo amplifier with a triangle, never below 0 V
+
+### Previous state
+
+- In the lab, a Wavetek Model 19 function generator fed a triangle (about 0.28 Hz, +1 V to +10 V) into the Thorlabs MDT694A piezo amplifier's EXT INPUT. The program could not make that ramp: the DAQ window's piezo driver only held a level or followed the frequency generator with a sine.
+- The piezo driver accepted negative levels down to its safety limit. The MDT694A takes 0–10 V, and a negative input drives the piezo below 0 V.
+
+### Current state
+
+- **Triangle at its own frequency**, a new piezo mode in **Devices → Frequency generator and piezo (NI DAQ)…**: **Bottom**, **Top** and **Frequency** (0.01–1000 Hz). The ramp starts at the bottom and is built from whole samples of the 20 MHz clock; the line under the controls says the frequency the device really produces. Both analog outputs share one sample clock, so the triangle needs the frequency generator off or on a counter, and the window says so.
+- The piezo driver never goes below 0 V in any mode, phase steps included. The Voltage, Bottom and Top boxes start at 0 V, and settings or steps that would go lower are refused in words.
+- **Where to plug in…** at the bottom of the DAQ window opens a drawing of the USB-6251 BNC's front panel, laid out after NI's own front-panel figure (PFI BNCs at the top, APFI 0, the analog outputs, the analog inputs with their FS/GS switches, USER 1/2 and the 30-way screw-terminal strip), with the sockets the current settings use marked and numbered, and beside it where each cable goes, plus the safety notes. It follows the form while open; a counter on PFI 8–15 is marked on its screw-terminal row, since those have no BNC.
+- **Safety checklist before any drive signal.** The first Apply that switches an output on for a real NI device opens a checklist (MDT694A knob at zero, only the DAQ's cable on its EXT INPUT with the Wavetek unplugged, its OUTPUT never to the DAQ, the safety limit and VOLT LIMIT suit the piezo, the generator's cable and limit, someone watching). It lists checks only for the outputs being switched on (the piezo's when **Piezo on** is ticked, the generator's when **Generator on** is), plus the watcher check. **Allow drive signals** stays off until every box is ticked. Each role is allowed once per connection; switching on another role, or moving one to another socket, asks again for it. The simulated device never asks. The gate is in the DAQ controller, so Phase-view stepping from saved settings also waits for it: at startup the Phase view no longer starts stepping a real piezo by itself.
+- **Self-checks.** Every analog output is set to 0 V the moment a device connects (clearing anything a crash or another program left on). About once a second the outputs are read back through the USB-6251's internal `_ao0_vs_aognd`/`_ao1_vs_aognd` channels (no wiring); a reading outside what was written (±0.1 V) sets every output to 0 V and says which output read what. If the window stops responding for 2 s while an output is on, the DAQ thread sets everything to 0 V by itself. **Test outputs…** steps each output to 0.5 V and back and checks the readback (asked first: switch the MDT694A off).
+- Wiring: the DAQ's **AO 1** BNC goes to the MDT694A's **EXT INPUT**; the Wavetek is no longer needed in the piezo chain. Set the piezo's safety limit to 10 V at most. `docs/notes/piezo-thorlabs-mdt694a-wiring.md` has the instruments' specifications, the scope reading of the old ramp and the wiring.
+- The real USB-6251 also lists its `freqout` channel among its counter outputs; the DAQ window offered it as a generator output named "FREQOUT (sine)", which pyLabLib cannot use for the square wave. Only `ctr` counters are listed now.
+- Dummy mode does not sweep the simulated reference mirror with a DAQ triangle: the image keeps the triangle's centre, and the **Follow DAQ** note says so.
+
 ## 2026-11-22 — The iPhone difference view says why it has no image, and falls back to luma video
 
 ### Previous state
