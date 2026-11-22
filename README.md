@@ -33,6 +33,7 @@ scripts/
   camera_live_control.py   standalone live camera-control helper
   check_analog_luma.py     camera-PC check of the USB-Live2's luma path (raw YUY2 vs BGR)
 experiments/          candidate, test and older working scripts
+  espi_diff_cpp/      C++ prototype: camera -> |frame - previous or reference| -> window (no Python, no OpenCV)
 ios/ESPICamera/       the ESPI Camera iOS app (iPhone as a USB camera; SwiftUI, XcodeGen, TestFlight)
 docs/
   camera/             curated PySpin / BFS-U3-63S4M-C / other-model / acquisition / XC-ST50 + USB-Live2 notes
@@ -226,6 +227,8 @@ Double-click `scripts/windows/SETUP AND START ESPI.bat`. It checks for Python 3.
 ## Other variants
 
 `experiments/espi_live_bfs_u3_200s6m.py` is a standalone full copy of the viewer adapted for the 20 MP BFS-U3-200S6M-C (15 fps default, 1000 ms image timeout). It predates the package layout and has not been reconciled with the package.
+
+`experiments/espi_diff_cpp/` is a separate C++ prototype that shares no code with the package: it opens a FLIR camera (Spinnaker C++), a capture device (SDL3) or a synthetic interferometer, subtracts frames with its own code and shows the difference live. Build and usage are in its [README](experiments/espi_diff_cpp/README.md).
 
 See [CHANGELOG.md](CHANGELOG.md) for history and [AGENTS.md](AGENTS.md) for contributor and agent guidance.
 
