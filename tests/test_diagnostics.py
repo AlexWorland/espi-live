@@ -7,6 +7,7 @@ import numpy as np
 
 from espi_live import diagnostics
 from espi_live.engine import Settings
+from classic_pipeline import classic_settings
 from list_log import ListLog
 
 
@@ -56,7 +57,7 @@ class SummaryTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        plain = diagnostics.settings_summary(Settings())
+        plain = diagnostics.settings_summary(classic_settings())
         self.assertIn("mode=Raw frames_back=1", plain)
         self.assertIn("outlier_filter=off", plain)
         self.assertIn("scaling=stretch clip 0%", plain)
@@ -64,19 +65,26 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("average=1 block", plain)
         self.assertIn("smoothing=off", plain)
         self.assertIn("exposure=8000us gain=0dB fps=30", plain)
-        busy = diagnostics.settings_summary(Settings(
+        busy = diagnostics.settings_summary(classic_settings(
             mode="Previous", noise_reduction=40, average=8, rolling=True,
             smoothing=5, smoothing_method="Median", frames_back=4,
             outlier_filter=3, scale_range=False, difference_gain=6))
         self.assertIn("mode=Previous frames_back=4 noise_reduction=40", busy)
         self.assertIn("outlier_filter=3px", busy)
         self.assertIn("scaling=gain x6 exposure", busy)
-        ordered = diagnostics.settings_summary(Settings(
+        ordered = diagnostics.settings_summary(classic_settings(
             scale_range=False, gain_before_average=True, average_multiplier=2.5))
         self.assertIn("scaling=gain x42 before average, multiplier x2.5", ordered)
         self.assertIn("average=8 rolling", busy)
         self.assertIn("smoothing=Median 5", busy)
         self.assertNotIn("clahe", busy)
+        self.assertNotIn("phase=", busy)
+        self.assertIn("ref_frames=1 ", plain)
+        default = diagnostics.settings_summary(Settings())
+        self.assertIn("average=4 camera-frames-first", default)
+        self.assertIn("ref_frames=16 smoothing=Oriented 11", default)
+        phase = diagnostics.settings_summary(Settings(mode="Phase"))
+        self.assertIn("phase=5-step filter=9px settle=2 exposure", phase)
 
     def test_sharpness_falls_with_blur_for_large_and_small_frames(self):
         """Blur lowers the value; small frames are measured without resizing.

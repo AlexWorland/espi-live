@@ -21,6 +21,7 @@ from espi_live.engine import (ComparePacket, Engine, FramePacket, Settings,
                               range_text, reference_text, view_hint)
 from espi_live.processing import (ESPIProcessor, PeakHold, RangeTracker,
                                   ReferenceCapture, watermark_demo)
+from classic_pipeline import CLASSIC_PIPELINE, classic_settings
 from list_log import ListLog
 from test_engine import wait_until
 
@@ -105,7 +106,7 @@ class ReferenceHelperTests(unittest.TestCase):
         """
         from espi_live.qt_app import LONGEST_HINT
         processor = ESPIProcessor()
-        s = Settings(mode="Reference")
+        s = classic_settings(mode="Reference")
         hints = [view_hint(s, processor)]
         self.assertIn("press F", hints[-1])
         processor.start_reference(30, 0.0, 0.0)
@@ -153,13 +154,13 @@ class ReferenceHelperTests(unittest.TestCase):
         Returns: None.
         """
         diff = np.tile(np.arange(0, 6, dtype=np.uint8), (64, 16))
-        image, levels = finish_difference(diff, Settings())
+        image, levels = finish_difference(diff, classic_settings())
         self.assertEqual(levels, (0, 5, 0, 255))
         self.assertEqual(int(image.max()), 255)
         image, levels = finish_difference(
-            flat(3), Settings())
+            flat(3), classic_settings())
         self.assertEqual(levels, (3, 3, 0, 0))
-        raw = Settings(scale_range=False, difference_gain=1.0, invert=True)
+        raw = classic_settings(scale_range=False, difference_gain=1.0, invert=True)
         image, levels = finish_difference(diff, raw)
         self.assertEqual(levels, (0, 5, 0, 5))
         np.testing.assert_array_equal(image, cv2.bitwise_not(diff))
@@ -172,28 +173,28 @@ class ReferenceHelperTests(unittest.TestCase):
         Returns: None.
         """
         diff = np.tile(np.arange(0, 6, dtype=np.uint8), (64, 16))
-        gained = Settings(scale_range=False, difference_gain=10.0)
+        gained = classic_settings(scale_range=False, difference_gain=10.0)
         image, levels = finish_difference(diff, gained)
         self.assertEqual(levels, (0, 5, 0, 50))
         self.assertEqual(int(image.max()), 50)
         image, levels = finish_difference(diff, gained, labview_order=True)
         np.testing.assert_array_equal(image, diff)  # gain was applied before averaging
-        normalized = Settings(normalize_window=15)
+        normalized = classic_settings(normalize_window=15)
         image, levels = finish_difference(diff, normalized)
         self.assertEqual(levels, (0, 5, None, None))
         self.assertIsNone(finish_difference(diff, normalized, measure=False)[1])
         self.assertEqual(image.shape, diff.shape)
         seen = []
         peaks = PeakHold()
-        finish_difference(diff, Settings(peak_hold_s=1.0), peaks=peaks,
+        finish_difference(diff, classic_settings(peak_hold_s=1.0), peaks=peaks,
                           now=1.0, sample=lambda img, now: seen.append((img.shape, now)))
         self.assertEqual(seen, [(diff.shape, 1.0)])
         ranges = RangeTracker()
         loud = np.full((8, 8), 100, np.uint8)
         loud[0, 0] = 0
-        finish_difference(loud, Settings(steady_range_s=10.0), ranges=ranges, now=0.0)
+        finish_difference(loud, classic_settings(steady_range_s=10.0), ranges=ranges, now=0.0)
         _, levels = finish_difference(
-            diff, Settings(steady_range_s=10.0), ranges=ranges, now=0.1)
+            diff, classic_settings(steady_range_s=10.0), ranges=ranges, now=0.1)
         self.assertGreater(levels[1], 5)  # the range shrinks only slowly
 
     def test_range_text(self):
@@ -202,9 +203,9 @@ class ReferenceHelperTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        self.assertEqual(range_text((1, 9, 0, 255), Settings()),
+        self.assertEqual(range_text((1, 9, 0, 255), classic_settings()),
                          "Input: 1–9    Scaled: 0–255")
-        self.assertEqual(range_text((1, 9, None, None), Settings(normalize_window=15)),
+        self.assertEqual(range_text((1, 9, None, None), classic_settings(normalize_window=15)),
                          "Input: 1–9    Local normalization 15 px")
 
     def test_condition_difference(self):
@@ -215,17 +216,17 @@ class ReferenceHelperTests(unittest.TestCase):
         """
         diff = np.array([[1, 5], [9, 3]], np.uint8)
         frame = flat(100, (2, 2))
-        out, labview = condition_difference(diff, frame, Settings())
+        out, labview = condition_difference(diff, frame, classic_settings())
         self.assertFalse(labview)
         np.testing.assert_array_equal(out, diff)
-        out, _ = condition_difference(diff, frame, Settings(threshold=4))
+        out, _ = condition_difference(diff, frame, classic_settings(threshold=4))
         np.testing.assert_array_equal(out, [[0, 5], [9, 0]])
         out, labview = condition_difference(
-            diff, frame, Settings(scale_range=False, gain_before_average=True,
+            diff, frame, classic_settings(scale_range=False, gain_before_average=True,
                                   difference_gain=2.0))
         self.assertTrue(labview)
         np.testing.assert_array_equal(out, diff * 2)
-        out, _ = condition_difference(diff, frame, Settings(even_brightness=True))
+        out, _ = condition_difference(diff, frame, classic_settings(even_brightness=True))
         self.assertEqual(out.shape, diff.shape)
 
     def test_present_flips_then_watermarks(self):
@@ -257,6 +258,7 @@ class EngineReferenceTests(unittest.TestCase):
         paths.OUTPUT_DIR = self.tmp.name
         self.log = ListLog()
         self.engine = Engine(self.log)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.processor = ESPIProcessor()
 
     def tearDown(self):
@@ -325,7 +327,7 @@ class EngineReferenceTests(unittest.TestCase):
         """
         self.processor.start_reference(2, 0.0, 0.0, manual=False)
         self.processor.rolling = flat(5).astype(np.float32)
-        s = Settings(rolling=True)
+        s = classic_settings(rolling=True)
         self.engine._reference_frame(self.processor, flat(1), s)
         self.engine._reference_frame(self.processor, flat(3), s)
         np.testing.assert_array_equal(self.processor.ref, flat(2))
@@ -338,13 +340,13 @@ class EngineReferenceTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        self.engine._note_refresh_overlap(Settings(ref_refresh_s=0.5, ref_frames=30), None)
+        self.engine._note_refresh_overlap(classic_settings(ref_refresh_s=0.5, ref_frames=30), None)
         self.assertTrue(self.logged("averaging 30 frames takes about 1.0 s, longer "
                                     "than the 0.5 s refresh"))
         self.log.lines.clear()
-        for s, fps in ((Settings(ref_refresh_s=2.0, ref_frames=30), 30.0),
-                       (Settings(ref_refresh_s=0.0, ref_frames=30), None),
-                       (Settings(ref_refresh_s=0.1, ref_frames=1), None)):
+        for s, fps in ((classic_settings(ref_refresh_s=2.0, ref_frames=30), 30.0),
+                       (classic_settings(ref_refresh_s=0.0, ref_frames=30), None),
+                       (classic_settings(ref_refresh_s=0.1, ref_frames=1), None)):
             self.engine._note_refresh_overlap(s, fps)
         self.assertEqual(self.log.lines, [])
 
@@ -379,7 +381,7 @@ class EngineReferenceTests(unittest.TestCase):
         """
         self.assertIsNone(self.engine.latest_compare())
         self.engine.set_compare(True)
-        s = Settings(mode="Reference", gamma=1.5, average=4)
+        s = classic_settings(mode="Reference", gamma=1.5, average=4)
         self.processor.set_reference(flat(20), 0.0, 0.0, frames=8)
         self.processor.start_reference(8, 0.0, 0.0)
         packet = FramePacket(7, flat(99), 1.5, "Reference", False)
@@ -403,7 +405,7 @@ class EngineReferenceTests(unittest.TestCase):
         Returns: None.
         """
         ramp = np.tile(np.arange(0, 120, dtype=np.uint8), (80, 1))
-        s = Settings(mode="Raw", flip_horizontal=True)
+        s = classic_settings(mode="Raw", flip_horizontal=True)
         self.processor.set_reference(flat(10), 0.0, 0.0)
         self.engine.demo_source = object()  # demo: watermark every image
         packet = FramePacket(3, flat(0), 1.0, "Raw", True)
@@ -415,7 +417,7 @@ class EngineReferenceTests(unittest.TestCase):
         np.testing.assert_array_equal(compare.current.image, watermark_demo(ramp[:, ::-1]))
         self.assertTrue(compare.demo and compare.difference.demo)
         self.assertIn("no averaging (the view is Raw)", compare.difference_info)
-        s = Settings(mode="Reference", average=3, rolling=True)
+        s = classic_settings(mode="Reference", average=3, rolling=True)
         self.processor.set_reference(flat(10, (40, 120)), 0.0, 0.0)  # other size
         self.engine._publish_compare(self.processor, ramp, s, packet, 1.0)
         compare = self.engine.latest_compare()
@@ -423,7 +425,7 @@ class EngineReferenceTests(unittest.TestCase):
         self.assertIsNone(compare.difference)
         self.assertEqual(compare.difference_info, "the Reference view, average 3 rolling")
         self.processor.clear_reference()
-        self.engine._publish_compare(self.processor, ramp, Settings(mode="Reference"),
+        self.engine._publish_compare(self.processor, ramp, classic_settings(mode="Reference"),
                                      packet, 1.0)
         self.assertEqual(self.engine.latest_compare().baseline_info, "none yet")
         self.assertIn("no averaging", self.engine.latest_compare().difference_info)
@@ -455,7 +457,7 @@ class EngineReferenceTests(unittest.TestCase):
         frames = [rng.integers(0, 256, (40, 60), dtype=np.uint8) for _ in range(8)]
         for back, flip in ((1, False), (3, True)):
             self.processor = ESPIProcessor()
-            s = Settings(mode="Previous", frames_back=back, flip_horizontal=flip)
+            s = classic_settings(mode="Previous", frames_back=back, flip_horizontal=flip)
             compare = self.feed_previous(s, frames)
             earlier = frames[-1 - back]
             mirror = (lambda image: image[:, ::-1]) if flip else (lambda image: image)
@@ -478,7 +480,7 @@ class EngineReferenceTests(unittest.TestCase):
         Returns: None.
         """
         frames = [flat(10), flat(20), flat(30)]
-        s = Settings(mode="Previous", frames_back=2)
+        s = classic_settings(mode="Previous", frames_back=2)
         for frame in frames:
             self.processor.difference(frame, "Previous", 2)
         np.testing.assert_array_equal(self.processor.previous, frames[0])
@@ -497,7 +499,7 @@ class EngineReferenceTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        compare = self.feed_previous(Settings(mode="Previous", frames_back=3),
+        compare = self.feed_previous(classic_settings(mode="Previous", frames_back=3),
                                      [flat(10), flat(20)])
         self.assertIsNone(compare.baseline)
         self.assertIsNone(compare.difference)
@@ -506,7 +508,7 @@ class EngineReferenceTests(unittest.TestCase):
         self.assertEqual(compare.baseline_label, "Previous (3 frames back)")
         np.testing.assert_array_equal(compare.current.image, flat(20))
         self.processor = ESPIProcessor()
-        compare = self.feed_previous(Settings(mode="Previous"), [flat(10)])
+        compare = self.feed_previous(classic_settings(mode="Previous"), [flat(10)])
         self.assertEqual(compare.baseline_info, "none yet: the view needs 1 frame of history")
         self.assertEqual(compare.baseline_label, "Previous (1 frame back)")
 
@@ -517,7 +519,7 @@ class EngineReferenceTests(unittest.TestCase):
         Returns: None.
         """
         frames = [flat(10 * n) for n in range(1, 9)]
-        s = Settings(mode="Previous", frames_back=2, average=3, rolling=False)
+        s = classic_settings(mode="Previous", frames_back=2, average=3, rolling=False)
         compare = self.feed_previous(s, frames, average=True)
         self.assertEqual(compare.sequence, 6)  # the last full block of 3 differences
         np.testing.assert_array_equal(compare.current.image, flat(60))
@@ -533,7 +535,7 @@ class EngineReferenceTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        s = Settings(mode="Previous", frames_back=2, average=4)
+        s = classic_settings(mode="Previous", frames_back=2, average=4)
         frames = [flat(10 * n) for n in range(1, 5)]
         self.assertIsNone(self.feed_previous(s, frames[:3], average=True))
         self.assertTrue(self.engine._publish_compare_filling(
@@ -720,6 +722,7 @@ class EngineLoopReferenceTests(unittest.TestCase):
         paths.OUTPUT_DIR = self.tmp.name
         self.log = ListLog()
         self.engine = Engine(self.log)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.use_demo()
         frames = [flat(value) for value in (10, 20, 30, 40)]
         counter = iter(range(10 ** 9))

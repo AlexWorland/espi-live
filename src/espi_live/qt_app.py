@@ -56,8 +56,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, codex, daq, error_reports, feedback, iphone,
-                       log_uploads, paths, profiles, simulation, source_code, tips, ui_scale,
-                       updater)
+                       log_uploads, paths, phase, profiles, simulation, source_code, tips,
+                       ui_scale, updater)
 from espi_live.channels import demo_channels, open_camera_channels, restore_channel
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
@@ -359,16 +359,19 @@ PRESET_SAVE_TIP = (
 PRESET_DELETE_TIP = "Remove the chosen saved preset. Cameras keep their settings."
 RESET_CAMERA_TIP = (
     "Put every control of the displayed camera back to its starting values "
-    "(exposure 8000 µs, gain 0 dB, 30 fps on a FLIR camera; the LabVIEW flow "
-    "on an analog one) and clear its saved settings, after you confirm. Other "
-    "cameras and saved presets do not change."
+    "(exposure 8000 µs, gain 0 dB, 30 fps on a FLIR camera, and the default "
+    "noise pipeline: Average N 4 on camera frames, 16 reference frames, "
+    "Oriented speckle filter) and clear its saved settings, after you "
+    "confirm. Other cameras and saved presets do not change."
 )
 MESSAGE_TIP_WIDTH = 120
 # Previous and Reference views run in this order. Raw skips difference processing but still applies display gamma.
 PIPELINE = ("noise reduction → (frame average) → difference (N frames back) → "
             "noise threshold → beam brightness → outlier filter → average → "
             "speckle filter → noise floor → peak hold → fixed gain, stretch or "
-            "local normalization → invert → brightness, gain and contrast → gamma")
+            "local normalization → invert → brightness, gain and contrast → gamma. "
+            "Phase view: piezo phase steps → wrapped phase → minus the reference "
+            "phase → sine/cosine filter")
 # Fringe-enhancement and display-tone values every preset sets unless it
 # overrides them, so a preset never inherits peak hold or a threshold from the
 # last one. The sensitivity floor is not here: it is per camera (analog capture
@@ -462,9 +465,11 @@ LABVIEW_FLOW_TIP = (
     "view with a reference captured now (and again whenever Reference view has "
     "none), full frames, Fixed gain applied to each frame before averaging, and "
     "no noise reduction, speckle filter or invert. Difference gain, "
-    "exposure, gain, frame rate and recording stay as they are. On by default "
-    "for an analog camera. Turning it off puts back your own settings; changes "
-    "made while it is on are dropped."
+    "exposure, gain, frame rate and recording stay as they are. Off by "
+    "default: every camera starts with the noise pipeline (camera frames "
+    "averaged before the difference, an averaged reference, the Oriented "
+    "speckle filter), which the VI did not have. Turning it off puts back "
+    "your own settings; changes made while it is on are dropped."
 )
 PRESET_TIPS = {
     "Live preview": "Watch fringes form while you align the setup: Previous view, "
@@ -510,7 +515,7 @@ Processing order (Previous and Reference views):
 
 Raw view applies noise reduction and display gamma, without scaling.
 
-Analog camera (Sony XC-ST50): it starts in the LabVIEW flow, the LabVIEW ESPI 1.5 VI's processing with its saved defaults: Reference view with an automatic reference, Fixed gain 42× (the VI's Constant) on each frame, no averaging or filters. Turn LabVIEW flow off for your own settings, which also use Fixed gain: Auto stretch would blow the camera's few grey levels of noise up to full-contrast grain. Lower Difference gain when noise shows as grey grain. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths, including its N + 1 frames divided by N.
+Analog camera (Sony XC-ST50): it starts in Reference view with Fixed gain 42× (Auto stretch would blow the camera's few grey levels of noise up to full-contrast grain) and the noise pipeline every camera gets: four frames averaged before the difference, a 16-frame automatic reference and the Oriented speckle filter. The LabVIEW flow toggle gives the LabVIEW ESPI 1.5 VI's processing with its saved defaults instead: a one-frame automatic reference, Fixed gain 42× (the VI's Constant) on each frame, no averaging or filters. Lower Difference gain when noise shows as grey grain. Gain before averaging (LabVIEW order) and Average multiplier reproduce the VI's averaging maths, including its N + 1 frames divided by N.
 
 Three controls that are easy to mix up:
   Noise reduction blends camera frames over time, before the difference. It removes sensor noise and keeps the speckle. It trails motion and weakens Previous-view fringes.
@@ -720,6 +725,12 @@ MODE_TIPS = {
                   "stores the live frame (or the average of Ref. frames frames). "
                   "Ref. refresh can recapture it on a timer so slow drift "
                   "cancels. C shows it beside the current frame."),
+    "Phase": ("Phase: phase-shifting ESPI. The NI DAQ steps the reference "
+              "piezo between frames and each pixel's phase change since the "
+              "phase reference is shown with its sign (subtraction fringes "
+              "have none): mid-grey is no change, black to white one fringe. "
+              "Needs the piezo driver applied in Devices > NI DAQ; the camera "
+              "then starts in this view. F takes a new phase reference."),
 }
 
 
@@ -2419,6 +2430,8 @@ DAQ_TITLE = "Frequency generator and piezo (NI DAQ)"
 GENERATOR_KINDS = {"ao": "sine", "ctr": "square, 5 V TTL"}
 PIEZO_MODE_TEXT = ((daq.HOLD, "Hold a voltage"),
                    (daq.SINE, "Sine at the generator's frequency"))
+PHASE_STEP_TEXT = ((5, "5-step (Hariharan)"), (4, "4-step"))
+PHASE_MESSAGE_MS = 10000  # how long phase-step notices stay in the status bar
 
 
 def daq_spin(minimum, maximum, decimals, suffix, step):
@@ -2870,46 +2883,44 @@ class DaqDialog(QDialog):
     def poll(self, drive_only=False):
         """Handle what the controller has reported.
 
-        Args: drive_only is True while the window is closed (the main window
-            polls then, to keep the demo cameras' drive current): a device
-            list, which would connect to a device, is left for when the
-            window is shown.
+        The window drains the controller's events (it also follows the
+        drive for the demo cameras and the piezo for the Phase view) and
+        passes each one to handle().
+
+        Args: drive_only is True to keep a device list, which would connect to
+            a device, for when the window is shown (the window does this by
+            itself while this window is closed).
         Returns: None.
         """
-        later = []
-        while True:
-            try:
-                kind, payload = self.controller.events.get_nowait()
-            except queue.Empty:
-                break
-            if kind == "devices" and drive_only:
-                later.append((kind, payload))
-            elif kind == "devices":
-                self._show_devices(*payload)
-            elif kind == "connected":
-                self.connected(payload)
-            elif kind == "applied":
-                self.window.set_daq_drive(payload.drive)
-                prefix = ("Simulated, nothing driven: "
-                          if self.outputs is not None and self.outputs.device.simulated
-                          else "Outputs: ")
-                self.state_label.setText(prefix + payload.summary)
-            elif kind == "rejected":
-                self.problem_label.setText("\n".join(payload))
-                self.state_label.setText("Outputs: not changed.")
-            elif kind == "zeroed":
-                self.window.set_daq_drive(daq.Drive())
-                self._switch_off()
-                self.state_label.setText("Outputs: all at 0 V.")
-            elif kind == "failed":
-                self.window.set_daq_drive(daq.Drive())
-                self._switch_off()
-                self.problem_label.setText(
-                    f"The DAQ reported an error: {payload}. The outputs were set to "
-                    "0 V where the device allowed it.")
-                self.state_label.setText("Outputs: stopped after an error.")
-        for event in later:
-            self.controller.events.put(event)
+        self.window.poll_daq(defer_devices=drive_only)
+
+    def handle(self, kind, payload):
+        """Show one controller event in the form.
+
+        Args: kind and payload are the event.
+        Returns: None.
+        """
+        if kind == "devices":
+            self._show_devices(*payload)
+        elif kind == "connected":
+            self.connected(payload)
+        elif kind == "applied":
+            prefix = ("Simulated, nothing driven: "
+                      if self.outputs is not None and self.outputs.device.simulated
+                      else "Outputs: ")
+            self.state_label.setText(prefix + payload.summary)
+        elif kind == "rejected":
+            self.problem_label.setText("\n".join(payload))
+            self.state_label.setText("Outputs: not changed.")
+        elif kind == "zeroed":
+            self._switch_off()
+            self.state_label.setText("Outputs: all at 0 V.")
+        elif kind == "failed":
+            self._switch_off()
+            self.problem_label.setText(
+                f"The DAQ reported an error: {payload}. The outputs were set to "
+                "0 V where the device allowed it.")
+            self.state_label.setText("Outputs: stopped after an error.")
 
     def _switch_off(self):
         """Untick both On boxes, to match outputs at 0 V.
@@ -3410,6 +3421,8 @@ class MainWindow(QMainWindow):
         self.daq = None  # daq.DaqController, made when the DAQ window first opens
         self.daq_drive = daq.Drive()  # what its outputs produce, for demo cameras
         self.daq_dialog = None  # DaqDialog, built on first use
+        self.daq_auto = None  # device name startup connects to once the scan ends
+        self.phase_stepper = None  # phase.PiezoStepper the displayed engine steps
         self.view_state = None  # last logged (view size, zoom, image size)
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
@@ -3481,6 +3494,7 @@ class MainWindow(QMainWindow):
             self._schedule_update_check()
         if check_updates:
             self.source.start()  # downloads this build's source if it is missing
+        self._auto_connect_daq()
         self.whats_new = updater.take_whats_new()
         if self.whats_new is not None:
             # After the window is on screen, so the notes appear in front of it.
@@ -3748,7 +3762,9 @@ class MainWindow(QMainWindow):
             button.setChecked(mode == s.mode)
             set_tooltip(button, MODE_TIPS[mode])
             self.mode_group.addButton(button)
-            bar.addWidget(button)
+            action = bar.addWidget(button)
+            if mode == "Phase":  # shown only with a piezo (see _show_phase_state)
+                self.phase_mode_action = action
         self.mode_group.buttonClicked.connect(
             lambda button: self.engine.update_settings(mode=button.text()))
         self.raw_difference_button = QPushButton("Raw difference")
@@ -4225,7 +4241,11 @@ class MainWindow(QMainWindow):
             "How many difference frames are combined to quiet speckle in the "
             "fringes. Use it in Previous or Reference view when one difference "
             "is too speckled to read. 1 turns it off and keeps the full frame "
-            "rate. Start at 8 for a measurement; use 1 while aligning.")
+            "rate. With Average camera frames on (the default) the camera "
+            "frames are averaged before the difference instead, which lowers "
+            "camera and capture noise by the square root of N; in the Phase "
+            "view each phase step averages N frames. Starts at 4; use 1 while "
+            "aligning.")
         self.average.valueChanged.connect(
             lambda v: self.engine.update_settings(average=int(v)))
         add(self.average, "Average N")
@@ -4249,8 +4269,9 @@ class MainWindow(QMainWindow):
             "steady change, such as time-averaged fringes, stays. In Previous "
             "view, Frames back then counts averages. Rolling average does not "
             "apply. Pair it with Ref. frames of N or more in Reference view, so "
-            "the reference is as quiet. Start off; try it with Average N 4–8 on "
-            "a noisy or analog camera.")
+            "the reference is as quiet. On by default (the noise pipeline), "
+            "with Average N 4 and 16 reference frames; turn it off for the "
+            "full frame rate or a rolling average.")
         self.frames_first.setChecked(s.average_frames_first)
         self.frames_first.toggled.connect(self._frames_first_changed)
         add(self.frames_first)
@@ -4263,7 +4284,8 @@ class MainWindow(QMainWindow):
             "several frames quiets it. The old reference stays in use until the new "
             "one is complete, and the status bar counts the frames. Use 1 for a fast "
             "camera with little noise; try 8–30 for a noisy or analog camera, with "
-            "the object still. Start at 1.")
+            "the object still. Starts at 16 (about half a second at 30 fps); "
+            "Reference view captures one automatically when it has none.")
         self.ref_frames.valueChanged.connect(
             lambda v: self.engine.update_settings(ref_frames=int(v)))
         add(self.ref_frames, "Ref. frames")
@@ -4288,6 +4310,9 @@ class MainWindow(QMainWindow):
             lambda v: self.engine.update_settings(frames_back=int(v)))
         add(self.frames_back, "Frames back")
 
+        heading("Phase shifting")
+        self._build_phase_controls(add, note, s)
+
         heading("Fringe enhancement")
         self.outlier_filter = SliderSpin(0, 15, 1, 0, s.outlier_filter, " px")
         self.outlier_filter.set_description(
@@ -4305,18 +4330,20 @@ class MainWindow(QMainWindow):
         self.smoothing_combo.setCurrentText(s.smoothing_method)
         set_tooltip(self.smoothing_combo,
             "Blurs each difference image so pixel-scale speckle fades and broader "
-            "fringes stand out. Gaussian softens edges and accepts any width. "
-            "Median keeps fringe edges sharper and is capped at 5 px so the frame "
-            "rate holds. Use Median when the fringe edges matter; Gaussian for a "
-            "softer look. Start with Median.")
+            "fringes stand out. Oriented (the default) measures which way the "
+            "fringes run and smooths along them, not across them, so dense "
+            "fringes survive a width that would blur them away with Gaussian; "
+            "where no direction shows it acts like Gaussian. Gaussian softens "
+            "edges and accepts any width. Median keeps fringe edges sharper and "
+            "is capped at 5 px so the frame rate holds. Start with Oriented.")
         self.smoothing_combo.currentTextChanged.connect(
             lambda name: self.engine.update_settings(smoothing_method=name))
         self.smoothing = SliderSpin(0, 31, 1, 0, s.smoothing, " px")
         self.smoothing.set_description(
-            "Width of the speckle filter, in pixels. Keep it well below the "
-            "fringe spacing or the fringes blur away with the speckle. 0 turns "
-            "the filter off. Start at 3 px and raise it only while the fringes "
-            "stay sharp.")
+            "Width of the speckle filter, in pixels. Keep it below the fringe "
+            "spacing or the fringes blur away with the speckle (Oriented "
+            "tolerates more, because it smooths along the fringes). 0 turns "
+            "the filter off. Starts at 11 px; lower it if dense fringes fade.")
         self.smoothing.valueChanged.connect(
             lambda v: self.engine.update_settings(smoothing=int(v)))
         add(self.smoothing_combo, "Speckle filter")
@@ -5518,6 +5545,7 @@ class MainWindow(QMainWindow):
             self.log.write(f"Processing on: {channel.label}")
             channel.start(self._release_shared_device(channel))
         self.current = channel
+        self._attach_stepper(self.phase_stepper)  # the piezo follows the display
         self.drawn_sequence = 0
         self.shown_packet = None
         self.view.clear()
@@ -5593,8 +5621,13 @@ class MainWindow(QMainWindow):
                               (self.normalize_window, s.normalize_window),
                               (self.brightness, s.brightness),
                               (self.display_gain, s.display_gain),
-                              (self.contrast, s.contrast)):
+                              (self.contrast, s.contrast),
+                              (self.phase_filter, s.phase_filter),
+                              (self.phase_settle, s.phase_settle_frames)):
             widget.set_value(value)
+        self.phase_steps.blockSignals(True)
+        self.phase_steps.setCurrentIndex(self.phase_steps.findData(s.phase_steps))
+        self.phase_steps.blockSignals(False)
         toggles = ((self.rolling, s.rolling),
                    (self.gain_before_average, s.gain_before_average),
                    (self.invert, s.invert), (self.flip_button, s.flip_horizontal),
@@ -5625,6 +5658,7 @@ class MainWindow(QMainWindow):
         self.labview_button.setChecked(self.current is not None and
                                        self.current.labview_saved is not None)
         self.labview_button.blockSignals(False)
+        self._show_phase_state()
 
     def _scaling_changed(self, name):
         """Send a Scaling choice to the engine and match the related controls.
@@ -5949,14 +5983,267 @@ class MainWindow(QMainWindow):
         if self.pixels_dialog is not None and self.pixels_dialog.isVisible():
             self.pixels_dialog.move_to(x, y)
 
+    def _ensure_daq(self):
+        """Create the DAQ controller on first use.
+
+        Its events are read by poll_daq, from _poll_status (and from the DAQ
+        window's own timer while it is open).
+
+        Args: None.
+        Returns: The daq.DaqController.
+        """
+        if self.daq is None:
+            self.daq = daq.DaqController(self.log)
+        return self.daq
+
+    def _auto_connect_daq(self):
+        """At startup, reconnect the NI DAQ saved with a piezo, for the Phase view.
+
+        Connecting sets every output to 0 V; nothing is driven until the
+        Phase view steps the piezo. A saved simulated device is reconnected
+        only for a synthetic camera, since it cannot move a real camera's
+        reference beam.
+
+        Args: None.
+        Returns: None.
+        """
+        saved = self._saved_piezo()
+        if saved is None or not saved.device:
+            return
+        if saved.device == daq.SIMULATED and not self.current.demo:
+            return
+        self.daq_auto = saved.device
+        self.log.write(f"NI DAQ: looking for {saved.device}; its piezo drives the "
+                       "Phase view.")
+        self._ensure_daq().request("scan")
+
+    @staticmethod
+    def _saved_piezo():
+        """The DAQ settings saved by Apply, when they assign the piezo driver.
+
+        A piezo counts as configured only after Apply has saved settings that
+        assign it: the DAQ window's defaults name AO 1 for the piezo, and
+        merely opening that window must never start driving it.
+
+        Args: None.
+        Returns: daq.DaqSettings, or None when nothing is saved or the piezo
+            is unassigned.
+        """
+        if not QSettings("ESPI", "espi_live").value(DAQ_SETTINGS_KEY, ""):
+            return None
+        saved = DaqDialog._saved_settings()
+        return saved if saved.piezo_output != daq.OFF else None
+
+    def poll_daq(self, defer_devices=False):
+        """Handle the DAQ controller's events, for the window and the DAQ window.
+
+        Args: defer_devices keeps a device list for the DAQ window until it
+            is shown (as it is kept while that window is closed), because the
+            window connects to a device when it gets one.
+        Returns: None; nothing is read once the window is closing (the DAQ is
+            already shut down then).
+        """
+        if self.daq is None or self.closing:
+            return
+        later = []
+        while True:
+            try:
+                kind, payload = self.daq.events.get_nowait()
+            except queue.Empty:
+                break
+            dialog = self.daq_dialog
+            if kind == "devices" and dialog is not None and (
+                    defer_devices or not dialog.isVisible()):
+                later.append((kind, payload))
+                continue
+            self._daq_event(kind, payload)
+            if dialog is not None:
+                dialog.handle(kind, payload)
+        for event in later:
+            self.daq.events.put(event)
+
+    def _daq_event(self, kind, payload):
+        """Follow the piezo: attach it to the Phase view, or take it away.
+
+        A device whose saved settings assign the piezo driver makes the
+        Phase view the displayed camera's view (the default whenever a piezo
+        is present). Applying settings in the DAQ window updates the steps;
+        0 V, an error or a disconnect stops them.
+
+        Args: kind and payload are the controller's event.
+        Returns: None.
+        """
+        if kind == "devices" and self.daq_auto is not None and self.daq_dialog is None:
+            wanted, self.daq_auto = self.daq_auto, None
+            names = [info.name for info in payload[0]] + [daq.SIMULATED]
+            if wanted in names:
+                self.daq.request("connect", device=wanted)
+            else:
+                self.log.write(f"NI DAQ: {wanted} was not found, so the Phase view "
+                               "has no piezo. Plug it in and open Devices > NI DAQ.")
+        elif kind == "connected":
+            self.set_daq_drive(daq.Drive())  # a new connection starts at 0 V
+            saved = self._saved_piezo()
+            if saved is None or saved.piezo_output not in payload.analog:
+                self._attach_stepper(None)
+                return
+            # Everything is at 0 V after connecting, so the generator stays off.
+            base = replace(saved, device=payload.device.name, generator_on=False,
+                           piezo_on=False)
+            self._attach_stepper(phase.PiezoStepper(self.daq, base,
+                                                    payload.device.simulated))
+        elif kind == "applied":
+            self.set_daq_drive(payload.drive)
+            applied = self.daq.status()["settings"]
+            device = self.daq.status()["device"]
+            if applied is not None and applied.piezo_output != daq.OFF:
+                self._attach_stepper(phase.PiezoStepper(
+                    self.daq, applied, device is not None and device.simulated))
+            else:
+                self._attach_stepper(None)
+        elif kind in ("zeroed", "failed", "closed"):
+            self.set_daq_drive(daq.Drive())
+            if self.phase_stepper is not None:
+                self.log.write("Phase view: piezo stepping stopped (the NI DAQ outputs "
+                               "are at 0 V or disconnected).")
+                self._attach_stepper(None)
+
+    def _attach_stepper(self, stepper):
+        """Give the piezo to the displayed camera's engine, and only to it.
+
+        A piezo that was not there before makes the Phase view the displayed
+        camera's view (the default whenever a piezo is configured); a camera
+        switched away from it by hand stays where it is until the piezo is
+        taken away and comes back.
+
+        Args: stepper is a phase.PiezoStepper, or None.
+        Returns: None.
+        """
+        arrived = stepper is not None and self.phase_stepper is None
+        self.phase_stepper = stepper
+        for channel in self.channels:
+            engine = channel.engine
+            if engine is not None:
+                engine.set_phase_stepper(stepper if channel is self.current else None)
+        if arrived:
+            self.engine.update_settings(mode="Phase")
+            self._load_settings(self.engine.settings(), self.current.limits)
+            self.log.write(f"NI DAQ piezo on {daq.output_label(stepper.settings.piezo_output)}"
+                           ": Phase view on (phase-shifting ESPI).")
+        self._show_phase_state()
+
+    def _show_phase_state(self):
+        """Describe the piezo under Phase shifting and enable Calibrate.
+
+        Args: None.
+        Returns: None.
+        """
+        stepper = self.phase_stepper
+        self.calibrate_phase_button.setEnabled(stepper is not None)
+        # The Phase view button takes toolbar room only when it can work, or
+        # while the displayed camera is in that view (so it can be left).
+        self.phase_mode_action.setVisible(
+            stepper is not None or self.engine.settings().mode == "Phase")
+        if stepper is None:
+            self.phase_state.setText(
+                "Piezo: not connected. Assign the piezo driver in Devices > NI DAQ; "
+                "the Phase view then starts by itself.")
+            return
+        s = stepper.settings
+        simulated = " Simulated device: nothing is driven." if stepper.simulated else ""
+        self.phase_state.setText(
+            f"Piezo: {daq.output_label(s.piezo_output)}, from {s.piezo_voltage_v:g} V "
+            f"in steps of {s.piezo_step_v:.4g} V.{simulated}")
+
+    def calibrate_phase(self):
+        """Measure the piezo's phase step and set the voltage per step.
+
+        Args: None.
+        Returns: None; the result arrives as a "phase_calibrated" event.
+        """
+        if self.phase_stepper is None:
+            QMessageBox.information(
+                self, "Calibrate phase step",
+                "Connect the NI DAQ and assign the piezo driver first "
+                "(Devices > NI DAQ).")
+            return
+        self.engine.update_settings(mode="Phase")
+        self._load_settings(self.engine.settings(), self.current.limits)
+        self.engine.request("calibrate_phase")
+
+    def _save_piezo_step(self, volts):
+        """Keep a calibrated voltage per step in the saved DAQ settings.
+
+        Args: volts is the new voltage per phase step.
+        Returns: None.
+        """
+        saved = replace(DaqDialog._saved_settings(), piezo_step_v=volts)
+        QSettings("ESPI", "espi_live").setValue(DAQ_SETTINGS_KEY,
+                                                json.dumps(saved.to_dict()))
+        if self.daq_dialog is not None:
+            self.daq_dialog.piezo_step.setValue(volts)
+
+    def _build_phase_controls(self, add, note, s):
+        """Create the Phase shifting controls.
+
+        Args: add and note place widgets in the controls grid (see
+            _build_controls); s is the displayed camera's Settings.
+        Returns: None.
+        """
+        self.phase_steps = QComboBox()
+        for steps, text in PHASE_STEP_TEXT:
+            self.phase_steps.addItem(text, steps)
+        self.phase_steps.setCurrentIndex(self.phase_steps.findData(s.phase_steps))
+        set_tooltip(self.phase_steps,
+            "How many phase steps make one phase map. 5-step (Hariharan) "
+            "tolerates a piezo step that is not exactly a quarter wave and "
+            "measures the step it made (shown in the status bar). 4-step is "
+            "faster but turns a wrong step into ripple across the fringes. "
+            "Start with 5-step.")
+        self.phase_steps.currentIndexChanged.connect(
+            lambda _index: self.engine.update_settings(
+                phase_steps=int(self.phase_steps.currentData())))
+        add(self.phase_steps, "Phase steps")
+        self.phase_filter = SliderSpin(0, phase.MAX_PHASE_FILTER, 1, 0, s.phase_filter,
+                                       " px")
+        self.phase_filter.set_description(
+            "Width of the sine/cosine filter on the phase change. It smooths "
+            "speckle noise without blurring across the jump from black to "
+            "white, and weights strongly interfering speckles most. 0 turns it "
+            "off. Keep it below the fringe spacing. Starts at 9 px.")
+        self.phase_filter.valueChanged.connect(
+            lambda v: self.engine.update_settings(phase_filter=int(v)))
+        add(self.phase_filter, "Phase filter")
+        self.phase_settle = SliderSpin(0, phase.MAX_SETTLE_FRAMES, 1, 0,
+                                       s.phase_settle_frames, " fr")
+        self.phase_settle.set_description(
+            "Camera frames thrown away after each piezo step, because they were "
+            "exposed while the piezo moved or settled. Raise it if the measured "
+            "step wanders or the phase map is noisy right after a step; a slow "
+            "piezo amplifier or a capture stick that buffers frames needs more. "
+            "Starts at 2.")
+        self.phase_settle.valueChanged.connect(
+            lambda v: self.engine.update_settings(phase_settle_frames=int(v)))
+        add(self.phase_settle, "Settle")
+        self.calibrate_phase_button = QPushButton("Calibrate phase step")
+        set_tooltip(self.calibrate_phase_button,
+            "Measure the phase step the piezo makes over five 5-step sets, with "
+            "the object still, then set the NI DAQ's voltage per step so that "
+            "each step is a quarter wave (90°). The new voltage is saved with "
+            "the DAQ settings and a new phase reference is taken.")
+        self.calibrate_phase_button.clicked.connect(self.calibrate_phase)
+        add(self.calibrate_phase_button)
+        self.phase_state = QLabel()
+        note(self.phase_state)
+        self._show_phase_state()
+
     def _show_daq_dialog(self):
         """Open the NI DAQ window, creating its controller on first use.
 
         Args: None.
         Returns: None.
         """
-        if self.daq is None:
-            self.daq = daq.DaqController(self.log)
+        self._ensure_daq()
         if self.daq_dialog is None:
             self.daq_dialog = DaqDialog(self, self.daq)
         self.daq_dialog.show()
@@ -6170,8 +6457,7 @@ class MainWindow(QMainWindow):
         text = self.log.drain()
         if text:
             self.log_view.appendPlainText(text.rstrip("\n"))
-        if self.daq_dialog is not None and not self.daq_dialog.isVisible():
-            self.daq_dialog.poll(drive_only=True)  # keep the demo drive current
+        self.poll_daq()  # the drive for demo cameras and the piezo for the Phase view
         now = time.monotonic()
         if now - self.fps_window_start >= 1.0:
             self.display_fps = self.drawn_frames / (now - self.fps_window_start)
@@ -6751,6 +7037,23 @@ class MainWindow(QMainWindow):
             self._phone_settings_changed(channel, payload)
         elif kind == "noise_calibrated" and displayed:
             self.min_range.set_value(payload)
+        elif kind == "phase_calibrated":
+            degrees, volts = payload
+            self._save_piezo_step(volts)
+            if self.phase_stepper is not None:
+                self._attach_stepper(self.phase_stepper.with_step(volts))
+            self.statusBar().showMessage(
+                f"Phase step calibrated: {degrees:.0f}° measured; now {volts:.4g} V "
+                "per step.", PHASE_MESSAGE_MS)
+        elif kind == "phase_calibration_failed":
+            self.statusBar().showMessage(
+                f"Phase step calibration failed: {payload:.0f}° per step measured "
+                "(see the log).", PHASE_MESSAGE_MS)
+        elif kind == "phase_stopped":
+            if displayed:
+                self._attach_stepper(None)
+            self.statusBar().showMessage(f"{name}Phase view stopped: {payload}",
+                                         PHASE_MESSAGE_MS)
         elif kind == "record_off" and displayed:
             self.record_button.blockSignals(True)
             self.record_button.setChecked(False)
@@ -6763,6 +7066,7 @@ class MainWindow(QMainWindow):
             if displayed:
                 self._load_settings(channel.engine.settings(), channel.limits)
             self._set_demo(False)
+            self._attach_stepper(self.phase_stepper)
         elif kind == "switch_failed":
             QMessageBox.warning(self, "Camera unavailable",
                                 f"Could not start live capture: {payload}\n\n"

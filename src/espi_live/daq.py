@@ -55,6 +55,10 @@ INSTALL_HINT = 'pip install pylablib-lightweight "nidaqmx>=1.4,<1.8"'
 _NI = None  # pylablib.devices.NI once loaded
 
 
+class PiezoMoveError(RuntimeError):
+    """The piezo could not be moved to a requested level."""
+
+
 def load_ni():
     """Import pyLabLib's NI module (and through it nidaqmx) on first use.
 
@@ -677,7 +681,8 @@ class DaqController:
     arrive on the events queue as (kind, payload): "devices" ((list of
     DeviceInfo, reason or None)), "connected" (DeviceOutputs), "applied"
     (OutputPlan), "rejected" (list of problems), "zeroed", "failed" (text)
-    and "closed".
+    and "closed". move_piezo() is the one blocking call: the camera engine
+    uses it to step the piezo between frames for phase-shifting ESPI.
     """
 
     def __init__(self, log, backend_factory=None):
@@ -696,7 +701,8 @@ class DaqController:
         self._lock = threading.Lock()
         self.backend = None  # worker thread only
         self.outputs = None  # worker thread only
-        self._status = {"device": None, "active": False, "summary": "Not connected"}
+        self._status = {"device": None, "active": False, "summary": "Not connected",
+                        "settings": None}
 
     def request(self, action, **payload):
         """Queue work for the device thread, starting it if needed.
@@ -720,10 +726,38 @@ class DaqController:
 
         Args: None.
         Returns: A dict copy: device (DeviceInfo or None), active (True while
-            any output is on), summary (text).
+            any output is on), summary (text), settings (the DaqSettings last
+            written to the device, or None since connecting or zeroing).
         """
         with self._lock:
             return dict(self._status)
+
+    def move_piezo(self, settings, volts, timeout):
+        """Hold the piezo at a level and wait until the device has it.
+
+        The piezo is switched on in hold mode at volts; every other output
+        keeps the values in settings. Unlike request("apply"), nothing is
+        put on the events queue, so stepping does not flood the DAQ window.
+
+        Args: settings is DaqSettings (the generator part is written as is);
+            volts is the piezo level at the DAQ; timeout is the longest wait
+            in seconds.
+        Returns: The OutputPlan written. Raises PiezoMoveError when there is
+            no device, the level breaks a rule (the safety limit), the device
+            fails or it does not answer within timeout.
+        """
+        reply = queue.SimpleQueue()
+        self.request("piezo", settings=replace(settings, piezo_on=True, piezo_mode=HOLD,
+                                               piezo_voltage_v=float(volts)),
+                     reply=reply)
+        try:
+            ok, result = reply.get(timeout=timeout)
+        except queue.Empty:
+            raise PiezoMoveError(f"the DAQ did not apply {volts:g} V within "
+                                 f"{timeout:g} s") from None
+        if not ok:
+            raise PiezoMoveError(result)
+        return result
 
     def shutdown(self, timeout):
         """Set every output to 0 V, disconnect and wait for the thread.
@@ -806,14 +840,46 @@ class DaqController:
         if found:
             self.events.put(("rejected", found))
             return
+        output_plan = self._write(settings)
+        prefix = "SIMULATED, nothing driven: " if self.backend.simulated else ""
+        self.log.info(f"NI DAQ applied: {prefix}{output_plan.summary}")
+        self.events.put(("applied", output_plan))
+
+    def _write(self, settings):
+        """Plan valid settings, write them and record them as applied.
+
+        Args: settings is DaqSettings that problems() accepts.
+        Returns: The OutputPlan written.
+        """
         output_plan = plan(settings, self.outputs)
         self.backend.apply(output_plan)
         active = (settings.generator_on and settings.generator_output != OFF) or (
             settings.piezo_on and settings.piezo_output != OFF)
-        prefix = "SIMULATED, nothing driven: " if self.backend.simulated else ""
-        self.log.info(f"NI DAQ applied: {prefix}{output_plan.summary}")
-        self._set_status(active=active, summary=output_plan.summary)
-        self.events.put(("applied", output_plan))
+        self._set_status(active=active, summary=output_plan.summary, settings=settings)
+        return output_plan
+
+    def _do_piezo(self, settings, reply):
+        """Write one phase-step level and answer the waiting move_piezo().
+
+        Args: settings is DaqSettings with the piezo level to hold; reply is
+            the queue move_piezo() waits on, given (True, OutputPlan) or
+            (False, reason).
+        Returns: None. A device failure is answered, then raised for _run.
+        """
+        if self.backend is None:
+            reply.put((False, "the NI DAQ is not connected"))
+            return
+        found = problems(settings, self.outputs)
+        if found:
+            reply.put((False, " ".join(found)))
+            return
+        try:
+            output_plan = self._write(settings)
+        except Exception as exc:
+            reply.put((False, f"{type(exc).__name__}: {exc}"))
+            raise
+        self.log.debug(f"NI DAQ phase step: {output_plan.summary}")
+        reply.put((True, output_plan))
 
     def _do_zero(self):
         """Set every output to 0 V.
@@ -824,7 +890,7 @@ class DaqController:
         if self.backend is not None:
             self.backend.zero()
             self.log.info("NI DAQ: every output set to 0 V")
-        self._set_status(active=False, summary="All outputs at 0 V")
+        self._set_status(active=False, summary="All outputs at 0 V", settings=None)
         self.events.put(("zeroed", None))
 
     def _disconnect(self):
@@ -835,7 +901,7 @@ class DaqController:
         """
         backend, self.backend = self.backend, None
         self.outputs = None
-        self._set_status(device=None, active=False, summary="Not connected")
+        self._set_status(device=None, active=False, summary="Not connected", settings=None)
         if backend is not None:
             backend.close()
             self.log.info("NI DAQ: outputs at 0 V, device released")
@@ -846,7 +912,7 @@ class DaqController:
         Args: None.
         Returns: None. A second failure is logged and the device released.
         """
-        self._set_status(active=False, summary="Stopped after an error")
+        self._set_status(active=False, summary="Stopped after an error", settings=None)
         if self.backend is None:
             return
         try:

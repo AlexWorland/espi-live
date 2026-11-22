@@ -788,6 +788,48 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.log.has("NI DAQ apply failed: unplugged"))
         self.assertEqual(self.controller.status()["summary"], "Stopped after an error")
 
+    def test_move_piezo_holds_a_level_without_events(self):
+        """A phase step writes the level, records the settings and sends no event.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaisesRegex(daq.PiezoMoveError, "not connected"):
+            self.controller.move_piezo(daq.DaqSettings(), 0.1, 5.0)
+        self.connect()
+        base = daq.DaqSettings(piezo_voltage_v=0.0, generator_output=daq.OFF)
+        written = self.controller.move_piezo(base, 0.25, 5.0)
+        self.assertEqual(written.values["ao1"], 0.25)
+        status = self.controller.status()
+        self.assertTrue(status["active"])
+        self.assertEqual((status["settings"].piezo_voltage_v, status["settings"].piezo_on,
+                          status["settings"].piezo_mode), (0.25, True, daq.HOLD))
+        self.assertTrue(self.controller.events.empty())
+        self.assertTrue(self.log.has("NI DAQ phase step: piezo AO 1 holds 0.25 V"))
+        with self.assertRaisesRegex(daq.PiezoMoveError, "above its"):
+            self.controller.move_piezo(base, 5.0, 5.0)  # past the 1 V safety limit
+        self.controller.request("zero")
+        wait_event(self.controller, "zeroed")
+        self.assertIsNone(self.controller.status()["settings"])
+
+    def test_move_piezo_times_out_and_reports_device_failures(self):
+        """No answer in time, or a failing device, raises PiezoMoveError.
+
+        Args: None.
+        Returns: None.
+        """
+        idle = daq.DaqController(self.log)
+        with mock.patch.object(idle, "request"):  # the worker never answers
+            with self.assertRaisesRegex(daq.PiezoMoveError, "within 0.05 s"):
+                idle.move_piezo(daq.DaqSettings(), 0.1, 0.05)
+        backend = FailingBackend(fail_apply=DeviceError("unplugged"))
+        self.backends.append(backend)
+        self.connect()
+        with self.assertRaisesRegex(daq.PiezoMoveError, "unplugged"):
+            self.controller.move_piezo(daq.DaqSettings(generator_output=daq.OFF), 0.1, 5.0)
+        self.assertIn("unplugged", wait_event(self.controller, "failed")[0])
+        self.assertEqual(backend.zeroed, 1)
+
     def test_unexpected_failure_is_reported(self):
         """A bug is logged at ERROR through the error reporter.
 

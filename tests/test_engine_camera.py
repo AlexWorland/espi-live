@@ -23,6 +23,7 @@ from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
 from fake_iphone import commands, frame_bytes, phone_socket
 from fake_pyspin import (FakeCamera, FakeImage, FakeNode, FakeSpinnakerException,
                          FakeSystem, make_pyspin)
+from classic_pipeline import CLASSIC_PIPELINE, classic_settings
 from list_log import ListLog
 
 
@@ -108,6 +109,7 @@ class CameraEngineCase(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.engine = Engine(self.log)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.addCleanup(self.shutdown)
 
     def shutdown(self):
@@ -859,6 +861,7 @@ class OpenOnStartTests(CameraEngineCase):
         Returns: None.
         """
         self.engine = Engine(self.log, serial="21234567", tag="21234567")
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.open_on_start()
         self.engine.start()
         self.assertEqual(self.wait_event("camera_limits")["Gain"], (0.0, 30.0))
@@ -872,6 +875,7 @@ class OpenOnStartTests(CameraEngineCase):
         Returns: None.
         """
         self.engine = Engine(self.log, serial="99999999")
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.open_on_start()
         self.engine.start()
         self.assertIn("no longer connected", self.wait_event("open_failed"))
@@ -1010,6 +1014,7 @@ class CaptureEngineCase(CameraEngineCase):
                           index=enumerated.index, backend=enumerated.backend,
                           vid=enumerated.vid, pid=enumerated.pid)
         self.engine = Engine(self.log, tag=info.serial, info=info)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.open_camera()
         return self.engine
 
@@ -1058,7 +1063,7 @@ class CaptureEngineTests(CaptureEngineCase):
         self.factory.frames = [interlaced_frame()]
         engine_ = self.capture_engine()
         self.assertFalse(engine_.settings().single_field)
-        engine_.update_settings(mode="Raw")  # it starts in the LabVIEW flow's Reference
+        engine_.update_settings(mode="Raw")  # an analog camera starts in Reference view
         engine_.start()
         self.assertTrue(wait_until(lambda: engine_.latest_packet() is not None))
         self.assertEqual(int(engine_.latest_packet().image[1].max()), 255)
@@ -1130,6 +1135,7 @@ class CameraReportEventTests(CaptureEngineCase):
         self.capture_engine(usb_live2())
         self.assertEqual(self.reports(), [])
         self.engine = Engine(self.log)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.open_camera()
         self.assertEqual(self.reports(), [])
 
@@ -1174,6 +1180,7 @@ class IPhoneEngineTests(CameraEngineCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.engine = Engine(self.log, tag=info.serial, info=info)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.open_camera()
         return self.engine
 

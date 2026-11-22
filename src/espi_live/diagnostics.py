@@ -76,7 +76,10 @@ def settings_summary(settings):
     Args: settings is an engine.Settings (any object with its fields).
     Returns: One line of text for the log.
     """
-    averaging = f"{settings.average}{' rolling' if settings.rolling else ' block'}"
+    if settings.average_frames_first:
+        averaging = f"{settings.average} camera-frames-first"
+    else:
+        averaging = f"{settings.average}{' rolling' if settings.rolling else ' block'}"
     smoothing = (f"{settings.smoothing_method} {settings.smoothing}"
                  if settings.smoothing > 1 else "off")
     if settings.scale_range:
@@ -88,10 +91,13 @@ def settings_summary(settings):
         scaling = f"gain x{settings.difference_gain:g}"
     outliers = (f"{settings.outlier_filter}px" if settings.outlier_filter > 1
                 else "off")
+    phase = (f"phase={settings.phase_steps}-step filter={settings.phase_filter}px "
+             f"settle={settings.phase_settle_frames} " if settings.mode == "Phase" else "")
     return (f"mode={settings.mode} frames_back={settings.frames_back} "
             f"noise_reduction={settings.noise_reduction:g} "
-            f"outlier_filter={outliers} average={averaging} smoothing={smoothing} "
-            f"scaling={scaling} "
+            f"outlier_filter={outliers} average={averaging} "
+            f"ref_frames={settings.ref_frames} smoothing={smoothing} "
+            f"scaling={scaling} {phase}"
             f"exposure={settings.exposure_us:g}us gain={settings.gain_db:g}dB "
             f"fps={settings.fps:g}")
 

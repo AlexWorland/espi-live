@@ -14,10 +14,11 @@ import numpy as np
 
 from espi_live import engine as engine_module
 from espi_live import paths
-from espi_live.engine import (Engine, Settings, finish_difference, floor_key,
+from espi_live.engine import (Engine, finish_difference, floor_key,
                               view_hint)
 from espi_live.processing import (FLOOR_MIN_IMAGES, FLOOR_SD_MARGIN,
                                   ESPIProcessor, NoiseFloorMap, subtract_floor)
+from classic_pipeline import CLASSIC_PIPELINE, classic_settings
 from list_log import ListLog
 from test_engine import wait_until
 
@@ -185,7 +186,7 @@ class FloorHelpersTests(unittest.TestCase):
         Returns: None.
         """
         processor = ESPIProcessor()
-        s = Settings(mode="Previous", scale_range=True)
+        s = classic_settings(mode="Previous", scale_range=True)
         key = floor_key(s, processor, (4, 4))
         self.assertEqual(key, floor_key(replace(s, difference_gain=3.0), processor, (4, 4)))
         self.assertEqual(key, floor_key(replace(s, gamma=2.0), processor, (4, 4)))
@@ -209,7 +210,7 @@ class FloorHelpersTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        s = Settings(mode="Previous", scale_range=False, difference_gain=10.0)
+        s = classic_settings(mode="Previous", scale_range=False, difference_gain=10.0)
         seen = []
         image = np.full((2, 2), 5, np.uint8)
         out, levels = finish_difference(
@@ -227,7 +228,7 @@ class FloorHelpersTests(unittest.TestCase):
         Returns: None.
         """
         processor = ESPIProcessor()
-        s = Settings(mode="Previous")
+        s = classic_settings(mode="Previous")
         self.assertEqual(view_hint(s, processor, "floor note"), "floor note")
         processor.start_reference(4, 0.0, 0.0)
         self.assertIn("Capturing reference", view_hint(s, processor, "floor note"))
@@ -244,8 +245,9 @@ class EngineFloorStateTests(unittest.TestCase):
         """
         self.log = ListLog()
         self.engine = Engine(self.log)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.processor = ESPIProcessor()
-        self.s = Settings(mode="Previous", floor_subtract=True)
+        self.s = classic_settings(mode="Previous", floor_subtract=True)
 
     def test_note_for_raw_measuring_missing_stale_and_ready(self):
         """Raw: none; measuring: a count; no or stale map: ask; matching: none.
@@ -329,6 +331,7 @@ class EngineNoiseFloorTests(unittest.TestCase):
         paths.OUTPUT_DIR = self.tmp.name
         self.log = ListLog()
         self.engine = Engine(self.log)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.use_demo()
         self.engine.start()
         self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))

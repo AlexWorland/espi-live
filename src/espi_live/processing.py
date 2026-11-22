@@ -12,8 +12,10 @@ from collections import deque
 import cv2
 import numpy as np
 
-VIEW_MODES = ("Raw", "Previous", "Reference")
-SMOOTHING_METHODS = ("Gaussian", "Median")
+# Phase is phase-shifting ESPI (espi_live.phase); it needs the NI DAQ's piezo.
+VIEW_MODES = ("Raw", "Previous", "Reference", "Phase")
+# Oriented smooths along the fringes (see oriented_smooth); the default.
+SMOOTHING_METHODS = ("Oriented", "Gaussian", "Median")
 # OpenCV's vectorized median handles widths up to 5; wider uint8 medians take
 # ~30 ms per 6 MP frame, which would cut the camera's 30 fps.
 MAX_MEDIAN_WIDTH = 5
@@ -434,10 +436,11 @@ def even_out_brightness(difference, frame, sigma=BEAM_SIGMA_PX):
 def smooth_speckle(image, method, size):
     """Blur away pixel-scale speckle so broad fringes stand out.
 
-    Args: image is a 2-D uint8 array; method is a SMOOTHING_METHODS name;
-        size is the kernel width in pixels (made odd), with 0 or 1 meaning off;
-        Median is capped at MAX_MEDIAN_WIDTH to stay within a frame interval.
-    Returns: The smoothed uint8 image, or the input itself when off.
+    Args: image is a 2-D uint8 (or deep) array; method is a SMOOTHING_METHODS
+        name; size is the kernel width in pixels (made odd), with 0 or 1
+        meaning off; Median is capped at MAX_MEDIAN_WIDTH to stay within a
+        frame interval.
+    Returns: The smoothed image of the same type, or the input itself when off.
     """
     size = int(size)
     if size <= 1:
@@ -445,7 +448,105 @@ def smooth_speckle(image, method, size):
     size |= 1  # OpenCV kernels must have odd widths
     if method == "Median":
         return cv2.medianBlur(image, min(size, MAX_MEDIAN_WIDTH))
+    if method == "Oriented":
+        return oriented_smooth(image, size)
     return cv2.GaussianBlur(image, (size, size), 0)
+
+
+# Oriented smoothing: the fringe direction is measured on an image this many
+# times smaller (it changes slowly), which keeps a 6 MP frame near 45 ms.
+ORIENTATION_SCALE = 4
+# Below this many pixels on the short side there is too little to measure a
+# direction from; the filter is then an ordinary Gaussian.
+MIN_ORIENTED_SIDE = 16
+
+
+def _line_blur(image, size, sigma, dy, dx):
+    """Blur along a diagonal line with Gaussian weights.
+
+    A diagonal 2-D kernel through cv2.filter2D costs ~60 ms on a 6 MP frame;
+    adding shifted copies of the padded image costs ~6 ms.
+
+    Args: image is a float32 2-D array; size is the odd number of taps;
+        sigma is the Gaussian width in taps; dy and dx are the line's step
+        (1, 1 for down-right, 1, -1 for down-left).
+    Returns: A new float32 array.
+    """
+    half = size // 2
+    padded = cv2.copyMakeBorder(image, half, half, half, half, cv2.BORDER_REFLECT)
+    height, width = image.shape
+    out = np.zeros_like(image)
+    weights = [math.exp(-0.5 * (tap / sigma) ** 2) for tap in range(-half, half + 1)]
+    total = sum(weights)
+    for tap, weight in zip(range(-half, half + 1), weights):
+        top, left = half + tap * dy, half + tap * dx
+        cv2.scaleAdd(padded[top:top + height, left:left + width], weight / total, out,
+                     dst=out)
+    return out
+
+
+def oriented_smooth(image, size):
+    """Smooth speckle along the fringes, not across them.
+
+    A Gaussian of the same width also blurs across fringes, so dense fringes
+    fade with the speckle. Here a light isotropic blur (sigma size/8) is
+    followed by a long blur along the local fringe direction (sigma size/2),
+    the direction coming from the structure tensor of a reduced copy. Where
+    no direction stands out (coherence near 0) the result blends into an
+    ordinary Gaussian. On simulated ESPI difference fringes this matched or
+    beat a Gaussian of the same width at every fringe spacing tried, most
+    for dense fringes (docs/notes/espi-noise-and-capture-research.md).
+
+    Args: image is a 2-D uint8 (or deep float32) array; size is the odd
+        filter width in pixels (at least 3).
+    Returns: The smoothed image: uint8 rounded and saturated, or float32.
+    """
+    values = image.astype(np.float32)
+    height, width = values.shape
+    if min(height, width) < MIN_ORIENTED_SIDE:
+        smoothed = cv2.GaussianBlur(values, (size, size), 0)
+        return smoothed if is_deep(image) else cv2.convertScaleAbs(smoothed)
+    across = max(0.7, size / 8.0)
+    along = size / 2.0
+    taps = 2 * size + 1
+    pre = cv2.GaussianBlur(values, (0, 0), across)
+    scale = max(1, min(ORIENTATION_SCALE, min(height, width) // 32))
+    small = cv2.resize(pre, (max(1, width // scale), max(1, height // scale)),
+                       interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), max(0.8, size / 4.0 / scale))
+    gx = cv2.Sobel(small, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(small, cv2.CV_32F, 0, 1, ksize=3)
+    window = max(1.0, size / 2.0 / scale)
+    jxx = cv2.GaussianBlur(gx * gx, (0, 0), window)
+    jxy = cv2.GaussianBlur(gx * gy, (0, 0), window)
+    jyy = cv2.GaussianBlur(gy * gy, (0, 0), window)
+    # The fringe direction, as a doubled angle: (cos 2t, sin 2t), t along it.
+    cos2 = jyy - jxx
+    sin2 = -2.0 * jxy
+    strength = cv2.magnitude(cos2, sin2)
+    coherence = strength / (jxx + jyy + 1e-6)
+    inverse = 1.0 / (strength + 1e-6)
+    full = (width, height)
+    cos2 = cv2.resize(cos2 * inverse, full, interpolation=cv2.INTER_LINEAR)
+    sin2 = cv2.resize(sin2 * inverse, full, interpolation=cv2.INTER_LINEAR)
+    coherence = cv2.resize(coherence, full, interpolation=cv2.INTER_LINEAR)
+    # Four directional blurs, blended by how close the fringe runs to each:
+    # 0 degrees (cos2 = 1), 90 (cos2 = -1), 45 (sin2 = 1) and 135 (sin2 = -1).
+    blurs = (
+        (cv2.max(cos2, 0.0), cv2.GaussianBlur(pre, (taps, 1), along, sigmaY=1e-3)),
+        (cv2.max(-cos2, 0.0), cv2.GaussianBlur(pre, (1, taps), 1e-3, sigmaY=along)),
+        (cv2.max(sin2, 0.0), _line_blur(pre, taps, along / math.sqrt(2), 1, 1)),
+        (cv2.max(-sin2, 0.0), _line_blur(pre, taps, along / math.sqrt(2), 1, -1)),
+    )
+    weight_sum = np.full_like(values, 1e-6)
+    oriented = np.zeros_like(values)
+    for weight, blurred in blurs:
+        weight_sum += weight
+        oriented += weight * blurred
+    oriented /= weight_sum
+    plain = cv2.GaussianBlur(values, (size, size), size / 3.0)
+    smoothed = coherence * oriented + (1.0 - coherence) * plain
+    return smoothed if is_deep(image) else cv2.convertScaleAbs(smoothed)
 
 
 def apply_gain(image, gain):
