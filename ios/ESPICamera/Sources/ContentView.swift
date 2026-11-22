@@ -5,6 +5,15 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            Button {
+                model.setDifferenceView(true)
+            } label: {
+                Label("Difference view", systemImage: "square.on.square.dashed")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.cameraAllowed != true)
+            .padding(8)
             ZStack {
                 Color.black
                 if model.previewOn && model.cameraAllowed == true {
@@ -21,6 +30,11 @@ struct ContentView: View {
                     .padding()
             }
             ControlsForm(model: model)
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { model.differenceOn },
+            set: { if !$0 { model.setDifferenceView(false) } })) {
+            DifferenceView(model: model)
         }
     }
 }
@@ -45,6 +59,9 @@ struct StatusCard: View {
             if !snapshot.lens.isEmpty {
                 Text("Back camera: \(snapshot.lens) (chosen in ESPI Live)")
                     .foregroundStyle(.secondary)
+            }
+            if s.raw {
+                Text("Bayer RAW · \(s.rawChannel) plane · 16-bit, no video processing")
             }
             Text(String(format: "%d × %d%@ · %.0f µs · ISO %.0f · focus %@",
                         s.width, s.height, cropText(s), s.exposureUs, s.iso,
@@ -96,7 +113,7 @@ struct ControlsForm: View {
                     if !active { model.apply(LinkCommand(exposureUs: exposure)) }
                 }
                 LabeledContent("ISO", value: String(format: "%.0f", iso))
-                Slider(value: $iso, in: range(snap.limits.iso, fallback: 32 ... 3200)) {
+                Slider(value: $iso, in: sliderRange(snap.limits.iso, fallback: 32 ... 3200)) {
                     Text("ISO")
                 } onEditingChanged: { active in
                     editing = active
@@ -111,6 +128,26 @@ struct ControlsForm: View {
                 Text("Camera (locked: no auto exposure)")
             } footer: {
                 Text("ESPI Live's exposure, gain (ISO) and frame-rate sliders change these too.")
+            }
+            Section {
+                Picker("Capture", selection: Binding(
+                    get: { s.raw },
+                    set: { model.apply(LinkCommand(raw: $0)) })) {
+                    Text("Video (processed luma)").tag(false)
+                    Text("Bayer RAW (sensor data)").tag(true)
+                }
+                Picker("RAW colour", selection: Binding(
+                    get: { s.rawChannel },
+                    set: { model.apply(LinkCommand(rawChannel: $0)) })) {
+                    Text("Red (633 nm laser)").tag("red")
+                    Text("Green (532 nm laser)").tag("green")
+                    Text("Blue").tag("blue")
+                }
+            } header: {
+                Text("Capture mode")
+            } footer: {
+                Text("RAW takes stills (about 5–10 per second) and sends one colour "
+                     + "plane of the sensor's data, without the phone's noise reduction.")
             }
             Section("Focus") {
                 LabeledContent("Lens position", value: String(format: "%.3f", lens))
@@ -166,25 +203,6 @@ struct ControlsForm: View {
         }
     }
 
-    private func exposureRange(_ limits: CaptureLimits) -> ClosedRange<Double> {
-        let low = max(limits.exposureUs[0], 10)
-        let high = min(max(limits.exposureUs[1], low + 1), 100_000)
-        return low ... high
-    }
-
-    private func range(_ pair: [Double], fallback: ClosedRange<Double>) -> ClosedRange<Double> {
-        pair.count == 2 && pair[0] < pair[1] ? pair[0] ... pair[1] : fallback
-    }
-
-    private func logRange(_ range: ClosedRange<Double>) -> ClosedRange<Double> {
-        log10(range.lowerBound) ... log10(range.upperBound)
-    }
-
-    private func logBinding(_ value: Binding<Double>) -> Binding<Double> {
-        Binding(get: { log10(max(value.wrappedValue, 1)) },
-                set: { value.wrappedValue = pow(10, $0).rounded() })
-    }
-
     private func frameRates(_ limits: CaptureLimits) -> [Double] {
         let top = limits.fps.count == 2 ? limits.fps[1] : 30
         let current = model.snapshot.settings.fps.rounded()
@@ -192,4 +210,28 @@ struct ControlsForm: View {
         if !rates.contains(current) { rates.append(current) }
         return rates.sorted()
     }
+}
+
+// Slider helpers shared by the streaming controls and the difference view.
+
+/// The exposure slider's range: the camera's limits, kept within 10 µs ... 100 ms.
+func exposureRange(_ limits: CaptureLimits) -> ClosedRange<Double> {
+    let low = max(limits.exposureUs[0], 10)
+    let high = min(max(limits.exposureUs[1], low + 1), 100_000)
+    return low ... high
+}
+
+/// A `[low, high]` limit as a slider range, or `fallback` until the camera reports one.
+func sliderRange(_ pair: [Double], fallback: ClosedRange<Double>) -> ClosedRange<Double> {
+    pair.count == 2 && pair[0] < pair[1] ? pair[0] ... pair[1] : fallback
+}
+
+func logRange(_ range: ClosedRange<Double>) -> ClosedRange<Double> {
+    log10(range.lowerBound) ... log10(range.upperBound)
+}
+
+/// A slider binding on log10 of `value`, so exposure moves evenly across decades.
+func logBinding(_ value: Binding<Double>) -> Binding<Double> {
+    Binding(get: { log10(max(value.wrappedValue, 1)) },
+            set: { value.wrappedValue = pow(10, $0).rounded() })
 }

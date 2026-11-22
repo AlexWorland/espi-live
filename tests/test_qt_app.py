@@ -5508,8 +5508,8 @@ class PhoneWindowTests(unittest.TestCase):
                                   return_value="disabled in tests"),
                 mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
                 mock.patch.object(camera, "PySpin", make_pyspin(system)),
-                mock.patch.object(capture, "load_enumerator",
-                                  return_value=FakeEnumerator([])),
+                mock.patch.object(capture, "import_enumerator",
+                                  return_value=(FakeEnumerator([]), "")),
                 mock.patch.object(iphone, "list_iphones", return_value=[phone]),
                 mock.patch.object(sources, "make_session", make)):
             patcher.start()
@@ -5778,9 +5778,9 @@ class CaptureWindowTests(unittest.TestCase):
                                   FakeReportWorker),
                 mock.patch.object(paths, "OUTPUT_DIR", tmp.name),
                 mock.patch.object(camera, "PySpin", make_pyspin(system)),
-                mock.patch.object(capture, "load_enumerator",
-                                  return_value=FakeEnumerator(
-                                      [usb_live2(0), integrated_webcam(1), webcam(2)])),
+                mock.patch.object(capture, "import_enumerator",
+                                  return_value=(FakeEnumerator(
+                                      [usb_live2(0), integrated_webcam(1), webcam(2)]), "")),
                 mock.patch.object(capture.cv2, "VideoCapture",
                                   FakeCaptureFactory(frames=[interlaced_frame()])),
                 mock.patch.object(iphone, "list_iphones", return_value=[])):

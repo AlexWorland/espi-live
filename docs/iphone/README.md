@@ -71,6 +71,33 @@ The **iPhone** section appears only while an iPhone is displayed. Changes
 made on the phone's screen are sent back, and ESPI Live's controls follow
 them within a second or two.
 
+### Bayer RAW mode
+
+The **Capture** choice in ESPI Live's iPhone section (and on the phone's screen) switches
+from the video pipeline to **Bayer RAW**. Apple's video output is always processed (noise
+reduction, sharpening, tone mapping); the photo output can deliver the sensor's Bayer data
+with that pipeline bypassed, so RAW mode takes **stills** as fast as they come:
+
+- **Rate:** about 5–10 frames per second (Apple's figure; measure it on your phone).
+  Frame rate, frame size and the video crop sizes do not apply; **Send at most** and
+  **Crop** (in plane pixels) still do.
+- **Resolution:** Apple offers Bayer RAW only binned to about 12 MP (4032 × 3024); full
+  resolution is processed ProRAW, which is not used. One colour plane is half that size in
+  each direction (2016 × 1512).
+- **Colour:** the phone keeps the sites of one colour (**RAW colour**): red for a 633 nm
+  laser, green for 532 nm (both green sites averaged), or blue. Interpolated colours are
+  never mixed in, so each value is a real sensor reading.
+- **Values:** 16-bit counts, with the black and white level from the photo's DNG metadata
+  (if the phone reports none, the app uses 0 and 16383 and says so in its error line).
+  ESPI Live converts them to **deep frames**: float32 grey levels on the 8-bit scale
+  (black = 0, white = 255), negatives kept, so every processing step keeps its precision
+  and only the final picture is rounded to 8 bits (`processing.to_uint8`).
+- **Bandwidth:** a red plane is about 6 MB per frame, so 5–10 fps needs about 30–60 MB/s:
+  a USB 3 phone and cable, or a crop on USB 2.
+- **Limits:** the phone still has a rolling shutter, and stills arrive with uneven timing,
+  so RAW suits a continuous laser and not pulsed or phase-stepped capture. A shutter sound
+  may play where the phone's region requires it.
+
 ### Bandwidth
 
 Frames are never compressed. When USB is still busy with the previous frame,
@@ -109,6 +136,64 @@ shows how many it skipped.
 
 Treat the phone as a qualitative fringe viewer and check results against the
 FLIR camera.
+
+## Difference view on the phone
+
+The app can also show fringes by itself, with no computer or cable. Tap
+**Difference view** on the phone. The screen fills with
+`|image(n) − image(n−1)|`, each image subtracted from the one before it,
+with no gain, averaging, smoothing or stretch. It is ESPI Live's *Raw
+difference*, computed on the phone's GPU from the back camera selected at
+the time.
+
+### Which camera data it uses
+
+The rawest data the camera offers, chosen from its pixel formats (not the
+phone model):
+
+1. **Bayer RAW stills** taken back to back, found the same way as for
+   [Bayer RAW mode](#bayer-raw-mode): the unprocessed sensor mosaic, binned to
+   about 12 MP. Only the **red photosites** are used, one per 2 × 2 cell,
+   because the lab laser is a 633 nm HeNe. The image is half the mosaic's
+   width and height (about 2016 × 1512), and nothing is demosaiced. Expect
+   roughly 5–10 images a second with uneven spacing; the screen shows the
+   rate and the time between the two images compared.
+2. **10-bit luma video** (`x420`, the Y plane only), when the camera has no
+   Bayer RAW format the app can read.
+3. **8-bit luma video** (`420f`).
+
+Luma video goes through the phone's image processor, whose noise reduction
+blends neighbouring frames and cannot be turned off, so it comes after the
+slower but unprocessed stills. The iPhone 17 Pro's Bayer *video* (ProRes RAW)
+is not used for the same reason: it is reported to be temporally
+noise-reduced too. The label at the top always names the source in use, for
+example `Bayer RAW stills · red photosites · 14-bit · 2016 × 1512 · 6.8 fps`,
+and says why when a rawer one was not available.
+
+### Brightness
+
+The source's full scale is white. For RAW stills that is the photo's own
+white level minus its black level (from its DNG metadata; `2^14 − 1` if it
+has none), so a change across the sensor's whole range is white. For luma it
+is `2^bits − 1`, so for 8-bit luma the grey is the difference itself, as in
+ESPI Live's Raw difference. A still scene is mostly black.
+
+### Controls and the USB link
+
+- Exposure, ISO, focus and **Autofocus once, then lock** stay on screen. A
+  change restarts the comparison, so the next image is black. A back camera
+  chosen from ESPI Live while the view is on is used at once, with its own
+  sources.
+- Frame size, crop, frame rate, send rate and the RAW mode switch do not apply
+  in the difference view. Changes to them, from the phone or from ESPI Live,
+  take effect when you tap **Done**.
+- While the view is on, no frames go to the computer. STATUS messages carry on
+  with `interrupted` set to "difference view on the phone", so ESPI Live logs
+  why frames stopped and keeps the link. **Done** restores streaming,
+  including RAW mode if it was on.
+- RAW stills are silent where iOS 18 can suppress the shutter sound. Elsewhere
+  the phone clicks on each capture.
+- Continuous RAW capture warms the phone; the thermal state is shown.
 
 ## How the link works
 
@@ -152,6 +237,14 @@ little-endian.
 **FRAME_META** (`<IIIIQqfffI`): width, height, stride, pixel format (1 =
 Mono8), sequence, presentation time (ns), exposure (µs), ISO, lens position,
 reserved.
+
+**RAW frames** (pixel format 2 = Mono16): after FRAME_META comes a 16-byte
+**RAW_META** (`<ffII`): black level, white level (sensor counts), colour (0 red,
+1 green, 2 blue) and the sensor's pattern (0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR); then
+`stride × height` little-endian 16-bit values, one colour plane, rows unpadded
+(`stride` counts values). `settings` also carries `raw` (bool) and `raw_channel`
+(`"red"`, `"green"` or `"blue"`), and COMMAND accepts the same two keys. An older
+app ignores them, and an older ESPI Live rejects a Mono16 frame as "not Mono8".
 
 **settings:** `exposure_us`, `iso`, `fps`, `lens_position`, `width`,
 `height`, `crop_width`, `crop_height`, `max_send_fps`.

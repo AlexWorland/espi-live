@@ -4801,6 +4801,33 @@ class MainWindow(QMainWindow):
         Args: add is _build_controls' add(widget, label, basic) helper.
         Returns: None.
         """
+        self.phone_capture = QComboBox()
+        self.phone_capture.addItem("Video (the phone's processed luma)", False)
+        self.phone_capture.addItem("Bayer RAW (sensor data)", True)
+        set_tooltip(self.phone_capture,
+                    "Video: the phone's own video pipeline, with its noise reduction "
+                    "and tone mapping, at the frame rate below. Bayer RAW: one colour "
+                    "plane of the sensor's 10-bit data, with that pipeline bypassed: "
+                    "noisier pixels, but the noise is the sensor's own and the speckle "
+                    "is not smoothed. It is taken as still photos, so expect about "
+                    "5-10 frames per second, at half the sensor's width and height; "
+                    "frame rate, size and crop below then do not apply.")
+        self.phone_capture.activated.connect(
+            lambda index: self._phone_command(raw=self.phone_capture.itemData(index)))
+        add(self.phone_capture, "Capture", basic=True)
+        self.phone_raw_channel = QComboBox()
+        for channel, text in (("red", "Red (633 nm laser)"),
+                              ("green", "Green (532 nm laser)"), ("blue", "Blue")):
+            self.phone_raw_channel.addItem(text, channel)
+        set_tooltip(self.phone_raw_channel,
+                    "Which of the sensor's colour sites RAW mode keeps. Match the "
+                    "laser: a red laser lights mainly the red sites (a quarter of the "
+                    "pixels) and a green one the green sites (both are averaged). The "
+                    "other sites carry little signal.")
+        self.phone_raw_channel.activated.connect(
+            lambda index: self._phone_command(
+                raw_channel=self.phone_raw_channel.itemData(index)))
+        add(self.phone_raw_channel, "RAW colour", basic=True)
         self.phone_fps = QComboBox()
         set_tooltip(self.phone_fps,
                     "Frame rate the iPhone captures at. A USB 2 iPhone carries about "
@@ -4857,6 +4884,9 @@ class MainWindow(QMainWindow):
         Args: fields are COMMAND keys and values (see iphone.IPhoneSession).
         Returns: None.
         """
+        if "raw" in fields:  # a new capture mode starts the measurement over
+            self.engine.request("reset_average")
+            self.engine.request("reset_previous")
         self.engine.request("camera_command", **fields)
 
     def _phone_fps_chosen(self, index):
@@ -4922,6 +4952,10 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 combo.setCurrentIndex(index)
 
+        if "raw" in settings:
+            select(self.phone_capture, bool(settings["raw"]))
+        if "raw_channel" in settings:
+            select(self.phone_raw_channel, settings["raw_channel"])
         if "width" in settings and "height" in settings:
             select(self.phone_size, f"{settings['width']}x{settings['height']}")
         if "crop_width" in settings:

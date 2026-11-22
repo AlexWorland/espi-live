@@ -101,8 +101,8 @@ class CameraEngineCase(unittest.TestCase):
         self.enumerator = FakeEnumerator()  # no video devices unless a test adds some
         self.factory = FakeCaptureFactory()
         for patcher in (mock.patch.object(camera, "PySpin", make_pyspin(self.system)),
-                        mock.patch.object(capture, "load_enumerator",
-                                          return_value=self.enumerator),
+                        mock.patch.object(capture, "import_enumerator",
+                                          return_value=(self.enumerator, "")),
                         mock.patch.object(capture.cv2, "VideoCapture", self.factory),
                         mock.patch.object(iphone, "list_iphones", return_value=[])):
             patcher.start()

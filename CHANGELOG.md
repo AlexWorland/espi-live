@@ -15,6 +15,45 @@
 - Vibration is averaged exactly over each exposure: a whole number of drive cycles per exposure gives steady J0 fringes, a fractional number flickers as on a real camera.
 - Each demo camera has its own speckle pattern. The **DUMMY MODE ACTIVE** watermark, banner and `dummy_` file names are unchanged.
 
+## 2026-11-21 — Difference view on the iPhone
+
+### Previous state
+
+- The ESPI Camera app only sent the camera image to ESPI Live over USB; seeing fringes needed the computer.
+
+### Current state
+
+- A **Difference view** button on the phone shows `|image(n) − image(n−1)|` full screen, computed on the phone's GPU with no computer or cable, and no gain, averaging or filtering.
+- It uses the rawest data the selected back camera has: back-to-back Bayer RAW stills (red photosites only, for the 633 nm laser; about 5–10 a second, with the photo's white minus black level as white), otherwise 10-bit, then 8-bit luma video. The source, its bit depth, size and rate are always shown on screen.
+- Exposure, ISO and focus can be changed in the view. While it is on, no frames go to the computer and ESPI Live is told why; **Done** restores streaming.
+
+## 2026-11-21 — USB-Live2 found again in the Windows build
+
+### Previous state
+
+- The Windows build (v0.14.8) listed no video devices, so with the Hauppauge USB-Live2 plugged in the app said "No FLIR camera or recognised capture adapter detected". The log only said `cv2_enumerate_cameras is not installed`. The package was in the build, but its native module could not load: the runtime DLL it needs sits in a `cv2_enumerate_cameras.libs` folder, which PyInstaller left out (it kept one copy of the shared DLL, under `pandas.libs`).
+- The adapter table knew only USB ID `2040:C200`; a USB-Live2 on Windows 11 reports `2040:C220`, so it matched by name only.
+
+### Current state
+
+- When `cv2_enumerate_cameras` fails to import in the built program, the app adds the build's `*.libs` folders to the DLL search path and tries once more, so it finds the DLL wherever PyInstaller put it.
+- The log and `--check` now give the real reason: `is not installed`, or `could not be loaded: <the ImportError>`.
+- The release workflow's smoke test fails unless `--check` reports `cv2_enumerate_cameras available`, so a build that cannot list video devices is no longer published.
+- `2040:C220` is recognised as a Hauppauge USB-Live2, next to `2040:C200`.
+
+## 2026-11-21 — iPhone Bayer RAW mode
+
+### Previous state
+
+- The iPhone sent the video pipeline's 8-bit luma only, so the phone's own noise reduction, sharpening and tone mapping were already in every frame, and the whole processing chain worked on 8-bit values.
+
+### Current state
+
+- The iPhone section has a **Capture** choice: **Video** (as before) or **Bayer RAW**. RAW takes Bayer RAW stills (about 5–10 per second, binned 12 MP) with the phone's image pipeline bypassed, keeps one colour plane (**RAW colour**: red for a 633 nm laser, green for 532 nm, or blue; two green sites are averaged) and sends it as 16-bit values with the black and white levels. The ESPI Camera app has the same two choices on its own screen. The app must be updated from TestFlight; an older app ignores the new commands and stays on video.
+- RAW frames are *deep*: float32 grey levels on the 8-bit scale (black level 0, white level 255, fractions kept). Noise reduction, frame averaging, reference capture, difference, averaging, Speckle filter, outlier rejection, noise floor, peak hold and the Auto stretch all keep that precision, and the picture is rounded to 8 bits only at the final scaling. Auto stretch and the status bar's Input range therefore work on differences far below one 8-bit level (the range shows fractions such as `0.07–0.31`). Calibrate noise suggests a floor of 0 when a RAW still scene's noise is under one level. Fixed gain has the same units as for 8-bit cameras, so a dim RAW difference needs a large Difference gain; Auto stretch is the usual choice.
+- The link protocol is unchanged for video: a RAW frame uses pixel format Mono16 and a 16-byte extension after the frame metadata (see `docs/iphone/README.md`).
+- Limits: rolling shutter, uneven frame timing and a lower frame rate make RAW unsuitable for pulsed lasers or phase-stepped capture. The RAW path has not been run on a phone yet.
+
 ## 2026-11-21 — iPhone back cameras listed one by one
 
 ### Previous state
