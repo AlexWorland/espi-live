@@ -1037,7 +1037,8 @@ class Engine:
 
             now = time.monotonic()
             gaps.frame_ok(now, 1.0 / max(1.0, resulting_fps or s.fps), context)
-            camera_sharpness.observe(frame, now, context)
+            if not self.demo:  # simulated fringes come and go; there is no blur
+                camera_sharpness.observe(frame, now, context)
             if not s.raw_difference:
                 frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
             now = time.monotonic()
@@ -1152,7 +1153,8 @@ class Engine:
                         last_range_time = now
 
             if image is not None:
-                shown_sharpness.observe(image, now, context)
+                if not self.demo:
+                    shown_sharpness.observe(image, now, context)
                 if s.raw_difference:  # no flip or display tone either
                     image = present(image, False, self.demo)
                 else:  # every view; before the watermark so its text reads normally

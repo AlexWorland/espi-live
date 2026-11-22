@@ -11,6 +11,7 @@ from unittest import mock
 
 import numpy as np
 
+from espi_live import diagnostics
 from espi_live import engine as engine_module
 from espi_live import paths
 from espi_live.camera import CameraInfo
@@ -660,6 +661,26 @@ class SimulatedObjectEngineTests(EngineDemoTests):
         self.engine.request("drive", drive=Drive("sine", 1000.0, 0.1))
         self.assertTrue(wait_until(
             lambda: self.engine.demo_source.harmonic_path_nm()[0] == 1000.0))
+
+    def test_simulated_frames_raise_no_sharpness_warnings(self):
+        """Fringes coming and going on the simulated drum are not camera blur.
+
+        Previous view of a deforming drum, then Still: the displayed
+        difference drops to exactly black, which the sharpness monitors would
+        report as a blur episode on a real camera.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(diagnostics, "SHARPNESS_INTERVAL_S", 0.0), \
+                mock.patch.object(diagnostics, "SHARPNESS_MIN_SAMPLES", 3):
+            self.engine.update_settings(mode="Previous", demo_object="Slow deformation")
+            self.engine.demo_source.clock_s = 2.0
+            time.sleep(0.6)
+            self.engine.update_settings(demo_object="Still")
+            self.assertTrue(wait_until(lambda: self.log.has("Simulated object: Still")))
+            time.sleep(0.8)
+        self.assertFalse(self.log.has("Sharpness drop"))
 
     def test_status_names_the_simulated_signal(self):
         """The dummy status line says the video is a simulated ESPI signal.

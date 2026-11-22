@@ -368,6 +368,22 @@ class DriveHandOffTests(DaqWindowTestCase):
         self.window._poll_status()
         self.assertEqual(self.window.daq_drive, daq.Drive())
 
+    def test_hidden_dialog_leaves_device_lists_for_later(self):
+        """Closed, the DAQ window connects to nothing; it picks the list up when shown.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.hide()
+        with mock.patch.object(dialog, "_connect_selected") as connect:
+            self.window.daq.events.put(("devices", ([], None)))
+            self.window._poll_status()
+            connect.assert_not_called()
+            dialog.show()
+            dialog.poll()
+            connect.assert_called_once_with()
+
 
 class NoDeviceTests(DaqWindowTestCase):
     """Without NI support or devices, only the simulated device is offered."""

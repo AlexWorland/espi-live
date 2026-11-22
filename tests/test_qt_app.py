@@ -5173,6 +5173,7 @@ class RunTests(unittest.TestCase):
         self.cameras.side_effect = RuntimeError("no camera")
         self.assertEqual(qt_app.run(), 7)
         self.dialogs.question.assert_called_once()
+        self.assertIn("simulated ESPI signal", self.dialogs.question.call_args.args[2])
         self.assertEqual(self.demos.call_args.args[:2], (self.log, 1))
         self.assertTrue(any("Camera startup unavailable" in line
                             for line in self.log.lines))

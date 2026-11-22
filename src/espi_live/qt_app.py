@@ -2867,18 +2867,24 @@ class DaqDialog(QDialog):
             self.state_label.setText("Outputs: all at 0 V until you apply.")
         self.refresh()
 
-    def poll(self):
+    def poll(self, drive_only=False):
         """Handle what the controller has reported.
 
-        Args: None.
+        Args: drive_only is True while the window is closed (the main window
+            polls then, to keep the demo cameras' drive current): a device
+            list, which would connect to a device, is left for when the
+            window is shown.
         Returns: None.
         """
+        later = []
         while True:
             try:
                 kind, payload = self.controller.events.get_nowait()
             except queue.Empty:
-                return
-            if kind == "devices":
+                break
+            if kind == "devices" and drive_only:
+                later.append((kind, payload))
+            elif kind == "devices":
                 self._show_devices(*payload)
             elif kind == "connected":
                 self.connected(payload)
@@ -2902,6 +2908,8 @@ class DaqDialog(QDialog):
                     f"The DAQ reported an error: {payload}. The outputs were set to "
                     "0 V where the device allowed it.")
                 self.state_label.setText("Outputs: stopped after an error.")
+        for event in later:
+            self.controller.events.put(event)
 
     def _switch_off(self):
         """Untick both On boxes, to match outputs at 0 V.
@@ -6163,7 +6171,7 @@ class MainWindow(QMainWindow):
         if text:
             self.log_view.appendPlainText(text.rstrip("\n"))
         if self.daq_dialog is not None and not self.daq_dialog.isVisible():
-            self.daq_dialog.poll()  # keep the demo cameras' DAQ drive current
+            self.daq_dialog.poll(drive_only=True)  # keep the demo drive current
         now = time.monotonic()
         if now - self.fps_window_start >= 1.0:
             self.display_fps = self.drawn_frames / (now - self.fps_window_start)
@@ -6889,7 +6897,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
                 answer = QMessageBox.question(
                     None, "No camera detected",
                     "No FLIR camera or recognised capture adapter is available. "
-                    "Start dummy/demo mode with a synthetic example pattern?")
+                    "Start dummy/demo mode with a simulated ESPI signal (a "
+                    "simulated drumhead on an ideal sensor)?")
                 if answer != QMessageBox.Yes:
                     log.write("No camera detected; demo mode declined.")
                     return 0

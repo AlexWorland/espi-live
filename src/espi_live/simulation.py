@@ -425,6 +425,7 @@ class DemoSource:
         self.drive = Drive()
         self.piezo_on = False  # the reference piezo's triangle wave
         self.clock_s = 0.0
+        self._cycle_start = 0.0  # when Slow deformation was chosen (its cycle's 0)
         self._harmonic = None   # (key, frequency, Z, u map, arg Z map)
         self._table = None      # (key, FringeTable, prepared lookup, fixed F or None)
         self._warned = False
@@ -515,10 +516,13 @@ class DemoSource:
         """Choose what the simulated drumhead does.
 
         Args: name is one of SIMULATED_OBJECTS.
-        Returns: None. Raises ValueError for any other name.
+        Returns: None. Raises ValueError for any other name. Choosing Slow
+            deformation (from another object) starts its cycle at rest.
         """
         if name not in SIMULATED_OBJECTS:
             raise ValueError(f"Unknown simulated object: {name!r}")
+        if name == "Slow deformation" and self.object != name:
+            self._cycle_start = self.clock_s  # start the dent's cycle at rest
         self.object = name
 
     def set_piezo(self, on):
@@ -646,7 +650,8 @@ class DemoSource:
         static = -K_PER_NM * self.static_piezo_nm()
         phase = self.speckle_phase + np.float32(static) if static else self.speckle_phase
         if self.object == "Slow deformation":
-            phase = phase + np.float32(K_PER_NM * deformation_nm(self.clock_s)) * self.load_shape
+            dent = deformation_nm(self.clock_s - self._cycle_start)
+            phase = phase + np.float32(K_PER_NM * dent) * self.load_shape
         state = self._harmonic_state()
         # The triangle is a scalar on the uniform reference beam, and far
         # slower than any vibration, so its exposure average multiplies F.

@@ -298,6 +298,26 @@ class SceneTests(unittest.TestCase):
         np.testing.assert_array_equal(rest[outside], bent[outside])
         self.assertFalse(np.array_equal(rest[source.drum_mask], bent[source.drum_mask]))
 
+    def test_choosing_slow_deformation_starts_its_cycle_at_rest(self):
+        """The dent's cycle restarts when the object is chosen, so nothing jumps.
+
+        Args: None.
+        Returns: None.
+        """
+        still = self.source("Still")
+        rest = still.next_frame(8000, 0, 30)
+        source = self.source("Still")
+        source.clock_s = 41.0  # 5 s into a 12 s cycle: the dent would be at its peak
+        source.set_object("Slow deformation")
+        np.testing.assert_array_equal(source.next_frame(8000, 0, 30), rest)
+        source.clock_s = 41.0 + 5.5
+        phase = source.speckle_phase + K_PER_NM * deformation_nm(5.5) * source.load_shape
+        intensity = source.background + source.modulation * np.cos(phase)
+        self.assertLessEqual(max_error(source.next_frame(8000, 0, 30),
+                                       expected_frame(intensity)), 1)
+        source.set_object("Slow deformation")  # choosing it again keeps the cycle
+        self.assertAlmostEqual(source.clock_s, 41.0 + 5.5 + 1 / 30)
+
     def test_deformation_frame_matches_the_phase(self):
         """A deformed frame is the interferogram with phase K * d * load shape.
 
