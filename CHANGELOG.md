@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-22 — The mouse wheel no longer changes drop-downs
+
+### Previous state
+
+- Sliders and number boxes ignored the wheel, but every drop-down (camera, smoothing, scaling, phase steps, the iPhone options, the simulated object) still stepped to its next entry on a wheel notch. Scrolling the Controls panel with the pointer over one silently changed a setting.
+
+### Current state
+
+- All drop-downs ignore the wheel, so the Controls panel scrolls instead, and take focus only by a click or Tab. Click, the open list and the arrow keys still choose an entry.
+- A test sends wheel notches to every drop-down, slider and number box in the window, so a plain one added later fails.
+
 ## 2026-11-21 — Always-on capture uploads
 
 ### Previous state
