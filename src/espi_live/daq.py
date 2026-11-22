@@ -25,6 +25,7 @@ import importlib
 import math
 import queue
 import threading
+import time
 from dataclasses import asdict, dataclass, field, fields, replace
 
 import numpy as np
@@ -67,6 +68,17 @@ BNC_GROUPS = (("ANALOG INPUTS", tuple(f"ai{index}" for index in range(8))),
 BNC_TERMINALS = tuple(name for _, names in BNC_GROUPS for name in names)
 PIEZO_AMPLIFIER = "Thorlabs MDT694A EXT INPUT"
 PIEZO_ROLE, GENERATOR_ROLE = "Piezo driver", "Frequency generator"
+
+# Self-checks. The USB-6251 measures its own analog outputs through the
+# internal channels "_ao0_vs_aognd" and "_ao1_vs_aognd", with no wiring.
+READBACK_SAMPLES = 50
+READBACK_RATE = 10_000.0  # S/s: 5 ms per check
+READBACK_TOLERANCE_V = 0.1  # how far a reading may be from what was written
+CHECK_INTERVAL_S = 1.0  # readback and watchdog period while connected
+WATCHDOG_S = 2.0  # outputs go to 0 V when the window has not polled for this long
+SELF_TEST_V = 0.5  # the level each output is stepped to by the self-test
+CHECKLIST_REQUIRED = ("Tick off the safety checklist in the NI DAQ window first: no drive "
+                      "signal goes to this device until it is done for this connection.")
 
 INSTALL_HINT = 'pip install pylablib-lightweight "nidaqmx>=1.4,<1.8"'
 _NI = None  # pylablib.devices.NI once loaded
@@ -193,6 +205,40 @@ def wiring(settings):
                                 "the specimen drive's input (shaker or tone amplifier)",
                                 f"Sine, at most the {s.generator_limit_v:g} V safety limit."))
     return found
+
+
+MDT694A_GAIN = 15.0  # V/V at its 150 V limit
+
+
+def checklist_items(settings):
+    """List what the user must confirm before drive signals reach a real device.
+
+    Args: settings is DaqSettings (the items follow its output assignment).
+    Returns: A list of sentences, one checkbox each.
+    """
+    s = settings
+    items = []
+    if s.piezo_output != OFF:
+        piezo = socket_label(s.piezo_output)
+        items += [
+            "The MDT694A's OUTPUT ADJ knob is turned to zero (it adds to the DAQ's "
+            "voltage).",
+            f"Only the DAQ's {piezo} cable goes to the MDT694A's EXT INPUT: the Wavetek "
+            "is unplugged from it.",
+            "The MDT694A's OUTPUT goes only to the piezo, never to the DAQ (it reaches "
+            "150 V).",
+            f"The piezo's safety limit here ({s.piezo_limit_v:g} V at the DAQ, about "
+            f"{s.piezo_limit_v * MDT694A_GAIN:.0f} V at the piezo) and the MDT694A's "
+            "VOLT LIMIT suit this piezo.",
+        ]
+    if s.generator_output != OFF:
+        where = socket_label(s.generator_terminal if s.generator_output.startswith("ctr")
+                             else s.generator_output)
+        items.append(f"The generator's {where} cable goes to the specimen drive's input, "
+                     f"which accepts its {s.generator_limit_v:g} V safety limit.")
+    items.append("Someone is watching the setup and knows that “All outputs to 0 V” "
+                 "stops everything.")
+    return items
 
 
 def output_label(output):
@@ -458,6 +504,62 @@ def piezo_range(settings):
     return s.piezo_voltage_v, s.piezo_voltage_v
 
 
+def drives(settings):
+    """Tell whether settings send any drive signal.
+
+    Args: settings is DaqSettings.
+    Returns: True when the generator or the piezo is switched on and assigned.
+    """
+    s = settings
+    return (s.generator_on and s.generator_output != OFF) or (
+        s.piezo_on and s.piezo_output != OFF)
+
+
+def assignment(settings):
+    """Name which output serves which role, for the safety checklist.
+
+    Args: settings is DaqSettings.
+    Returns: A tuple (generator output, its PFI terminal or "", piezo output);
+        the checklist must be ticked again when it changes.
+    """
+    s = settings
+    terminal = s.generator_terminal if s.generator_output.startswith("ctr") else ""
+    return (s.generator_output, terminal, s.piezo_output)
+
+
+def expected_levels(output_plan):
+    """Work out the range each written AO channel may read back in.
+
+    Args: output_plan is the OutputPlan written.
+    Returns: A dict from channel to (lowest, highest) volts.
+    """
+    found = {}
+    for channel in output_plan.analog:
+        values = np.asarray(output_plan.values.get(channel, 0.0), dtype=float)
+        found[channel] = (float(values.min()), float(values.max()))
+    return found
+
+
+def readback_problem(expected, readings):
+    """Compare readings of the outputs with what was written.
+
+    Args: expected maps a channel to (lowest, highest) volts; readings maps
+        a channel to its read samples.
+    Returns: A sentence describing the first channel out of range, or "".
+    """
+    for channel, (low, high) in expected.items():
+        samples = np.asarray(readings.get(channel, ()), dtype=float)
+        if not samples.size:
+            return f"{output_label(channel)} could not be read back"
+        lowest, highest = float(samples.min()), float(samples.max())
+        if lowest < low - READBACK_TOLERANCE_V or highest > high + READBACK_TOLERANCE_V:
+            wanted = f"{low:.3g} V" if low == high else f"{low:.3g}–{high:.3g} V"
+            seen = f"{lowest:.3g} V" if abs(highest - lowest) < 1e-3 \
+                else f"{lowest:.3g}–{highest:.3g} V"
+            return f"{output_label(channel)} read {seen} where {wanted} was written"
+    return ""
+
+
 def _buffer_samples(rate, samples):
     """Size an AO buffer: whole cycles, at least MIN_WRITE_S of waveform.
 
@@ -658,7 +760,10 @@ class SimulatedBackend:
         """
         self.outputs = None
         self.applied = None  # the last OutputPlan
-        self.zeroed = 0  # how many times every output was set to 0 V
+        self.zeroed = 0  # how many times the outputs in use were set to 0 V
+        self.zeroed_all = 0  # how many times every output of the device was
+        self.levels = {}  # channel -> the value or waveform it holds
+        self.shift = {}  # channel -> volts added to its readback (fault injection in tests)
 
     def open(self, device):
         """Pretend to connect.
@@ -676,6 +781,27 @@ class SimulatedBackend:
         Returns: None.
         """
         self.applied = output_plan
+        self.levels.update(output_plan.values)
+
+    def set_levels(self, levels):
+        """Pretend to hold constant levels.
+
+        Args: levels maps an AO channel to volts.
+        Returns: None.
+        """
+        self.levels.update(levels)
+
+    def read_outputs(self, channels):
+        """Read back what each output holds (exactly, plus any injected shift).
+
+        Args: channels are AO channel names.
+        Returns: A dict from channel to an array of READBACK_SAMPLES volts.
+        """
+        found = {}
+        for channel in channels:
+            held = np.asarray(self.levels.get(channel, 0.0), dtype=float).ravel()
+            found[channel] = np.resize(held, READBACK_SAMPLES) + self.shift.get(channel, 0.0)
+        return found
 
     def zero(self):
         """Pretend to set every output to 0 V and stop the counter.
@@ -684,7 +810,18 @@ class SimulatedBackend:
         Returns: None.
         """
         self.applied = None
+        self.levels = {}
         self.zeroed += 1
+
+    def zero_all(self):
+        """Pretend to set every analog output of the device to 0 V.
+
+        Args: None.
+        Returns: None.
+        """
+        self.applied = None
+        self.levels = {}
+        self.zeroed_all += 1
 
     def close(self):
         """Pretend to disconnect.
@@ -795,6 +932,57 @@ class PylablibBackend:
             self.nidaq.add_voltage_output(channel, channel, rng=(-MAX_VOLTS, MAX_VOLTS))
         self.analog = tuple(analog)
 
+    def zero_all(self):
+        """Set every analog output of the device to 0 V, not only those in use.
+
+        Used on connecting, so a level left by a crash or another program is
+        cleared before anything else is written.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.counter is not None:
+            self.nidaq.stop_pulse_output(self.GENERATOR)
+        self.set_levels({channel: 0.0 for channel in self.outputs.analog})
+
+    def set_levels(self, levels):
+        """Hold constant levels on every analog output (unlisted ones at 0 V).
+
+        Args: levels maps an AO channel to volts.
+        Returns: None.
+        """
+        channels = tuple(self.outputs.analog)
+        if self.analog != channels:
+            self._reconnect(channels)
+        self.nidaq.setup_voltage_output_clock(rate=0)
+        self.nidaq.set_voltage_outputs(list(channels),
+                                       [float(levels.get(c, 0.0)) for c in channels])
+
+    def read_outputs(self, channels):
+        """Measure the analog outputs through the device's internal channels.
+
+        M Series devices read each AO against AO GND on "_aoN_vs_aognd"
+        through their own ADC, so no cable is needed.
+
+        Args: channels are AO channel names.
+        Returns: A dict from channel to an array of READBACK_SAMPLES volts.
+        """
+        nidaqmx = load_ni().daq.nidaqmx
+        task = nidaqmx.Task()
+        try:
+            for channel in channels:
+                task.ai_channels.add_ai_voltage_chan(f"{self.device}/_{channel}_vs_aognd",
+                                                     min_val=-MAX_VOLTS, max_val=MAX_VOLTS)
+            task.timing.cfg_samp_clk_timing(
+                READBACK_RATE, sample_mode=nidaqmx.constants.AcquisitionType.FINITE,
+                samps_per_chan=READBACK_SAMPLES)
+            data = np.asarray(task.read(number_of_samples_per_channel=READBACK_SAMPLES,
+                                        timeout=1.0), dtype=float)
+        finally:
+            task.close()
+        rows = data.reshape(len(channels), -1)
+        return dict(zip(channels, rows))
+
     def zero(self):
         """Set every AO channel to 0 V and stop the counter output.
 
@@ -854,24 +1042,41 @@ class DaqController:
 
     request() queues work: "scan" (list devices), "connect" (device: a
     DAQmx name or SIMULATED), "apply" (settings: DaqSettings), "zero" (every
-    output to 0 V) and "close" (0 V, disconnect, end the thread). Results
+    output to 0 V), "self_test" (step each AO to SELF_TEST_V and back,
+    reading it back) and "close" (0 V, disconnect, end the thread). Results
     arrive on the events queue as (kind, payload): "devices" ((list of
     DeviceInfo, reason or None)), "connected" (DeviceOutputs), "applied"
-    (OutputPlan), "rejected" (list of problems), "zeroed", "failed" (text)
-    and "closed". move_piezo() is the one blocking call: the camera engine
-    uses it to step the piezo between frames for phase-shifting ESPI.
+    (OutputPlan), "rejected" (list of problems), "zeroed", "failed" (text),
+    "fault" (text: a self-check set every output to 0 V), "self_test"
+    ((passed, list of lines)) and "closed". move_piezo() is the one blocking
+    call: the camera engine uses it to step the piezo between frames for
+    phase-shifting ESPI.
+
+    Self-checks, while a device is connected: every AO is set to 0 V on
+    connecting; about once a second the outputs are read back through the
+    device's internal channels and compared with what was written; and when
+    heartbeat() has been called (by the window) but not for WATCHDOG_S while
+    an output is on, everything goes to 0 V. A real device takes no drive
+    signal until arm() has recorded the safety checklist for this connection
+    and output assignment.
     """
 
-    def __init__(self, log, backend_factory=None):
+    def __init__(self, log, backend_factory=None, clock=time.monotonic):
         """Create an idle controller; the thread starts with the first request.
 
         Args: log is an AppLog or PrefixedLog; backend_factory, given a device
             name, returns the backend for it (default: SimulatedBackend for
-            SIMULATED, otherwise PylablibBackend).
+            SIMULATED, otherwise PylablibBackend); clock gives seconds (tests
+            pass their own).
         Returns: None.
         """
         self.log = log
         self.backend_factory = backend_factory or default_backend
+        self.clock = clock
+        self._beat = None  # when the window last called heartbeat()
+        self._armed = None  # (device name, assignment) the checklist was done for
+        self.expected = {}  # worker thread only: channel -> (lowest, highest) volts
+        self._faulted = False  # worker thread only: a self-check fault is reported once
         self.events = queue.SimpleQueue()
         self._commands = queue.SimpleQueue()
         self._thread = None
@@ -897,6 +1102,43 @@ class DaqController:
                                                 daemon=True)
                 self._thread.start()
             self._commands.put((action, payload))
+
+    def heartbeat(self):
+        """Tell the controller the window is still responding.
+
+        Once called, a window that stops calling it for WATCHDOG_S while an
+        output is on gets every output set to 0 V.
+
+        Args: None.
+        Returns: None.
+        """
+        self._beat = self.clock()
+
+    def arm(self, settings):
+        """Record that the safety checklist was ticked off for these outputs.
+
+        It holds for the connected device and this output assignment, until
+        the next connection.
+
+        Args: settings is the DaqSettings the checklist was shown for.
+        Returns: None.
+        """
+        with self._lock:
+            device = self._status["device"]
+            self._armed = (device.name if device else None, assignment(settings))
+
+    def is_armed(self, settings):
+        """Tell whether drive signals may go to the device with these settings.
+
+        Args: settings is DaqSettings.
+        Returns: True for the simulated device, or when the checklist was
+            ticked for the connected device and this output assignment.
+        """
+        with self._lock:
+            device = self._status["device"]
+            if device is not None and device.simulated:
+                return True
+            return device is not None and self._armed == (device.name, assignment(settings))
 
     def status(self):
         """Report the device and what it is producing.
@@ -964,18 +1206,71 @@ class DaqController:
         Args: None.
         Returns: None.
         """
+        next_check = self.clock() + CHECK_INTERVAL_S
         while True:
-            action, payload = self._commands.get()
             try:
-                if action == "close":
-                    self._disconnect()
-                    self.events.put(("closed", None))
-                    return
-                getattr(self, f"_do_{action}")(**payload)
-            except Exception as exc:  # report, make the outputs safe, carry on
-                error_reports.caught(self.log, exc, "daq", f"NI DAQ {action} failed")
-                self._make_safe()
-                self.events.put(("failed", f"{type(exc).__name__}: {exc}"))
+                action, payload = self._commands.get(
+                    timeout=max(0.0, next_check - self.clock()))
+            except queue.Empty:
+                action, payload = None, {}
+            if action == "close":
+                self._handle("close", self._disconnect)
+                self.events.put(("closed", None))
+                return
+            if action is not None:
+                name = "self-check" if action == "check" else action
+                self._handle(name, getattr(self, f"_do_{action}"), **payload)
+            if self.clock() >= next_check:  # also between busy phase steps
+                next_check = self.clock() + CHECK_INTERVAL_S
+                self._handle("self-check", self._do_check)
+
+    def _handle(self, name, work, **payload):
+        """Run one piece of work; on any failure report it and go to 0 V.
+
+        Args: name names the work in the log; work is a bound method;
+            payload its keyword arguments.
+        Returns: None.
+        """
+        try:
+            work(**payload)
+        except Exception as exc:  # report, make the outputs safe, carry on
+            error_reports.caught(self.log, exc, "daq", f"NI DAQ {name} failed")
+            self._make_safe()
+            self.events.put(("failed", f"{type(exc).__name__}: {exc}"))
+
+    def _do_check(self):
+        """Run the self-checks: the freeze watchdog, then the output readback.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.backend is None or self._faulted:
+            return
+        beat = self._beat
+        if beat is not None and self.status()["active"]:
+            silent = self.clock() - beat
+            if silent > WATCHDOG_S:
+                self._fault(f"the window stopped responding for {silent:.1f} s")
+                return
+        if self.expected:
+            problem = readback_problem(self.expected,
+                                       self.backend.read_outputs(list(self.expected)))
+            if problem:
+                self._fault(problem)
+
+    def _fault(self, reason):
+        """Set every output to 0 V after a failed self-check, and say why once.
+
+        Args: reason is a sentence fragment naming what was wrong.
+        Returns: None.
+        """
+        self._faulted = True
+        self.log.warning(f"NI DAQ self-check: {reason}. Every output was set to 0 V.")
+        self.backend.zero_all()
+        self.expected = {channel: (0.0, 0.0) for channel in self.outputs.analog}
+        self._set_status(active=False, summary=f"Stopped by the self-check: {reason}",
+                         settings=None)
+        self.events.put(("fault", reason))
 
     def _do_scan(self):
         """List devices.
@@ -998,6 +1293,11 @@ class DaqController:
         backend = self.backend_factory(device)
         self.outputs = backend.open(device)
         self.backend = backend
+        with self._lock:
+            self._armed = None  # the checklist is ticked again for each connection
+        backend.zero_all()  # clear anything a crash or another program left on
+        self.expected = {channel: (0.0, 0.0) for channel in self.outputs.analog}
+        self._faulted = False
         info = self.outputs.device
         self.log.info(f"NI DAQ: connected to {info.label}; outputs "
                       f"{', '.join(self.outputs.analog + self.outputs.counters)}")
@@ -1014,6 +1314,8 @@ class DaqController:
             self.events.put(("rejected", ["Connect to a device first."]))
             return
         found = problems(settings, self.outputs)
+        if not found and drives(settings) and not self.is_armed(settings):
+            found = [CHECKLIST_REQUIRED]
         if found:
             self.events.put(("rejected", found))
             return
@@ -1030,6 +1332,8 @@ class DaqController:
         """
         output_plan = plan(settings, self.outputs)
         self.backend.apply(output_plan)
+        self.expected = expected_levels(output_plan)
+        self._faulted = False
         active = (settings.generator_on and settings.generator_output != OFF) or (
             settings.piezo_on and settings.piezo_output != OFF)
         self._set_status(active=active, summary=output_plan.summary, settings=settings)
@@ -1047,6 +1351,8 @@ class DaqController:
             reply.put((False, "the NI DAQ is not connected"))
             return
         found = problems(settings, self.outputs)
+        if not found and not self.is_armed(settings):
+            found = [CHECKLIST_REQUIRED]
         if found:
             reply.put((False, " ".join(found)))
             return
@@ -1066,9 +1372,45 @@ class DaqController:
         """
         if self.backend is not None:
             self.backend.zero()
+            self.expected = {channel: (0.0, 0.0) for channel in self.expected}
             self.log.info("NI DAQ: every output set to 0 V")
         self._set_status(active=False, summary="All outputs at 0 V", settings=None)
         self.events.put(("zeroed", None))
+
+    def _do_self_test(self):
+        """Step each analog output to SELF_TEST_V and back to 0 V, reading it back.
+
+        Every output is left at 0 V afterwards. Needs no checklist: the
+        window asks for the piezo amplifier to be off first.
+
+        Args: None.
+        Returns: None; the result is a "self_test" event (passed, lines).
+        """
+        if self.backend is None:
+            self.events.put(("self_test", (False, ["Connect to a device first."])))
+            return
+        channels = list(self.outputs.analog)
+        lines, passed = [], True
+        for channel in channels + [None]:  # None: every output back at 0 V
+            levels = {c: (SELF_TEST_V if c == channel else 0.0) for c in channels}
+            self.backend.set_levels(levels)
+            readings = self.backend.read_outputs(channels)
+            problem = readback_problem({c: (v, v) for c, v in levels.items()}, readings)
+            step = f"{output_label(channel)} at {SELF_TEST_V:g} V" if channel \
+                else "every output at 0 V"
+            means = ", ".join(f"{output_label(c)} {float(np.mean(readings[c])):.3f} V"
+                              for c in channels)
+            lines.append(f"{step}: {'FAILED, ' + problem if problem else 'OK'} ({means})")
+            passed = passed and not problem
+        self.backend.zero_all()
+        self.expected = {channel: (0.0, 0.0) for channel in channels}
+        self._faulted = False
+        self._set_status(active=False, settings=None,
+                         summary="Self-test " + ("passed" if passed else "FAILED")
+                         + "; all outputs at 0 V")
+        self.log.info(f"NI DAQ self-test {'passed' if passed else 'FAILED'}: "
+                      + "; ".join(lines))
+        self.events.put(("self_test", (passed, lines)))
 
     def _disconnect(self):
         """Set the outputs to 0 V and release the device, if one is open.
@@ -1078,6 +1420,7 @@ class DaqController:
         """
         backend, self.backend = self.backend, None
         self.outputs = None
+        self.expected = {}
         self._set_status(device=None, active=False, summary="Not connected", settings=None)
         if backend is not None:
             backend.close()
@@ -1090,6 +1433,7 @@ class DaqController:
         Returns: None. A second failure is logged and the device released.
         """
         self._set_status(active=False, summary="Stopped after an error", settings=None)
+        self.expected = {}
         if self.backend is None:
             return
         try:

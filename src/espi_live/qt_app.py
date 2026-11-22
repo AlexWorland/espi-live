@@ -2670,6 +2670,11 @@ class DaqDialog(QDialog):
         self.problem_label.setStyleSheet("color:#c00000;")
         self.state_label = QLabel("Outputs: not connected")
         self.state_label.setWordWrap(True)
+        self.safety_label = QLabel()
+        self.safety_label.setWordWrap(True)
+        self.test_label = QLabel()
+        self.test_label.setWordWrap(True)
+        self.test_label.setTextFormat(Qt.RichText)
         note = QLabel("Volts are at the DAQ, before your amplifiers. Closing this window "
                       "leaves the outputs running; they go to 0 V when ESPI live closes.")
         note.setWordWrap(True)
@@ -2681,6 +2686,11 @@ class DaqDialog(QDialog):
                                              QDialogButtonBox.ActionRole)
         set_tooltip(self.zero_button,
                     "Stop the generator and set every assigned output to 0 V.")
+        self.test_button = buttons.addButton("Test outputs…", QDialogButtonBox.ActionRole)
+        set_tooltip(self.test_button,
+                    "Self-test: step each analog output to "
+                    f"{daq.SELF_TEST_V:g} V and back, and read it back through the "
+                    "device's internal channels (no wiring). Switch the MDT694A off first.")
         self.wiring_button = buttons.addButton("Where to plug in…",
                                                QDialogButtonBox.HelpRole)
         set_tooltip(self.wiring_button,
@@ -2699,6 +2709,8 @@ class DaqDialog(QDialog):
         layout.addWidget(piezo)
         layout.addWidget(self.problem_label)
         layout.addWidget(self.state_label)
+        layout.addWidget(self.safety_label)
+        layout.addWidget(self.test_label)
         layout.addStretch(1)
         layout.addWidget(note)
         layout.addWidget(buttons)
@@ -2709,6 +2721,8 @@ class DaqDialog(QDialog):
         self.zero_button.clicked.connect(lambda: self.controller.request("zero"))
         self.wiring = None  # the "Where to plug in" window, built on first use
         self.wiring_button.clicked.connect(self.show_wiring)
+        self.checklist = None  # the safety checklist, while it is open
+        self.test_button.clicked.connect(self.run_self_test)
         self.step_down.clicked.connect(lambda: self.step(-1))
         self.step_up.clicked.connect(lambda: self.step(1))
         close.clicked.connect(self.reject)
@@ -2891,6 +2905,8 @@ class DaqDialog(QDialog):
         found = daq.problems(s, outputs)
         self.problem_label.setText("\n".join(found))
         self.apply_button.setEnabled(self.outputs is not None and not found)
+        self.test_button.setEnabled(self.outputs is not None)
+        self.safety_label.setText(self._safety_text(s))
         self.generator_result.setText(self._preview(s, outputs, found))
         self.piezo_result.setText(self._piezo_preview(s, outputs, found))
         if self.wiring is not None:
@@ -2968,8 +2984,74 @@ class DaqDialog(QDialog):
         settings = self.settings()
         QSettings("ESPI", "espi_live").setValue(DAQ_SETTINGS_KEY,
                                                 json.dumps(settings.to_dict()))
+        if daq.drives(settings) and not self.controller.is_armed(settings):
+            self._ask_checklist(settings)
+            return
+        self._send(settings)
+
+    def _send(self, settings):
+        """Send settings to the device.
+
+        Args: settings is daq.DaqSettings.
+        Returns: None.
+        """
         self.state_label.setText("Outputs: applying…")
         self.controller.request("apply", settings=settings)
+
+    def _ask_checklist(self, settings):
+        """Show the safety checklist; once it is ticked off, apply the settings.
+
+        Args: settings is the daq.DaqSettings waiting to be applied.
+        Returns: None.
+        """
+        if self.checklist is not None:
+            self.checklist.close()
+        self.checklist = DaqChecklistDialog(self, settings)
+        self.checklist.accepted.connect(lambda: self._checklist_done(settings))
+        self.checklist.open()
+
+    def _checklist_done(self, settings):
+        """Record the ticked checklist with the controller and apply.
+
+        Args: settings is the daq.DaqSettings the checklist was shown for.
+        Returns: None.
+        """
+        self.controller.arm(settings)
+        self.window.log.write("NI DAQ: safety checklist ticked off for "
+                              f"{self.outputs.device.label if self.outputs else 'the device'}.")
+        self.refresh()
+        self._send(settings)
+
+    def _safety_text(self, settings):
+        """Say where the safety checklist stands for the connected device.
+
+        Args: settings is the form's daq.DaqSettings.
+        Returns: One line ("" with no device or the simulated one).
+        """
+        if self.outputs is None or self.outputs.device.simulated:
+            return ""
+        if self.controller.is_armed(settings):
+            return "Safety checklist: ticked off for this connection."
+        return ("Safety checklist: shown before the first drive signal to this device "
+                "(once per connection, and again if the outputs are reassigned).")
+
+    def run_self_test(self):
+        """Ask for the amplifiers to be off, then run the output self-test.
+
+        Args: None.
+        Returns: None.
+        """
+        answer = QMessageBox.question(
+            self, "Test outputs",
+            f"Each analog output goes to {daq.SELF_TEST_V:g} V for a moment and back to "
+            "0 V, read back through the device's own internal channels.\n\n"
+            "Switch the MDT694A off (or unplug its EXT INPUT) and the specimen drive "
+            "before you start. Run the test?")
+        if answer != QMessageBox.Yes:
+            return
+        self._switch_off()
+        self.test_label.setText("Testing outputs…")
+        self.controller.request("self_test")
 
     def step(self, direction):
         """Move the held piezo voltage by one step, and apply it if the piezo is on.
@@ -3043,6 +3125,20 @@ class DaqDialog(QDialog):
         elif kind == "zeroed":
             self._switch_off()
             self.state_label.setText("Outputs: all at 0 V.")
+        elif kind == "fault":
+            self._switch_off()
+            self.problem_label.setText(
+                f"Self-check: {payload}. Every output was set to 0 V; find the cause "
+                "before switching anything on again.")
+            self.state_label.setText("Outputs: stopped by the self-check.")
+        elif kind == "self_test":
+            passed, lines = payload
+            colour = "#2b8a3e" if passed else "#c00000"
+            heading = "Self-test passed" if passed else "Self-test FAILED"
+            self.test_label.setText(f'<span style="color:{colour}"><b>{heading}.</b><br>'
+                                    + "<br>".join(html.escape(line) for line in lines)
+                                    + "</span>")
+            self.state_label.setText("Outputs: all at 0 V after the self-test.")
         elif kind == "failed":
             self._switch_off()
             self.problem_label.setText(
@@ -3353,6 +3449,85 @@ class DaqPanelView(QWidget):
                              label)
             if mark:
                 self._draw_badge(painter, QPointF(848, y), mark)
+
+
+class CheckLabel(QLabel):
+    """A wrapping label that ticks its checkbox when clicked, as a checkbox's own text does."""
+
+    def __init__(self, text, box):
+        """Show text beside a checkbox.
+
+        Args: text is the sentence; box is the QCheckBox it belongs to.
+        Returns: None.
+        """
+        super().__init__(text)
+        self.box = box
+        self.setWordWrap(True)
+        self.setBuddy(box)
+
+    def mouseReleaseEvent(self, event):
+        """Toggle the checkbox on a click.
+
+        Args: event is the Qt mouse event.
+        Returns: None.
+        """
+        self.box.toggle()
+        super().mouseReleaseEvent(event)
+
+
+class DaqChecklistDialog(QDialog):
+    """The safety checklist the user ticks off before drive signals reach a real device.
+
+    "Allow drive signals" stays disabled until every box is ticked. It is
+    shown once per connection, and again when the outputs are reassigned.
+    """
+
+    def __init__(self, parent, settings):
+        """List the checks for these settings' output assignment.
+
+        Args: parent is the DaqDialog; settings is the daq.DaqSettings about
+            to be applied.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Before the DAQ drives anything")
+        self.resize(ui_scale.px(520), ui_scale.px(380))
+        intro = QLabel("Tick off each check. Until you do, ESPI live sends no drive signal "
+                       "to this device; this is asked once per connection, and again if "
+                       "the outputs are reassigned.")
+        intro.setWordWrap(True)
+        self.boxes, self.labels = [], []
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        for text in daq.checklist_items(settings):  # long sentences wrap beside each box
+            box = QCheckBox()
+            box.toggled.connect(self._update)
+            label = CheckLabel(text, box)
+            row = QHBoxLayout()
+            row.addWidget(box, 0, Qt.AlignTop)
+            row.addWidget(label, 1)
+            layout.addLayout(row)
+            self.boxes.append(box)
+            self.labels.append(label)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox()
+        self.allow_button = buttons.addButton("Allow drive signals",
+                                              QDialogButtonBox.AcceptRole)
+        cancel = buttons.addButton(QDialogButtonBox.Cancel)
+        for button in buttons.buttons():
+            button.setAutoDefault(False)
+        buttons.accepted.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+        self._update()
+
+    def _update(self, *_):
+        """Enable "Allow drive signals" once every box is ticked.
+
+        Args: _ is the toggled state (ignored).
+        Returns: None.
+        """
+        self.allow_button.setEnabled(all(box.isChecked() for box in self.boxes))
 
 
 class DaqWiringDialog(QDialog):
@@ -6529,6 +6704,7 @@ class MainWindow(QMainWindow):
         """
         if self.daq is None or self.closing:
             return
+        self.daq.heartbeat()  # the DAQ zeroes the outputs if this stops while they are on
         later = []
         while True:
             try:
@@ -6574,6 +6750,11 @@ class MainWindow(QMainWindow):
             # Everything is at 0 V after connecting, so the generator stays off.
             base = replace(saved, device=payload.device.name, generator_on=False,
                            piezo_on=False)
+            if not self.daq.is_armed(replace(base, piezo_on=True)):
+                self._attach_stepper(None)
+                self.log.write("Phase view: the NI DAQ piezo waits for the safety checklist "
+                               "(Devices > NI DAQ…, then Apply with the piezo on).")
+                return
             self._attach_stepper(phase.PiezoStepper(self.daq, base,
                                                     payload.device.simulated))
         elif kind == "applied":
@@ -6585,7 +6766,9 @@ class MainWindow(QMainWindow):
                     self.daq, applied, device is not None and device.simulated))
             else:
                 self._attach_stepper(None)
-        elif kind in ("zeroed", "failed", "closed"):
+        elif kind in ("zeroed", "failed", "closed", "fault"):
+            if kind == "fault":
+                self.log.write(f"NI DAQ self-check: {payload}. Every output was set to 0 V.")
             self.set_daq_drive(daq.Drive())
             if self.phase_stepper is not None:
                 self.log.write("Phase view: piezo stepping stopped (the NI DAQ outputs "

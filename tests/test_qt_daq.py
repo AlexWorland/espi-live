@@ -16,6 +16,9 @@ import time
 import unittest
 from unittest import mock
 
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+
 from espi_live import daq, qt_app
 from test_qt_app import APP, FakeSettings, WindowTestCase
 
@@ -86,6 +89,18 @@ class DaqWindowTestCase(WindowTestCase):
         self.settle(dialog, lambda: dialog.outputs is not None)
         return dialog
 
+    def allow(self, dialog):
+        """Tick off the safety checklist the last Apply opened, allowing drive signals.
+
+        Args: dialog is the DaqDialog.
+        Returns: None.
+        """
+        checklist = dialog.checklist
+        self.assertIsNotNone(checklist)
+        for box in checklist.boxes:
+            box.setChecked(True)
+        checklist.allow_button.click()
+
     def settle(self, dialog, predicate, timeout=5.0):
         """Poll the dialog until a condition holds.
 
@@ -134,6 +149,7 @@ class DaqMenuTests(DaqWindowTestCase):
         dialog = self.open_dialog()
         dialog.generator_on.setChecked(True)
         dialog.apply()
+        self.allow(dialog)
         self.settle(dialog, lambda: "sine" in dialog.state_label.text())
         self.window.close()
         self.assertTrue(self.log.has("NI DAQ: outputs at 0 V, device released"))
@@ -299,6 +315,107 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog.wiring.show_settings(settings, daq.DeviceInfo("Dev2", "USB-6009"))
         self.assertIn("sockets may differ", dialog.wiring.device_note.text())
 
+    def test_safety_checklist_before_the_first_drive(self):
+        """Apply opens the checklist; Allow stays off until all are ticked; once per connection.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertIn("shown before the first drive signal", dialog.safety_label.text())
+        dialog.apply()  # nothing switched on: no checklist needed
+        self.settle(dialog, lambda: "off" in dialog.state_label.text())
+        self.assertIsNone(dialog.checklist)
+        dialog.piezo_on.setChecked(True)
+        dialog.apply()
+        checklist = dialog.checklist
+        self.assertTrue(checklist.isVisible())
+        self.assertEqual(len(checklist.boxes), 6)
+        self.assertFalse(checklist.allow_button.isEnabled())
+        for box in checklist.boxes[:-1]:
+            box.setChecked(True)
+        self.assertFalse(checklist.allow_button.isEnabled())
+        checklist.labels[-1].mouseReleaseEvent(
+            QMouseEvent(QEvent.MouseButtonRelease, QPointF(1, 1), QPointF(1, 1),
+                        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        self.assertTrue(checklist.boxes[-1].isChecked())  # clicking the sentence ticks it
+        self.assertTrue(checklist.allow_button.isEnabled())
+        checklist.allow_button.click()
+        self.settle(dialog, lambda: "holds" in dialog.state_label.text())
+        self.assertIn("ticked off for this connection", dialog.safety_label.text())
+        self.assertTrue(self.log.has("safety checklist ticked off for Dev1: USB-6251"))
+        dialog.apply()  # already ticked for this connection
+        self.assertIs(dialog.checklist, checklist)
+        # Reassigning the piezo asks again; cancelling sends nothing.
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog._set_combo(dialog.piezo_output, "ao0")
+        dialog.apply()
+        self.assertIsNot(dialog.checklist, checklist)
+        again = dialog.checklist
+        dialog.apply()  # a second Apply replaces the open checklist
+        self.assertFalse(again.isVisible())
+        dialog.checklist.reject()
+        self.assertEqual(self.window.daq.status()["settings"].piezo_output, "ao1")
+
+    def test_simulated_device_needs_no_checklist(self):
+        """The simulated device drives nothing, so it never asks.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.device_box.setCurrentIndex(dialog.device_box.findData(daq.SIMULATED))
+        dialog._connect_selected()
+        self.settle(dialog, lambda: dialog.outputs is not None
+                    and dialog.outputs.device.simulated)
+        self.assertEqual(dialog.safety_label.text(), "")
+        dialog.piezo_on.setChecked(True)
+        dialog.apply()
+        self.assertIsNone(dialog.checklist)
+        self.settle(dialog, lambda: dialog.state_label.text().startswith("Simulated"))
+
+    def test_self_test_button(self):
+        """Test outputs asks first, then shows the result; a fault is explained.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertTrue(dialog.test_button.isEnabled())
+        dialog.test_button.click()  # answered No
+        self.assertEqual(dialog.test_label.text(), "")
+        self.dialogs.question.return_value = self.dialogs.Yes
+        dialog.test_button.click()
+        self.settle(dialog, lambda: "Self-test passed" in dialog.test_label.text())
+        self.assertIn("AO 1 at 0.5 V: OK", dialog.test_label.text())
+        self.assertIn("after the self-test", dialog.state_label.text())
+        dialog.handle("self_test", (False, ["AO 1 at 0.5 V: FAILED, AO 1 read 0.8 V"]))
+        self.assertIn("Self-test FAILED", dialog.test_label.text())
+        dialog.piezo_on.setChecked(True)
+        dialog.handle("fault", "AO 1 read 3 V where 0.2 V was written")
+        self.assertFalse(dialog.piezo_on.isChecked())
+        self.assertIn("Self-check: AO 1 read 3 V", dialog.problem_label.text())
+        self.assertIn("stopped by the self-check", dialog.state_label.text())
+        dialog._connect_selected()  # nothing chosen changes nothing; no device: disabled
+        dialog.connected(None)
+        self.assertFalse(dialog.test_button.isEnabled())
+
+    def test_window_beats_and_follows_faults(self):
+        """Polling sends the heartbeat; a fault drops the drive and is logged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.open_dialog()
+        daq_controller = self.window.daq
+        with mock.patch.object(daq_controller, "heartbeat") as beat:
+            self.window.poll_daq()
+        beat.assert_called_once_with()
+        self.window.set_daq_drive(daq.Drive("sine", 1000.0, 0.1))
+        self.window._daq_event("fault", "the window stopped responding for 3.0 s")
+        self.assertEqual(self.window.daq_drive, daq.Drive())
+        self.assertTrue(self.log.has("NI DAQ self-check: the window stopped responding"))
+
     def test_problems_block_apply(self):
         """A clash or an unsafe level is explained and disables Apply.
 
@@ -324,6 +441,7 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog.piezo_on.setChecked(True)
         dialog.piezo_voltage.setValue(0.25)
         dialog.apply()
+        self.allow(dialog)
         self.settle(dialog, lambda: "holds 0.25 V" in dialog.state_label.text())
         self.assertTrue(dialog.state_label.text().startswith("Outputs: "))
         saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
@@ -456,6 +574,7 @@ class DriveHandOffTests(DaqWindowTestCase):
         dialog.frequency.setValue(1000.0)
         dialog.generator_on.setChecked(True)
         dialog.apply()
+        self.allow(dialog)
         self.settle(dialog, lambda: self.window.daq_drive.waveform == "sine")
         self.assertAlmostEqual(self.window.daq_drive.frequency_hz, 1000.0, delta=0.01)
         self.assertIs(self.window.current.drive, self.window.daq_drive)
@@ -598,6 +717,12 @@ class PhaseWindowTests(DaqWindowTestCase):
                   generator_on=True)
         w._auto_connect_daq()
         self.assertTrue(self.log.has("looking for Dev1"))
+        # A real device takes no drive signal before the checklist: no stepping yet.
+        self.pump(lambda: self.log.has("waits for the safety checklist"))
+        self.assertIsNone(w.phase_stepper)
+        saved = qt_app.DaqDialog._saved_settings()
+        w.daq.arm(saved)
+        w._daq_event("connected", daq.DeviceOutputs(REAL))
         self.pump(lambda: w.phase_stepper is not None)
         stepper = w.phase_stepper
         self.assertIs(self.engine.phase_stepper, stepper)

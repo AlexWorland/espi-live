@@ -1631,6 +1631,21 @@ python -m espi_live</code></pre>
         <li><strong>Apply</strong> sends the settings; <strong>All outputs to
           0 V</strong> stops the generator and sets every assigned output to
           0 V. An assigned output that is switched off is held at 0 V.</li>
+        <li><strong>Safety checklist</strong> — the first <strong>Apply</strong>
+          that switches an output on for a real device asks you to tick off a
+          short checklist (the MDT694A's knob at zero, only the DAQ's cable on
+          its EXT INPUT, its OUTPUT never to the DAQ, the limits suit the
+          piezo, the generator's cable, someone watching). Nothing is driven
+          until every box is ticked. It is asked once per connection and again
+          if you reassign the outputs; the simulated device never asks. The
+          Phase view's piezo steps wait for it too.</li>
+        <li><strong>Self-checks</strong> — every output is set to 0 V when the
+          device connects. While connected, ESPI live reads its own outputs back
+          about once a second through the USB-6251's internal channels (no
+          extra cable); a reading that does not match what was written, or the
+          window freezing for 2 s while an output is on, sets every output to
+          0 V and says why. <strong>Test outputs…</strong> steps each output to
+          0.5 V and back and checks it; switch the MDT694A off first.</li>
         <li><strong>Where to plug in…</strong> — a drawing of the USB-6251
           BNC's front panel, laid out like NI's own figure of it, with the
           sockets your settings use marked and numbered, and beside it where
