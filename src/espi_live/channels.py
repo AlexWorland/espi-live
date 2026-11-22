@@ -15,6 +15,7 @@ from dataclasses import asdict, replace
 
 from espi_live import error_reports, sources
 from espi_live.camera import CameraInfo
+from espi_live.daq import Drive
 from espi_live.engine import Engine
 from espi_live.engine import default_settings as source_settings
 from espi_live.profiles import Profile, default_profile, profile_key, summary
@@ -142,6 +143,7 @@ class Channel:
         # start in the flow.
         self.labview_saved = default_profile(info, demo).labview_saved
         self.retired = []  # stopped engines that may still be finishing
+        self.drive = Drive()  # the DAQ outputs, for a demo channel's simulated drumhead
         if profile is not None:
             self.apply_profile(profile)
 
@@ -256,6 +258,7 @@ class Channel:
         engine = self._new_engine()
         if self.demo_source:
             engine.use_demo(self.info.serial)
+            engine.request("drive", drive=self.drive)
         else:
             engine.open_camera()
         self.engine = engine
@@ -274,10 +277,25 @@ class Channel:
         engine = self._new_engine()
         if self.demo_source:
             engine.use_demo(self.info.serial)
+            engine.request("drive", drive=self.drive)
         else:
             engine.open_on_start(after or (self.retired[-1] if self.retired else None))
         self.engine = engine
         engine.start()
+
+    def set_drive(self, drive):
+        """Follow what the NI DAQ's outputs produce.
+
+        A demo channel's simulated drumhead reacts to it (see
+        simulation.DemoSource); a camera channel only keeps it.
+
+        Args: drive is a daq.Drive (Drive() when nothing is driven).
+        Returns: None; a running demo engine is sent it at once, and every
+            demo engine started later starts with it.
+        """
+        self.drive = drive
+        if self.engine is not None and self.demo:
+            self.engine.request("drive", drive=drive)
 
     def stop(self):
         """Turn processing off, keeping the settings for the next start.

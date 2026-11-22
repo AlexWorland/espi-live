@@ -241,6 +241,38 @@ class CounterPlan:
 
 
 @dataclass(frozen=True)
+class Drive:
+    """What the outputs produce, for the simulated ESPI signal in dummy mode.
+
+    The generator's waveform is "sine", "square" or "" (off or unassigned),
+    at the frequency the device really produces; the piezo's mode is HOLD,
+    SINE or "" (off or unassigned), with piezo_v its held level or its sine's
+    centre. device is the label of the device that applied it. Drive() is
+    "nothing driven".
+    """
+
+    waveform: str = ""
+    frequency_hz: float = 0.0
+    amplitude_v: float = 0.0
+    offset_v: float = 0.0
+    piezo_mode: str = ""
+    piezo_v: float = 0.0
+    piezo_amplitude_v: float = 0.0
+    piezo_phase_deg: float = 0.0
+    device: str = ""
+    simulated: bool = False
+
+    @property
+    def active(self):
+        """Tell whether the generator or the piezo is producing anything.
+
+        Args: None.
+        Returns: True when either is on.
+        """
+        return bool(self.waveform or self.piezo_mode)
+
+
+@dataclass(frozen=True)
 class OutputPlan:
     """Exactly what to write to the device, worked out from DaqSettings."""
 
@@ -252,6 +284,7 @@ class OutputPlan:
     counter: CounterPlan = None
     frequency_hz: float = 0.0  # what the generator really produces (0 when off)
     summary: str = ""
+    drive: Drive = Drive()  # the same, described for the ESPI simulation
 
 
 def choose_timing(frequency, channels, max_rate=None):
@@ -407,7 +440,31 @@ def plan(settings, outputs=None):
                          f"{s.piezo_voltage_v:g} V")
     summary = "; ".join(parts) if parts else "no outputs assigned"
     return OutputPlan(analog, rate, samples, buffer_samples, values, counter,
-                      frequency, summary)
+                      frequency, summary, describe_drive(s, outputs, frequency))
+
+
+def describe_drive(settings, outputs, frequency):
+    """Describe what valid settings make the outputs produce.
+
+    Args: settings is the DaqSettings plan() accepted; outputs is the
+        device's DeviceOutputs; frequency is the generator's real frequency
+        (0 when it is off).
+    Returns: A Drive.
+    """
+    s = settings
+    waveform, amplitude = "", 0.0
+    if s.generator_on and s.generator_output in outputs.analog:
+        waveform, amplitude = "sine", s.generator_amplitude_v
+    elif s.generator_on and s.generator_output in outputs.counters:
+        waveform = "square"
+    mode = s.piezo_mode if s.piezo_on and s.piezo_output != OFF else ""
+    sine = mode == SINE
+    return Drive(waveform, frequency if waveform else 0.0, amplitude,
+                 s.generator_offset_v if waveform == "sine" else 0.0, mode,
+                 s.piezo_voltage_v if mode else 0.0,
+                 s.piezo_amplitude_v if sine else 0.0,
+                 s.piezo_phase_deg if sine else 0.0,
+                 outputs.device.label, outputs.device.simulated)
 
 
 class SimulatedBackend:

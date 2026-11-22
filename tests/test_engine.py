@@ -11,6 +11,7 @@ from unittest import mock
 
 import numpy as np
 
+from espi_live import diagnostics
 from espi_live import engine as engine_module
 from espi_live import paths
 from espi_live.camera import CameraInfo
@@ -22,6 +23,7 @@ from espi_live.processing import (SMOOTHING_METHODS, ESPIProcessor,
                                   raw_difference,
                                   smooth_speckle,
                                   stretch_contrast)
+from espi_live.daq import Drive
 from list_log import ListLog
 
 
@@ -211,10 +213,10 @@ class EngineDemoTests(unittest.TestCase):
         """
         state = {"n": 0}
 
-        def next_frame(exposure_us, gain_db, now):
+        def next_frame(exposure_us, gain_db, fps):
             """Return the next frame, alternating 0 and 3.
 
-            Args: exposure_us, gain_db and now are the demo source arguments.
+            Args: exposure_us, gain_db and fps are the demo source arguments.
             Returns: A Mono8 frame.
             """
             state["n"] += 1
@@ -256,10 +258,10 @@ class EngineDemoTests(unittest.TestCase):
         """
         state = {"n": 0}
 
-        def next_frame(exposure_us, gain_db, now):
+        def next_frame(exposure_us, gain_db, fps):
             """Return the next frame, alternating 0 and 4.
 
-            Args: exposure_us, gain_db and now are the demo source arguments.
+            Args: exposure_us, gain_db and fps are the demo source arguments.
             Returns: A Mono8 frame.
             """
             state["n"] += 1
@@ -317,10 +319,10 @@ class EngineDemoTests(unittest.TestCase):
         state = {"n": 0}
         columns = np.tile(np.arange(60, dtype=np.uint8), (80, 1))
 
-        def next_frame(exposure_us, gain_db, now):
+        def next_frame(exposure_us, gain_db, fps):
             """Return the next frame, alternating black and the column ramp.
 
-            Args: exposure_us, gain_db and now are the demo source arguments.
+            Args: exposure_us, gain_db and fps are the demo source arguments.
             Returns: A Mono8 frame.
             """
             state["n"] += 1
@@ -442,10 +444,10 @@ class EngineDemoTests(unittest.TestCase):
         shape = (80, 60)
         state = {"n": 0}
 
-        def next_frame(exposure_us, gain_db, now):
+        def next_frame(exposure_us, gain_db, fps):
             """Return the next black or white frame.
 
-            Args: exposure_us, gain_db and now are the demo source arguments.
+            Args: exposure_us, gain_db and fps are the demo source arguments.
             Returns: A Mono8 frame.
             """
             state["n"] += 1
@@ -577,7 +579,7 @@ class EngineDemoTests(unittest.TestCase):
         Returns: None.
         """
         ramp = np.tile(np.arange(0, 240, 4, dtype=np.uint8), (80, 1))
-        self.engine.demo_source.next_frame = lambda exposure_us, gain_db, now: ramp.copy()
+        self.engine.demo_source.next_frame = lambda exposure_us, gain_db, fps: ramp.copy()
         self.engine.update_settings(
             fps=120, mode="Raw", gamma=1.0, noise_reduction=0,
             flip_horizontal=False)
@@ -621,6 +623,73 @@ class EngineDemoTests(unittest.TestCase):
         self.assertTrue(wait_until(
             lambda: self.engine.latest_packet().sequence > first + 3))
         self.assertIn("refreshes every", self.engine.status()["hint"])
+
+
+class SimulatedObjectEngineTests(EngineDemoTests):
+    """The demo engine feeds its simulated source the object and the DAQ drive."""
+
+    def test_demo_object_reaches_the_source(self):
+        """Choosing an object changes what the source simulates, and is logged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(demo_object="Still")
+        self.assertTrue(wait_until(lambda: self.engine.demo_source.object == "Still"))
+        self.assertTrue(wait_until(lambda: self.log.has("Simulated object: Still")))
+
+    def test_reference_piezo_reaches_the_source(self):
+        """Turning the reference piezo on reaches the source and is logged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertFalse(self.engine.settings().demo_piezo)
+        self.engine.update_settings(demo_piezo=True)
+        self.assertTrue(wait_until(lambda: self.engine.demo_source.piezo_on))
+        self.assertTrue(wait_until(lambda: self.log.has("Reference piezo: triangle on")))
+        self.engine.update_settings(demo_piezo=False)
+        self.assertTrue(wait_until(lambda: self.log.has("Reference piezo: off")))
+
+    def test_drive_action_reaches_a_demo_source(self):
+        """The DAQ drive is handed to the source on the worker.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(demo_object="Follow DAQ")
+        self.engine.request("drive", drive=Drive("sine", 1000.0, 0.1))
+        self.assertTrue(wait_until(
+            lambda: self.engine.demo_source.harmonic_path_nm()[0] == 1000.0))
+
+    def test_simulated_frames_raise_no_sharpness_warnings(self):
+        """Fringes coming and going on the simulated drum are not camera blur.
+
+        Previous view of a deforming drum, then Still: the displayed
+        difference drops to exactly black, which the sharpness monitors would
+        report as a blur episode on a real camera.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(diagnostics, "SHARPNESS_INTERVAL_S", 0.0), \
+                mock.patch.object(diagnostics, "SHARPNESS_MIN_SAMPLES", 3):
+            self.engine.update_settings(mode="Previous", demo_object="Slow deformation")
+            self.engine.demo_source.clock_s = 2.0
+            time.sleep(0.6)
+            self.engine.update_settings(demo_object="Still")
+            self.assertTrue(wait_until(lambda: self.log.has("Simulated object: Still")))
+            time.sleep(0.8)
+        self.assertFalse(self.log.has("Sharpness drop"))
+
+    def test_status_names_the_simulated_signal(self):
+        """The dummy status line says the video is a simulated ESPI signal.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIn("simulated ESPI signal", self.engine.status()["camera"])
+        self.assertTrue(self.log.has("simulated ESPI signal (ideal sensor)"))
 
 
 if __name__ == "__main__":

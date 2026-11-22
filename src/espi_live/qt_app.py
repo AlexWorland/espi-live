@@ -56,7 +56,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, codex, daq, error_reports, feedback, iphone,
-                       log_uploads, paths, profiles, source_code, tips, ui_scale, updater)
+                       log_uploads, paths, profiles, simulation, source_code, tips, ui_scale,
+                       updater)
 from espi_live.channels import demo_channels, open_camera_channels, restore_channel
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
@@ -690,6 +691,24 @@ TOOLTIP_WRAP = 52  # characters; keeps a tip about as wide as the controls dock
 TOOLTIP_MARGIN = 2
 TOOLTIP_CHROME = 18  # Qt's tooltip frame, so the estimated size is not smaller than the real one
 SIMULATED_TIP = "Simulated in dummy mode"
+SIMULATED_OBJECT_TIP = (
+    "What the simulated drumhead does in dummy mode. The video is an ideal "
+    "camera's view of an ESPI setup: speckle, a reference beam and an ideal "
+    "sensor with no noise, so every processing step works on a known signal. "
+    "Still: nothing moves; a still scene's differences are exactly zero. "
+    "Slow deformation: the drum is pressed in to 8 fringes and released every "
+    "12 s. Vibration: drum mode (1, 1) at 1000 Hz; set the reference on Still "
+    "first. Follow DAQ: the NI DAQ window's generator drives the drum (Devices "
+    "→ NI DAQ…, the Simulated device works). The DAQ piezo moves the reference "
+    "mirror in every case. Only shown for demo cameras.")
+SIMULATED_NOTE_TIP = "What the simulated drumhead is doing now, and what drives it."
+SIMULATED_PIEZO_TIP = (
+    "Ramp the simulated reference mirror with a slow triangle wave (1 Hz, 1.2 µm "
+    "peak to peak), as a piezo on the reference beam does on the bench. The "
+    "reference phase then changes between frames (about 90° at 30 fps), which "
+    "decorrelates the speckle: in Previous view a vibration's still nodal lines "
+    "turn bright and its J0 fringes dark, instead of a dark nodal line. Adds to "
+    "the DAQ piezo. Off by default; demo cameras only.")
 ZOOM_SLIDER_TIP = ("Drag, click or scroll to zoom. The mouse wheel and "
                    "drag-to-pan on the image still work.")
 MODE_TIPS = {
@@ -2826,9 +2845,11 @@ class DaqDialog(QDialog):
         """Show the connected device (or none).
 
         Args: outputs is the device's daq.DeviceOutputs, or None.
-        Returns: None.
+        Returns: None; a new connection (or none) starts at 0 V, so the
+            demo cameras' drive is switched off.
         """
         self.outputs = outputs
+        self.window.set_daq_drive(daq.Drive())
         if outputs is not None:
             self._fill_outputs(outputs)
             info = outputs.device
@@ -2846,22 +2867,29 @@ class DaqDialog(QDialog):
             self.state_label.setText("Outputs: all at 0 V until you apply.")
         self.refresh()
 
-    def poll(self):
+    def poll(self, drive_only=False):
         """Handle what the controller has reported.
 
-        Args: None.
+        Args: drive_only is True while the window is closed (the main window
+            polls then, to keep the demo cameras' drive current): a device
+            list, which would connect to a device, is left for when the
+            window is shown.
         Returns: None.
         """
+        later = []
         while True:
             try:
                 kind, payload = self.controller.events.get_nowait()
             except queue.Empty:
-                return
-            if kind == "devices":
+                break
+            if kind == "devices" and drive_only:
+                later.append((kind, payload))
+            elif kind == "devices":
                 self._show_devices(*payload)
             elif kind == "connected":
                 self.connected(payload)
             elif kind == "applied":
+                self.window.set_daq_drive(payload.drive)
                 prefix = ("Simulated, nothing driven: "
                           if self.outputs is not None and self.outputs.device.simulated
                           else "Outputs: ")
@@ -2870,14 +2898,18 @@ class DaqDialog(QDialog):
                 self.problem_label.setText("\n".join(payload))
                 self.state_label.setText("Outputs: not changed.")
             elif kind == "zeroed":
+                self.window.set_daq_drive(daq.Drive())
                 self._switch_off()
                 self.state_label.setText("Outputs: all at 0 V.")
             elif kind == "failed":
+                self.window.set_daq_drive(daq.Drive())
                 self._switch_off()
                 self.problem_label.setText(
                     f"The DAQ reported an error: {payload}. The outputs were set to "
                     "0 V where the device allowed it.")
                 self.state_label.setText("Outputs: stopped after an error.")
+        for event in later:
+            self.controller.events.put(event)
 
     def _switch_off(self):
         """Untick both On boxes, to match outputs at 0 V.
@@ -3376,6 +3408,7 @@ class MainWindow(QMainWindow):
         self.compare_dialog = None  # ReferenceCompareDialog, built on first use
         self.pixels_dialog = None  # PixelSquareDialog, built on first use
         self.daq = None  # daq.DaqController, made when the DAQ window first opens
+        self.daq_drive = daq.Drive()  # what its outputs produce, for demo cameras
         self.daq_dialog = None  # DaqDialog, built on first use
         self.view_state = None  # last logged (view size, zoom, image size)
         self.drawn_frames = 0
@@ -4113,6 +4146,33 @@ class MainWindow(QMainWindow):
         add(self.exposure, "Exposure", basic=True)
         add(self.gain, "Gain", basic=True)
         add(self.fps, "Requested FPS")
+        self.simulated_object = QComboBox()
+        self.simulated_object.addItems(simulation.SIMULATED_OBJECTS)
+        self.simulated_object.setCurrentText(s.demo_object)
+        set_tooltip(self.simulated_object, SIMULATED_OBJECT_TIP)
+        self.simulated_object.currentTextChanged.connect(self._choose_simulated_object)
+        self.simulated_note = QLabel()
+        self.simulated_note.setWordWrap(True)
+        self.simulated_note.setStyleSheet("color: palette(placeholder-text);")
+        set_tooltip(self.simulated_note, SIMULATED_NOTE_TIP)
+        simulated_name = QLabel("Simulated object")
+        set_tooltip(simulated_name, SIMULATED_OBJECT_TIP)
+        self.simulated_box = QWidget()
+        simulated_grid = QGridLayout(self.simulated_box)
+        simulated_grid.setContentsMargins(0, 0, 0, 0)
+        self._sized(simulated_grid.setHorizontalSpacing, 8)
+        self._sized(simulated_grid.setVerticalSpacing, 4)
+        simulated_grid.setColumnStretch(1, 1)
+        simulated_grid.addWidget(simulated_name, 0, 0)
+        simulated_grid.addWidget(self.simulated_object, 0, 1)
+        simulated_grid.addWidget(self.simulated_note, 1, 0, 1, 2)
+        self.simulated_piezo = QCheckBox("Reference piezo (triangle, decorrelation)")
+        self.simulated_piezo.setChecked(s.demo_piezo)
+        set_tooltip(self.simulated_piezo, SIMULATED_PIEZO_TIP)
+        self.simulated_piezo.toggled.connect(self._choose_simulated_piezo)
+        simulated_grid.addWidget(self.simulated_piezo, 2, 0, 1, 2)
+        self._show_simulated_note()
+        add(self.simulated_box, basic=True)
         self.single_field = QCheckBox("Single field (interlaced camera)")
         set_tooltip(self.single_field,
                     "Show only the even rows of each interlaced frame, doubled to full "
@@ -5542,8 +5602,10 @@ class MainWindow(QMainWindow):
                    (self.frames_first, s.average_frames_first),
                    (self.floor_subtract, s.floor_subtract),
                    (self.record_button, s.record), (self.single_field, s.single_field),
-                   (self.raw_difference_button, s.raw_difference))
+                   (self.raw_difference_button, s.raw_difference),
+                   (self.simulated_piezo, s.demo_piezo))
         combos = ((self.smoothing_combo, s.smoothing_method),
+                  (self.simulated_object, s.demo_object),
                   (self.scaling, SCALING_MODES[1] if s.scale_range else SCALING_MODES[0]))
         for widget, _ in toggles + combos:
             widget.blockSignals(True)
@@ -5553,6 +5615,7 @@ class MainWindow(QMainWindow):
             widget.setCurrentText(text)
         for widget, _ in toggles + combos:
             widget.blockSignals(False)
+        self._show_simulated_note()
         for button in self.mode_group.buttons():
             button.setChecked(button.text() == s.mode)
         self._sync_raw_difference(s.raw_difference)
@@ -5751,6 +5814,7 @@ class MainWindow(QMainWindow):
             widget.setEnabled(not analog)
             widget.set_note(IPHONE_GAIN_TIP if phone and widget is self.gain else note)
         self._sync_phone_controls(channel)
+        self.simulated_box.setVisible(channel.demo)
         self.single_field.setVisible(
             not channel.demo and getattr(channel.identity, "interlaced", False))
 
@@ -6058,6 +6122,45 @@ class MainWindow(QMainWindow):
         self._show_tip()
         QSettings("ESPI", "espi_live").setValue("tips/hidden", self.tips.hidden)
 
+    def _choose_simulated_object(self, name):
+        """Send the chosen simulated object to the displayed camera.
+
+        Args: name is a simulation.SIMULATED_OBJECTS name.
+        Returns: None.
+        """
+        self.engine.update_settings(demo_object=name)
+        self._show_simulated_note()
+
+    def _choose_simulated_piezo(self, on):
+        """Turn the displayed demo camera's reference piezo triangle on or off.
+
+        Args: on is the checkbox state.
+        Returns: None.
+        """
+        self.engine.update_settings(demo_piezo=on)
+        self._show_simulated_note()
+
+    def _show_simulated_note(self):
+        """Say under the control what the simulated drumhead is doing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.simulated_note.setText(simulation.object_note(
+            self.simulated_object.currentText(), self.daq_drive,
+            piezo=self.simulated_piezo.isChecked()))
+
+    def set_daq_drive(self, drive):
+        """Follow what the NI DAQ outputs produce, for every demo camera.
+
+        Args: drive is a daq.Drive (daq.Drive() when nothing is driven).
+        Returns: None; every channel gets it (demo engines use it).
+        """
+        self.daq_drive = drive
+        for channel in self.channels:
+            channel.set_drive(drive)
+        self._show_simulated_note()
+
     def _poll_status(self):
         """Refresh status text, the log, and handle engine events.
 
@@ -6067,6 +6170,8 @@ class MainWindow(QMainWindow):
         text = self.log.drain()
         if text:
             self.log_view.appendPlainText(text.rstrip("\n"))
+        if self.daq_dialog is not None and not self.daq_dialog.isVisible():
+            self.daq_dialog.poll(drive_only=True)  # keep the demo drive current
         now = time.monotonic()
         if now - self.fps_window_start >= 1.0:
             self.display_fps = self.drawn_frames / (now - self.fps_window_start)
@@ -6792,7 +6897,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
                 answer = QMessageBox.question(
                     None, "No camera detected",
                     "No FLIR camera or recognised capture adapter is available. "
-                    "Start dummy/demo mode with a synthetic example pattern?")
+                    "Start dummy/demo mode with a simulated ESPI signal (a "
+                    "simulated drumhead on an ideal sensor)?")
                 if answer != QMessageBox.Yes:
                     log.write("No camera detected; demo mode declined.")
                     return 0

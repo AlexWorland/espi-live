@@ -1579,6 +1579,129 @@ def _dock_controls_missing_tooltips(dock):
     return missing
 
 
+class SimulatedObjectTests(WindowTestCase):
+    """The demo-only Simulated object control and its note."""
+
+    def test_control_shows_for_demo_and_hides_for_live(self):
+        """The control lists the four objects, shows for a demo and hides for a camera.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        items = tuple(w.simulated_object.itemText(i) for i in range(w.simulated_object.count()))
+        self.assertEqual(items, qt_app.profiles.CHOICES["demo_object"])
+        self.assertEqual(w.simulated_object.currentText(), "Slow deformation")
+        self.assertFalse(w.simulated_box.isHidden())
+        source, self.engine.demo_source = self.engine.demo_source, None  # a live camera
+        w._set_demo(False)
+        self.assertTrue(w.simulated_box.isHidden())
+        self.engine.demo_source = source
+        w._set_demo(True)
+        self.assertFalse(w.simulated_box.isHidden())
+        tip = " ".join(w.simulated_object.toolTip().split())
+        for phrase in ("Still", "Slow deformation", "Vibration", "Follow DAQ", "piezo"):
+            self.assertIn(phrase, tip)
+
+    def test_choice_writes_the_engine_and_the_note(self):
+        """Choosing an object sends it to the displayed engine and rewrites the note.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.simulated_object.setCurrentText("Vibration")
+        self.assertEqual(self.engine.settings().demo_object, "Vibration")
+        self.assertEqual(w.simulated_note.text(),
+                         qt_app.simulation.object_note("Vibration", w.daq_drive))
+        self.assertIn("1000 Hz", w.simulated_note.text())
+
+    def test_note_follows_the_daq_drive(self):
+        """A new DAQ drive reaches every channel and the note says what it is.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.simulated_object.setCurrentText("Follow DAQ")
+        self.assertIn("no DAQ drive", w.simulated_note.text())
+        drive = qt_app.daq.Drive("sine", 627.6, 0.1, device="Simulated device (no hardware)",
+                                 simulated=True)
+        w.set_daq_drive(drive)
+        self.assertIs(w.daq_drive, drive)
+        self.assertIs(w.current.drive, drive)
+        self.assertIn("627.6 Hz sine, 0.10 V", w.simulated_note.text())
+        self.assertIn(("drive", {"drive": drive}), self.queued())
+
+    def test_reference_piezo_toggle(self):
+        """The piezo box sends demo_piezo, names the triangle in the note and explains itself.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertFalse(w.simulated_piezo.isChecked())
+        w.simulated_object.setCurrentText("Vibration")
+        w.simulated_piezo.setChecked(True)
+        self.assertTrue(self.engine.settings().demo_piezo)
+        self.assertEqual(w.simulated_note.text(), qt_app.simulation.object_note(
+            "Vibration", w.daq_drive, piezo=True))
+        tip = " ".join(w.simulated_piezo.toolTip().split())
+        for phrase in ("triangle", "reference", "decorrelat", "nodal"):
+            self.assertIn(phrase, tip)
+        other = replace(self.engine.settings(), demo_piezo=False)
+        w._load_settings(other, {})
+        self.assertFalse(w.simulated_piezo.isChecked())
+        self.assertTrue(self.engine.settings().demo_piezo)
+        self.assertNotIn("reference piezo", w.simulated_note.text())
+
+    def test_loading_settings_shows_without_sending(self):
+        """Showing another camera's settings sets the control quietly.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        other = replace(self.engine.settings(), demo_object="Still")
+        w._load_settings(other, {})
+        self.assertEqual(w.simulated_object.currentText(), "Still")
+        self.assertEqual(self.engine.settings().demo_object, "Slow deformation")
+        self.assertIn("Nothing moves", w.simulated_note.text())
+
+    def test_switch_live_hides_control_and_keeps_live_default(self):
+        """After a live switch the control hides and the camera keeps its own default.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.simulated_object.setCurrentText("Follow DAQ")
+        self.engine.update_settings(record=False, mode="Raw")  # as _switch_live does
+        self.engine.demo_source = None  # so does leaving the synthetic source
+        self.engine.events.put(("switched_live", None))
+        w._handle_events()
+        self.assertTrue(w.simulated_box.isHidden())
+        self.assertEqual(self.engine.settings().demo_object, "Slow deformation")
+        demo = json.loads(FakeSettings.store["profiles/demo/DEMO1"])
+        self.assertEqual(demo["settings"]["demo_object"], "Follow DAQ")
+
+
+class SimulatedObjectSimpleUiTests(WindowTestCase):
+    """The Simulated object control stays in the simple UI."""
+
+    simple_ui = True
+
+    def test_shown_in_simple_ui(self):
+        """Dummy mode is for trying the processing, so its object choice is basic.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIs(self.window.simulated_box.parent() is not None, True)
+        self.assertFalse(self.window.simulated_box.isHidden())
+        self.assertIsNot(self.window.simulated_box.parent(), self.window.hidden_controls)
+
+
 class SimpleUiTests(WindowTestCase):
     """The temporary basic-controls-only build renders just the essentials."""
 
@@ -4005,6 +4128,26 @@ class ProfileWindowTests(unittest.TestCase):
         self.assertEqual(stored(KEY1)["settings"]["exposure_us"], 9000.0)
         self.assertNotIn(KEY2, FakeSettings.store)
 
+    def test_simulated_object_is_kept_per_demo_camera(self):
+        """Each demo camera keeps its own object, across a restart.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.simulated_object.setCurrentText("Vibration")
+        second = self.display(1)
+        self.assertEqual(w.simulated_object.currentText(), "Slow deformation")
+        self.assertEqual(second.engine.settings().demo_object, "Slow deformation")
+        w.simulated_object.setCurrentText("Still")
+        self.assertEqual(self.channels[0].profile().settings.demo_object, "Vibration")
+        w.close()
+        restarted = self.make_window()
+        first, second = self.channels
+        self.assertEqual(first.engine.settings().demo_object, "Vibration")
+        self.assertEqual(second.settings.demo_object, "Still")
+        self.assertEqual(restarted.simulated_object.currentText(), "Vibration")
+
     def test_each_camera_comes_back_with_its_own_settings_after_a_restart(self):
         """A new window on the same store restores both cameras, never recording.
 
@@ -5030,6 +5173,7 @@ class RunTests(unittest.TestCase):
         self.cameras.side_effect = RuntimeError("no camera")
         self.assertEqual(qt_app.run(), 7)
         self.dialogs.question.assert_called_once()
+        self.assertIn("simulated ESPI signal", self.dialogs.question.call_args.args[2])
         self.assertEqual(self.demos.call_args.args[:2], (self.log, 1))
         self.assertTrue(any("Camera startup unavailable" in line
                             for line in self.log.lines))

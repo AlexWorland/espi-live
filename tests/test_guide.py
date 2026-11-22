@@ -58,7 +58,9 @@ class GuideTest(unittest.TestCase):
                        "Gamma", "Record AVI",
                        "Save frame", "Set reference", "Reset last",
                        "Reset average", "Switch to live capture",
-                       "Fit to window", "Actual size", "F1"):
+                       "Fit to window", "Actual size", "F1", "Simulated object",
+                       "Slow deformation", "Follow DAQ", "ideal sensor", "drumhead",
+                       "Reference piezo", "white nodal line"):
             self.assertTrue(phrase in text, f"missing phrase: {phrase!r}")
         for operation in ("Capture a reference", "Record a measurement",
                           "Save a still frame", "Troubleshooting",

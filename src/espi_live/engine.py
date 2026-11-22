@@ -35,7 +35,7 @@ from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.capture_models import adapter_for
-from espi_live.processing import (DEEP_DTYPE, DEFAULT_DIFFERENCE_GAIN, DemoSource,
+from espi_live.processing import (DEEP_DTYPE, DEFAULT_DIFFERENCE_GAIN,
                                   ESPIProcessor, MAX_FRAMES_BACK,
                                   NoiseCalibration, NoiseFloorMap, PeakHold,
                                   RangeTracker, apply_display, apply_gain,
@@ -44,6 +44,7 @@ from espi_live.processing import (DEEP_DTYPE, DEFAULT_DIFFERENCE_GAIN, DemoSourc
                                   raw_difference, reject_outliers,
                                   single_field, smooth_speckle, stretch_levels,
                                   subtract_floor, to_uint8, watermark_demo)
+from espi_live.simulation import DEFAULT_OBJECT, DemoSource
 from espi_live.recording import (AVIRecorder, recording_path, save_frame,
                                  save_frame_set)
 
@@ -101,6 +102,8 @@ class Settings:
     average_frames_first: bool = False  # Average N averages camera frames, then subtracts
     floor_subtract: bool = False  # take the measured per-pixel noise floor off each difference
     raw_difference: bool = False  # |live - previous| raw frames; every other step off
+    demo_object: str = DEFAULT_OBJECT  # what the simulated drumhead does (demo only)
+    demo_piezo: bool = False      # demo only: the reference piezo's triangle (decorrelation)
 
 
 # The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
@@ -584,10 +587,12 @@ class Engine:
             synthetic cameras look different.
         Returns: None.
         """
-        self.demo_source = DemoSource(label=label)
+        self.demo_source = DemoSource(label=label, log=self.log)
         self._set_status(demo=True, camera=(
-            "DUMMY MODE ACTIVE — exposure, gain, and FPS are simulated"))
-        self.log.write("DUMMY MODE ACTIVE: synthetic video; no camera acquired.")
+            "DUMMY MODE ACTIVE — simulated ESPI signal, ideal sensor; exposure, "
+            "gain and FPS are simulated"))
+        self.log.write("DUMMY MODE ACTIVE: simulated ESPI signal (ideal sensor); "
+                       "no camera acquired.")
 
     def _attach_camera(self, session):
         """Make an opened camera session the frame source.
@@ -707,7 +712,9 @@ class Engine:
             "camera_command" (payload: phone-only settings such as
             lens_position, width and height, crop_width and crop_height,
             max_send_fps or refocus, sent to a source that takes them, the
-            iPhone; ignored by other cameras).
+            iPhone; ignored by other cameras) or "drive" (payload drive, a
+            daq.Drive: what the DAQ outputs produce, for the simulated
+            drumhead in demo mode; ignored by cameras).
         Returns: None.
         """
         if action in ("save", "save_compare"):
@@ -996,8 +1003,14 @@ class Engine:
 
             work_started = time.monotonic()
             if self.demo:
-                frame = self.demo_source.next_frame(
-                    s.exposure_us, s.gain_db, work_started)
+                if s.demo_object != self.demo_source.object:
+                    self.demo_source.set_object(s.demo_object)
+                    self.log.write(f"Simulated object: {s.demo_object}")
+                if s.demo_piezo != self.demo_source.piezo_on:
+                    self.demo_source.set_piezo(s.demo_piezo)
+                    self.log.write("Reference piezo: triangle on (decorrelation)"
+                                   if s.demo_piezo else "Reference piezo: off")
+                frame = self.demo_source.next_frame(s.exposure_us, s.gain_db, s.fps)
             else:
                 grabbed, state = self.camera.grab(CAMERA_TIMEOUT_MS)
                 if state != "ok":
@@ -1024,7 +1037,8 @@ class Engine:
 
             now = time.monotonic()
             gaps.frame_ok(now, 1.0 / max(1.0, resulting_fps or s.fps), context)
-            camera_sharpness.observe(frame, now, context)
+            if not self.demo:  # simulated fringes come and go; there is no blur
+                camera_sharpness.observe(frame, now, context)
             if not s.raw_difference:
                 frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
             now = time.monotonic()
@@ -1139,7 +1153,8 @@ class Engine:
                         last_range_time = now
 
             if image is not None:
-                shown_sharpness.observe(image, now, context)
+                if not self.demo:
+                    shown_sharpness.observe(image, now, context)
                 if s.raw_difference:  # no flip or display tone either
                     image = present(image, False, self.demo)
                 else:  # every view; before the watermark so its text reads normally
@@ -1646,6 +1661,8 @@ class Engine:
                 processor, frame = self._switch_live(processor, frame)
             elif action == "camera_command":
                 self._camera_command(payload)
+            elif action == "drive" and self.demo:
+                self.demo_source.set_drive(payload["drive"])
 
     def _camera_command(self, fields):
         """Send phone-only settings to a source that takes them.

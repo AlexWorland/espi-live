@@ -40,6 +40,7 @@ from urllib.parse import unquote
 
 from espi_live.camera import CAMERA_RANGES
 from espi_live.engine import LABVIEW_FLOW, Settings, default_settings, is_analog, own_settings
+from espi_live.simulation import SIMULATED_OBJECTS
 from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_FRAMES_BACK,
                                   MAX_REFERENCE_FRAMES, SMOOTHING_METHODS, VIEW_MODES)
 
@@ -85,7 +86,8 @@ RANGES = {
     "display_gain": (1, 8),
     "contrast": (0, 100),
 }
-CHOICES = {"mode": VIEW_MODES, "smoothing_method": SMOOTHING_METHODS}
+CHOICES = {"mode": VIEW_MODES, "smoothing_method": SMOOTHING_METHODS,
+           "demo_object": SIMULATED_OBJECTS}
 KEY_SAFE = frozenset(string.ascii_letters + string.digits + "-_")
 
 

@@ -626,9 +626,61 @@ python -m espi_live</code></pre>
       <section id="start-demo">
         <h3>Without a camera (demo mode) <a class="anchor" href="#start-demo" aria-label="Link to Demo mode">#</a></h3>
         <pre tabindex="0"><code>./run.sh --demo</code></pre>
-        <p>Demo mode produces a moving synthetic grayscale pattern, so you can
-          learn the controls, check processing, and test saving and recording
-          without a camera. Exposure, gain and frame rate are simulated.</p>
+        <p>Demo mode shows a <strong>simulated ESPI signal</strong>: what an
+          ideal camera would record looking at a speckle interferometer whose
+          specimen is a <strong>drumhead</strong> (an ideal circular membrane
+          clamped at its rim; no material model). The sensor is an
+          <strong>ideal sensor</strong>: brightness is proportional to exposure
+          and gain, frames are rounded to 8 bits and clip at 255, and there is
+          no shot, read or fixed-pattern noise. Every processing step
+          (Previous, Reference, averaging, gain or stretch, the LabVIEW flow,
+          the noise floor) therefore works on a signal whose correct result is
+          known, so you can check the processing by eye, learn the controls,
+          and test saving and recording without a camera.</p>
+        <p>The <strong>Simulated object</strong> control (Camera section, demo
+          cameras only) chooses what the drumhead does; the note under it says
+          what is driving it:</p>
+        <ul>
+          <li><strong>Still</strong> — nothing moves. Previous view is exactly
+            black and <em>Measure noise floor</em> reads 0.</li>
+          <li><strong>Slow deformation</strong> (the default) — a pad at a third
+            of the radius presses the drum in to 8 fringes over 5 s, holds 1 s,
+            releases over 5 s and rests 1 s, every 12 s. Against a reference,
+            closed rings grow around the pad and crowd toward it (a membrane's
+            dent is logarithmic); outside the rim stays black.</li>
+          <li><strong>Vibration</strong> — drum mode (1, 1) at 1000 Hz, peak
+            16 rad (5 J0 fringes). Set the reference on Still first, then
+            choose Vibration: two lobes of 1 − J0 bands either side of a dark
+            nodal diameter. At 8000 µs (8 whole cycles per exposure) Previous
+            view stays black; at 8700 µs the exposure starts at a different
+            phase each frame and the pattern flickers, as on a real camera.</li>
+          <li><strong>Follow DAQ</strong> — the NI DAQ window's frequency
+            generator drives the drum (Devices → NI DAQ…; the Simulated device
+            works). 0.1 V at the fundamental gives 16 rad. Its resonances:
+            628 Hz (0, 1) rings, 1000 Hz (1, 1) one nodal diameter, 1340 Hz
+            (2, 1) a nodal cross, 1441 Hz (0, 2) a nodal circle, 1665 Hz (3, 1)
+            six lobes, 1831 Hz (1, 2); higher modes need more volts. A
+            counter's square wave counts as its fundamental. The piezo's sine
+            (locked to the generator) modulates the reference beam and moves
+            the zero-order fringe.</li>
+        </ul>
+        <p>In every case the DAQ piezo moves the simulated reference mirror:
+          1500 nm per DAQ volt (a 100 nm/V stack behind a gain-15 amplifier),
+          so the default 0.05 V step shifts the reference phase by about 85°.
+          The exposure average is exact for any number of drive cycles per
+          exposure, and frames follow an ideal sensor clock at the requested
+          frame rate.</p>
+        <p><strong>Reference piezo (triangle, decorrelation)</strong> (a
+          checkbox under the note; off by default) ramps the simulated
+          reference mirror with a slow triangle wave, 1 Hz and 1.2 µm peak to
+          peak, as a piezo on the reference beam does on the bench. The
+          reference phase then changes between frames (about 90° at 30 fps),
+          so the speckle decorrelates: in <strong>Previous</strong> view a
+          still area shows bright speckle, and a vibration shows |J0|
+          fringes with a <strong>white nodal line</strong> where the drum
+          does not move (without it, a steady vibration's Previous view is
+          black). A rolling Average N smooths the speckle into clean fringes.
+          It works with every object and adds to the DAQ piezo.</p>
         <div class="warn">
           <p><strong>Demo data is clearly marked.</strong> A red
             <strong>DUMMY MODE</strong> banner (in the Controls panel) and a
@@ -842,6 +894,12 @@ python -m espi_live</code></pre>
           <li><strong>Requested FPS</strong> — the frame rate you ask the camera
             for. The default is 30 fps. The camera may deliver less if exposure,
             USB bandwidth or the camera's own limits prevent it.</li>
+          <li><strong>Simulated object</strong> — demo cameras only: what the
+            simulated drumhead does (Still, Slow deformation, Vibration or
+            Follow DAQ; see <a href="#start-demo">demo mode</a>). Saved with
+            that demo camera's settings. <strong>Reference piezo</strong>
+            under it adds the reference-beam triangle wave for
+            decorrelation.</li>
           <li><strong>Noise reduction</strong> — blends each camera frame with
             the previous ones (0 = off, 95 = strongest; each step adds the same
             amount of memory, so 10 keeps about three frames and 95 about
@@ -1594,6 +1652,11 @@ python -m espi_live</code></pre>
               <td>Applies in every view, Raw included.</td></tr>
             <tr><td>Single field</td><td>Off (interlaced only)</td>
               <td>On / off</td><td>Even rows only, doubled to full height.</td></tr>
+            <tr><td>Simulated object</td><td>Slow deformation (demo only)</td>
+              <td>Still / Slow deformation / Vibration / Follow DAQ</td>
+              <td>What the simulated drumhead does.</td></tr>
+            <tr><td>Reference piezo</td><td>Off (demo only)</td><td>On / off</td>
+              <td>1 Hz triangle, 1.2 µm peak to peak on the reference mirror.</td></tr>
             <tr><td>Average N</td><td>1 (off)</td><td>1–60, step 1</td>
               <td>Ignored in Raw view.</td></tr>
             <tr><td>Rolling average</td><td>Off</td><td>On / off</td>

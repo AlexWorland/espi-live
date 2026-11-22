@@ -13,6 +13,7 @@ from unittest import mock
 
 from espi_live import camera, capture, channels, iphone, paths, profiles
 from espi_live.camera import CameraInfo
+from espi_live.daq import Drive
 from espi_live.engine import Engine
 from fake_capture import FakeCaptureFactory, FakeEnumerator, usb_live2, webcam
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
@@ -287,6 +288,71 @@ class ChannelTests(ChannelTestCase):
         idle.retired = [stuck]
         self.assertFalse(idle.wait(0.01))
         self.assertEqual(idle.retired, [stuck])
+
+
+class DriveForwardingTests(ChannelTestCase):
+    """The DAQ drive reaches every demo channel's simulated drumhead."""
+
+    DRIVE = Drive("sine", 1000.0, 0.1)
+
+    def test_set_drive_reaches_a_running_demo_engine(self):
+        """A running demo engine is sent the drive at once.
+
+        Args: None.
+        Returns: None.
+        """
+        demo = self.channel(CameraInfo("DEMO1"), demo=True)
+        demo.start()
+        demo.set_drive(self.DRIVE)
+        self.assertIs(demo.drive, self.DRIVE)
+        self.assertTrue(wait_until(lambda: demo.engine.demo_source.drive == self.DRIVE))
+
+    def test_new_demo_engine_gets_the_current_drive(self):
+        """A demo engine started (or opened) later starts with the drive in force.
+
+        Args: None.
+        Returns: None.
+        """
+        demo = self.channel(CameraInfo("DEMO1"), demo=True)
+        self.assertEqual(demo.drive, Drive())
+        demo.set_drive(self.DRIVE)
+        demo.start()
+        self.assertTrue(wait_until(lambda: demo.engine.demo_source.drive == self.DRIVE))
+        opened = self.channel(CameraInfo("DEMO2"), demo=True)
+        opened.set_drive(self.DRIVE)
+        opened.open()
+        opened.engine.start()
+        self.assertTrue(wait_until(lambda: opened.engine.demo_source.drive == self.DRIVE))
+
+    def test_live_channel_keeps_but_does_not_send(self):
+        """A camera channel remembers the drive and never sends it to its engine.
+
+        Args: None.
+        Returns: None.
+        """
+        cam = self.channel(CameraInfo("1", "BFS"))
+        cam.engine = mock.Mock(demo=False)
+        cam.set_drive(self.DRIVE)
+        self.assertIs(cam.drive, self.DRIVE)
+        cam.engine.request.assert_not_called()
+        idle = self.channel(CameraInfo("DEMO3"), demo=True)
+        idle.set_drive(self.DRIVE)  # no engine yet: kept for the next start
+        self.assertIs(idle.drive, self.DRIVE)
+
+    def test_two_demo_channels_each_get_it(self):
+        """One DAQ drive reaches every demo camera.
+
+        Args: None.
+        Returns: None.
+        """
+        first = self.channel(CameraInfo("DEMO1"), demo=True)
+        second = self.channel(CameraInfo("DEMO2"), demo=True)
+        for channel in (first, second):
+            channel.start()
+            channel.set_drive(self.DRIVE)
+        for channel in (first, second):
+            self.assertTrue(wait_until(
+                lambda channel=channel: channel.engine.demo_source.drive == self.DRIVE))
 
 
 class StartupHelperTests(ChannelTestCase):

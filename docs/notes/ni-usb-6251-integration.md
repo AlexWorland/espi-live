@@ -633,8 +633,10 @@ the exact values that will be applied.
 - **Demo mode** uses `SimulatedDaq`. It runs the same plan and logs what it
   would apply, and its status reads **"DAQ: simulated, no hardware"**, so it
   can never pass for a real DAQ.
-  - Optionally, `DemoSource` could render J0²(K·a) fringes from the drive
-    amplitude **(future)**.
+  - Done (2026-11-21): `simulation.DemoSource`'s **Follow DAQ** object renders
+    the exposure-averaged fringes of a simulated drumhead from the applied
+    drive (generator frequency and amplitude, piezo level or sine); see
+    `docs/notes/simulated-espi-signal-design.md`.
 - **Tests.** Add `tests/fake_nidaqmx.py`, an in-memory stand-in installed
   into `sys.modules` the way `fake_pyspin.py` is. It needs:
   - `nidaqmx.Task` with `ao_channels`, `co_channels`, `do_channels`,

@@ -12,6 +12,7 @@ from dataclasses import asdict, replace
 from espi_live import profiles
 from espi_live.camera import CameraInfo
 from espi_live.engine import LABVIEW_FLOW, Settings
+from espi_live.simulation import DEFAULT_OBJECT, SIMULATED_OBJECTS
 from list_log import ListLog
 
 DEMO = CameraInfo("DEMO1", "Synthetic camera")
@@ -115,6 +116,23 @@ class FieldTests(unittest.TestCase):
 
 class DefaultProfileTests(unittest.TestCase):
     """A camera with nothing saved starts exactly as before."""
+
+    def test_demo_object_choices(self):
+        """The simulated object is one of four; anything else loads the default.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(profiles.CHOICES["demo_object"], SIMULATED_OBJECTS)
+        self.assertEqual(Settings().demo_object, DEFAULT_OBJECT)
+        defaults = profiles.Profile(Settings())
+        data = {"format": 1, "settings": {"demo_object": "Wobble"}}
+        log = ListLog()
+        read = profiles.parse_profile(json.dumps(data), defaults, log)
+        self.assertEqual(read.settings.demo_object, DEFAULT_OBJECT)
+        data["settings"]["demo_object"] = "Vibration"
+        read = profiles.parse_profile(json.dumps(data), defaults, log)
+        self.assertEqual(read.settings.demo_object, "Vibration")
 
     def test_demo_and_flir_cameras_keep_the_documented_defaults(self):
         """Exposure 8000 µs, gain 0 dB, 30 fps, Raw view, LabVIEW flow off.
