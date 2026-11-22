@@ -57,18 +57,21 @@ All of this lives in a new GUI-free module, `src/espi_live/simulation.py`, with 
 ### 5.1 Optics and sensor
 
 - Wavelength λ = 632.8 nm (HeNe). Illumination and viewing are along the surface normal, so the phase sensitivity is K = 4π/λ for the specimen, and the same for the reflecting piezo mirror.
-- **Object beam:** a fully developed speckle field E = low-pass-filtered complex Gaussian noise (a circular pupil in the FFT domain), sized for a mean speckle diameter of about 3 px and normalised to ⟨|E|²⟩ = 1. I_o = |E|² · G(x, y), where G is a centred Gaussian laser spot that falls to about a quarter of its peak at the plate's corners. ψ = arg E. The seed is a stable hash of the camera label (e.g. `zlib.crc32`, not Python's per-process `hash`), so DEMO1 and DEMO2 differ but each repeats exactly from run to run.
+- **Object beam:** a fully developed speckle field E = low-pass-filtered complex Gaussian noise (a circular pupil in the FFT domain), sized for a mean speckle diameter of about 3 px and normalised to ⟨|E|²⟩ = 1. I_o = |E|² · G(x, y), where G is a centred Gaussian laser spot that falls to half its peak at the drum's rim. ψ = arg E. The seed is a stable hash of the camera label (e.g. `zlib.crc32`, not Python's per-process `hash`), so DEMO1 and DEMO2 differ but each repeats exactly from run to run.
 - **Reference beam:** smooth and uniform, I_r equal to the object's mean intensity at the spot centre (the best fringe visibility there).
 - **Intensity at an instant:** I = I_o + I_r + 2√(I_o I_r) cos(ψ + K·(w − p)), where w is the specimen's out-of-plane displacement and p the piezo mirror's displacement.
 - **Ideal sensor:** value = round(clip(s · (Tₑ / 8000 µs) · 10^(gain/20) · ⟨I⟩_exposure, 0, 255)), where s is set so the spot centre averages about 64 grey levels at the defaults (8000 µs, 0 dB), with under 1 % of pixels at 255. It's linear with no floor (the old demo clamped its brightness factor to 0.1–2.5): a very short exposure is honestly dark.
 - Precompute once per source: B = I_o + I_r, M = 2√(I_o I_r) (float32) and ψ.
 
-### 5.2 Specimen
+### 5.2 Specimen: a drumhead
 
-- A rectangular plate with simply supported edges, occupying the centred 88 % × 88 % of the frame (aspect 3:2, like the frame). Outside it the mount is rigid (w = 0) but still speckled, so the plate's edge is a visible zero-motion line in every behaviour.
-- Mode shapes S_mn = sin(mπx/Lx)·sin(nπy/Ly) for 1 ≤ m, n ≤ 15. Frequencies f_mn = f₁₁·((m/Lx)² + (n/Ly)²)/((1/Lx)² + (1/Ly)²), with f₁₁ = 520 Hz, chosen so f₂₁ = 1000 Hz. Q = 50 for every mode.
-- **Point drive** at (0.37 Lx, 0.41 Ly), off every low mode's nodal lines. The modal participation is S_mn(drive point)/(f_mn/f₁₁)². At 0 Hz the mode sum is then the point-load deflection (the Green's function), and the same shape is the Slow-deformation load. Static and dynamic behaviour are one consistent plate.
-- **Separable evaluation:** every field is X_yᵀ · C · X_x with sine bases X_x (15 × W) and X_y (15 × H), so a full complex amplitude map costs one small matrix product, not 225 full-frame sums.
+*Changed on 2026-11-21 at the user's request ("simulate a drumhead: not the actual materials, but a circular plane"). The first version used a rectangular plate.*
+
+- An ideal circular membrane clamped at its rim, centred in the frame, with a diameter of 88 % of the frame's shorter side. There is no material model: no tension, density or thickness. Outside the rim the mount is rigid (w = 0) but still speckled, so the rim is a visible zero-motion circle in every behaviour.
+- Mode (m, n) has m nodal diameters and n nodal circles (the rim included). Its shape is J_m(j_mn·r/R)·cos(m(θ − θ_d)), and its frequency f_mn = 1000 Hz · j_mn / j₁₁, where j_mn is the n-th zero of J_m. So (1, 1) is exactly 1000 Hz, and the fundamental (0, 1) is 627.6 Hz. Then come (2, 1) 1340 Hz, (0, 2) 1441 Hz, (3, 1) 1665 Hz, (1, 2) 1831 Hz and so on: not harmonic, as on a real drum. Every mode with j_mn ≤ 30 (109 modes) has Q = 50.
+- **Drive pad** at r = R/3, angle θ_d = 30° (counter-clockwise from +x, y up). A drive on that axis excites only the cos(m(θ − θ_d)) member of each degenerate pair, so the sin members are left out exactly. Each mode's static share is J_m(j_mn/3)/(N_mn·j_mn²), where N_mn = (2π if m = 0, else π)·J_{m+1}(j_mn)²/2. It is tapered by exp(−(j_mn/14)²) for the pad's size (a true point load is logarithmically singular on a membrane). At 0 Hz the mode sum is the pad's dent, which is also the Slow-deformation load. Static and dynamic behaviour are one consistent drum.
+- **Bessel functions without SciPy:** one cached FFT table of e^(ix·sin t) gives J_0..J_40 on 0 ≤ x ≤ 34 (step 0.002, error < 1e-6). The zeros are read from its sign changes, searched from x = m, because below that a high order is ~1e-20 and rounding noise flips its sign.
+- **Polar evaluation:** for each m, the modes' radial profiles are summed on a 2048-point radius grid, read at every pixel's radius and multiplied by cos(mθ), built by recurrence. Only pixels on the drum are computed. A full complex amplitude map costs about 48 ms (once per drive change); building a source costs 60–120 ms.
 
 ### 5.3 Behaviours
 
@@ -76,15 +79,15 @@ All of this lives in a new GUI-free module, `src/espi_live/simulation.py`, with 
 |---|---|---|---|
 | Still | 0 | none | hold level |
 | Slow deformation | D(t)·Ŝ_load | none | hold level |
-| Vibration | 0 | mode (2, 1) at its resonance, 1000 Hz, amplitude for about 5 dark fringes (peak K·a ≈ 16 rad) | hold level |
+| Vibration | 0 | drum mode (1, 1) at its resonance, 1000 Hz, peak K·a = 16 rad (5 J0 fringes) | hold level |
 | Follow DAQ | 0 | generator → mode sum (5.4) | hold level, or sine (5.4) |
 
-- **Slow deformation:** Ŝ_load is the point-load deflection normalised to a peak of 1. D(t) cycles every 12 s: a smooth (raised-cosine) ramp from 0 to 8 fringes' worth (8·λ/2 ≈ 2.53 µm) over 5 s, a 1 s hold, a 5 s ramp back down, then 1 s still. Reference view shows fringes appearing and multiplying. Previous view shows faint rate fringes (the peak rate is about 26 nm per frame at 30 fps, about 0.5 rad) and is exactly black during the hold and the still second.
+- **Slow deformation:** Ŝ_load is the pad's dent, normalised to a peak of 1. D(t) cycles every 12 s: a smooth (raised-cosine) ramp from 0 to 8 fringes' worth (8·λ/2 ≈ 2.53 µm) over 5 s, a 1 s hold, a 5 s ramp back down, then 1 s still. Reference view shows fringes appearing and multiplying. Previous view shows faint rate fringes (the peak rate is about 26 nm per frame at 30 fps, about 0.5 rad) and is exactly black during the hold and the still second.
 - The vibration is in steady state at once. The usual workflow, as on the bench: choose Still (or switch the generator off), set the reference, then start the vibration.
 
 ### 5.4 DAQ coupling
 
-- **Generator.** Sine on an AO: V(t) = A·sin(ωt). The specimen's complex amplitude is W(x, y) = A·Σ_mn C_mn·H_mn(f)·S_mn(x, y), with H_mn(f) = 1/(1 − (f/f_mn)² + i·f/(Q·f_mn)) and C_mn = C₀·S_mn(drive)/(f_mn/f₁₁)². C₀ is set so 0.1 V at f₁₁ gives about 5 dark fringes; higher modes need more volts, as on a real plate. A square TTL wave from a counter counts as its fundamental, amplitude (4/π)·2.5 V, and the harmonics and DC are ignored. The generator's DC offset is ignored (a constant displacement; invisible in Previous view).
+- **Generator.** Sine on an AO: V(t) = A·sin(ωt). The drum's complex amplitude is W = A·C₀·Σ_mn (static share)_mn·H_mn(f)·shape_mn, with H_mn(f) = 1/(1 − (f/f_mn)² + i·f/(Q·f_mn)). C₀ is set so 0.1 V at the fundamental, f(0, 1), peaks at 16 rad; higher modes need more volts, as on a real drum. A square TTL wave from a counter counts as its fundamental, amplitude (4/π)·2.5 V, and the harmonics and DC are ignored. The generator's DC offset is ignored (a constant displacement; invisible in Previous view).
 - **Piezo:** 1500 nm per DAQ volt (the lab's 100 nm/V stack behind a gain-15 amplifier, docs/notes/ni-usb-6251-integration.md §5). A held level V_h gives a constant reference phase K·1500·V_h; the default 0.05 V step is about 85°, close to π/2. In sine mode, p(t) = 1500·(V_c + V_a·sin(ωt + θ)): V_c is a held phase, and the harmonic part becomes the reference phasor P = 1500·V_a·e^(iθ). Piezo sine applies only in Follow DAQ (it is locked to the generator); in the other behaviours only its centre or held level acts.
 - **Net harmonic path difference:** Z(x, y) = W − P (nm, complex), so Δφ_h(t) = K·|Z|·sin(ωt + arg Z). Reference modulation moves the zero-order fringe to where W = P, as Høgmoen and Løkberg describe.
 - **Which DAQ:** the object follows whatever the DAQ window has applied, whether the Simulated device or real hardware. The status text says which. When nothing is connected or applied, or the outputs are zeroed, or the DAQ fails or closes, the drive is "off": no generator, piezo at 0 V.
@@ -124,15 +127,15 @@ On the dev Mac at 960×640: at most 8 ms per frame in every behaviour, and at mo
 
 ## 7. What a user should see (the by-eye checks)
 
-- **Raw:** a speckled laser spot on a plate. Vibrating regions show lower speckle contrast; nodal lines keep full contrast.
+- **Raw:** a speckled laser spot on the drumhead (it falls to half at the rim). Vibrating regions show lower speckle contrast; nodal lines keep full contrast.
 - **Still:** Previous view is exactly black, and Measure noise floor reads 0. A piezo step (the DAQ window's Step) flashes a uniform fringe-free change in Previous view and a uniform offset against a reference.
-- **Slow deformation:** Reference view shows closed correlation fringes around the bulge's peak (next to the drive point), growing to 8 and back, always black outside the plate. They are widely spaced around the peak, where the slope is zero, and crowd toward the supported edges, where the slope is steepest (about 2.3× the slope at the drive point along its row: the model, checked by the builder review, not a guess).
-- **Vibration:** against a still reference, the (2, 1) mode's 1 − J0 fringes with a dark nodal line down the middle. Previous view stays black at 8000 µs (8 whole cycles) and flickers at, say, 8700 µs (8.7 cycles).
-- **Follow DAQ:** sweeping the generator through about 520 Hz, 1000 Hz, … makes successive mode shapes appear. A whole number of cycles per exposure keeps them steady. The piezo sine at the drive frequency moves the zero-order fringe.
+- **Slow deformation:** Reference view shows closed rings around the pad (at R/3, 30°), growing to 8 and back, always black outside the drum. A membrane's dent is logarithmic, so the rings crowd toward the pad and spread toward the rim (the reverse of a plate).
+- **Vibration:** against a still reference, drum mode (1, 1): 1 − J0 bands in two lobes either side of a dark nodal diameter at 120° (perpendicular to the drive axis). Previous view stays black at 8000 µs (8 whole cycles) and flickers at, say, 8700 µs (8.7 cycles).
+- **Follow DAQ:** sweeping the generator through 628 Hz (0, 1: rings), 1000 Hz (1, 1: one nodal diameter), 1340 Hz (2, 1: a nodal cross), 1441 Hz (0, 2: a nodal circle), 1665 Hz (3, 1: six lobes) … makes successive drum modes appear. A whole number of cycles per exposure keeps them steady. The piezo sine at the drive frequency moves the zero-order fringe.
 
 ## 8. Tests (camera-free, 100 % line coverage)
 
-- `tests/test_simulation.py`: speckle statistics (mean intensity and a contrast near 1 on the plate), the per-label seed (repeatable, distinct), sensor linearity in exposure and gain and clipping at 255; Still frames identical; Slow-deformation zero outside the plate and the cycle's phases; a piezo held step equal to the expected phase; the FFT table against direct numerical integration of J_k (J0 zeros at u = 2.405 and 5.520) and against brute-force exposure integration on a small frame within 1 grey level, for whole and fractional n; reference modulation cancelling where W = P; `Drive` from `plan()` for sine, square, hold, sine piezo and off.
+- `tests/test_simulation.py`: speckle statistics (mean intensity and a contrast near 1 on the drum), the per-label seed (repeatable, distinct), sensor linearity in exposure and gain and clipping at 255; Still frames identical; Slow-deformation zero outside the drum; the drum mask, the Bessel functions and zeros, the mode frequencies and the (1, 1) shape against an independent J1 and the cycle's phases; a piezo held step equal to the expected phase; the FFT table against direct numerical integration of J_k (J0 zeros at u = 2.405 and 5.520) and against brute-force exposure integration on a small frame within 1 grey level, for whole and fractional n; reference modulation cancelling where W = P; `Drive` from `plan()` for sine, square, hold, sine piezo and off.
 - Engine: the `drive` action reaches a demo source and is ignored by a camera; `demo_object` changes are applied.
 - Qt: control visibility (demo or live, Simple UI), its persistence in the demo profile, no cross-camera leaks, and DAQ events forwarded to demo engines (including off on zero, failure and close).
 - Existing tests that run real demo frames (test_qt_app, test_engine_camera, test_channels, test_noise_floor, test_reference, test_pixel_square, test_fringe_enhancement, test_wheel, test_update_integration and others): re-run them all, and fix any that relied on the old pattern (e.g. a nonzero Previous difference in the first frames, where the deformation ramp starts at zero rate).

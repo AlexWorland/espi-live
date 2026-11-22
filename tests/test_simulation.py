@@ -13,8 +13,8 @@ import numpy as np
 from espi_live import simulation
 from espi_live.daq import HOLD, SINE, Drive
 from espi_live.simulation import (DEFAULT_OBJECT, K_PER_NM, SIMULATED_OBJECTS,
-                                  DemoSource, FringeTable, deformation_nm,
-                                  mode_frequency_hz, object_note)
+                                  DemoSource, FringeTable, bessel_j, bessel_zero,
+                                  deformation_nm, mode_frequency_hz, object_note)
 from list_log import ListLog
 
 
@@ -37,6 +37,30 @@ def j0(u):
     """
     t = (np.arange(20000) + 0.5) * np.pi / 20000
     return float(np.cos(u * np.sin(t)).mean())
+
+
+def jm(m, x, samples=400):
+    """Bessel J_m by Bessel's integral, independent of the module.
+
+    Args: m is the order; x is an array.
+    Returns: J_m(x), same shape.
+    """
+    t = (np.arange(samples) + 0.5) * np.pi / samples
+    x = np.asarray(x, np.float64)
+    return np.cos(m * t - x[..., None] * np.sin(t)).mean(axis=-1)
+
+
+def drum_polar(width, height):
+    """Each pixel centre's drum coordinates, as the design defines them.
+
+    Args: width and height are the frame size.
+    Returns: (rho, theta): radius over the drum radius (0.44 x the shorter
+        side) and the angle counter-clockwise from +x, with y up on screen.
+    """
+    y = np.arange(height)[:, None] + 0.5 - height / 2
+    x = np.arange(width)[None, :] + 0.5 - width / 2
+    radius = 0.44 * min(width, height)
+    return np.hypot(x, y) / radius, np.arctan2(-y, x)
 
 
 class FringeTableTests(unittest.TestCase):
@@ -158,7 +182,7 @@ def max_error(frame, expected):
 
 
 class SceneTests(unittest.TestCase):
-    """Speckle, plate, ideal sensor, Still and Slow deformation."""
+    """Speckle, drumhead, ideal sensor, Still and Slow deformation."""
 
     def source(self, obj=None, width=96, height=64, label="DEMO1"):
         """Make a small simulated source.
@@ -210,10 +234,10 @@ class SceneTests(unittest.TestCase):
         source = self.source("Still", 480, 320)
         middle = source.background[128:192, 192:288]
         self.assertLess(abs(float(middle.mean()) - 64), 10)
-        speckle = source.speckle_intensity[source.plate_mask]
+        speckle = source.speckle_intensity[source.drum_mask]
         self.assertTrue(0.8 < float(speckle.std() / speckle.mean()) < 1.2)
         frame = source.next_frame(8000, 0, 30)
-        self.assertLess(float((frame[source.plate_mask] == 255).mean()), 0.01)
+        self.assertLess(float((frame[source.drum_mask] == 255).mean()), 0.01)
 
     def test_sensor_is_linear_and_clips(self):
         """Brightness is proportional to exposure and to linear gain, then clips at 255.
@@ -258,8 +282,8 @@ class SceneTests(unittest.TestCase):
         ramp = [deformation_nm(t) for t in np.linspace(0.01, 4.99, 50)]
         self.assertTrue(all(b > a for a, b in zip(ramp, ramp[1:])))
 
-    def test_deformation_never_moves_outside_the_plate(self):
-        """The mount around the plate is rigid.
+    def test_deformation_never_moves_outside_the_drum(self):
+        """The rim and the mount around the drumhead are rigid.
 
         Args: None.
         Returns: None.
@@ -268,9 +292,9 @@ class SceneTests(unittest.TestCase):
         rest = source.next_frame(8000, 0, 30)
         source.clock_s = 5.5
         bent = source.next_frame(8000, 0, 30)
-        outside = ~source.plate_mask
+        outside = ~source.drum_mask
         np.testing.assert_array_equal(rest[outside], bent[outside])
-        self.assertFalse(np.array_equal(rest[source.plate_mask], bent[source.plate_mask]))
+        self.assertFalse(np.array_equal(rest[source.drum_mask], bent[source.drum_mask]))
 
     def test_deformation_frame_matches_the_phase(self):
         """A deformed frame is the interferogram with phase K * d * load shape.
@@ -285,22 +309,32 @@ class SceneTests(unittest.TestCase):
         intensity = source.background + source.modulation * np.cos(phase)
         self.assertLessEqual(max_error(frame, expected_frame(intensity)), 1)
 
+    def test_drum_is_a_centred_circle(self):
+        """The drumhead fills 88 % of the frame height, centred; the corners are mount.
+
+        Args: None.
+        Returns: None.
+        """
+        source = self.source(width=480, height=320)
+        rho, _ = drum_polar(480, 320)
+        np.testing.assert_array_equal(source.drum_mask, rho < 1)
+        self.assertTrue(source.drum_mask[160, 240])
+        self.assertFalse(source.drum_mask[0, 0] or source.drum_mask[160, 20])
+
     def test_load_peaks_near_the_drive_point(self):
-        """The point-load deflection peaks next to the drive point, and is 0 off the plate.
+        """The point-load dent peaks at the drive point (1/3 radius, 30 degrees), 0 off the drum.
 
         Args: None.
         Returns: None.
         """
         source = self.source(width=480, height=320)
         self.assertAlmostEqual(float(source.load_shape.max()), 1.0, places=5)
-        self.assertEqual(float(np.abs(source.load_shape[~source.plate_mask]).max()), 0.0)
+        self.assertEqual(float(np.abs(source.load_shape[~source.drum_mask]).max()), 0.0)
         y, x = np.unravel_index(np.argmax(source.load_shape), source.load_shape.shape)
-        columns = np.flatnonzero(source.plate_mask.any(axis=0))
-        rows = np.flatnonzero(source.plate_mask.any(axis=1))
-        u = (x - columns[0]) / (columns[-1] - columns[0])
-        v = (y - rows[0]) / (rows[-1] - rows[0])
-        self.assertLess(abs(u - 0.37), 0.1)
-        self.assertLess(abs(v - 0.41), 0.1)
+        radius = 0.44 * 320
+        expected_x = 240 + 0.33 * radius * math.cos(math.radians(30))
+        expected_y = 160 - 0.33 * radius * math.sin(math.radians(30))
+        self.assertLess(math.hypot(x + 0.5 - expected_x, y + 0.5 - expected_y), 0.1 * radius)
 
     def test_clock_advances_by_frame_period(self):
         """The sensor clock moves one frame period per frame, independent of wall time.
@@ -365,29 +399,49 @@ class VibrationTests(unittest.TestCase):
             source.set_drive(drive)
         return source
 
+    def test_bessel_functions_and_zeros(self):
+        """J_m and its zeros match the standard values.
+
+        Args: None.
+        Returns: None.
+        """
+        np.testing.assert_allclose(bessel_j(0, np.array([0.0, 2.404826])), [1.0, 0.0],
+                                   atol=1e-6)
+        self.assertAlmostEqual(float(bessel_j(1, np.array([1.0]))[0]), 0.4400506, places=6)
+        x = np.linspace(0, 25, 101)
+        for m in (0, 1, 4, 9):
+            np.testing.assert_allclose(bessel_j(m, x), jm(m, x), atol=1e-6)
+        for (m, n), value in {(0, 1): 2.404826, (1, 1): 3.831706, (2, 1): 5.135622,
+                              (0, 2): 5.520078, (3, 2): 9.761023}.items():
+            self.assertAlmostEqual(bessel_zero(m, n), value, delta=1e-5)
+
     def test_mode_frequencies(self):
-        """The plate's modes sit where the design puts them; (2, 1) is exactly 1000 Hz.
+        """Drum modes follow the Bessel zeros; (1, 1) is exactly 1000 Hz.
 
         Args: None.
         Returns: None.
         """
-        self.assertAlmostEqual(mode_frequency_hz(1, 1), 520.0)
-        self.assertAlmostEqual(mode_frequency_hz(2, 1), 1000.0, delta=1e-9)
-        self.assertAlmostEqual(mode_frequency_hz(1, 2), 520 * (1 / 2.25 + 4) / (1 / 2.25 + 1))
+        self.assertAlmostEqual(mode_frequency_hz(1, 1), 1000.0, delta=1e-9)
+        self.assertAlmostEqual(mode_frequency_hz(0, 1), 1000 * 2.404826 / 3.831706, delta=1e-2)
+        self.assertAlmostEqual(mode_frequency_hz(2, 1), 1000 * 5.135622 / 3.831706, delta=1e-2)
 
-    def test_vibration_has_a_still_nodal_line(self):
-        """The built-in mode (2, 1) peaks at 16 rad and has a still line down the middle.
+    def test_vibration_is_the_drum_mode(self):
+        """The built-in drive is mode (1, 1): J1 across a nodal diameter, 16 rad peak.
 
         Args: None.
         Returns: None.
         """
-        source = self.source("Vibration", width=97)
+        source = self.source("Vibration")
         frequency, path = source.harmonic_path_nm()
-        amplitude = np.abs(path)
         self.assertAlmostEqual(frequency, 1000.0, delta=1e-9)
-        self.assertAlmostEqual(float(K_PER_NM * amplitude.max()), 16.0, delta=1e-3)
-        self.assertLess(float(amplitude[:, 48].max()), 1e-3 * float(amplitude.max()))
-        self.assertEqual(float(amplitude[~source.plate_mask].max()), 0.0)
+        rho, theta = drum_polar(96, 64)
+        shape = jm(1, 3.831706 * np.minimum(rho, 1)) * np.cos(theta - math.radians(30))
+        shape = np.where(rho < 1, shape, 0)
+        expected = shape * (16.0 / K_PER_NM / np.abs(shape).max())
+        scale = float(np.abs(expected).max())
+        self.assertLess(float(np.abs(path - expected).max()), 2e-3 * scale)
+        self.assertAlmostEqual(float(K_PER_NM * np.abs(path).max()), 16.0, delta=0.05)
+        self.assertEqual(float(np.abs(path[~source.drum_mask]).max()), 0.0)
         self.assertEqual(self.source("Still").harmonic_path_nm(), (0.0, None))
         self.assertEqual(self.source("Slow deformation").harmonic_path_nm(), (0.0, None))
 
@@ -406,7 +460,7 @@ class VibrationTests(unittest.TestCase):
                 self.assertLessEqual(max_error(frame, expected), 1, (exposure, t0))
 
     def test_follow_daq_matches_brute_force_with_reference_modulation(self):
-        """A driven plate with a piezo sine and a held centre is integrated exactly.
+        """A driven drumhead with a piezo sine and a held centre is integrated exactly.
 
         Args: None.
         Returns: None.
@@ -434,15 +488,16 @@ class VibrationTests(unittest.TestCase):
         self.assertFalse(np.array_equal(frames[0], frames[1]))
 
     def test_follow_daq_resonance(self):
-        """0.1 V at the first resonance gives 16 rad; off resonance far less; off is still.
+        """0.1 V at the fundamental (0, 1) gives 16 rad; off resonance far less; off is still.
 
         Args: None.
         Returns: None.
         """
-        _, path = self.source("Follow DAQ", Drive("sine", 520.0, 0.1)).harmonic_path_nm()
+        fundamental = mode_frequency_hz(0, 1)
+        _, path = self.source("Follow DAQ", Drive("sine", fundamental, 0.1)).harmonic_path_nm()
         peak = float(K_PER_NM * np.abs(path).max())
         self.assertAlmostEqual(peak, 16.0, delta=0.32)
-        _, off = self.source("Follow DAQ", Drive("sine", 700.0, 0.1)).harmonic_path_nm()
+        _, off = self.source("Follow DAQ", Drive("sine", 800.0, 0.1)).harmonic_path_nm()
         self.assertLess(float(K_PER_NM * np.abs(off).max()), 0.3 * peak)
         idle = self.source("Follow DAQ", Drive())
         self.assertEqual(idle.harmonic_path_nm(), (0.0, None))
@@ -455,8 +510,8 @@ class VibrationTests(unittest.TestCase):
         Args: None.
         Returns: None.
         """
-        square = self.source("Follow DAQ", Drive("square", 520.0)).harmonic_path_nm()[1]
-        sine = self.source("Follow DAQ", Drive("sine", 520.0, 4 / np.pi * 2.5)).harmonic_path_nm()[1]
+        square = self.source("Follow DAQ", Drive("square", 627.0)).harmonic_path_nm()[1]
+        sine = self.source("Follow DAQ", Drive("sine", 627.0, 4 / np.pi * 2.5)).harmonic_path_nm()[1]
         np.testing.assert_allclose(square, sine, rtol=1e-6, atol=1e-6)
 
     def test_piezo_hold_shifts_the_phase_in_every_object(self):
@@ -495,14 +550,14 @@ class VibrationTests(unittest.TestCase):
                                    rtol=1e-5, atol=1e-4)
 
     def test_reference_modulation_cancels_where_matched(self):
-        """A piezo sine equal to the plate's motion at a pixel makes that pixel still.
+        """A piezo sine equal to the drum's motion at a pixel makes that pixel still.
 
         Args: None.
         Returns: None.
         """
-        _, motion = self.source("Follow DAQ", Drive("sine", 520.0, 0.1)).harmonic_path_nm()
+        _, motion = self.source("Follow DAQ", Drive("sine", 627.0, 0.1)).harmonic_path_nm()
         target = complex(motion[30, 40])
-        drive = Drive("sine", 520.0, 0.1, piezo_mode=SINE,
+        drive = Drive("sine", 627.0, 0.1, piezo_mode=SINE,
                       piezo_amplitude_v=abs(target) / 1500.0,
                       piezo_phase_deg=math.degrees(np.angle(target)))
         _, path = self.source("Follow DAQ", drive).harmonic_path_nm()
@@ -532,20 +587,20 @@ class VibrationTests(unittest.TestCase):
         self.assertEqual(len(built), 2)
 
     def test_strong_drive_stays_finite(self):
-        """An overdriven plate clamps the table range, warns once and stays finite.
+        """An overdriven drum clamps the table range, warns once and stays finite.
 
         Args: None.
         Returns: None.
         """
         log = ListLog()
-        source = self.source("Follow DAQ", Drive("sine", 520.0, 10.0), log=log)
+        source = self.source("Follow DAQ", Drive("sine", 627.6, 10.0), log=log)
         for _ in range(2):
             frame = source.next_frame(8000, 0, 30)
         self.assertEqual(frame.dtype, np.uint8)
         warnings = [m for level, m, _ in log.records if level == "WARNING"]
         self.assertEqual(len(warnings), 1)
         self.assertIn("finer than", warnings[0])
-        self.source("Follow DAQ", Drive("sine", 520.0, 10.0)).next_frame(8000, 0, 30)
+        self.source("Follow DAQ", Drive("sine", 627.6, 10.0)).next_frame(8000, 0, 30)
 
     def test_object_note_texts(self):
         """The note under the control says what the simulation is doing.
@@ -556,7 +611,7 @@ class VibrationTests(unittest.TestCase):
         self.assertIn("Nothing moves", object_note("Still", Drive()))
         self.assertIn("12 s", object_note("Slow deformation", Drive()))
         vibration = object_note("Vibration", Drive())
-        self.assertIn("mode (2, 1)", vibration)
+        self.assertIn("mode (1, 1)", vibration)
         self.assertIn("1000 Hz", vibration)
         idle = object_note("Follow DAQ", Drive())
         self.assertIn("no DAQ drive", idle)

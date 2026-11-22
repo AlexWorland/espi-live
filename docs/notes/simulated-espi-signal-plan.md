@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+- **Amendment (2026-11-21, user request): the specimen is a drumhead, not a plate.** Spec §5.2 is binding: a circular membrane, diameter 88 % of the shorter side, modes J_m(j_mn r/R)·cos(m(θ − 30°)) with j_mn ≤ 30, (1, 1) = 1000 Hz, fundamental (0, 1) = 627.6 Hz, drive pad at R/3 and 30°. `DemoSource.drum_mask` replaces `plate_mask`. Tasks 1–4 were done on the plate and then converted. Where a later task names a plate frequency, use the drum's: 628 / 1000 / 1340 / 1441 / 1665 / 1831 Hz for (0, 1), (1, 1), (2, 1), (0, 2), (3, 1), (1, 2).
+
 - Python: `~/espi_live/.venv/bin/python` (the worktree has no `.venv`). Single modules run with `PYTHONPATH=src:tests`.
 - Full suite: `PYTHONPATH=src:tests QT_QPA_PLATFORM=offscreen ~/espi_live/.venv/bin/python -m coverage run -m unittest discover -s tests && ~/espi_live/.venv/bin/python -m coverage report` must pass at **100 % line coverage**, with no `# pragma: no cover`.
 - After each edit: `~/espi_live/.venv/bin/python -m py_compile <changed files>`.
@@ -274,7 +276,7 @@
 **Files:**
 - Modify:
   - `README.md` (the dummy-mode text);
-  - `src/espi_live/user_guide.html` (the `#start-demo` section: the simulation, the four objects, the mode frequencies 520 / 1000 / 1600 / 1800 / 2080 / 2880 Hz for (1,1), (2,1), (1,2), (3,1), (2,2), (3,2), the piezo 1500 nm/V and 0.05 V ≈ 85°, the by-eye checks of spec §7, and the Simulated object control in the controls reference);
+  - `src/espi_live/user_guide.html` (the `#start-demo` section: the simulation, the four objects, the drum's mode frequencies 628 / 1000 / 1340 / 1441 / 1665 / 1831 Hz for (0,1), (1,1), (2,1), (0,2), (3,1), (1,2), the piezo 1500 nm/V and 0.05 V ≈ 85°, the by-eye checks of spec §7, and the Simulated object control in the controls reference);
   - `AGENTS.md` (the layout and architecture rows: `simulation.py`; `processing.py` no longer lists `DemoSource`; the `daq.py` row's `Drive`; the Demo-mode paragraph; the Engine-threading list gains `drive`; the Frame-flow `DemoSource.next_frame` wording);
   - `CHANGELOG.md` (a new top entry dated 2026-11-21);
   - `docs/notes/ni-usb-6251-integration.md` (the "(future)" line now points to `simulation.py`).
@@ -295,7 +297,7 @@
   - the control in each object (including Simple UI);
   - Raw, Reference against a Still reference, and Previous for each object;
   - Vibration at 8000 µs and at 8700 µs;
-  - Follow DAQ at 520 Hz and 1000 Hz with the DAQ window;
+  - Follow DAQ at 628 Hz and 1340 Hz with the DAQ window;
   - a live (fake) camera with the control hidden.
   
   Look at each image and check it against spec §7.

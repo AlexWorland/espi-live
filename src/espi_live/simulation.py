@@ -1,8 +1,9 @@
 """A simulated ESPI signal for dummy mode: what an ideal camera would record.
 
-The scene is a speckle interferometer: a rough plate scatters laser light
-into a speckle field, a smooth reference beam interferes with it, and the
-plate's out-of-plane motion w shifts the optical phase by K * w (light
+The scene is a speckle interferometer: a drumhead (an ideal circular
+membrane, no material model) scatters laser light into a speckle field, a
+smooth reference beam interferes with it, and the drumhead's out-of-plane
+motion w shifts the optical phase by K * w (light
 along the surface normal, K = 4 pi / lambda). The DAQ's piezo moves the
 reference mirror the same way. The sensor is perfectly clean: each pixel
 is the intensity averaged over the exposure, scaled by exposure and gain,
@@ -16,6 +17,7 @@ a real camera's do. See docs/notes/simulated-espi-signal-design.md.
 Nothing here touches a GUI toolkit or PySpin.
 """
 
+import functools
 import math
 import zlib
 
@@ -28,16 +30,29 @@ from espi_live.daq import SINE, Drive
 WAVELENGTH_NM = 632.8  # HeNe
 K_PER_NM = 4 * math.pi / WAVELENGTH_NM  # phase per nm of out-of-plane motion
 
-# Specimen: a simply supported rectangular plate on the centred part of the
-# frame, its modes (m, n) up to MAX_MODE each way. Frequencies use the fixed
-# physical aspect PLATE_ASPECT whatever the frame size, so f(2, 1) is
-# exactly 1000 Hz.
-PLATE_FRACTION = 0.88
-PLATE_ASPECT = 1.5
-MAX_MODE = 15
-F11_HZ = 520.0
+# Specimen: a drumhead, an ideal circular membrane clamped at its rim, centred
+# with a diameter of DRUM_FRACTION of the frame's shorter side; the mount
+# around it is rigid. There is no material model: mode (m, n) has m nodal
+# diameters and n nodal circles (the rim included), shape
+# J_m(j_mn r / R) cos(m (theta - drive angle)) and a frequency proportional
+# to the Bessel zero j_mn, scaled so the built-in mode (1, 1) is 1000 Hz.
+# Modes with j_mn up to MODE_J_LIMIT are simulated.
+DRUM_FRACTION = 0.88
+MODE_J_LIMIT = 30.0
 MODE_Q = 50.0
-DRIVE_POINT = (0.37, 0.41)  # plate coordinates, off every low mode's nodal lines
+# The drive (a small pad: a shaker, a finger) presses at this radius (share of
+# R) and angle (counter-clockwise from +x, y up). A point drive on that axis
+# excites only the cos(m theta) member of each mode pair. The pad's size
+# tapers mode j by exp(-(j / DRIVE_PAD_J)^2).
+DRIVE_RADIUS = 0.33
+DRIVE_ANGLE_DEG = 30.0
+DRIVE_PAD_J = 14.0
+RADIAL_SAMPLES = 2048
+# Bessel functions: a table over 0..BESSEL_X_MAX, step BESSEL_STEP, orders
+# 0..BESSEL_ORDERS - 1.
+BESSEL_X_MAX = 34.0
+BESSEL_STEP = 0.002
+BESSEL_ORDERS = 41
 
 # Slow deformation: a raised-cosine ramp to DEFORMATION_FRINGES fringes over
 # RAMP_S, a HOLD_S hold, the ramp back down, then STILL_S at rest.
@@ -48,9 +63,10 @@ STILL_S = 1.0
 CYCLE_S = 2 * RAMP_S + HOLD_S + STILL_S
 
 # Vibration: the built-in drive excites one mode at its resonance.
-VIBRATION_MODE = (2, 1)
-VIBRATION_PEAK_RAD = 16.0  # peak K * amplitude: about 5 dark J0 fringes
-# Follow DAQ: a 0.1 V sine at f(1, 1) gives this peak phase amplitude.
+VIBRATION_MODE = (1, 1)
+VIBRATION_HZ = 1000.0
+VIBRATION_PEAK_RAD = 16.0  # peak K * amplitude: 5 J0 fringes
+# Follow DAQ: a 0.1 V sine at the fundamental, f(0, 1), gives this peak.
 GENERATOR_PEAK_RAD = 16.0
 GENERATOR_REFERENCE_V = 0.1
 TTL_HIGH_V = 5.0  # a counter's square wave; only its fundamental is simulated
@@ -64,8 +80,8 @@ SPOT_LEVEL = 64.0
 # so the speckle intensity (twice that) stays within the sensor's Nyquist
 # limit and each pixel's point sample is exact. Grains look 2-3 px wide.
 PUPIL_CUTOFF_PER_PX = 0.25
-# The Gaussian laser spot falls to this share of its peak at the plate's corners.
-SPOT_CORNER_LEVEL = 0.25
+# The Gaussian laser spot falls to this share of its peak at the drum's rim.
+SPOT_RIM_LEVEL = 0.5
 
 SIMULATED_OBJECTS = ("Still", "Slow deformation", "Vibration", "Follow DAQ")
 DEFAULT_OBJECT = "Slow deformation"
@@ -207,14 +223,77 @@ def deformation_nm(t_s):
     return 0.0
 
 
-def mode_frequency_hz(m, n):
-    """Resonance frequency of plate mode (m, n).
+@functools.lru_cache(maxsize=1)
+def _bessel_table():
+    """Tabulate J_0 .. J_(BESSEL_ORDERS - 1) on 0..BESSEL_X_MAX.
 
-    Args: m and n are the mode's half-wave counts along the plate's long
-        and short sides.
-    Returns: The frequency in Hz; (1, 1) is F11_HZ and (2, 1) is 1000 Hz.
+    By Jacobi-Anger, exp(i x sin t) = sum over k of J_k(x) exp(ikt), so an
+    FFT over t gives every order at once (numpy only; no SciPy).
+
+    Args: None.
+    Returns: (x grid, table) with table[m] = J_m on the grid (float64).
     """
-    return F11_HZ * ((m / PLATE_ASPECT) ** 2 + n ** 2) / ((1 / PLATE_ASPECT) ** 2 + 1)
+    x = np.arange(0.0, BESSEL_X_MAX + BESSEL_STEP / 2, BESSEL_STEP)
+    points = 128  # J_k(x) is negligible for k > x + 30, so 128 cannot alias
+    t = 2 * np.pi * np.arange(points) / points
+    spectrum = np.fft.fft(np.exp(1j * x[:, None] * np.sin(t[None, :])), axis=1) / points
+    return x, np.ascontiguousarray(spectrum[:, :BESSEL_ORDERS].real.T)
+
+
+def bessel_j(m, x):
+    """Bessel function of the first kind.
+
+    Args: m is the order (0..BESSEL_ORDERS - 1); x is an array in
+        0..BESSEL_X_MAX.
+    Returns: J_m(x) as a float64 array of x's shape.
+    """
+    grid, table = _bessel_table()
+    return np.interp(x, grid, table[m])
+
+
+@functools.lru_cache(maxsize=None)
+def bessel_zero(m, n):
+    """The n-th positive zero of J_m.
+
+    Args: m is the order; n counts from 1.
+    Returns: j_mn as a float, or math.inf when it lies beyond the table.
+    """
+    grid, table = _bessel_table()
+    values = table[m]
+    # j_m1 > m, and below x = m a high order is ~1e-20, where rounding noise
+    # flips its sign: search from there.
+    start = max(1, int(m / BESSEL_STEP))
+    crossings = np.flatnonzero(np.signbit(values[start:-1]) != np.signbit(values[start + 1:]))
+    if len(crossings) < n:
+        return math.inf
+    i = start + crossings[n - 1]
+    return float(grid[i] - values[i] * BESSEL_STEP / (values[i + 1] - values[i]))
+
+
+@functools.lru_cache(maxsize=1)
+def drum_modes():
+    """List the simulated drum modes.
+
+    Args: None.
+    Returns: A tuple of (m, n, j_mn) with j_mn <= MODE_J_LIMIT, by m then n.
+    """
+    modes = []
+    for m in range(BESSEL_ORDERS - 1):
+        n = 1
+        while bessel_zero(m, n) <= MODE_J_LIMIT:
+            modes.append((m, n, bessel_zero(m, n)))
+            n += 1
+    return tuple(modes)
+
+
+def mode_frequency_hz(m, n):
+    """Resonance frequency of drum mode (m, n).
+
+    Args: m is the number of nodal diameters; n the number of nodal circles,
+        the rim included.
+    Returns: The frequency in Hz; VIBRATION_MODE, (1, 1), is VIBRATION_HZ.
+    """
+    return VIBRATION_HZ * bessel_zero(m, n) / bessel_zero(*VIBRATION_MODE)
 
 
 def object_note(name, drive):
@@ -227,11 +306,11 @@ def object_note(name, drive):
     if name == "Still":
         parts = ["Nothing moves"]
     elif name == "Slow deformation":
-        parts = [f"The plate bulges to {DEFORMATION_FRINGES} fringes and back every "
-                 f"{CYCLE_S:g} s, resting for the last {STILL_S:g} s"]
+        parts = [f"The drumhead is pressed in to {DEFORMATION_FRINGES} fringes and "
+                 f"released every {CYCLE_S:g} s, resting for the last {STILL_S:g} s"]
     elif name == "Vibration":
         m, n = VIBRATION_MODE
-        parts = [f"Built-in drive: mode ({m}, {n}) at {mode_frequency_hz(m, n):.0f} Hz, "
+        parts = [f"Built-in drive: drum mode ({m}, {n}) at {mode_frequency_hz(m, n):.0f} Hz, "
                  "peak 16 rad (5 J0 fringes). Set the reference on Still first"]
     elif not drive.active:
         return ("Follow DAQ: no DAQ drive — open Devices → NI DAQ… and choose the "
@@ -253,70 +332,26 @@ def object_note(name, drive):
     return "; ".join(parts) + "."
 
 
-def _plate_axis(size):
-    """Place the plate along one frame axis.
-
-    Args: size is the frame's width or height in pixels.
-    Returns: (coordinate, inside): each pixel centre's plate coordinate
-        (0..1 across the plate) and whether it lies on the plate.
-    """
-    start = size * (1 - PLATE_FRACTION) / 2
-    coordinate = (np.arange(size) + 0.5 - start) / (size * PLATE_FRACTION)
-    return coordinate, (coordinate > 0) & (coordinate < 1)
-
-
-def _sine_basis(coordinate, inside):
-    """Tabulate sin(m pi s) for m = 1..MAX_MODE along one axis, 0 off the plate.
-
-    Args: coordinate and inside are what _plate_axis returned.
-    Returns: A float64 array of shape (MAX_MODE, size).
-    """
-    modes = np.arange(1, MAX_MODE + 1)[:, None]
-    return np.sin(np.pi * modes * coordinate[None, :]) * inside[None, :]
-
-
-def _mode_stiffness():
-    """Each mode's (m / aspect)^2 + n^2, the plate's eigenvalue up to a constant.
-
-    Args: None.
-    Returns: A float64 array of shape (MAX_MODE n, MAX_MODE m).
-    """
-    m = np.arange(1, MAX_MODE + 1)[None, :]
-    n = np.arange(1, MAX_MODE + 1)[:, None]
-    return (m / PLATE_ASPECT) ** 2 + n ** 2
-
-
-def _drive_participation():
-    """Each mode's shape at the drive point, S_mn(DRIVE_POINT).
-
-    Args: None.
-    Returns: A float64 array of shape (MAX_MODE n, MAX_MODE m).
-    """
-    modes = np.arange(1, MAX_MODE + 1)
-    along_x = np.sin(np.pi * modes * DRIVE_POINT[0])
-    along_y = np.sin(np.pi * modes * DRIVE_POINT[1])
-    return along_y[:, None] * along_x[None, :]
-
-
 class DemoSource:
     """An ideal camera looking at a simulated speckle interferometer.
 
     The object beam is a fully developed speckle field under a Gaussian laser
     spot, the reference beam is smooth and uniform (as bright as the object's
-    mean at the spot centre), and the plate on the centred PLATE_FRACTION of
-    the frame moves according to the chosen object (SIMULATED_OBJECTS).
+    mean at the spot centre), and the drumhead centred in the frame moves
+    according to the chosen object (SIMULATED_OBJECTS); the mount around it
+    stays still.
 
     Attributes: width and height are the frame size; object is the chosen
         SIMULATED_OBJECTS name; background and modulation are B = I_o + I_r
         and M = 2 sqrt(I_o I_r) in grey levels at REFERENCE_EXPOSURE_US and
         0 dB; speckle_phase is the object speckle's phase psi; speckle_intensity
-        is |E|^2 (mean 1); plate_mask marks the plate; load_shape is the
-        point-load deflection (peak 1, 0 off the plate); clock_s is the start
-        time of the next frame on the sensor's own clock.
+        is |E|^2 (mean 1); drum_mask marks the drumhead; load_shape is the
+        dent the drive pad presses (peak 1, 0 off the drum); clock_s is the
+        start time of the next frame on the sensor's own clock.
     """
 
     def __init__(self, width=960, height=640, label=None, log=None):
-        """Build the speckle field, beams and plate.
+        """Build the speckle field, beams and drumhead.
 
         Args: width and height are the frame size in pixels; label (a camera
             serial such as "DEMO1") seeds the speckle, so each demo camera
@@ -344,34 +379,80 @@ class DemoSource:
         self.speckle_intensity = intensity.astype(np.float32)
         self.speckle_phase = np.angle(field).astype(np.float32)
 
-        x_plate, x_inside = _plate_axis(width)
-        y_plate, y_inside = _plate_axis(height)
-        self.plate_mask = y_inside[:, None] & x_inside[None, :]
-        self.basis_x = _sine_basis(x_plate, x_inside)
-        self.basis_y = _sine_basis(y_plate, y_inside)
-        load = self.mode_sum(_drive_participation() / _mode_stiffness() ** 2)
-        self.load_shape = (load / load.max()).astype(np.float32)
-
         y = np.arange(height)[:, None] + 0.5 - height / 2
         x = np.arange(width)[None, :] + 0.5 - width / 2
-        corner = (PLATE_FRACTION / 2) ** 2 * (width ** 2 + height ** 2)
-        spot = np.exp(math.log(SPOT_CORNER_LEVEL) * (x * x + y * y) / corner)
+        radius = DRUM_FRACTION / 2 * min(width, height)
+        rho = np.hypot(x, y) / radius
+        self.drum_mask = rho < 1
+        self._inside = np.flatnonzero(self.drum_mask)
+        position = rho.ravel()[self._inside] * (RADIAL_SAMPLES - 1)
+        self._radial_index = position.astype(np.int64)
+        self._radial_weight = position - self._radial_index
+        angle = np.arctan2(-y, x) - math.radians(DRIVE_ANGLE_DEG)
+        self._cos_angle = np.cos(np.broadcast_to(angle, rho.shape).ravel()[self._inside])
+        self.modes = drum_modes()
+        grid = np.linspace(0.0, 1.0, RADIAL_SAMPLES)
+        self._profiles = np.array([bessel_j(m, j * grid) for m, _, j in self.modes])
+        load = self.mode_sum(self._drive_weights().real)
+        self.load_shape = (load / load.max()).astype(np.float32)
+
+        spot = np.exp(math.log(SPOT_RIM_LEVEL) * rho * rho)
         level = SPOT_LEVEL / 2  # object mean and reference are 1 each at the centre
         objects = intensity * spot
         self.background = (level * (objects + 1.0)).astype(np.float32)
         self.modulation = (level * 2 * np.sqrt(objects)).astype(np.float32)
 
     def mode_sum(self, coefficients):
-        """Evaluate a sum of plate modes over the frame.
+        """Evaluate a sum of drum modes over the frame.
 
-        Args: coefficients is a (MAX_MODE, MAX_MODE) array, real or complex,
-            indexed [n - 1, m - 1] for mode (m, n).
-        Returns: A (height, width) array, 0 off the plate.
+        Each order m gathers its modes' radial profiles into one, which is
+        read at every pixel's radius and multiplied by cos(m theta), built
+        by the Chebyshev recurrence; only pixels on the drum are computed.
+
+        Args: coefficients is an array aligned with self.modes, real or complex.
+        Returns: A (height, width) array, 0 off the drum.
         """
-        return self.basis_y.T @ coefficients @ self.basis_x
+        coefficients = np.asarray(coefficients)
+        orders = np.array([m for m, _, _ in self.modes])
+        total = np.zeros(self._inside.size, np.result_type(coefficients, np.float64))
+        lower, upper = np.ones_like(self._cos_angle), self._cos_angle
+        for m in range(orders.max() + 1):
+            angular = lower if m == 0 else upper
+            if m >= 2:
+                lower, upper = upper, 2 * self._cos_angle * upper - lower
+                angular = upper
+            chosen = orders == m
+            if not np.any(coefficients[chosen]):
+                continue
+            profile = coefficients[chosen] @ self._profiles[chosen]
+            near = profile[self._radial_index]
+            far = profile[self._radial_index + 1]
+            total += (near + (far - near) * self._radial_weight) * angular
+        result = np.zeros(self.width * self.height, total.dtype)
+        result[self._inside] = total
+        return result.reshape(self.height, self.width)
+
+    def _drive_weights(self, frequency=0.0):
+        """Each mode's response to the drive pad, as mode_sum coefficients.
+
+        A mode's static share is its shape at the pad over its norm and
+        stiffness (j_mn^2), tapered for the pad's size; at a frequency it is
+        also a resonator of quality MODE_Q. At 0 Hz the sum is the pad's dent.
+
+        Args: frequency is the drive frequency in Hz.
+        Returns: A complex array aligned with self.modes.
+        """
+        weights = []
+        for m, n, j in self.modes:
+            norm = (2 * math.pi if m == 0 else math.pi) * bessel_j(m + 1, j) ** 2 / 2
+            share = bessel_j(m, j * DRIVE_RADIUS) / norm / j ** 2
+            ratio = frequency / mode_frequency_hz(m, n)
+            weights.append(share * math.exp(-(j / DRIVE_PAD_J) ** 2)
+                           / (1 - ratio ** 2 + 1j * ratio / MODE_Q))
+        return np.array(weights)
 
     def set_object(self, name):
-        """Choose what the simulated plate does.
+        """Choose what the simulated drumhead does.
 
         Args: name is one of SIMULATED_OBJECTS.
         Returns: None. Raises ValueError for any other name.
@@ -422,16 +503,15 @@ class DemoSource:
         frequency, path = 0.0, None
         if self.object == "Vibration":
             m, n = VIBRATION_MODE
-            coefficients = np.zeros((MAX_MODE, MAX_MODE))
-            coefficients[n - 1, m - 1] = 1.0
-            shape = self.mode_sum(coefficients)
+            shape = self.mode_sum([1.0 if (mode[0], mode[1]) == (m, n) else 0.0
+                                   for mode in self.modes])
             frequency = mode_frequency_hz(m, n)
             path = shape * (VIBRATION_PEAK_RAD / K_PER_NM / np.abs(shape).max())
         elif self.object == "Follow DAQ" and self.drive.waveform:
             frequency = self.drive.frequency_hz
             volts = (self.drive.amplitude_v if self.drive.waveform == "sine"
                      else 4 / math.pi * TTL_HIGH_V / 2)
-            path = volts * self._plate_response(frequency)
+            path = volts * self._drum_response(frequency)
             if self.drive.piezo_mode == SINE:
                 path = path - PIEZO_NM_PER_V * self.drive.piezo_amplitude_v * np.exp(
                     1j * math.radians(self.drive.piezo_phase_deg))
@@ -445,30 +525,19 @@ class DemoSource:
         self._table = None
         return self._harmonic
 
-    def _plate_response(self, frequency):
-        """The plate's displacement per volt of a sine drive at one frequency.
+    def _drum_response(self, frequency):
+        """The drumhead's displacement per volt of a sine drive at one frequency.
 
-        Each mode responds as a resonator of quality MODE_Q, weighted by its
-        shape at DRIVE_POINT over (f_mn / f11)^2, so at 0 Hz the sum is the
-        point-load deflection. The scale makes GENERATOR_REFERENCE_V at
-        f(1, 1) peak at GENERATOR_PEAK_RAD.
+        The scale makes GENERATOR_REFERENCE_V at the fundamental, f(0, 1),
+        peak at GENERATOR_PEAK_RAD.
 
         Args: frequency is the drive frequency in Hz.
         Returns: A complex (height, width) map in nm per volt.
         """
-        stiffness = _mode_stiffness()
-        weights = _drive_participation() * (stiffness[0, 0] / stiffness) ** 2
-
-        def response(f):
-            """Sum the modes' responses at one frequency, unscaled.
-
-            Args: f is the frequency in Hz.
-            Returns: The complex (height, width) mode sum.
-            """
-            ratio = f * stiffness[0, 0] / (F11_HZ * stiffness)
-            return self.mode_sum(weights / (1 - ratio ** 2 + 1j * ratio / MODE_Q))
-        reference = np.abs(response(F11_HZ)).max() * GENERATOR_REFERENCE_V
-        return response(frequency) * (GENERATOR_PEAK_RAD / K_PER_NM / reference)
+        fundamental = mode_frequency_hz(0, 1)
+        reference = np.abs(self.mode_sum(self._drive_weights(fundamental))).max()
+        scale = GENERATOR_PEAK_RAD / K_PER_NM / (reference * GENERATOR_REFERENCE_V)
+        return self.mode_sum(self._drive_weights(frequency)) * scale
 
     def _fringe_map(self, state, exposure_us, t0):
         """The exposure average F at every pixel for this frame.
