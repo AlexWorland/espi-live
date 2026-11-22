@@ -17,7 +17,9 @@ Nothing here touches a GUI toolkit or PySpin.
 """
 
 import math
+import zlib
 
+import cv2
 import numpy as np
 
 # Optics.
@@ -56,7 +58,15 @@ PIEZO_NM_PER_V = 1500.0  # 100 nm/V stack behind a gain-15 amplifier
 # default exposure and gain; brightness is proportional to both.
 REFERENCE_EXPOSURE_US = 8000.0
 SPOT_LEVEL = 64.0
-SPECKLE_DIAMETER_PX = 3.0
+# The imaging pupil passes spatial frequencies up to this (cycles per pixel),
+# so the speckle intensity (twice that) stays within the sensor's Nyquist
+# limit and each pixel's point sample is exact. Grains look 2-3 px wide.
+PUPIL_CUTOFF_PER_PX = 0.25
+# The Gaussian laser spot falls to this share of its peak at the plate's corners.
+SPOT_CORNER_LEVEL = 0.25
+
+SIMULATED_OBJECTS = ("Still", "Slow deformation", "Vibration", "Follow DAQ")
+DEFAULT_OBJECT = "Slow deformation"
 
 # FringeTable accuracy: the largest interpolation error allowed along each
 # axis (the two add), and the amplitude step of the table.
@@ -164,3 +174,161 @@ class FringeTable:
         Returns: A complex64 array of that shape.
         """
         return self.lookup(self.prepare(u), beta)
+
+
+def deformation_nm(t_s):
+    """Slow deformation's displacement at the bulge's peak.
+
+    Args: t_s is the simulation time in seconds.
+    Returns: The peak displacement in nm: a raised-cosine ramp from 0 to
+        DEFORMATION_FRINGES half-wavelengths over RAMP_S, held for HOLD_S,
+        ramped back over RAMP_S, then 0 for STILL_S, repeating every CYCLE_S.
+    """
+    peak = DEFORMATION_FRINGES * WAVELENGTH_NM / 2
+    t = t_s % CYCLE_S
+    if t < RAMP_S:
+        return peak * (1 - math.cos(math.pi * t / RAMP_S)) / 2
+    if t < RAMP_S + HOLD_S:
+        return peak
+    if t < 2 * RAMP_S + HOLD_S:
+        return peak * (1 + math.cos(math.pi * (t - RAMP_S - HOLD_S) / RAMP_S)) / 2
+    return 0.0
+
+
+def _plate_axis(size):
+    """Place the plate along one frame axis.
+
+    Args: size is the frame's width or height in pixels.
+    Returns: (coordinate, inside): each pixel centre's plate coordinate
+        (0..1 across the plate) and whether it lies on the plate.
+    """
+    start = size * (1 - PLATE_FRACTION) / 2
+    coordinate = (np.arange(size) + 0.5 - start) / (size * PLATE_FRACTION)
+    return coordinate, (coordinate > 0) & (coordinate < 1)
+
+
+def _sine_basis(coordinate, inside):
+    """Tabulate sin(m pi s) for m = 1..MAX_MODE along one axis, 0 off the plate.
+
+    Args: coordinate and inside are what _plate_axis returned.
+    Returns: A float64 array of shape (MAX_MODE, size).
+    """
+    modes = np.arange(1, MAX_MODE + 1)[:, None]
+    return np.sin(np.pi * modes * coordinate[None, :]) * inside[None, :]
+
+
+def _mode_stiffness():
+    """Each mode's (m / aspect)^2 + n^2, the plate's eigenvalue up to a constant.
+
+    Args: None.
+    Returns: A float64 array of shape (MAX_MODE n, MAX_MODE m).
+    """
+    m = np.arange(1, MAX_MODE + 1)[None, :]
+    n = np.arange(1, MAX_MODE + 1)[:, None]
+    return (m / PLATE_ASPECT) ** 2 + n ** 2
+
+
+def _drive_participation():
+    """Each mode's shape at the drive point, S_mn(DRIVE_POINT).
+
+    Args: None.
+    Returns: A float64 array of shape (MAX_MODE n, MAX_MODE m).
+    """
+    modes = np.arange(1, MAX_MODE + 1)
+    along_x = np.sin(np.pi * modes * DRIVE_POINT[0])
+    along_y = np.sin(np.pi * modes * DRIVE_POINT[1])
+    return along_y[:, None] * along_x[None, :]
+
+
+class DemoSource:
+    """An ideal camera looking at a simulated speckle interferometer.
+
+    The object beam is a fully developed speckle field under a Gaussian laser
+    spot, the reference beam is smooth and uniform (as bright as the object's
+    mean at the spot centre), and the plate on the centred PLATE_FRACTION of
+    the frame moves according to the chosen object (SIMULATED_OBJECTS).
+
+    Attributes: width and height are the frame size; object is the chosen
+        SIMULATED_OBJECTS name; background and modulation are B = I_o + I_r
+        and M = 2 sqrt(I_o I_r) in grey levels at REFERENCE_EXPOSURE_US and
+        0 dB; speckle_phase is the object speckle's phase psi; speckle_intensity
+        is |E|^2 (mean 1); plate_mask marks the plate; load_shape is the
+        point-load deflection (peak 1, 0 off the plate); clock_s is the start
+        time of the next frame on the sensor's own clock.
+    """
+
+    def __init__(self, width=960, height=640, label=None, log=None):
+        """Build the speckle field, beams and plate.
+
+        Args: width and height are the frame size in pixels; label (a camera
+            serial such as "DEMO1") seeds the speckle, so each demo camera
+            has its own, the same in every run; log is an AppLog-like object
+            for warnings, or None.
+        Returns: None.
+        """
+        self.width = width
+        self.height = height
+        self.log = log
+        self.object = DEFAULT_OBJECT
+        self.clock_s = 0.0
+        rng = np.random.default_rng(zlib.crc32((label or "DEMO").encode()))
+        noise = rng.standard_normal((height, width)) + 1j * rng.standard_normal((height, width))
+        fy = np.fft.fftfreq(height)[:, None]
+        fx = np.fft.fftfreq(width)[None, :]
+        pupil = fx * fx + fy * fy <= PUPIL_CUTOFF_PER_PX ** 2
+        field = np.fft.ifft2(np.fft.fft2(noise) * pupil)
+        intensity = np.abs(field) ** 2
+        intensity /= intensity.mean()
+        self.speckle_intensity = intensity.astype(np.float32)
+        self.speckle_phase = np.angle(field).astype(np.float32)
+
+        x_plate, x_inside = _plate_axis(width)
+        y_plate, y_inside = _plate_axis(height)
+        self.plate_mask = y_inside[:, None] & x_inside[None, :]
+        self.basis_x = _sine_basis(x_plate, x_inside)
+        self.basis_y = _sine_basis(y_plate, y_inside)
+        load = self.mode_sum(_drive_participation() / _mode_stiffness() ** 2)
+        self.load_shape = (load / load.max()).astype(np.float32)
+
+        y = np.arange(height)[:, None] + 0.5 - height / 2
+        x = np.arange(width)[None, :] + 0.5 - width / 2
+        corner = (PLATE_FRACTION / 2) ** 2 * (width ** 2 + height ** 2)
+        spot = np.exp(math.log(SPOT_CORNER_LEVEL) * (x * x + y * y) / corner)
+        level = SPOT_LEVEL / 2  # object mean and reference are 1 each at the centre
+        objects = intensity * spot
+        self.background = (level * (objects + 1.0)).astype(np.float32)
+        self.modulation = (level * 2 * np.sqrt(objects)).astype(np.float32)
+
+    def mode_sum(self, coefficients):
+        """Evaluate a sum of plate modes over the frame.
+
+        Args: coefficients is a (MAX_MODE, MAX_MODE) array, real or complex,
+            indexed [n - 1, m - 1] for mode (m, n).
+        Returns: A (height, width) array, 0 off the plate.
+        """
+        return self.basis_y.T @ coefficients @ self.basis_x
+
+    def set_object(self, name):
+        """Choose what the simulated plate does.
+
+        Args: name is one of SIMULATED_OBJECTS.
+        Returns: None. Raises ValueError for any other name.
+        """
+        if name not in SIMULATED_OBJECTS:
+            raise ValueError(f"Unknown simulated object: {name!r}")
+        self.object = name
+
+    def next_frame(self, exposure_us, gain_db, fps):
+        """Expose one frame starting at clock_s, then advance the clock a frame period.
+
+        Args: exposure_us and gain_db are the simulated camera's settings;
+            fps is the requested frame rate (the sensor clock's rate).
+        Returns: A new (height, width) uint8 frame.
+        """
+        phase = self.speckle_phase
+        if self.object == "Slow deformation":
+            phase = phase + np.float32(K_PER_NM * deformation_nm(self.clock_s)) * self.load_shape
+        intensity = self.background + self.modulation * np.cos(phase)
+        scale = exposure_us / REFERENCE_EXPOSURE_US * 10.0 ** (gain_db / 20.0)
+        self.clock_s += 1.0 / max(float(fps), 1.0)
+        return cv2.convertScaleAbs(intensity, alpha=scale)
