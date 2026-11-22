@@ -557,7 +557,10 @@ class PylablibBackend:
         self.outputs = DeviceOutputs(
             DeviceInfo(info.name, info.model, info.serial_number),
             analog=tuple(_short(name) for name in dev.ao_physical_chans.channel_names),
-            counters=tuple(_short(name) for name in dev.co_physical_chans.channel_names),
+            # Counters only: the USB-6251 also lists "freqout" here, which
+            # cannot make the generator's square wave.
+            counters=tuple(name for name in map(_short, dev.co_physical_chans.channel_names)
+                           if name.startswith("ctr")),
             terminals=tuple(name for name in (_short(t) for t in dev.terminals)
                             if name.startswith("pfi")))
         return self.outputs

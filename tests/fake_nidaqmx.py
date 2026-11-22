@@ -275,7 +275,8 @@ class FakeDevice:
         self.ao_physical_chans = SimpleNamespace(
             channel_names=[f"{name}/ao0", f"{name}/ao1"])
         self.co_physical_chans = SimpleNamespace(
-            channel_names=[f"{name}/ctr0", f"{name}/ctr1"])
+            # The real USB-6251 also lists its frequency output here.
+            channel_names=[f"{name}/ctr0", f"{name}/ctr1", f"{name}/freqout"])
         self.terminals = ([f"/{name}/PFI{index}" for index in range(16)]
                           + [f"/{name}/20MHzTimebase", f"/{name}/ao/SampleClock"])
 
