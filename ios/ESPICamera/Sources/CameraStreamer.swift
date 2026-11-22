@@ -63,6 +63,10 @@ struct StreamerSnapshot: Sendable {
     var pipelineNote: String?
     /// Time between the two images being compared.
     var differenceIntervalMs: Double?
+    /// Before the first image: the source, the stills asked for and returned, and what holds them up.
+    var differenceStatus: String?
+    /// The source the difference view was asked to use (the view can force luma video).
+    var differenceSource = DifferenceSource.auto
 }
 
 /// One back camera: its id and menu name as sent to ESPI Live, and the device.
@@ -138,6 +142,13 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private var rawGeneration = 0          // bumped when the RAW stills' purpose changes
     private var rawCaptureGeneration = 0   // the generation of the still in flight
     private var ignoreImagesBefore = 0.0   // host-clock seconds; images before it are dropped
+    private var differenceSource = DifferenceSource.auto
+    private var differenceStartedAt = 0.0  // systemUptime when the current source started
+    private var imagesSinceStart = 0       // images shown since the source started
+    private var stillsAsked = 0            // Bayer stills requested since the source started
+    private var stillsReturned = 0         // ... that came back (with or without an error)
+    private var stillsDiscarded = 0        // ... that came back but were not compared
+    private var rawBlockerNotes: [String] = []  // why the last still could not be taken
 
     /// RAW stills are being taken: the streaming RAW mode, or the difference view's Bayer source.
     private var rawActive: Bool {
@@ -169,6 +180,17 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// Turns the on-phone difference view on or off.
     func setDifferenceView(_ on: Bool) {
         queue.async { self.setDifferenceOnQueue(on) }
+    }
+
+    /// Forces the difference view onto luma video, or back to the rawest source.
+    func setDifferenceSource(_ source: DifferenceSource) {
+        queue.async {
+            guard self.differenceOn, source != self.differenceSource else { return }
+            self.differenceSource = source
+            self.restartDifferenceSource()
+            self.sendStatus()
+            self.publish()
+        }
     }
 
     // MARK: Startup
@@ -505,8 +527,10 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         rawGeneration += 1
         differenceOn = on
         if on {
+            differenceSource = .auto  // each time the view opens, try the rawest source
             startDifferenceSource()
         } else {
+            differenceSource = .auto
             pipeline = nil
             pipelineLabel = nil
             pipelineNote = nil
@@ -518,13 +542,28 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         publish()
     }
 
-    /// Picks the rawest source this camera offers and starts it.
-    private func startDifferenceSource() {
+    /// Starts the source again after the view forced another one or gave up on Bayer stills.
+    private func restartDifferenceSource(note: String? = nil) {
+        rawPending?.cancel()
+        rawGeneration += 1
+        startDifferenceSource(fallbackNote: note)
+    }
+
+    /// Picks the rawest source this camera offers (or luma video, when the view
+    /// was told to use it) and starts it. `fallbackNote` explains a forced fallback.
+    private func startDifferenceSource(fallbackNote: String? = nil) {
         resetDifference()
         pipeline = nil
         pipelineLabel = nil
+        pipelineNote = nil
         differenceSize = nil
         differenceFps = 0
+        differenceStartedAt = ProcessInfo.processInfo.systemUptime
+        imagesSinceStart = 0
+        stillsAsked = 0
+        stillsReturned = 0
+        stillsDiscarded = 0
+        rawBlockerNotes = []
         guard let camera = device else {
             pipelineNote = "No back camera found"
             return
@@ -533,10 +572,11 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         let videoTypes = Set(camera.formats.map { $0.formatDescription.mediaSubType.rawValue })
         let choice = choosePipeline(PipelineCapabilities(
             rawPhotoFormats: rawChoice.map { [$0.pixelFormat] } ?? [],
-            videoFormats: videoTypes.sorted()))
+            videoFormats: videoTypes.sorted()), source: differenceSource)
         pipeline = choice.pipeline
-        pipelineNote = choice.note
-        if rawChoice == nil, choice.pipeline != nil, choice.note == nil {
+        pipelineNote = fallbackNote ?? choice.note
+        if differenceSource == .auto, rawChoice == nil, choice.pipeline != nil,
+           choice.note == nil {
             pipelineNote = "This camera has no Bayer RAW format the app can read; showing luma"
         }
         applyCameraSettings()
@@ -556,7 +596,11 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     /// Subtracts the previous image from this one and updates the label.
     private func showDifference(_ buffer: CVPixelBuffer, seconds: Double, fullScale: UInt32? = nil) {
-        guard differenceOn, let pipeline, let engine, seconds >= ignoreImagesBefore else { return }
+        guard differenceOn, let pipeline, let engine else { return }
+        guard seconds >= ignoreImagesBefore else {  // taken while a setting was still reaching the sensor
+            stillsDiscarded += 1
+            return
+        }
         do {
             let image = try engine.process(buffer, pipeline: pipeline, fullScale: fullScale)
             if differenceSize?.width != image.width || differenceSize?.height != image.height {
@@ -567,6 +611,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             if let last = lastImageSeconds { differenceIntervalMs = (seconds - last) * 1000 }
             lastImageSeconds = seconds
             imagesInWindow += 1
+            imagesSinceStart += 1
             refreshLabel()
         } catch {
             lastError = "Difference: \(error)"
@@ -801,12 +846,20 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private func captureRawOnQueue() {
         guard rawActive, let choice = rawChoice else { return }
         // The difference view needs no link; capturePhoto raises without a running session.
-        let connection = photoOutput.connection(with: .video)
-        let ready = differenceOn
-            ? session.isRunning && !session.isInterrupted && !rawInFlight
-                && connection?.isEnabled == true && connection?.isActive == true
-                && photoOutput.availableRawPhotoPixelFormatTypes.contains(choice.pixelFormat)
-            : connectionReady && session.isRunning && !rawInFlight && !inFlight
+        let ready: Bool
+        if differenceOn {
+            let connection = photoOutput.connection(with: .video)
+            rawBlockerNotes = rawBlockers(RawReadiness(
+                sessionRunning: session.isRunning, interrupted: session.isInterrupted,
+                stillInFlight: rawInFlight, hasConnection: connection != nil,
+                connectionEnabled: connection?.isEnabled == true,
+                connectionActive: connection?.isActive == true,
+                wantedFormat: choice.pixelFormat,
+                offeredFormats: photoOutput.availableRawPhotoPixelFormatTypes))
+            ready = rawBlockerNotes.isEmpty
+        } else {
+            ready = connectionReady && session.isRunning && !rawInFlight && !inFlight
+        }
         guard ready else {
             scheduleRawCapture(after: 0.05)
             return
@@ -828,6 +881,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
         rawInFlight = true
         rawCaptureGeneration = rawGeneration
+        if differenceOn { stillsAsked += 1 }
         photoOutput.capturePhoto(with: photoSettings, delegate: self)
     }
 
@@ -838,6 +892,7 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private func rawPhotoFinished(_ photo: AVCapturePhoto, error: Error?) {
         rawInFlight = false
+        if differenceOn { stillsReturned += 1 }
         // After a failed still, wait before the next, so an interrupted camera is not hammered.
         defer { if rawActive { scheduleRawCapture(after: error == nil ? 0 : 0.5) } }
         capturedInWindow += 1
@@ -847,7 +902,10 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
         // A still taken for another purpose (before the view opened or closed, or
         // on another camera) is never compared with the new ones.
-        guard rawCaptureGeneration == rawGeneration else { return }
+        guard rawCaptureGeneration == rawGeneration else {
+            if differenceOn { stillsDiscarded += 1 }
+            return
+        }
         if differenceOn {
             differenceStill(photo)
             return
@@ -1151,8 +1209,25 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         bytesInWindow = 0
         windowStart = now
         ticks += 1
+        if differenceOn, bayerStalled(pipeline, imagesSinceStart: imagesSinceStart,
+                                      seconds: now - differenceStartedAt) {
+            // No Bayer still in time: show luma video, and say why on screen.
+            let note = bayerFallbackNote(seconds: now - differenceStartedAt,
+                                         blockers: rawBlockerNotes)
+            differenceSource = .luma
+            restartDifferenceSource(note: note)
+            sendStatus()
+        }
         if ticks % 2 == 0 { sendStatus() }  // once a second: the computer's liveness check
         publish()
+    }
+
+    /// The header text while the difference view has no image yet; nil once one is shown.
+    private func differenceStatusText() -> String? {
+        guard differenceOn, let pipeline, imagesSinceStart == 0 else { return nil }
+        return differenceWaitingText(pipeline: pipeline, asked: stillsAsked,
+                                     returned: stillsReturned, discarded: stillsDiscarded,
+                                     blockers: rawBlockerNotes)
     }
 
     private func publish() {
@@ -1163,7 +1238,8 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             limits: limits, formats: formats, focusLocked: focusLocked,
             thermal: Self.thermalText(), interrupted: interrupted, error: lastError,
             lens: lensName, differenceOn: differenceOn, pipelineLabel: pipelineLabel,
-            pipelineNote: pipelineNote, differenceIntervalMs: differenceIntervalMs))
+            pipelineNote: pipelineNote, differenceIntervalMs: differenceIntervalMs,
+            differenceStatus: differenceStatusText(), differenceSource: differenceSource))
     }
 
     static func thermalText() -> String {

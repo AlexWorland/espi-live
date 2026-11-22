@@ -49,8 +49,9 @@ struct DifferenceView: View {
     private func header(_ snap: StreamerSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top) {
-                Text(snap.pipelineLabel ?? "Choosing the camera source…")
+                Text(snap.pipelineLabel ?? snap.differenceStatus ?? "Choosing the camera source…")
                     .font(.footnote.monospacedDigit().weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 Button("Done") { model.setDifferenceView(false) }
                     .buttonStyle(.borderedProminent)
@@ -93,6 +94,13 @@ struct DifferenceView: View {
             sliderRow(String(format: "Focus %.3f", lens), value: $lens, in: 0 ... 1) {
                 model.apply(LinkCommand(lensPosition: lens))
             }
+            Picker("Source", selection: Binding(
+                get: { snap.differenceSource },
+                set: { model.setDifferenceSource($0) })) {
+                Text("Rawest (Bayer RAW)").tag(DifferenceSource.auto)
+                Text("Luma video").tag(DifferenceSource.luma)
+            }
+            .pickerStyle(.segmented)
             Button("Autofocus once, then lock") { model.apply(LinkCommand(refocus: true)) }
                 .buttonStyle(.bordered)
         }

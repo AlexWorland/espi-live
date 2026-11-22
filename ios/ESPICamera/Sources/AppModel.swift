@@ -38,6 +38,11 @@ final class AppModel {
         streamer.apply(command)
     }
 
+    /// Forces the difference view onto luma video, or back to the rawest source.
+    func setDifferenceSource(_ source: DifferenceSource) {
+        streamer.setDifferenceSource(source)
+    }
+
     /// Opens or closes the on-phone difference view.
     func setDifferenceView(_ on: Bool) {
         differenceOn = on
