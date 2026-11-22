@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-22 — The NI DAQ drives the piezo amplifier with a triangle, never below 0 V
+
+### Previous state
+
+- In the lab, a Wavetek Model 19 function generator fed a triangle (about 0.28 Hz, +1 V to +10 V) into the Thorlabs MDT694A piezo amplifier's EXT INPUT. The program could not make that ramp: the DAQ window's piezo driver only held a level or followed the frequency generator with a sine.
+- The piezo driver accepted negative levels down to its safety limit. The MDT694A takes 0–10 V, and a negative input drives the piezo below 0 V.
+
+### Current state
+
+- **Triangle at its own frequency**, a new piezo mode in **Devices → Frequency generator and piezo (NI DAQ)…**: **Bottom**, **Top** and **Frequency** (0.01–1000 Hz). The ramp starts at the bottom and is built from whole samples of the 20 MHz clock; the line under the controls says the frequency the device really produces. Both analog outputs share one sample clock, so the triangle needs the frequency generator off or on a counter, and the window says so.
+- The piezo driver never goes below 0 V in any mode, phase steps included. The Voltage, Bottom and Top boxes start at 0 V, and settings or steps that would go lower are refused in words.
+- Wiring: the DAQ's **AO 1** BNC goes to the MDT694A's **EXT INPUT**; the Wavetek is no longer needed in the piezo chain. Set the piezo's safety limit to 10 V at most. `docs/notes/piezo-thorlabs-mdt694a-wiring.md` has the instruments' specifications, the scope reading of the old ramp and the wiring.
+- The real USB-6251 also lists its `freqout` channel among its counter outputs; the DAQ window offered it as a generator output named "FREQOUT (sine)", which pyLabLib cannot use for the square wave. Only `ctr` counters are listed now.
+- Dummy mode does not sweep the simulated reference mirror with a DAQ triangle: the image keeps the triangle's centre, and the **Follow DAQ** note says so.
+
 ## 2026-11-22 — The mouse wheel no longer changes drop-downs
 
 ### Previous state

@@ -2,10 +2,13 @@
 
 The frequency generator excites the specimen (a sine on an analog output, or
 a square TTL wave from a counter on a PFI terminal). The piezo driver sets the
-reference piezo's voltage: a held level for manual phase steps, or a sine
-locked to the generator's frequency and phase. Each role is assigned to its
-own output, and every voltage is clamped to a limit the user sets for the
-amplifier behind it.
+reference piezo's voltage: a held level for manual phase steps, a sine locked
+to the generator's frequency and phase, or a triangle at its own frequency
+(the slow ramp a function generator used to feed the piezo amplifier). Each
+role is assigned to its own output, and every voltage is clamped to a limit
+the user sets for the amplifier behind it. The piezo driver never goes below
+0 V: the piezo amplifier (a Thorlabs MDT694A) takes 0-10 V on its EXT INPUT,
+and a negative input would drive the piezo below 0 V.
 
 pyLabLib's NIDAQ class does the device work on top of NI's ``nidaqmx``
 package; both are imported lazily, so the program runs without them. The
@@ -33,8 +36,9 @@ COUNTER_OUTPUTS = ("ctr0", "ctr1")
 OFF = ""  # an unassigned role
 PFI_TERMINALS = tuple(f"pfi{index}" for index in range(16))
 SIMULATED = "Simulated"  # device name of the stand-in that drives no hardware
-HOLD, SINE = "hold", "sine"  # piezo modes
-PIEZO_MODES = (HOLD, SINE)
+HOLD, SINE, TRIANGLE = "hold", "sine", "triangle"  # piezo modes
+PIEZO_MODES = (HOLD, SINE, TRIANGLE)
+PIEZO_FLOOR_V = 0.0  # the piezo amplifier's input takes 0-10 V: never below this
 
 TIMEBASE_HZ = 20e6  # AO sample clock timebase; the rate is this divided by a whole number
 COUNTER_TIMEBASE_HZ = 80e6  # fastest counter timebase (estimates the square wave's frequency)
@@ -48,6 +52,8 @@ CLOSE_ENOUGH = 1e-4  # relative frequency error accepted (the clock itself is 50
 MIN_FREQUENCY_HZ = 0.1
 MAX_SINE_HZ = 100_000.0
 MAX_SQUARE_HZ = 1_000_000.0
+MIN_TRIANGLE_HZ = 0.01
+MAX_TRIANGLE_HZ = 1000.0
 MAX_VOLTS = 10.0  # the AO range
 MIN_WRITE_S = 0.001  # pyLabLib writes at least this much waveform per start
 
@@ -197,6 +203,9 @@ class DaqSettings:
     piezo_voltage_v: float = 0.0  # the held level, or the sine's centre
     piezo_amplitude_v: float = 0.0  # sine peak
     piezo_phase_deg: float = 0.0  # sine phase relative to the generator
+    piezo_bottom_v: float = 0.0  # triangle's lowest level
+    piezo_top_v: float = 1.0  # triangle's highest level
+    piezo_frequency_hz: float = 0.25  # triangle frequency, on its own clock
     piezo_step_v: float = 0.05  # what one Step button press adds
     piezo_limit_v: float = 1.0
 
@@ -250,9 +259,10 @@ class Drive:
 
     The generator's waveform is "sine", "square" or "" (off or unassigned),
     at the frequency the device really produces; the piezo's mode is HOLD,
-    SINE or "" (off or unassigned), with piezo_v its held level or its sine's
-    centre. device is the label of the device that applied it. Drive() is
-    "nothing driven".
+    SINE, TRIANGLE or "" (off or unassigned), with piezo_v its held level or
+    its sine's or triangle's centre, piezo_amplitude_v the swing either side
+    of it, and piezo_frequency_hz the triangle's real frequency. device is
+    the label of the device that applied it. Drive() is "nothing driven".
     """
 
     waveform: str = ""
@@ -265,6 +275,7 @@ class Drive:
     piezo_phase_deg: float = 0.0
     device: str = ""
     simulated: bool = False
+    piezo_frequency_hz: float = 0.0
 
     @property
     def active(self):
@@ -287,6 +298,7 @@ class OutputPlan:
     values: dict = field(default_factory=dict)  # channel -> float or 1-D array
     counter: CounterPlan = None
     frequency_hz: float = 0.0  # what the generator really produces (0 when off)
+    piezo_frequency_hz: float = 0.0  # what the piezo triangle really produces (0 otherwise)
     summary: str = ""
     drive: Drive = Drive()  # the same, described for the ESPI simulation
 
@@ -335,6 +347,45 @@ def square_frequency(frequency):
     return COUNTER_TIMEBASE_HZ / (2 * ticks)
 
 
+def triangle_wave(bottom, top, samples):
+    """Build one cycle of a symmetric triangle that starts at its bottom.
+
+    Starting at the bottom means the first sample after a held level is the
+    lowest one, never a jump to the top.
+
+    Args: bottom and top are the lowest and highest volts; samples is the
+        number of samples in the cycle.
+    Returns: A 1-D float array of samples: bottom, rising to top half-way,
+        falling back.
+    """
+    position = np.arange(samples) / samples
+    return bottom + (top - bottom) * (1.0 - np.abs(2.0 * position - 1.0))
+
+
+def piezo_range(settings):
+    """Work out the lowest and highest voltage the piezo driver produces.
+
+    Args: settings is DaqSettings (an unknown mode counts as a held level).
+    Returns: (lowest, highest) in volts at the DAQ.
+    """
+    s = settings
+    if s.piezo_mode == SINE:
+        swing = abs(s.piezo_amplitude_v)
+        return s.piezo_voltage_v - swing, s.piezo_voltage_v + swing
+    if s.piezo_mode == TRIANGLE:
+        return min(s.piezo_bottom_v, s.piezo_top_v), max(s.piezo_bottom_v, s.piezo_top_v)
+    return s.piezo_voltage_v, s.piezo_voltage_v
+
+
+def _buffer_samples(rate, samples):
+    """Size an AO buffer: whole cycles, at least MIN_WRITE_S of waveform.
+
+    Args: rate is the sample rate; samples is the number per cycle.
+    Returns: Samples per channel.
+    """
+    return math.ceil(max(rate * MIN_WRITE_S, samples) / samples) * samples
+
+
 def problems(settings, outputs=None):
     """List what is wrong with the settings, in words for the user.
 
@@ -373,17 +424,45 @@ def problems(settings, outputs=None):
             found.append(f"The generator would reach {peak:g} V, above its "
                          f"{s.generator_limit_v:g} V limit.")
     if s.piezo_output != OFF:
-        swing = abs(s.piezo_amplitude_v) if s.piezo_mode == SINE else 0.0
-        peak = abs(s.piezo_voltage_v) + swing
+        lowest, highest = piezo_range(s)
+        peak = max(abs(lowest), abs(highest))
         if peak > s.piezo_limit_v:
             found.append(f"The piezo driver would reach {peak:g} V, above its "
                          f"{s.piezo_limit_v:g} V limit.")
-        if s.piezo_mode not in PIEZO_MODES:
-            found.append(f"Unknown piezo mode {s.piezo_mode!r}.")
-        elif s.piezo_mode == SINE and s.piezo_on and not (
-                s.generator_on and s.generator_output in outputs.analog):
-            found.append("A piezo sine follows the frequency generator: put the "
-                         "generator on an analog output and switch it on.")
+        if lowest < PIEZO_FLOOR_V:
+            found.append(f"The piezo driver would go down to {lowest:g} V. The piezo "
+                         f"amplifier's input takes 0–{MAX_VOLTS:g} V (a negative input "
+                         "drives the piezo below 0 V): keep every level at 0 V or above.")
+        found.extend(_piezo_mode_problems(s, outputs))
+    return found
+
+
+def _piezo_mode_problems(settings, outputs):
+    """Check the rules of the piezo driver's mode.
+
+    Args: settings is DaqSettings with the piezo assigned; outputs is the
+        device's DeviceOutputs.
+    Returns: A list of sentences; empty when the mode can run.
+    """
+    s = settings
+    sine_generator = s.generator_on and s.generator_output in outputs.analog
+    if s.piezo_mode not in PIEZO_MODES:
+        return [f"Unknown piezo mode {s.piezo_mode!r}."]
+    if s.piezo_mode == SINE and s.piezo_on and not sine_generator:
+        return ["A piezo sine follows the frequency generator: put the "
+                "generator on an analog output and switch it on."]
+    if s.piezo_mode != TRIANGLE:
+        return []
+    found = []
+    if s.piezo_top_v <= s.piezo_bottom_v:
+        found.append("The piezo triangle's top must be above its bottom.")
+    if not MIN_TRIANGLE_HZ <= s.piezo_frequency_hz <= MAX_TRIANGLE_HZ:
+        found.append(f"The piezo triangle's frequency must be between "
+                     f"{MIN_TRIANGLE_HZ:g} Hz and {MAX_TRIANGLE_HZ:,.0f} Hz.")
+    if s.piezo_on and sine_generator:
+        found.append("A piezo triangle runs at its own frequency, but both analog "
+                     "outputs share one sample clock: switch the frequency generator "
+                     "off, or put it on a counter output.")
     return found
 
 
@@ -404,14 +483,14 @@ def plan(settings, outputs=None):
     sine = s.generator_on and s.generator_output in outputs.analog
     values = {channel: 0.0 for channel in analog}
     rate, samples, frequency, buffer_samples = 0.0, 0, 0.0, 0
+    piezo_frequency = 0.0
     parts = []
     if sine:
         rate, samples, frequency = choose_timing(s.generator_frequency_hz, len(analog))
         phase = 2 * math.pi * np.arange(samples) / samples
         values[s.generator_output] = (s.generator_offset_v
                                       + s.generator_amplitude_v * np.sin(phase))
-        cycles = math.ceil(max(rate * MIN_WRITE_S, samples) / samples)
-        buffer_samples = cycles * samples
+        buffer_samples = _buffer_samples(rate, samples)
         parts.append(f"generator {output_label(s.generator_output)} sine "
                      f"{frequency:.6g} Hz (asked {s.generator_frequency_hz:g}), "
                      f"{s.generator_amplitude_v:g} V peak, offset "
@@ -438,21 +517,31 @@ def plan(settings, outputs=None):
             parts.append(f"piezo {output_label(s.piezo_output)} sine "
                          f"{s.piezo_amplitude_v:g} V peak at "
                          f"{s.piezo_phase_deg:g}°, centre {s.piezo_voltage_v:g} V")
+        elif s.piezo_mode == TRIANGLE:
+            rate, samples, piezo_frequency = choose_timing(s.piezo_frequency_hz, len(analog))
+            values[s.piezo_output] = triangle_wave(s.piezo_bottom_v, s.piezo_top_v, samples)
+            buffer_samples = _buffer_samples(rate, samples)
+            parts.append(f"piezo {output_label(s.piezo_output)} triangle "
+                         f"{s.piezo_bottom_v:g}–{s.piezo_top_v:g} V at "
+                         f"{piezo_frequency:.6g} Hz (asked {s.piezo_frequency_hz:g}); "
+                         f"{samples} samples per cycle at {rate:,.0f} S/s")
         else:
             values[s.piezo_output] = float(s.piezo_voltage_v)
             parts.append(f"piezo {output_label(s.piezo_output)} holds "
                          f"{s.piezo_voltage_v:g} V")
     summary = "; ".join(parts) if parts else "no outputs assigned"
     return OutputPlan(analog, rate, samples, buffer_samples, values, counter,
-                      frequency, summary, describe_drive(s, outputs, frequency))
+                      frequency, piezo_frequency, summary,
+                      describe_drive(s, outputs, frequency, piezo_frequency))
 
 
-def describe_drive(settings, outputs, frequency):
+def describe_drive(settings, outputs, frequency, piezo_frequency=0.0):
     """Describe what valid settings make the outputs produce.
 
     Args: settings is the DaqSettings plan() accepted; outputs is the
         device's DeviceOutputs; frequency is the generator's real frequency
-        (0 when it is off).
+        (0 when it is off); piezo_frequency is the piezo triangle's real
+        frequency (0 for other modes).
     Returns: A Drive.
     """
     s = settings
@@ -463,12 +552,16 @@ def describe_drive(settings, outputs, frequency):
         waveform = "square"
     mode = s.piezo_mode if s.piezo_on and s.piezo_output != OFF else ""
     sine = mode == SINE
+    centre, swing = (s.piezo_voltage_v if mode else 0.0,
+                     s.piezo_amplitude_v if sine else 0.0)
+    if mode == TRIANGLE:
+        centre = (s.piezo_bottom_v + s.piezo_top_v) / 2
+        swing = (s.piezo_top_v - s.piezo_bottom_v) / 2
     return Drive(waveform, frequency if waveform else 0.0, amplitude,
                  s.generator_offset_v if waveform == "sine" else 0.0, mode,
-                 s.piezo_voltage_v if mode else 0.0,
-                 s.piezo_amplitude_v if sine else 0.0,
-                 s.piezo_phase_deg if sine else 0.0,
-                 outputs.device.label, outputs.device.simulated)
+                 centre, swing, s.piezo_phase_deg if sine else 0.0,
+                 outputs.device.label, outputs.device.simulated,
+                 piezo_frequency if mode == TRIANGLE else 0.0)
 
 
 class SimulatedBackend:

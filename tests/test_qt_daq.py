@@ -100,7 +100,9 @@ class DaqWindowTestCase(WindowTestCase):
             if predicate():
                 return
             time.sleep(0.01)
-        self.fail("the DAQ window never reached the expected state")
+        self.fail("the DAQ window never reached the expected state: device "
+                  f"{dialog.device_status.text()!r}, outputs {dialog.state_label.text()!r}, "
+                  f"problems {dialog.problem_label.text()!r}")
 
 
 class DaqMenuTests(DaqWindowTestCase):
@@ -176,9 +178,50 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog._set_combo(dialog.piezo_mode, daq.SINE)
         self.assertTrue(dialog.piezo_phase.isEnabled())
         self.assertFalse(dialog.step_up.isEnabled())
+        self.assertFalse(dialog.piezo_bottom.isEnabled())
+        dialog._set_combo(dialog.piezo_mode, daq.TRIANGLE)
+        for widget in (dialog.piezo_bottom, dialog.piezo_top, dialog.piezo_frequency):
+            self.assertTrue(widget.isEnabled())
+        self.assertFalse(dialog.piezo_voltage.isEnabled())
+        self.assertFalse(dialog.piezo_phase.isEnabled())
+        self.assertFalse(dialog.step_up.isEnabled())
         dialog._set_combo(dialog.piezo_output, daq.OFF)
         self.assertFalse(dialog.piezo_on.isEnabled())
         self.assertFalse(dialog.piezo_amplitude.isEnabled())
+        self.assertFalse(dialog.piezo_bottom.isEnabled())
+        self.assertEqual(dialog.piezo_result.text(), "")
+
+    def test_triangle_for_the_thor(self):
+        """The THOR's 0-10 V triangle is previewed, refused beside a sine, and applied.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertEqual(dialog.piezo_voltage.minimum(), 0.0)
+        self.assertEqual(dialog.piezo_bottom.minimum(), 0.0)
+        self.assertEqual(dialog.piezo_top.maximum(), daq.MAX_VOLTS)
+        dialog._set_combo(dialog.piezo_mode, daq.TRIANGLE)
+        dialog.piezo_limit.setValue(10.0)
+        dialog.piezo_bottom.setValue(0.5)
+        dialog.piezo_top.setValue(9.5)
+        dialog.piezo_frequency.setValue(0.281)
+        self.assertIn("0.281001 Hz triangle from 0.5 V to 9.5 V", dialog.piezo_result.text())
+        self.assertIn("2000 samples per cycle", dialog.piezo_result.text())
+        self.assertTrue(dialog.apply_button.isEnabled())
+        dialog.piezo_on.setChecked(True)
+        dialog.generator_on.setChecked(True)
+        self.assertIn("share one sample clock", dialog.problem_label.text())
+        self.assertEqual(dialog.piezo_result.text(), "")
+        self.assertFalse(dialog.apply_button.isEnabled())
+        dialog.generator_on.setChecked(False)
+        s = dialog.settings()
+        self.assertEqual((s.piezo_mode, s.piezo_bottom_v, s.piezo_top_v, s.piezo_frequency_hz),
+                         (daq.TRIANGLE, 0.5, 9.5, 0.281))
+        dialog.load(daq.DaqSettings())
+        self.assertEqual(dialog.piezo_mode.currentData(), daq.HOLD)
+        self.assertEqual((dialog.piezo_bottom.value(), dialog.piezo_top.value(),
+                          dialog.piezo_frequency.value()), (0.0, 1.0, 0.25))
 
     def test_problems_block_apply(self):
         """A clash or an unsafe level is explained and disables Apply.
@@ -287,7 +330,10 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog = self.open_dialog()
         dialog.rescan_button.click()
         self.assertEqual(dialog.device_status.text(), "Looking for NI devices…")
-        self.settle(dialog, lambda: dialog.outputs is not None)
+        # Wait for the rescan's own list and connection, not the one from opening:
+        # a late list would reconnect to Dev1 after the simulated device is chosen.
+        self.settle(dialog, lambda: dialog.outputs is not None
+                    and dialog.device_status.text() != "Looking for NI devices…")
         dialog.device_box.setCurrentIndex(dialog.device_box.findData(daq.SIMULATED))
         dialog._connect_selected()
         self.settle(dialog, lambda: dialog.outputs is not None

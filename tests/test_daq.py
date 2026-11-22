@@ -164,6 +164,11 @@ class SettingsTests(unittest.TestCase):
                                    generator_on=True, generator_frequency_hz=250.0,
                                    piezo_mode=daq.SINE, piezo_phase_deg=45.0)
         self.assertEqual(daq.DaqSettings.from_dict(settings.to_dict()), settings)
+        triangle = daq.DaqSettings(piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.5,
+                                   piezo_top_v=9.5, piezo_frequency_hz=0.281)
+        self.assertEqual(daq.DaqSettings.from_dict(triangle.to_dict()), triangle)
+        older = daq.DaqSettings.from_dict({"piezo_mode": daq.HOLD})  # before triangles
+        self.assertEqual(older.piezo_frequency_hz, daq.DaqSettings().piezo_frequency_hz)
 
     def test_bad_values_keep_defaults(self):
         """Unknown keys, wrong types and non-finite numbers are ignored.
@@ -288,9 +293,53 @@ class ProblemTests(unittest.TestCase):
         self.check("piezo driver would reach", piezo_mode=daq.SINE, piezo_voltage_v=0.5,
                    piezo_amplitude_v=0.6)
         self.check("Unknown piezo mode", piezo_mode="ramp")
+        self.check("go down to -0.1 V", piezo_voltage_v=-0.1)
+        self.check("go down to -0.2 V", piezo_mode=daq.SINE, piezo_voltage_v=0.1,
+                   piezo_amplitude_v=0.3)
+        self.check("go down to -0.5 V", piezo_mode=daq.TRIANGLE, piezo_bottom_v=-0.5)
+        self.check("piezo driver would reach 2 V", piezo_mode=daq.TRIANGLE,
+                   piezo_top_v=2.0)
+        self.check("top must be above its bottom", piezo_mode=daq.TRIANGLE,
+                   piezo_bottom_v=0.5, piezo_top_v=0.5)
+        self.check("triangle's frequency must be between", piezo_mode=daq.TRIANGLE,
+                   piezo_frequency_hz=0.001)
+        self.check("triangle's frequency must be between", piezo_mode=daq.TRIANGLE,
+                   piezo_frequency_hz=5000.0)
+        self.check("share one sample clock", piezo_mode=daq.TRIANGLE, piezo_on=True,
+                   generator_on=True)
         self.check("follows the frequency generator", piezo_mode=daq.SINE, piezo_on=True)
         self.check("follows the frequency generator", piezo_mode=daq.SINE, piezo_on=True,
                    generator_on=True, generator_output="ctr0")
+
+    def test_triangle_beside_a_counter_or_an_idle_generator(self):
+        """A triangle runs while the generator is a counter, off or unassigned.
+
+        Args: None.
+        Returns: None.
+        """
+        triangle = dict(piezo_mode=daq.TRIANGLE, piezo_on=True, piezo_bottom_v=0.0,
+                        piezo_top_v=1.0)
+        for generator in (dict(generator_output="ctr0", generator_on=True),
+                          dict(generator_on=False), dict(generator_output=daq.OFF)):
+            self.assertEqual(daq.problems(daq.DaqSettings(**generator, **triangle)), [])
+        # Unassigned, the piezo's levels are not checked.
+        self.assertEqual(daq.problems(daq.DaqSettings(piezo_output=daq.OFF,
+                                                      piezo_voltage_v=-1.0)), [])
+
+    def test_piezo_range(self):
+        """Each mode's lowest and highest level.
+
+        Args: None.
+        Returns: None.
+        """
+        s = daq.DaqSettings(piezo_voltage_v=0.4, piezo_amplitude_v=-0.1,
+                            piezo_bottom_v=0.9, piezo_top_v=0.2)
+        self.assertEqual(daq.piezo_range(s), (0.4, 0.4))
+        low, high = daq.piezo_range(daq.replace(s, piezo_mode=daq.SINE))
+        self.assertAlmostEqual(low, 0.3)
+        self.assertAlmostEqual(high, 0.5)
+        self.assertEqual(daq.piezo_range(daq.replace(s, piezo_mode=daq.TRIANGLE)), (0.2, 0.9))
+        self.assertEqual(daq.piezo_range(daq.replace(s, piezo_mode="ramp")), (0.4, 0.4))
 
     def test_square_wave_allows_high_frequencies_and_ignores_volts(self):
         """A counter goes to 1 MHz and its amplitude does not matter.
@@ -354,13 +403,49 @@ class PlanTests(unittest.TestCase):
         Returns: None.
         """
         settings = daq.DaqSettings(generator_on=True, piezo_on=True, piezo_mode=daq.SINE,
-                                   piezo_voltage_v=0.2, piezo_amplitude_v=0.3,
+                                   piezo_voltage_v=0.5, piezo_amplitude_v=0.3,
                                    piezo_phase_deg=90.0)
         p = daq.plan(settings)
         piezo = p.values["ao1"]
         self.assertEqual(len(piezo), p.samples_per_cycle)
-        self.assertAlmostEqual(piezo[0], 0.5)
+        self.assertAlmostEqual(piezo[0], 0.8)
+        self.assertEqual(p.piezo_frequency_hz, 0.0)
         self.assertIn("at 90°", p.summary)
+
+    def test_triangle_wave_shape(self):
+        """The triangle starts at its bottom, peaks half-way and is symmetric.
+
+        Args: None.
+        Returns: None.
+        """
+        wave = daq.triangle_wave(1.0, 9.0, 8)
+        np.testing.assert_allclose(wave, [1, 3, 5, 7, 9, 7, 5, 3])
+
+    def test_piezo_triangle_on_its_own_clock(self):
+        """The THOR's slow ramp: a positive triangle at its own frequency on AO 1.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(piezo_on=True, piezo_mode=daq.TRIANGLE,
+                                   piezo_bottom_v=0.5, piezo_top_v=9.5,
+                                   piezo_frequency_hz=0.281, piezo_limit_v=10.0)
+        p = daq.plan(settings)
+        self.assertEqual(p.analog, ("ao0", "ao1"))
+        self.assertEqual(p.values["ao0"], 0.0)  # the generator, off
+        wave = p.values["ao1"]
+        self.assertEqual(len(wave), p.samples_per_cycle)
+        self.assertEqual(p.buffer_samples % p.samples_per_cycle, 0)
+        self.assertEqual(wave[0], 0.5)
+        self.assertAlmostEqual(wave.max(), 9.5)
+        self.assertGreaterEqual(wave.min(), 0.0)
+        self.assertLessEqual(abs(p.piezo_frequency_hz - 0.281) / 0.281, daq.CLOSE_ENOUGH)
+        self.assertAlmostEqual(p.piezo_frequency_hz, p.rate / p.samples_per_cycle)
+        self.assertEqual(p.frequency_hz, 0.0)
+        self.assertIn("piezo AO 1 triangle 0.5–9.5 V", p.summary)
+        self.assertIn("generator AO 0 off", p.summary)
+        alone = daq.plan(daq.replace(settings, generator_output=daq.OFF))
+        self.assertEqual(alone.analog, ("ao1",))
 
     def test_square_wave_and_off_outputs(self):
         """A counter generator needs no AO clock; an off piezo sits at 0 V.
@@ -431,11 +516,30 @@ class DriveTests(unittest.TestCase):
         Returns: None.
         """
         s = daq.DaqSettings(generator_on=True, piezo_on=True, piezo_mode=daq.SINE,
-                            piezo_voltage_v=0.01, piezo_amplitude_v=0.2,
+                            piezo_voltage_v=0.3, piezo_amplitude_v=0.2,
                             piezo_phase_deg=90.0)
         drive = daq.plan(s).drive
         self.assertEqual((drive.piezo_mode, drive.piezo_v, drive.piezo_amplitude_v,
-                          drive.piezo_phase_deg), (daq.SINE, 0.01, 0.2, 90.0))
+                          drive.piezo_phase_deg, drive.piezo_frequency_hz),
+                         (daq.SINE, 0.3, 0.2, 90.0, 0.0))
+
+    def test_triangle_piezo(self):
+        """A piezo triangle is described by its centre, half its span and its frequency.
+
+        Args: None.
+        Returns: None.
+        """
+        s = daq.DaqSettings(generator_output="ctr0", generator_on=True, piezo_on=True,
+                            piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.1, piezo_top_v=0.9,
+                            piezo_frequency_hz=0.5)
+        p = daq.plan(s)
+        drive = p.drive
+        self.assertEqual(drive.piezo_mode, daq.TRIANGLE)
+        self.assertAlmostEqual(drive.piezo_v, 0.5)
+        self.assertAlmostEqual(drive.piezo_amplitude_v, 0.4)
+        self.assertEqual(drive.piezo_frequency_hz, p.piezo_frequency_hz)
+        self.assertAlmostEqual(drive.piezo_frequency_hz, 0.5)
+        self.assertEqual(drive.waveform, "square")
 
     def test_off_is_inactive(self):
         """Outputs that are off describe no drive.
@@ -542,6 +646,22 @@ class PylablibBackendTests(unittest.TestCase):
         self.assertAlmostEqual(wave.max(), 0.5, places=3)
         np.testing.assert_allclose(self.hardware.ao["ao1"], 0.25)
 
+    def test_triangle_reaches_the_piezo_output(self):
+        """The triangle is streamed on its own clock while a counter keeps running.
+
+        Args: None.
+        Returns: None.
+        """
+        p = self.apply(generator_output="ctr0", generator_on=True, piezo_on=True,
+                       piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.2, piezo_top_v=0.8,
+                       piezo_frequency_hz=2.0)
+        self.assertTrue(self.hardware.ao_running)
+        self.assertEqual(self.hardware.ao_rate, p.rate)
+        wave = self.hardware.ao["ao1"]
+        self.assertEqual(len(wave) % p.samples_per_cycle, 0)
+        self.assertAlmostEqual(wave.min(), 0.2)
+        self.assertAlmostEqual(wave.max(), 0.8)
+
     def test_held_levels_stop_the_clock(self):
         """With only constant levels, the AO task runs on demand.
 
@@ -549,9 +669,9 @@ class PylablibBackendTests(unittest.TestCase):
         Returns: None.
         """
         self.apply(generator_on=True)
-        self.apply(generator_on=False, piezo_on=True, piezo_voltage_v=-0.3)
+        self.apply(generator_on=False, piezo_on=True, piezo_voltage_v=0.3)
         self.assertFalse(self.hardware.ao_running)
-        self.assertEqual(self.hardware.ao, {"ao0": 0.0, "ao1": -0.3})
+        self.assertEqual(self.hardware.ao, {"ao0": 0.0, "ao1": 0.3})
 
     def test_reassigning_reconnects_at_zero(self):
         """A change of AO channels zeroes the old ones and reconnects.

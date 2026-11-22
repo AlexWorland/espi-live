@@ -2480,7 +2480,8 @@ DAQ_SETTINGS_KEY = "daq/settings"
 DAQ_TITLE = "Frequency generator and piezo (NI DAQ)"
 GENERATOR_KINDS = {"ao": "sine", "ctr": "square, 5 V TTL"}
 PIEZO_MODE_TEXT = ((daq.HOLD, "Hold a voltage"),
-                   (daq.SINE, "Sine at the generator's frequency"))
+                   (daq.SINE, "Sine at the generator's frequency"),
+                   (daq.TRIANGLE, "Triangle at its own frequency"))
 PHASE_STEP_TEXT = ((5, "5-step (Hariharan)"), (4, "4-step"))
 PHASE_MESSAGE_MS = 10000  # how long phase-step notices stay in the status bar
 
@@ -2603,9 +2604,11 @@ class DaqDialog(QDialog):
         for mode, text in PIEZO_MODE_TEXT:
             self.piezo_mode.addItem(text, mode)
         set_tooltip(self.piezo_mode,
-                    "Hold a voltage (step it by hand for phase steps), or follow the "
-                    "generator with a sine at the same frequency and a set phase.")
-        self.piezo_voltage = daq_spin(-daq.MAX_VOLTS, daq.MAX_VOLTS, 4, " V", 0.01)
+                    "Hold a voltage (step it by hand for phase steps), follow the "
+                    "generator with a sine at the same frequency and a set phase, or "
+                    "sweep a triangle between two voltages at its own frequency (the "
+                    "ramp a function generator would feed the piezo amplifier).")
+        self.piezo_voltage = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
         set_tooltip(self.piezo_voltage,
                     "The held voltage, or the centre of the sine, at the DAQ.")
         self.piezo_amplitude = daq_spin(0.0, daq.MAX_VOLTS, 4, " V", 0.01)
@@ -2613,6 +2616,22 @@ class DaqDialog(QDialog):
         self.piezo_phase = daq_spin(-360.0, 360.0, 1, "°", 5.0)
         set_tooltip(self.piezo_phase,
                     "Phase of the piezo sine relative to the generator. Sine mode only.")
+        self.piezo_bottom = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.piezo_bottom,
+                    "The triangle's lowest voltage (its DC offset). At 0 V or above, "
+                    "so the piezo amplifier's input never goes negative. Triangle mode "
+                    "only.")
+        self.piezo_top = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(self.piezo_top,
+                    "The triangle's highest voltage, at most the safety limit. "
+                    "Triangle mode only.")
+        self.piezo_frequency = daq_spin(daq.MIN_TRIANGLE_HZ, daq.MAX_TRIANGLE_HZ, 3,
+                                        " Hz", 0.01)
+        set_tooltip(self.piezo_frequency,
+                    "How many times a second the triangle goes up and down. The device "
+                    "rounds it slightly; the value it produces is shown below. Needs "
+                    "the frequency generator off or on a counter, because both analog "
+                    "outputs share one sample clock. Triangle mode only.")
         self.piezo_step = daq_spin(0.0001, daq.MAX_VOLTS, 4, " V", 0.01)
         set_tooltip(self.piezo_step,
                     "How far one Step press moves the held voltage (for example the "
@@ -2627,8 +2646,11 @@ class DaqDialog(QDialog):
         step_row.addWidget(self.step_up)
         self.piezo_limit = daq_spin(0.01, daq.MAX_VOLTS, 2, " V", 0.1)
         set_tooltip(self.piezo_limit,
-                    "Safety limit: the piezo driver never exceeds this many volts either "
-                    "way. Set it to the piezo amplifier's largest safe input.")
+                    "Safety limit: the piezo driver stays between 0 V and this many "
+                    "volts. Set it to the piezo amplifier's largest safe input (10 V "
+                    "for the Thorlabs MDT694A's EXT INPUT).")
+        self.piezo_result = QLabel()
+        self.piezo_result.setWordWrap(True)
         piezo = QGroupBox("Piezo driver")
         piezo_form = QFormLayout(piezo)
         piezo_form.addRow(self.piezo_on)
@@ -2636,8 +2658,12 @@ class DaqDialog(QDialog):
         piezo_form.addRow("Voltage", self.piezo_voltage)
         piezo_form.addRow("Amplitude", self.piezo_amplitude)
         piezo_form.addRow("Phase", self.piezo_phase)
+        piezo_form.addRow("Bottom", self.piezo_bottom)
+        piezo_form.addRow("Top", self.piezo_top)
+        piezo_form.addRow("Frequency", self.piezo_frequency)
         piezo_form.addRow("Step", step_row)
         piezo_form.addRow("Safety limit", self.piezo_limit)
+        piezo_form.addRow(self.piezo_result)
 
         self.problem_label = QLabel()
         self.problem_label.setWordWrap(True)
@@ -2686,6 +2712,7 @@ class DaqDialog(QDialog):
             box.currentIndexChanged.connect(self.refresh)
         for spin in (self.frequency, self.amplitude, self.offset, self.generator_limit,
                      self.piezo_voltage, self.piezo_amplitude, self.piezo_phase,
+                     self.piezo_bottom, self.piezo_top, self.piezo_frequency,
                      self.piezo_step, self.piezo_limit):
             spin.valueChanged.connect(self.refresh)
         for check in (self.generator_on, self.piezo_on):
@@ -2792,6 +2819,9 @@ class DaqDialog(QDialog):
         self.piezo_voltage.setValue(s.piezo_voltage_v)
         self.piezo_amplitude.setValue(s.piezo_amplitude_v)
         self.piezo_phase.setValue(s.piezo_phase_deg)
+        self.piezo_bottom.setValue(s.piezo_bottom_v)
+        self.piezo_top.setValue(s.piezo_top_v)
+        self.piezo_frequency.setValue(s.piezo_frequency_hz)
         self.piezo_step.setValue(s.piezo_step_v)
         self.piezo_limit.setValue(s.piezo_limit_v)
         self.wanted_device = s.device
@@ -2817,6 +2847,9 @@ class DaqDialog(QDialog):
             piezo_voltage_v=self.piezo_voltage.value(),
             piezo_amplitude_v=self.piezo_amplitude.value(),
             piezo_phase_deg=self.piezo_phase.value(),
+            piezo_bottom_v=self.piezo_bottom.value(),
+            piezo_top_v=self.piezo_top.value(),
+            piezo_frequency_hz=self.piezo_frequency.value(),
             piezo_step_v=self.piezo_step.value(),
             piezo_limit_v=self.piezo_limit.value())
 
@@ -2838,17 +2871,21 @@ class DaqDialog(QDialog):
             widget.setEnabled(has_generator)
         has_piezo = s.piezo_output != daq.OFF
         sine_piezo = has_piezo and s.piezo_mode == daq.SINE
-        for widget in (self.piezo_on, self.piezo_mode, self.piezo_voltage,
-                       self.piezo_limit):
+        triangle_piezo = has_piezo and s.piezo_mode == daq.TRIANGLE
+        for widget in (self.piezo_on, self.piezo_mode, self.piezo_limit):
             widget.setEnabled(has_piezo)
+        self.piezo_voltage.setEnabled(has_piezo and not triangle_piezo)
         for widget in (self.piezo_amplitude, self.piezo_phase):
             widget.setEnabled(sine_piezo)
+        for widget in (self.piezo_bottom, self.piezo_top, self.piezo_frequency):
+            widget.setEnabled(triangle_piezo)
         for widget in (self.piezo_step, self.step_down, self.step_up):
             widget.setEnabled(has_piezo and s.piezo_mode == daq.HOLD)
         found = daq.problems(s, outputs)
         self.problem_label.setText("\n".join(found))
         self.apply_button.setEnabled(self.outputs is not None and not found)
         self.generator_result.setText(self._preview(s, outputs, found))
+        self.piezo_result.setText(self._piezo_preview(s, outputs, found))
 
     @staticmethod
     def _preview(settings, outputs, found):
@@ -2867,6 +2904,23 @@ class DaqDialog(QDialog):
         channels = len({settings.generator_output, settings.piezo_output} - {daq.OFF})
         rate, samples, actual = daq.choose_timing(settings.generator_frequency_hz, channels)
         return (f"Produces {actual:.6g} Hz: {samples} samples per cycle at "
+                f"{rate:,.0f} samples/s.")
+
+    @staticmethod
+    def _piezo_preview(settings, outputs, found):
+        """Say what the piezo triangle will produce once applied.
+
+        Args: settings is daq.DaqSettings; outputs the device's outputs;
+            found is the list of problems.
+        Returns: One line of text ("" outside triangle mode or with problems).
+        """
+        s = settings
+        if found or s.piezo_output == daq.OFF or s.piezo_mode != daq.TRIANGLE:
+            return ""
+        channels = len({s.generator_output, s.piezo_output} & set(outputs.analog))
+        rate, samples, actual = daq.choose_timing(s.piezo_frequency_hz, channels)
+        return (f"Produces a {actual:.6g} Hz triangle from {s.piezo_bottom_v:g} V to "
+                f"{s.piezo_top_v:g} V: {samples} samples per cycle at "
                 f"{rate:,.0f} samples/s.")
 
     def _connect_selected(self, *_):

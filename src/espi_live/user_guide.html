@@ -1614,14 +1614,32 @@ python -m espi_live</code></pre>
           by a set amount, for manual phase steps), or <strong>Sine at the
           generator's frequency</strong> with its own amplitude, centre voltage
           and <strong>Phase</strong>. The sine shares the generator's clock, so
-          the phase between them is exact.</li>
+          the phase between them is exact. Or <strong>Triangle at its own
+          frequency</strong>: a ramp from <strong>Bottom</strong> up to
+          <strong>Top</strong> and back, <strong>Frequency</strong> times a
+          second (0.01–1000 Hz), starting at the bottom. This is the slow ramp
+          a function generator used to feed the piezo amplifier; the line below
+          says the frequency the device really produces. Both analog outputs
+          share one sample clock, so a triangle needs the frequency generator
+          off or on a counter.</li>
         <li><strong>Safety limit</strong> — each role refuses any setting that
-          would go beyond this many volts either way. Set it to your
-          amplifier's largest safe input before switching anything on.</li>
+          would go beyond this many volts. Set it to your amplifier's largest
+          safe input before switching anything on. The piezo driver never goes
+          below 0 V either: its amplifier, a Thorlabs MDT694A, takes 0–10 V on
+          its EXT INPUT, and a negative input would drive the piezo below 0 V.
+          For the MDT694A, set the piezo's limit to 10 V at most.</li>
         <li><strong>Apply</strong> sends the settings; <strong>All outputs to
           0 V</strong> stops the generator and sets every assigned output to
           0 V. An assigned output that is switched off is held at 0 V.</li>
       </ul>
+      <p><strong>Wiring the piezo (Thorlabs MDT694A).</strong> Connect the
+        DAQ's <strong>AO 1</strong> BNC to the MDT694A's <strong>EXT
+        INPUT</strong> (0–10 V) and leave its <strong>OUTPUT</strong> on the
+        piezo. The MDT694A multiplies the input by 15 at its 150 V limit and
+        adds the <strong>OUTPUT ADJ</strong> knob, so turn the knob to zero
+        unless you want an offset on top, and keep Top × 15 + the knob at or
+        below the limit lit on its front. Never connect the MDT694A's output
+        (up to 150 V) to the DAQ.</p>
       <p>All volts are at the DAQ, before your amplifiers. The DAQ cannot
         drive a shaker or piezo itself (±10 V, ±5 mA). Closing the window
         leaves the outputs running; they go to 0 V on an error and when ESPI

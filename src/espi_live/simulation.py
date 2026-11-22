@@ -25,7 +25,7 @@ import zlib
 import cv2
 import numpy as np
 
-from espi_live.daq import SINE, Drive
+from espi_live.daq import SINE, TRIANGLE, Drive
 
 # Optics.
 WAVELENGTH_NM = 632.8  # HeNe
@@ -419,6 +419,12 @@ def _object_text(name, drive):
     if drive.piezo_mode == SINE and name == "Follow DAQ":
         parts.append(f"piezo sine {drive.piezo_amplitude_v:.2f} V at "
                      f"{drive.piezo_phase_deg:.0f}°, centre {drive.piezo_v:.2f} V")
+    elif drive.piezo_mode == TRIANGLE:
+        low = drive.piezo_v - drive.piezo_amplitude_v
+        high = drive.piezo_v + drive.piezo_amplitude_v
+        parts.append(f"piezo triangle {low:.2f}–{high:.2f} V at "
+                     f"{drive.piezo_frequency_hz:.3g} Hz (not simulated: the image keeps "
+                     f"its centre, {drive.piezo_v:.2f} V)")
     elif drive.piezo_mode:
         shift = math.degrees(K_PER_NM * PIEZO_NM_PER_V * drive.piezo_v)
         parts.append(f"piezo holds {drive.piezo_v:.2f} V ({shift:.0f}° reference shift)")
