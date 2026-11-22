@@ -15,6 +15,21 @@
 - Vibration is averaged exactly over each exposure: a whole number of drive cycles per exposure gives steady J0 fringes, a fractional number flickers as on a real camera.
 - Each demo camera has its own speckle pattern. The **DUMMY MODE ACTIVE** watermark, banner and `dummy_` file names are unchanged.
 
+## 2026-11-21 — Analog camera read as raw YUY2 brightness
+
+### Previous state
+
+- The Sony XC-ST50 through the Hauppauge USB-Live2 was read as colour: on Windows DirectShow turned the stick's YUY2 into BGR (OpenCV's DirectShow backend cannot hand over YUY2), on Linux OpenCV did, and the viewer then turned BGR back into grey. The two roundings added about ±1 grey level of error per pixel, more where noise in the colour bytes made a channel clip. The LabVIEW flow's Fixed gain multiplies differences by 42, so that error showed.
+- `docs/camera/sony-xc-st50-usb-live2.md` said Linux runs the stick with `cx231xx`; that is only the older `2040:C200` model.
+
+### Current state
+
+- For a recognised adapter, the viewer reads the brightness bytes of the YUY2 video directly: on Windows through Media Foundation with conversion off (after DirectShow has selected the composite input, so opening takes about a second longer), on Linux through V4L2 with conversion off.
+- **Grey-level scale unchanged:** the stick sends video-range brightness (black 16, white 235), and the colour path expanded it to 0–255. The raw bytes are expanded with the same formula, so levels, the Difference gain 42 and saved profiles keep their meaning; only the conversion error is gone. As before, values above 235 read 255.
+- The raw path is used only when the device delivers YUY2 at 720 × 480 and its first frame's mean brightness is within 6 grey levels of the colour path's; otherwise, or on any error, the viewer uses the colour path exactly as before. The log line `Analog luma: ...` and camera reports say which path is in use. Setting `ESPI_ANALOG_LUMA=bgr` forces the colour path.
+- `scripts/check_analog_luma.py` (run on the camera PC with ESPI Live closed) shows the delivered format and layout, the raw brightness range, a same-frame comparison with the colour conversion, whether the colour path really had the expanded scale, and which path ESPI Live chooses.
+- The XC-ST50 notes describe both USB-Live2 revisions: `2040:C200` (Conexant CX23102, Linux `cx231xx`) and the Rev E1 `2040:C220` (Empia em2828X, Linux support only from the 2026 `em28xx` patches).
+
 ## 2026-11-21 — Difference view on the iPhone
 
 ### Previous state

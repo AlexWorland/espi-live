@@ -5631,6 +5631,44 @@ class PhoneWindowTests(unittest.TestCase):
         window.show_channel(self.phone)
         self.assertAlmostEqual(window.phone_focus.spin.value(), 0.1)
 
+    def test_capture_mode_restarts_the_measurement(self):
+        """Choosing RAW resets averaging and the previous frame; the colour does not.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        engine = self.phone.engine
+        with mock.patch.object(engine, "request", wraps=engine.request) as request:
+            window.phone_capture.activated.emit(window.phone_capture.findData(True))
+            self.assertEqual(request.call_args_list, [
+                mock.call("reset_average"), mock.call("reset_previous"),
+                mock.call("camera_command", raw=True)])
+            request.reset_mock()
+            window.phone_raw_channel.activated.emit(
+                window.phone_raw_channel.findData("green"))
+            self.assertEqual(request.call_args_list,
+                             [mock.call("camera_command", raw_channel="green")])
+        self.assertTrue(self.sent({"raw": True}))
+        self.assertTrue(self.sent({"raw_channel": "green"}))
+
+    def test_phone_raw_settings_follow_the_phone(self):
+        """RAW mode and colour reported by the phone select the matching items.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertIs(window.phone_capture.currentData(), False)
+        window._handle_event(self.phone, "camera_settings",
+                             {"raw": True, "raw_channel": "blue"})
+        self.assertIs(window.phone_capture.currentData(), True)
+        self.assertEqual(window.phone_raw_channel.currentData(), "blue")
+        window._handle_event(self.phone, "camera_settings", {"raw": 0})
+        self.assertIs(window.phone_capture.currentData(), False)
+        window._handle_event(self.phone, "camera_settings", {"raw_channel": "purple"})
+        self.assertEqual(window.phone_raw_channel.currentData(), "blue")  # unknown: kept
+
 
 class PhoneLensWindowTests(unittest.TestCase):
     """One iPhone with three back cameras: one drop-down entry each, one streaming."""
