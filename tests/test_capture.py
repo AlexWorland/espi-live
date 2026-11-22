@@ -12,8 +12,10 @@ import numpy as np
 
 from espi_live import capture
 from espi_live.camera import CameraInfo
-from fake_capture import (DSHOW_BASE, FakeCaptureFactory, FakeEnumerator, ListLog,
-                          bgr_frame, device, integrated_webcam, usb_live2, webcam)
+from fake_capture import (DSHOW_BASE, MSMF, YUY2_CODE, YUYV_CODE, FakeCaptureFactory,
+                          FakeEnumerator, ListLog, bgr_frame, device, integrated_webcam,
+                          ramp_luma, usb_live2, usb_live2_rev_e, webcam, yuy2_frame)
+from espi_live.processing import single_field
 
 YUY2 = float(cv2.VideoWriter_fourcc(*"YUY2"))
 
@@ -507,8 +509,383 @@ class SessionStreamTests(CaptureTestCase):
         session, cap, log = self.open_session()
         cap.release = mock.Mock(side_effect=RuntimeError("busy"))
         session.close()
-        self.assertEqual(log.lines, ["Capture release error: busy"])
+        self.assertEqual(log.lines[-1], "Capture release error: busy")
         self.assertIsNone(session.cap)
+
+
+def reference_for(luma):
+    """Build the BGR frame the BGR path delivers for a luma image.
+
+    Args: luma is a 2-D uint8 array of video-range codes.
+    Returns: A (H, W, 3) uint8 array, grey at the expanded level.
+    """
+    return np.repeat(capture.expand_video_range(luma)[:, :, None], 3, axis=2)
+
+
+RAW_PROPS = {cv2.CAP_PROP_FRAME_WIDTH: 720.0, cv2.CAP_PROP_FRAME_HEIGHT: 480.0}
+
+
+class LumaConversionTests(unittest.TestCase):
+    """The video-range table and the YUY2 layouts backends deliver."""
+
+    def test_table_matches_the_bgr_conversion_scale(self):
+        """Expanded raw Y has the scale of YUY2 → BGR → grey (BT.601, video range).
+
+        Args: None.
+        Returns: None.
+        """
+        table = capture.EXPAND_TABLE
+        self.assertEqual((table.dtype, table.shape), (np.uint8, (256,)))
+        self.assertEqual([int(table[code]) for code in (0, 16, 17, 126, 235, 255)],
+                         [0, 0, 1, 128, 255, 255])
+        self.assertTrue(np.all(np.diff(table.astype(int)) >= 0))
+        codes = np.arange(256, dtype=np.uint8)[None, :]
+        grey = cv2.cvtColor(cv2.cvtColor(yuy2_frame(codes), cv2.COLOR_YUV2BGR_YUY2),
+                            cv2.COLOR_BGR2GRAY)[0]
+        self.assertLessEqual(int(np.abs(grey.astype(int) - table.astype(int)).max()), 1)
+
+    def test_chroma_noise_moves_only_the_bgr_path(self):
+        """Noisy chroma shifts the BGR path's grey; the raw luma ignores it.
+
+        Args: None.
+        Returns: None.
+        """
+        luma = ramp_luma(64, 8, low=8, high=250)
+        chroma = np.random.default_rng(3).normal(128, 6, (8, 64)).clip(0, 255)
+        packed = yuy2_frame(luma)
+        packed[:, :, 1] = chroma.astype(np.uint8)
+        old = cv2.cvtColor(cv2.cvtColor(packed, cv2.COLOR_YUV2BGR_YUY2), cv2.COLOR_BGR2GRAY)
+        new = capture.expand_video_range(capture.yuy2_luma(packed, 64, 8))
+        self.assertTrue(np.array_equal(new, capture.EXPAND_TABLE[luma]))
+        self.assertGreater(int(np.abs(old.astype(int) - new.astype(int)).max()), 1)
+
+    def test_yuy2_luma_layouts(self):
+        """Pairs, wide rows, byte rows (padded or not) and 1-D buffers give the luma.
+
+        Args: None.
+        Returns: None.
+        """
+        luma = ramp_luma(8, 4)
+        for frame in (yuy2_frame(luma, "pairs"), yuy2_frame(luma, "wide"),
+                      yuy2_frame(luma, "row"), yuy2_frame(luma, "row", stride=20),
+                      yuy2_frame(luma, "row").reshape(-1)):
+            with self.subTest(shape=frame.shape):
+                self.assertTrue(np.array_equal(capture.yuy2_luma(frame, 8, 4), luma))
+
+    def test_yuy2_luma_refuses_what_is_not_certainly_yuy2(self):
+        """Other types, sizes and layouts give None, so the caller keeps BGR.
+
+        Args: None.
+        Returns: None.
+        """
+        luma = ramp_luma(8, 4)
+        row = yuy2_frame(luma, "row")
+        for frame, width, height in (
+                (bgr_frame(8, 4), 8, 4), (yuy2_frame(luma).astype(np.uint16), 8, 4),
+                (yuy2_frame(luma), 10, 4), (row, 8, 0), (row[:, :-1], 8, 4),
+                (row, 2, 4), (yuy2_frame(luma, "row", stride=40), 8, 4),
+                (np.zeros((2, 3, 4), dtype=np.uint8), 8, 4)):
+            with self.subTest(shape=frame.shape, size=(width, height)):
+                self.assertIsNone(capture.yuy2_luma(frame, width, height))
+
+    def test_describe_layout(self):
+        """A layout is its shape and type.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(capture.describe_layout(yuy2_frame(ramp_luma(), "row")),
+                         "1 × 691200, uint8")
+
+    def test_raw_route_and_setting(self):
+        """V4L2 reads raw anywhere, DirectShow only on Windows; the setting forces BGR.
+
+        Args: None.
+        Returns: None.
+        """
+        v4l2 = CameraInfo("video 1", "x", kind="capture", index=0, backend=cv2.CAP_V4L2)
+        dshow = capture_info(usb_live2())
+        self.assertEqual(capture.raw_route(v4l2), "v4l2")
+        with mock.patch.object(capture.sys, "platform", "darwin"):
+            self.assertEqual(capture.raw_route(dshow), "")
+        with mock.patch.object(capture.sys, "platform", "win32"):
+            self.assertEqual(capture.raw_route(dshow), "msmf")
+        for value, expected in (("", "auto"), ("raw", "auto"), (" BGR ", "bgr")):
+            with mock.patch.dict(capture.os.environ, {capture.LUMA_SETTING: value}):
+                self.assertEqual(capture.luma_setting(), expected)
+
+    def test_device_instance(self):
+        """DirectShow and Media Foundation paths of one device reduce alike.
+
+        Args: None.
+        Returns: None.
+        """
+        dshow = usb_live2_rev_e().path
+        msmf = usb_live2_rev_e(MSMF, interface="e5323777").path
+        self.assertNotEqual(dshow, msmf)
+        self.assertEqual(capture.device_instance(dshow), capture.device_instance(msmf.upper()))
+        self.assertEqual(capture.device_instance("video0"), "")
+        self.assertEqual(capture.device_instance(None), "")
+
+
+class V4L2RawLumaTests(CaptureTestCase):
+    """Linux: V4L2 hands over YUYV once its conversion is off."""
+
+    def open_v4l2(self, raw=None, props=None, reference=None, fixed=()):
+        """Open a USB-Live2 listed by V4L2.
+
+        Args: raw is the raw frames list (None: the flag is ignored); props
+            overrides the device properties; reference is the BGR frame;
+            fixed lists properties the device will not change.
+        Returns: (session, fake device, log).
+        """
+        luma = ramp_luma()
+        enumerated = usb_live2()
+        enumerated.backend = cv2.CAP_V4L2
+        options = {cv2.CAP_PROP_FOURCC: YUYV_CODE, **RAW_PROPS, **(props or {})}
+        return self.open_session(
+            enumerated, frames=[reference_for(luma) if reference is None else reference],
+            raw_frames=raw, props=options, fixed=fixed)
+
+    def test_raw_luma_is_used(self):
+        """The Y bytes, expanded, become the Mono8 frames; single field still works.
+
+        Args: None.
+        Returns: None.
+        """
+        luma = ramp_luma()
+        session, cap, log = self.open_v4l2(raw=[yuy2_frame(luma)])
+        expected = capture.expand_video_range(luma)
+        self.assertIn((cv2.CAP_PROP_CONVERT_RGB, 0), cap.sets)
+        self.assertEqual(session.luma_path,
+                         "raw YUY2 luma, video range 16–235 expanded to 0–255")
+        self.assertEqual(session.raw_layout, "480 × 720 × 2, uint8")
+        self.assertTrue(np.array_equal(session.first_frame, expected))
+        frame, state = session.grab(100)
+        self.assertEqual(state, "ok")
+        self.assertEqual((frame.shape, frame.dtype), ((480, 720), np.uint8))
+        self.assertTrue(np.array_equal(frame, expected))
+        self.assertEqual(single_field(frame).shape, (480, 720))
+        self.assertTrue(session.interlaced)
+        self.assertEqual(session.identity.fourcc, "YUYV")
+        line = log.lines[-1]
+        self.assertTrue(line.startswith("Analog luma: raw YUY2 luma"), line)
+        self.assertIn("frame 480 × 720 × 2, uint8; raw Y 40–200", line)
+        self.assertEqual(dict(session.read_details())["Luma path"], session.luma_path)
+
+    def test_a_backend_that_ignores_the_flag_keeps_bgr(self):
+        """BGR frames after CONVERT_RGB 0 are refused, and conversion is turned back on.
+
+        Args: None.
+        Returns: None.
+        """
+        session, cap, log = self.open_v4l2(raw=None)
+        self.assertEqual(cap.sets[-1], (cv2.CAP_PROP_CONVERT_RGB, 1))
+        self.assertEqual(session.luma_path, "BGR → grey")
+        self.assertIn("raw YUY2 through V4L2 was not used: a 480 × 720 × 3, uint8 "
+                      "frame is not YUY2 of that size", log.lines[-1])
+        frame, state = session.grab(100)
+        self.assertEqual((state, frame.shape), ("ok", (480, 720)))
+        self.assertEqual(session.raw_layout, "480 × 720 × 3, uint8")
+
+    def test_wrong_format_size_or_brightness_keeps_bgr(self):
+        """A non-YUY2 format, another size or a brightness mismatch keeps BGR.
+
+        Args: None.
+        Returns: None.
+        """
+        luma = ramp_luma()
+        raw = [yuy2_frame(luma)]
+        uyvy = float(cv2.VideoWriter_fourcc(*"UYVY"))
+        cases = (
+            ({cv2.CAP_PROP_FOURCC: uyvy}, None, "it delivers UYVY, not YUY2"),
+            ({cv2.CAP_PROP_FOURCC: 0.0}, None, "it delivers an unknown format, not YUY2"),
+            ({cv2.CAP_PROP_FRAME_HEIGHT: 576.0}, None, "it delivers 720 × 576, not 720 × 480"),
+            ({}, bgr_frame(value=10), "levels from the BGR path's 10.0"),
+        )
+        for props, reference, message in cases:
+            with self.subTest(message=message):
+                session, _, log = self.open_v4l2(raw=list(raw), props=props,
+                                                 reference=reference, fixed=tuple(props))
+                self.assertEqual(session.luma_path, "BGR → grey")
+                self.assertIn(message, log.lines[-1])
+
+    def test_setting_forces_bgr(self):
+        """ESPI_ANALOG_LUMA=bgr never turns conversion off.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.dict(capture.os.environ, {capture.LUMA_SETTING: "bgr"}):
+            session, cap, log = self.open_v4l2(raw=[yuy2_frame(ramp_luma())])
+        self.assertNotIn((cv2.CAP_PROP_CONVERT_RGB, 0), cap.sets)
+        self.assertEqual(session.luma_path, "BGR → grey")
+        self.assertIn("(ESPI_ANALOG_LUMA=bgr)", log.lines[-1])
+
+    def test_a_changed_frame_layout_is_a_grab_error(self):
+        """A later frame that is no longer YUY2 of the size is an error status.
+
+        Args: None.
+        Returns: None.
+        """
+        luma = ramp_luma()
+        session, _, _ = self.open_v4l2(raw=[yuy2_frame(luma), bgr_frame()])
+        error, state = session.grab(100)
+        self.assertEqual(state, "error")
+        self.assertIn("not the raw YUY2", str(error))
+
+
+class MediaFoundationRawLumaTests(CaptureTestCase):
+    """Windows: DirectShow selects the input, Media Foundation hands over YUY2."""
+
+    def setUp(self):
+        """Pretend to run on Windows.
+
+        Args: None.
+        Returns: None.
+        """
+        patcher = mock.patch.object(capture.sys, "platform", "win32")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def open_windows(self, msmf=None, listed=None, enumerator_problem="",
+                     dshow_frames=None):
+        """Open a Rev E1 USB-Live2 through DirectShow, then Media Foundation.
+
+        Args: msmf overrides the Media Foundation device's options; listed is
+            what Media Foundation enumerates (default: the same stick at index
+            3); enumerator_problem, if set, makes the enumerator unavailable;
+            dshow_frames are the DirectShow frames.
+        Returns: (session, factory, log, enumerator).
+        """
+        luma = ramp_luma()
+        options = {"frames": [None], "raw_frames": [None, yuy2_frame(luma, "row")],
+                   "props": {cv2.CAP_PROP_FOURCC: YUY2_CODE, cv2.CAP_PROP_FPS: 29.97,
+                             **RAW_PROPS}}
+        options.update(msmf or {})
+        factory = self.use_devices(frames=dshow_frames or [reference_for(luma)],
+                                   backends={MSMF: options})
+        if listed is None:
+            listed = [usb_live2_rev_e(MSMF, 0, "aaaaaaaa"),
+                      usb_live2_rev_e(MSMF, 3, "e5323777")]
+            listed[0].path = "\\\\?\\usb#vid_046d&pid_0825#x#{e5323777}"
+            listed[0].vid, listed[0].pid = 0x046D, 0x0825
+        enumerator = FakeEnumerator(listed)
+        result = (None, enumerator_problem) if enumerator_problem else (enumerator, "")
+        patcher = mock.patch.object(capture, "import_enumerator", return_value=result)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        log = ListLog()
+        session = capture.CaptureSession(log, capture_info(usb_live2_rev_e()))
+        session.open()
+        return session, factory, log, enumerator
+
+    def test_raw_luma_through_media_foundation(self):
+        """DirectShow routes composite and is released; Media Foundation reads Y.
+
+        Args: None.
+        Returns: None.
+        """
+        session, factory, log, enumerator = self.open_windows()
+        dshow, msmf = factory.made
+        self.assertEqual(enumerator.calls, [MSMF])
+        self.assertTrue(dshow.released)
+        self.assertEqual(dshow.sets[0], (cv2.CAP_PROP_CHANNEL, 0))
+        self.assertEqual((msmf.index, msmf.backend, msmf.released), (3, MSMF, False))
+        self.assertEqual(msmf.sets, [(cv2.CAP_PROP_CONVERT_RGB, 0),
+                                     (cv2.CAP_PROP_FRAME_WIDTH, 720),
+                                     (cv2.CAP_PROP_FRAME_HEIGHT, 480)])
+        self.assertIs(session.cap, msmf)
+        self.assertEqual(session.backend, MSMF)
+        self.assertEqual(session.identity.backend, capture.backend_name(MSMF))
+        self.assertEqual((session.identity.fourcc, session.identity.width,
+                          session.identity.height), ("YUY2", 720, 480))
+        self.assertAlmostEqual(session.identity.fps, 29.97)
+        self.assertEqual(session.raw_layout, "1 × 691200, uint8")
+        self.assertEqual(msmf.reads, 2)  # one empty read while the device starts
+        frame, state = session.grab(100)
+        self.assertEqual(state, "ok")
+        self.assertTrue(np.array_equal(frame, capture.expand_video_range(ramp_luma())))
+        self.assertIn("through " + capture.backend_name(MSMF), log.lines[-1])
+
+    def test_matched_by_usb_id_when_paths_differ(self):
+        """A unique USB ID matches when the paths do not.
+
+        Args: None.
+        Returns: None.
+        """
+        other = usb_live2_rev_e(MSMF, 5)
+        other.path = "different"
+        session, factory, _, _ = self.open_windows(listed=[other])
+        self.assertEqual(factory.made[-1].index, 5)
+        self.assertEqual(session.backend, MSMF)
+
+    def test_unmatched_device_keeps_directshow_open(self):
+        """An unlisted, ambiguous or unlistable device keeps the first DirectShow open.
+
+        Args: None.
+        Returns: None.
+        """
+        twins = [usb_live2_rev_e(MSMF, 1), usb_live2_rev_e(MSMF, 2)]
+        for twin in twins:
+            twin.path = ""
+        cases = (({"listed": []}, "Media Foundation does not list this device"),
+                 ({"listed": twins}, "several devices share its USB ID"),
+                 ({"enumerator_problem": "is not installed"},
+                  "cv2_enumerate_cameras is not installed"))
+        for options, message in cases:
+            with self.subTest(message=message):
+                session, factory, log, _ = self.open_windows(**options)
+                self.assertEqual(len(factory.made), 1)
+                self.assertFalse(factory.made[0].released)
+                self.assertEqual(session.backend, DSHOW_BASE)
+                self.assertEqual(session.luma_path, "BGR → grey")
+                self.assertIn("raw YUY2 through Media Foundation was not used: " + message,
+                              log.lines[-1])
+
+    def test_media_foundation_problems_reopen_directshow(self):
+        """Not opening, no frame, a refused property or another layout re-opens DirectShow.
+
+        Args: None.
+        Returns: None.
+        """
+        cases = (({"opened": False}, "Media Foundation did not open it"),
+                 ({"raw_frames": [None]}, "no raw frame arrived"),
+                 ({"set_error": cv2.error("refused")}, "refused"),
+                 ({"raw_frames": [bgr_frame()]}, "frame is not YUY2 of that size"))
+        for msmf, message in cases:
+            with self.subTest(message=message):
+                session, factory, log, _ = self.open_windows(msmf=msmf)
+                first, media_foundation, reopened = factory.made
+                self.assertTrue(first.released and media_foundation.released)
+                self.assertIs(session.cap, reopened)
+                self.assertEqual(reopened.backend, DSHOW_BASE)
+                self.assertEqual(session.backend, DSHOW_BASE)
+                self.assertEqual(session.luma_path, "BGR → grey")
+                self.assertIn(message, log.lines[-1])
+                frame, state = session.grab(100)
+                self.assertEqual((state, frame.shape), ("ok", (480, 720)))
+
+    def test_failed_reopen_is_an_open_error(self):
+        """When DirectShow cannot be re-opened, open() fails as before.
+
+        Args: None.
+        Returns: None.
+        """
+        reads = []
+
+        def dshow():
+            """Deliver the first frame, then nothing.
+
+            Args: None.
+            Returns: (ok, frame).
+            """
+            reads.append(1)
+            return (True, reference_for(ramp_luma())) if len(reads) == 1 else (False, None)
+
+        with self.assertRaises(RuntimeError) as caught:
+            self.open_windows(msmf={"opened": False}, dshow_frames=dshow)
+        self.assertIn("no video arrived", str(caught.exception))
 
 
 if __name__ == "__main__":

@@ -24,8 +24,9 @@ class CaptureAdapter:
 
 
 # Adapters tested with this viewer, keyed by USB (vendor ID, product ID). The
-# USB-Live2 reports 2040:C200 to Linux's cx231xx driver and 2040:C220 on a
-# Windows 11 camera PC.
+# USB-Live2 has two revisions with the same inputs: 2040:C200 (Conexant
+# CX23102, Linux cx231xx) and 2040:C220 (Rev E1, model 122020, Empia em2828X;
+# the Windows 11 camera PC's stick, in Linux em28xx only from 2026 patches).
 USB_LIVE2 = CaptureAdapter("Hauppauge USB-Live2", True, 720, 480, 0)
 ADAPTERS = {
     (0x2040, 0xC200): USB_LIVE2,
