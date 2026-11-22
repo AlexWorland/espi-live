@@ -118,17 +118,28 @@ struct PipelineChoice: Sendable, Equatable {
     var note: String?
 }
 
-/// Picks the rawest source the camera offers.
-func choosePipeline(_ caps: PipelineCapabilities) -> PipelineChoice {
+/// Which source the difference view is asked to use.
+enum DifferenceSource: String, Sendable, Equatable {
+    /// The rawest the camera offers (Bayer RAW stills, else luma video).
+    case auto
+    /// Luma video only: the fallback when Bayer RAW stills do not arrive.
+    case luma
+}
+
+/// Picks the rawest source the camera offers, or luma video when `source` is `.luma`.
+func choosePipeline(_ caps: PipelineCapabilities,
+                    source: DifferenceSource = .auto) -> PipelineChoice {
     var note: String?
-    for type in caps.rawPhotoFormats {
-        if let bayer = RawFormats.bayer(type) {
-            return PipelineChoice(pipeline: .bayerStills(format: type, pattern: bayer.pattern,
-                                                         bits: bayer.bits))
+    if source == .auto {
+        for type in caps.rawPhotoFormats {
+            if let bayer = RawFormats.bayer(type) {
+                return PipelineChoice(pipeline: .bayerStills(format: type, pattern: bayer.pattern,
+                                                             bits: bayer.bits))
+            }
         }
-    }
-    if let first = caps.rawPhotoFormats.first {
-        note = "Bayer RAW format '\(RawFormats.fourCC(first))' is not supported yet; showing luma"
+        if let first = caps.rawPhotoFormats.first {
+            note = "Bayer RAW format '\(RawFormats.fourCC(first))' is not supported yet; showing luma"
+        }
     }
     let ten = kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
     let eight = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
@@ -139,4 +150,73 @@ func choosePipeline(_ caps: PipelineCapabilities) -> PipelineChoice {
         return PipelineChoice(pipeline: .luma(format: eight, bits: 8), note: note)
     }
     return PipelineChoice(pipeline: nil, note: note ?? "No usable camera format")
+}
+
+// MARK: When Bayer RAW stills do not arrive
+
+/// Seconds the view waits for its first Bayer still before showing luma video instead.
+let bayerFirstImageTimeout = 6.0
+
+/// Bayer stills have produced no image for `seconds` since the source started.
+func bayerStalled(_ pipeline: RawPipeline?, imagesSinceStart: Int, seconds: Double) -> Bool {
+    guard case .bayerStills = pipeline else { return false }
+    return imagesSinceStart == 0 && seconds >= bayerFirstImageTimeout
+}
+
+/// What the photo output looks like right now, as far as taking a still is concerned.
+struct RawReadiness: Sendable, Equatable {
+    var sessionRunning: Bool
+    var interrupted: Bool
+    var stillInFlight: Bool
+    /// The photo output has a video connection at all.
+    var hasConnection: Bool
+    var connectionEnabled: Bool
+    var connectionActive: Bool
+    /// The Bayer format the view chose, and what the camera offers now.
+    var wantedFormat: OSType
+    var offeredFormats: [OSType]
+}
+
+/// Why no still is being taken, in words for the screen; empty when one can be.
+func rawBlockers(_ r: RawReadiness) -> [String] {
+    var blockers: [String] = []
+    if !r.sessionRunning { blockers.append("the camera session is not running") }
+    if r.interrupted { blockers.append("the camera is interrupted") }
+    if r.stillInFlight { blockers.append("the previous still has not come back") }
+    if !r.hasConnection {
+        blockers.append("the photo output has no camera connection")
+    } else {
+        if !r.connectionEnabled { blockers.append("the photo connection is disabled") }
+        if !r.connectionActive { blockers.append("the photo connection is not active") }
+    }
+    if !r.offeredFormats.contains(r.wantedFormat) {
+        let offered = r.offeredFormats.isEmpty
+            ? "none" : r.offeredFormats.map(RawFormats.fourCC).joined(separator: ", ")
+        blockers.append("the camera does not offer Bayer RAW "
+                        + "'\(RawFormats.fourCC(r.wantedFormat))' now (offers: \(offered))")
+    }
+    return blockers
+}
+
+/// The header text before the first image: the source, how many stills were
+/// asked for and came back, and what is holding the next one up.
+func differenceWaitingText(pipeline: RawPipeline, asked: Int, returned: Int, discarded: Int,
+                           blockers: [String]) -> String {
+    var text: String
+    switch pipeline {
+    case .bayerStills:
+        text = "Bayer RAW stills · waiting for the first image "
+            + "(\(asked) asked, \(returned) returned, \(discarded) discarded)"
+        if !blockers.isEmpty { text += "\nNot taking a still: " + blockers.joined(separator: "; ") }
+    case .luma:
+        text = "Luma video · waiting for the first image"
+    }
+    return text
+}
+
+/// The note shown when the view gives up on Bayer stills.
+func bayerFallbackNote(seconds: Double, blockers: [String]) -> String {
+    let why = blockers.isEmpty ? "no still came back" : blockers.joined(separator: "; ")
+    return String(format: "Bayer RAW stills gave no image in %.0f s (", seconds) + why
+        + "); showing luma video"
 }
