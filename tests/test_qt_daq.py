@@ -322,7 +322,7 @@ class DaqDialogTests(DaqWindowTestCase):
         Returns: None.
         """
         dialog = self.open_dialog()
-        self.assertIn("shown before the first drive signal", dialog.safety_label.text())
+        self.assertIn("shown before a drive signal", dialog.safety_label.text())
         dialog.apply()  # nothing switched on: no checklist needed
         self.settle(dialog, lambda: "off" in dialog.state_label.text())
         self.assertIsNone(dialog.checklist)
@@ -330,7 +330,7 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog.apply()
         checklist = dialog.checklist
         self.assertTrue(checklist.isVisible())
-        self.assertEqual(len(checklist.boxes), 6)
+        self.assertEqual(len(checklist.boxes), 5)  # the generator is off: no check for it
         self.assertFalse(checklist.allow_button.isEnabled())
         for box in checklist.boxes[:-1]:
             box.setChecked(True)
@@ -342,10 +342,22 @@ class DaqDialogTests(DaqWindowTestCase):
         self.assertTrue(checklist.allow_button.isEnabled())
         checklist.allow_button.click()
         self.settle(dialog, lambda: "holds" in dialog.state_label.text())
-        self.assertIn("ticked off for this connection", dialog.safety_label.text())
+        self.assertIn("ticked off for what is switched on", dialog.safety_label.text())
         self.assertTrue(self.log.has("safety checklist ticked off for Dev1: USB-6251"))
         dialog.apply()  # already ticked for this connection
         self.assertIs(dialog.checklist, checklist)
+        dialog.piezo_on.setChecked(False)  # nothing on: still ticked for this connection
+        self.assertIn("ticked off for what is switched on", dialog.safety_label.text())
+        dialog.piezo_on.setChecked(True)
+        dialog.generator_on.setChecked(True)  # a role not yet covered asks again
+        self.assertIn("shown before a drive signal", dialog.safety_label.text())
+        dialog.apply()
+        self.assertIsNot(dialog.checklist, checklist)
+        self.assertEqual(len(dialog.checklist.boxes), 6)
+        self.allow(dialog)
+        self.settle(dialog, lambda: "sine" in dialog.state_label.text())
+        checklist = dialog.checklist
+        dialog.generator_on.setChecked(False)
         # Reassigning the piezo asks again; cancelling sends nothing.
         dialog._set_combo(dialog.generator_output, daq.OFF)
         dialog._set_combo(dialog.piezo_output, "ao0")
@@ -721,7 +733,7 @@ class PhaseWindowTests(DaqWindowTestCase):
         self.pump(lambda: self.log.has("waits for the safety checklist"))
         self.assertIsNone(w.phase_stepper)
         saved = qt_app.DaqDialog._saved_settings()
-        w.daq.arm(saved)
+        w.daq.arm(daq.replace(saved, piezo_on=True))  # the checklist covered the piezo
         w._daq_event("connected", daq.DeviceOutputs(REAL))
         self.pump(lambda: w.phase_stepper is not None)
         stepper = w.phase_stepper

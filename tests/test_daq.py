@@ -1114,28 +1114,34 @@ class RealLikeBackend(daq.SimulatedBackend):
 class SafetyRuleTests(unittest.TestCase):
     """The GUI-free pieces of the checklist and the readback check."""
 
-    def test_checklist_follows_the_assignment(self):
-        """Piezo checks name its socket; the generator's names its own; one is always asked.
+    def test_checklist_follows_what_is_switched_on(self):
+        """Only roles switched on get their checks; the watcher check is always asked.
 
         Args: None.
         Returns: None.
         """
-        items = daq.checklist_items(daq.DaqSettings(piezo_limit_v=10.0))
+        both = daq.DaqSettings(piezo_limit_v=10.0, piezo_on=True, generator_on=True)
+        items = daq.checklist_items(both)
         self.assertEqual(len(items), 6)
         self.assertIn("OUTPUT ADJ knob", items[0])
         self.assertIn("AO 1 cable goes to the MDT694A's EXT INPUT", items[1])
         self.assertIn("about 150 V at the piezo", items[3])
         self.assertIn("AO 0 cable", items[4])
-        counter = daq.checklist_items(daq.DaqSettings(piezo_output=daq.OFF,
-                                                      generator_output="ctr0",
-                                                      generator_terminal="pfi4"))
+        counter = daq.checklist_items(daq.DaqSettings(generator_output="ctr0",
+                                                      generator_terminal="pfi4",
+                                                      generator_on=True))
+        self.assertEqual(len(counter), 2)  # the piezo is assigned but off: no piezo checks
         self.assertIn("PFI 4 cable", counter[0])
+        piezo_only = daq.checklist_items(daq.DaqSettings(piezo_on=True))
+        self.assertEqual(len(piezo_only), 5)
+        self.assertNotIn("generator", " ".join(piezo_only))
         alone = daq.checklist_items(daq.DaqSettings(piezo_output=daq.OFF,
-                                                    generator_output=daq.OFF))
+                                                    generator_output=daq.OFF,
+                                                    piezo_on=True, generator_on=True))
         self.assertEqual(len(alone), 1)
         self.assertIn("All outputs to 0 V", alone[0])
 
-    def test_drives_and_assignment(self):
+    def test_drives_and_driven_roles(self):
         """Only an assigned, switched-on role drives; the terminal counts for counters.
 
         Args: None.
@@ -1145,10 +1151,11 @@ class SafetyRuleTests(unittest.TestCase):
         self.assertTrue(daq.drives(daq.DaqSettings(piezo_on=True)))
         self.assertTrue(daq.drives(daq.DaqSettings(generator_on=True)))
         self.assertFalse(daq.drives(daq.DaqSettings(piezo_on=True, piezo_output=daq.OFF)))
-        self.assertEqual(daq.assignment(daq.DaqSettings()), ("ao0", "", "ao1"))
-        self.assertEqual(daq.assignment(daq.DaqSettings(generator_output="ctr1",
-                                                        generator_terminal="pfi2")),
-                         ("ctr1", "pfi2", "ao1"))
+        self.assertEqual(daq.driven_roles(daq.DaqSettings()), frozenset())
+        self.assertEqual(daq.driven_roles(daq.DaqSettings(piezo_on=True, generator_on=True,
+                                                          generator_output="ctr1",
+                                                          generator_terminal="pfi2")),
+                         {(daq.PIEZO_ROLE, "ao1", ""), (daq.GENERATOR_ROLE, "ctr1", "pfi2")})
 
     def test_expected_levels_and_readback(self):
         """Readings within the written range pass; others name the channel and both values.
@@ -1269,6 +1276,7 @@ class SelfCheckTests(unittest.TestCase):
         """
         settings = daq.DaqSettings(piezo_on=True, piezo_voltage_v=0.2)
         self.assertFalse(self.controller.is_armed(settings))  # no device yet
+        self.assertFalse(self.controller.checklist_done())
         self.connect()
         self.controller.request("apply", settings=settings)
         self.assertEqual(wait_event(self.controller, "rejected")[0], [daq.CHECKLIST_REQUIRED])
@@ -1282,9 +1290,16 @@ class SelfCheckTests(unittest.TestCase):
         wait_event(self.controller, "applied")
         self.controller.move_piezo(settings, 0.3, 5.0)
         moved = daq.replace(settings, piezo_output="ao0", generator_output=daq.OFF)
-        self.assertFalse(self.controller.is_armed(moved))
+        self.assertFalse(self.controller.is_armed(moved))  # another socket: ask again
+        both = daq.replace(settings, generator_on=True)
+        self.assertFalse(self.controller.is_armed(both))  # the generator was not covered
+        self.controller.arm(both)
+        self.assertTrue(self.controller.is_armed(both))
+        self.assertTrue(self.controller.is_armed(settings))  # earlier ticks still count
+        self.assertTrue(self.controller.checklist_done())
         self.connect()
         self.assertFalse(self.controller.is_armed(settings))
+        self.assertFalse(self.controller.checklist_done())
 
     def test_readback_fault_sets_everything_to_zero_once(self):
         """An output that reads back wrong stops everything, and is reported once.

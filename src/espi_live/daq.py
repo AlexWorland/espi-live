@@ -213,12 +213,13 @@ MDT694A_GAIN = 15.0  # V/V at its 150 V limit
 def checklist_items(settings):
     """List what the user must confirm before drive signals reach a real device.
 
-    Args: settings is DaqSettings (the items follow its output assignment).
-    Returns: A list of sentences, one checkbox each.
+    Args: settings is DaqSettings: only the roles it switches on get their
+        checks (an output that stays off is held at 0 V).
+    Returns: A list of sentences, one checkbox each; the last is always asked.
     """
     s = settings
     items = []
-    if s.piezo_output != OFF:
+    if s.piezo_on and s.piezo_output != OFF:
         piezo = socket_label(s.piezo_output)
         items += [
             "The MDT694A's OUTPUT ADJ knob is turned to zero (it adds to the DAQ's "
@@ -231,7 +232,7 @@ def checklist_items(settings):
             f"{s.piezo_limit_v * MDT694A_GAIN:.0f} V at the piezo) and the MDT694A's "
             "VOLT LIMIT suit this piezo.",
         ]
-    if s.generator_output != OFF:
+    if s.generator_on and s.generator_output != OFF:
         where = socket_label(s.generator_terminal if s.generator_output.startswith("ctr")
                              else s.generator_output)
         items.append(f"The generator's {where} cable goes to the specimen drive's input, "
@@ -515,16 +516,21 @@ def drives(settings):
         s.piezo_on and s.piezo_output != OFF)
 
 
-def assignment(settings):
-    """Name which output serves which role, for the safety checklist.
+def driven_roles(settings):
+    """Name each role the settings switch on, with the socket it drives.
 
     Args: settings is DaqSettings.
-    Returns: A tuple (generator output, its PFI terminal or "", piezo output);
-        the checklist must be ticked again when it changes.
+    Returns: A frozenset of (PIEZO_ROLE, AO channel) and (GENERATOR_ROLE,
+        output, PFI terminal or ""); the safety checklist must cover each one.
     """
     s = settings
-    terminal = s.generator_terminal if s.generator_output.startswith("ctr") else ""
-    return (s.generator_output, terminal, s.piezo_output)
+    roles = set()
+    if s.piezo_on and s.piezo_output != OFF:
+        roles.add((PIEZO_ROLE, s.piezo_output, ""))
+    if s.generator_on and s.generator_output != OFF:
+        terminal = s.generator_terminal if s.generator_output.startswith("ctr") else ""
+        roles.add((GENERATOR_ROLE, s.generator_output, terminal))
+    return frozenset(roles)
 
 
 def expected_levels(output_plan):
@@ -1074,7 +1080,7 @@ class DaqController:
         self.backend_factory = backend_factory or default_backend
         self.clock = clock
         self._beat = None  # when the window last called heartbeat()
-        self._armed = None  # (device name, assignment) the checklist was done for
+        self._armed = (None, frozenset())  # device name, roles the checklist covered
         self.expected = {}  # worker thread only: channel -> (lowest, highest) volts
         self._faulted = False  # worker thread only: a self-check fault is reported once
         self.events = queue.SimpleQueue()
@@ -1115,30 +1121,45 @@ class DaqController:
         self._beat = self.clock()
 
     def arm(self, settings):
-        """Record that the safety checklist was ticked off for these outputs.
+        """Record that the safety checklist was ticked off for the roles switched on.
 
-        It holds for the connected device and this output assignment, until
-        the next connection.
+        Each role it covered (and the socket it drives) stays allowed for the
+        connected device until the next connection.
 
         Args: settings is the DaqSettings the checklist was shown for.
         Returns: None.
         """
         with self._lock:
             device = self._status["device"]
-            self._armed = (device.name if device else None, assignment(settings))
+            name = device.name if device else None
+            covered = self._armed[1] if self._armed[0] == name else frozenset()
+            self._armed = (name, covered | driven_roles(settings))
 
     def is_armed(self, settings):
         """Tell whether drive signals may go to the device with these settings.
 
         Args: settings is DaqSettings.
-        Returns: True for the simulated device, or when the checklist was
-            ticked for the connected device and this output assignment.
+        Returns: True for the simulated device, or when the checklist covered
+            every role these settings switch on (with its socket) for the
+            connected device.
         """
         with self._lock:
             device = self._status["device"]
             if device is not None and device.simulated:
                 return True
-            return device is not None and self._armed == (device.name, assignment(settings))
+            return device is not None and self._armed[0] == device.name and \
+                driven_roles(settings) <= self._armed[1]
+
+    def checklist_done(self):
+        """Tell whether the checklist was ticked off for anything on this connection.
+
+        Args: None.
+        Returns: True once arm() covered at least one role of the connected device.
+        """
+        with self._lock:
+            device = self._status["device"]
+            return device is not None and self._armed[0] == device.name and \
+                bool(self._armed[1])
 
     def status(self):
         """Report the device and what it is producing.
@@ -1294,7 +1315,7 @@ class DaqController:
         self.outputs = backend.open(device)
         self.backend = backend
         with self._lock:
-            self._armed = None  # the checklist is ticked again for each connection
+            self._armed = (None, frozenset())  # the checklist is ticked again per connection
         backend.zero_all()  # clear anything a crash or another program left on
         self.expected = {channel: (0.0, 0.0) for channel in self.outputs.analog}
         self._faulted = False

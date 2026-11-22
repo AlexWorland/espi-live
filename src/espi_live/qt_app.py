@@ -3030,10 +3030,12 @@ class DaqDialog(QDialog):
         """
         if self.outputs is None or self.outputs.device.simulated:
             return ""
-        if self.controller.is_armed(settings):
-            return "Safety checklist: ticked off for this connection."
-        return ("Safety checklist: shown before the first drive signal to this device "
-                "(once per connection, and again if the outputs are reassigned).")
+        if daq.drives(settings) and self.controller.is_armed(settings) or (
+                not daq.drives(settings) and self.controller.checklist_done()):
+            return "Safety checklist: ticked off for what is switched on."
+        return ("Safety checklist: shown before a drive signal to this device, for the "
+                "outputs switched on (once per connection, and again for an output "
+                "switched on or reassigned later).")
 
     def run_self_test(self):
         """Ask for the amplifiers to be off, then run the output self-test.
@@ -3492,9 +3494,10 @@ class DaqChecklistDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Before the DAQ drives anything")
         self.resize(ui_scale.px(520), ui_scale.px(380))
-        intro = QLabel("Tick off each check. Until you do, ESPI live sends no drive signal "
-                       "to this device; this is asked once per connection, and again if "
-                       "the outputs are reassigned.")
+        intro = QLabel("Tick off each check for the outputs you are switching on. Until "
+                       "you do, ESPI live sends no drive signal to this device; this is "
+                       "asked once per connection, and again for an output switched on or "
+                       "reassigned later.")
         intro.setWordWrap(True)
         self.boxes, self.labels = [], []
         layout = QVBoxLayout(self)

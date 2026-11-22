@@ -1635,10 +1635,12 @@ python -m espi_live</code></pre>
           that switches an output on for a real device asks you to tick off a
           short checklist (the MDT694A's knob at zero, only the DAQ's cable on
           its EXT INPUT, its OUTPUT never to the DAQ, the limits suit the
-          piezo, the generator's cable, someone watching). Nothing is driven
-          until every box is ticked. It is asked once per connection and again
-          if you reassign the outputs; the simulated device never asks. The
-          Phase view's piezo steps wait for it too.</li>
+          piezo, the generator's cable, someone watching). It lists only the
+          checks for the outputs you are switching on. Nothing is driven until
+          every box is ticked. Each output is allowed once per connection;
+          switching on another one, or moving one to another socket, asks
+          again. The simulated device never asks. The Phase view's piezo steps
+          wait for it too.</li>
         <li><strong>Self-checks</strong> — every output is set to 0 V when the
           device connects. While connected, ESPI live reads its own outputs back
           about once a second through the USB-6251's internal channels (no
