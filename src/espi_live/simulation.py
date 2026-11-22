@@ -17,6 +17,7 @@ a real camera's do. See docs/notes/simulated-espi-signal-design.md.
 Nothing here touches a GUI toolkit or PySpin.
 """
 
+import collections
 import functools
 import math
 import zlib
@@ -100,6 +101,8 @@ MAX_TABLE_POINTS = 1 << 15
 # Above this phase amplitude a vibration's fringes are finer than the
 # speckle; pixels beyond it are simulated at this amplitude (with a warning).
 TABLE_U_LIMIT = 64.0
+# Tables kept per source: the two triangle directions, and a spare.
+TABLE_CACHE_SIZE = 4
 
 
 def _power_of_two(count):
@@ -129,13 +132,19 @@ class FringeTable:
     TABLE_U_STEP keeps it within TABLE_U_STEP ** 2 / 8 (|d2F/du2| <= 1).
     """
 
-    def __init__(self, u_max, cycles):
+    def __init__(self, u_max, cycles, pieces=None):
         """Build the table.
 
         Args: u_max is the largest phase amplitude (radians) to cover;
-            cycles is the number of drive cycles per exposure (n >= 0).
-        Returns: None. depends_on_beta is False for a whole number of cycles,
-            where F is exactly J0(u) whatever the start phase.
+            cycles is the number of drive cycles per exposure (n >= 0);
+            pieces describes a reference phase phi(s) that changes linearly
+            during the exposure (the reference piezo's triangle), averaged
+            together with the vibration as exp(-i phi(s)): a tuple of (start,
+            length, phase at its middle, rate) per linear piece, with start
+            and length as fractions of the exposure and the rate in radians
+            per exposure; None means no ramp.
+        Returns: None. depends_on_beta is False for a whole number of cycles
+            without a ramp, where F is exactly J0(u) whatever the start phase.
         """
         self.u_max = u_max
         self.cycles = cycles
@@ -147,10 +156,18 @@ class FringeTable:
         theta = 2 * np.pi * np.arange(coarse) / coarse
         k = np.fft.fftfreq(coarse, 1.0 / coarse)
         spectrum = np.fft.fft(np.exp(1j * u[:, None] * np.sin(theta[None, :])), axis=1)
-        weights = np.exp(1j * np.pi * k * cycles) * np.sinc(k * cycles)
-        # A whole number of cycles leaves exactly J0: drop the k != 0 terms,
-        # whose weights are only rounding noise, so beta cannot matter at all.
-        self.depends_on_beta = not (cycles >= 0.5 and abs(cycles - round(cycles)) < 1e-9)
+        # Each term's time average over the exposure: exp(ik(omega t + beta))
+        # times the ramp's exp(-i phi) integrates in closed form per linear piece.
+        weights = np.zeros(coarse, np.complex128)
+        for start, length, middle, rate in pieces or ((0.0, 1.0, 0.0, 0.0),):
+            spin = 2 * np.pi * k * cycles
+            weights += length * np.exp(1j * (spin * (start + length / 2) - middle)) * np.sinc(
+                (spin - rate) * length / (2 * np.pi))
+        # A whole number of cycles without a ramp leaves exactly J0: drop the
+        # k != 0 terms, whose weights are only rounding noise, so beta cannot
+        # matter at all.
+        self.depends_on_beta = not (pieces is None and cycles >= 0.5
+                                    and abs(cycles - round(cycles)) < 1e-9)
         if not self.depends_on_beta:
             weights[1:] = 0
         spectrum *= weights / coarse
@@ -325,20 +342,35 @@ def reference_ramp_average(t0, duration):
     """
     if duration <= 0:
         return complex(np.exp(-1j * triangle_phase(t0)))
+    return complex(sum(length * np.exp(-1j * middle) * np.sinc(rate * length / (2 * math.pi))
+                       for _, length, middle, rate in ramp_pieces(t0, duration)))
+
+
+def ramp_pieces(t0, duration):
+    """Split the triangle into its linear pieces over one exposure.
+
+    Args: t0 is the exposure's start (s); duration is its length (s), > 0.
+    Returns: A tuple of (start, length, phase at the middle, rate) per
+        piece, start and length as fractions of the exposure and the rate in
+        radians per exposure (FringeTable's pieces). A single piece is
+        exactly (0.0, 1.0, ...), so its table can be reused frame to frame.
+    """
     half = 0.5 / PIEZO_TRIANGLE_HZ
     slope = K_PER_NM * PIEZO_TRIANGLE_NM / half
-    total, start, end = 0j, t0, t0 + duration
+    pieces, start, end = [], t0, t0 + duration
     while start < end:
         # The nudge keeps a start that rounding left a hair below a turning
         # point in the next piece (it misplaces at most 1e-9 of a half period).
         piece = math.floor(start / half + 1e-9)
         stop = min((piece + 1) * half, end)
         rate = slope if piece % 2 == 0 else -slope
-        length = stop - start
-        middle = triangle_phase(start) + rate * length / 2
-        total += length * np.exp(-1j * middle) * np.sinc(rate * length / (2 * math.pi))
+        middle = triangle_phase(start) + rate * (stop - start) / 2
+        pieces.append([(start - t0) / duration, (stop - start) / duration, middle,
+                       rate * duration])
         start = stop
-    return complex(total / duration)
+    if len(pieces) == 1:
+        pieces[0][:2] = 0.0, 1.0
+    return tuple(tuple(piece) for piece in pieces)
 
 
 def object_note(name, drive, piezo=False):
@@ -350,6 +382,8 @@ def object_note(name, drive, piezo=False):
         piezo's sine only in Follow DAQ, which it is locked to.
     """
     text = _object_text(name, drive)
+    if piezo and name == "Vibration":  # the white nodal line is a Previous-view result
+        text = text.replace("Set the reference on Still first", "Use Previous view")
     if piezo:
         text = (f"{text[:-1]}; reference piezo: {PIEZO_TRIANGLE_HZ:g} Hz triangle, "
                 f"{PIEZO_TRIANGLE_NM / 1000:g} µm peak to peak (decorrelation).")
@@ -427,7 +461,7 @@ class DemoSource:
         self.clock_s = 0.0
         self._cycle_start = 0.0  # when Slow deformation was chosen (its cycle's 0)
         self._harmonic = None   # (key, frequency, Z, u map, arg Z map)
-        self._table = None      # (key, FringeTable, prepared lookup, fixed F or None)
+        self._tables = collections.OrderedDict()  # key -> [FringeTable, prepared, fixed F]
         self._warned = False
         rng = np.random.default_rng(zlib.crc32((label or "DEMO").encode()))
         noise = rng.standard_normal((height, width)) + 1j * rng.standard_normal((height, width))
@@ -594,7 +628,7 @@ class DemoSource:
             self._harmonic = (key, frequency, path,
                               (K_PER_NM * np.abs(path)).astype(np.float32),
                               np.angle(path).astype(np.float32))
-        self._table = None
+        self._tables.clear()
         return self._harmonic
 
     def _drum_response(self, frequency):
@@ -614,12 +648,18 @@ class DemoSource:
     def _fringe_map(self, state, exposure_us, t0):
         """The exposure average F at every pixel for this frame.
 
+        With the reference piezo's triangle on, F also averages the ramp,
+        exactly (the triangle's pieces go into the table's weights); its
+        phase at the exposure's middle is a factor outside the table, so the
+        two ramp directions each keep one table frame to frame.
+
         Args: state is _harmonic_state(); exposure_us is the exposure; t0 is
             the exposure's start on the sensor clock.
         Returns: A complex64 (height, width) map.
         """
         _, frequency, _, amplitude, angle = state
-        cycles = frequency * exposure_us * 1e-6
+        duration = exposure_us * 1e-6
+        cycles = frequency * duration
         needed = float(amplitude.max())
         if needed > TABLE_U_LIMIT and not self._warned and self.log is not None:
             self.log.warning(
@@ -627,18 +667,29 @@ class DemoSource:
                 "rad its fringes are finer than the speckle, so those pixels are "
                 f"simulated at {TABLE_U_LIMIT:.0f} rad.")
             self._warned = True
-        key = (cycles, min(needed, TABLE_U_LIMIT))
-        if self._table is None or self._table[0] != key:
-            table = FringeTable(key[1], cycles)
-            self._table = (key, table, table.prepare(amplitude), None)
-        _, table, prepared, fixed = self._table
-        if not table.depends_on_beta:  # whole cycles: the same every frame
+        pieces, factor = None, None
+        if self.piezo_on and duration > 0:
+            pieces = ramp_pieces(t0, duration)
+            reference = pieces[0][2]
+            factor = np.complex64(np.exp(-1j * reference))
+            pieces = tuple((start, length, middle - reference, rate)
+                           for start, length, middle, rate in pieces)
+        key = (cycles, min(needed, TABLE_U_LIMIT), pieces)
+        entry = self._tables.get(key)
+        if entry is None:
+            table = FringeTable(key[1], cycles, pieces)
+            entry = self._tables[key] = [table, table.prepare(amplitude), None]
+            while len(self._tables) > TABLE_CACHE_SIZE:
+                self._tables.popitem(last=False)
+        self._tables.move_to_end(key)
+        table, prepared, fixed = entry
+        if not table.depends_on_beta:  # whole cycles, no ramp: the same every frame
             if fixed is None:
-                fixed = table.lookup(prepared, angle)
-                self._table = self._table[:3] + (fixed,)
+                fixed = entry[2] = table.lookup(prepared, angle)
             return fixed
         shift = np.float32(2 * math.pi * ((frequency * t0) % 1.0))
-        return table.lookup(prepared, angle + shift)
+        fringe = table.lookup(prepared, angle + shift)
+        return fringe if factor is None else fringe * factor
 
     def next_frame(self, exposure_us, gain_db, fps):
         """Expose one frame starting at clock_s, then advance the clock a frame period.
@@ -653,17 +704,14 @@ class DemoSource:
             dent = deformation_nm(self.clock_s - self._cycle_start)
             phase = phase + np.float32(K_PER_NM * dent) * self.load_shape
         state = self._harmonic_state()
-        # The triangle is a scalar on the uniform reference beam, and far
-        # slower than any vibration, so its exposure average multiplies F.
-        ramp = (reference_ramp_average(self.clock_s, exposure_us * 1e-6)
-                if self.piezo_on else None)
-        if state[2] is None and ramp is None:
+        if state[2] is None and not self.piezo_on:
             intensity = self.background + self.modulation * np.cos(phase)
         else:
+            # A vibration's F includes the triangle exactly; without one the
+            # triangle on the uniform reference beam is a single number.
             fringe = (self._fringe_map(state, exposure_us, self.clock_s)
-                      if state[2] is not None else np.complex64(1.0))
-            if ramp is not None:
-                fringe = fringe * np.complex64(ramp)
+                      if state[2] is not None else
+                      np.complex64(reference_ramp_average(self.clock_s, exposure_us * 1e-6)))
             intensity = self.background + self.modulation * (
                 np.real(fringe) * np.cos(phase) - np.imag(fringe) * np.sin(phase))
         scale = exposure_us / REFERENCE_EXPOSURE_US * 10.0 ** (gain_db / 20.0)

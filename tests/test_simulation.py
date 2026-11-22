@@ -144,6 +144,32 @@ class FringeTableTests(unittest.TestCase):
         self.assertTrue(FringeTable(16, 8.7).depends_on_beta)
         self.assertTrue(FringeTable(16, 0.3).depends_on_beta)
 
+    def test_reference_ramp_pieces_match_brute_force(self):
+        """A linear reference ramp during the exposure is part of the exact average.
+
+        Args: None.
+        Returns: None.
+        """
+        betas = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+        cases = (
+            (8.0, ((0.0, 1.0, 0.0, 1.9),)),           # whole cycles, ramp up
+            (0.16, ((0.0, 1.0, 0.0, -1.9),)),         # 20 Hz at 8 ms, ramp down
+            (1.0, ((0.0, 0.3, -0.4, 0.57), (0.3, 0.7, 0.2, -1.33))),  # a turning point
+        )
+        for n, pieces in cases:
+            table = FringeTable(16, n, pieces)
+            self.assertTrue(table.depends_on_beta)
+            s = (np.arange(20000) + 0.5) / 20000
+            phase = np.zeros_like(s)
+            for start, length, middle, rate in pieces:
+                inside = (s >= start) & (s < start + length)
+                phase[inside] = middle + rate * (s[inside] - start - length / 2)
+            for u in (0.0, 3.0, 9.5, 16.0):
+                got = table.values(np.full(8, u), betas)
+                expected = np.array([np.exp(1j * (u * np.sin(2 * np.pi * n * s + b)
+                                                  - phase)).mean() for b in betas])
+                self.assertLess(float(np.abs(got - expected).max()), 3e-3, (n, u))
+
     def test_values_keep_the_input_shape(self):
         """A 2-D amplitude map gives a 2-D complex64 result.
 
@@ -596,14 +622,14 @@ class VibrationTests(unittest.TestCase):
         built = []
         real = simulation.FringeTable
 
-        def counting(u_max, cycles):
+        def counting(u_max, cycles, pieces=None):
             """Build a real table and count it.
 
-            Args: u_max and cycles are FringeTable's.
+            Args: u_max, cycles and pieces are FringeTable's.
             Returns: The FringeTable.
             """
             built.append(cycles)
-            return real(u_max, cycles)
+            return real(u_max, cycles, pieces)
         source = self.source("Vibration")
         with mock.patch.object(simulation, "FringeTable", counting):
             for exposure in (8000, 8000, 8100, 8100):
@@ -733,6 +759,33 @@ class ReferencePiezoTests(unittest.TestCase):
             expected = expected_frame(brute_frame(source, exposure, t0))
             self.assertLessEqual(max_error(frame, expected), 1, (exposure, t0))
 
+    def test_low_frequency_drive_with_piezo_matches_brute_force(self):
+        """A slow DAQ drive, its piezo sine and the triangle together stay exact.
+
+        Args: None.
+        Returns: None.
+        """
+        drive = Drive("sine", 20.0, 0.1, piezo_mode=SINE, piezo_amplitude_v=0.1)
+        for exposure, t0 in ((8000, 0.0123), (50000, 0.2), (50000, 0.48)):
+            source = self.source("Follow DAQ")
+            source.set_drive(drive)
+            source.clock_s = t0
+            frame = source.next_frame(exposure, 0, 30)
+            expected = expected_frame(brute_frame(source, exposure, t0))
+            self.assertLessEqual(max_error(frame, expected), 1, (exposure, t0))
+
+    def test_turning_point_tables_do_not_pile_up(self):
+        """Exposures across a turning point each need a table; only a few are kept.
+
+        Args: None.
+        Returns: None.
+        """
+        source = self.source("Vibration")
+        for t0 in (0.4950, 0.4960, 0.4970, 0.4980, 0.4990, 0.4995):
+            source.clock_s = t0
+            source.next_frame(8000, 0, 30)
+        self.assertEqual(len(source._tables), simulation.TABLE_CACHE_SIZE)
+
     def test_nodal_line_turns_white(self):
         """Frame-to-frame, the (1, 1) mode's still nodal line is bright with the piezo, black without.
 
@@ -771,6 +824,9 @@ class ReferencePiezoTests(unittest.TestCase):
             self.assertIn("reference piezo", note)
             self.assertIn("1 Hz triangle", note)
             self.assertNotIn("reference piezo", object_note(obj, Drive()))
+        vibration = object_note("Vibration", Drive(), piezo=True)
+        self.assertIn("Previous view", vibration)
+        self.assertNotIn("Set the reference on Still first", vibration)
 
 
 if __name__ == "__main__":
