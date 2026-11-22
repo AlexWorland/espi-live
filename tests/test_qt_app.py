@@ -5487,6 +5487,50 @@ class PhoneWindowTests(unittest.TestCase):
         window.show_channel(self.phone)
         self.assertAlmostEqual(window.phone_focus.spin.value(), 0.1)
 
+    def test_capture_mode_choice_starts_the_measurement_over(self):
+        """Choosing Bayer RAW resets averaging and the previous frame; a colour does not.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        engine = self.phone.engine
+        self.assertFalse(any(entry.endswith("Reset averaging.") for entry in self.log.lines))
+        with mock.patch.object(engine, "request", wraps=engine.request) as request:
+            window.phone_capture.activated.emit(window.phone_capture.findData(True))
+            self.assertEqual(request.call_args_list,
+                             [mock.call("reset_average"), mock.call("reset_previous"),
+                              mock.call("camera_command", raw=True)])
+            self.assertTrue(self.sent({"raw": True}))
+            for line in ("Reset averaging.", "Reset previous frame."):
+                self.assertTrue(wait_for(lambda line=line: any(
+                    entry.endswith(line) for entry in self.log.lines)), line)
+            request.reset_mock()
+            window.phone_raw_channel.activated.emit(
+                window.phone_raw_channel.findData("green"))
+            self.assertEqual(request.call_args_list,
+                             [mock.call("camera_command", raw_channel="green")])
+        self.assertTrue(self.sent({"raw_channel": "green"}))
+
+    def test_capture_mode_follows_the_phone(self):
+        """RAW mode and colour reported by the phone select the matching choices.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        self.assertIs(window.phone_capture.currentData(), False)
+        self.assertEqual(window.phone_raw_channel.currentData(), "red")
+        window._handle_event(self.phone, "camera_settings",
+                             {"raw": True, "raw_channel": "green"})
+        self.assertIs(window.phone_capture.currentData(), True)
+        self.assertEqual(window.phone_raw_channel.currentData(), "green")
+        self.assertEqual((self.phone.camera_settings["raw"],
+                          self.phone.camera_settings["raw_channel"]), (True, "green"))
+        window._handle_event(self.phone, "camera_settings", {"raw": False})
+        self.assertIs(window.phone_capture.currentData(), False)
+        self.assertEqual(window.phone_raw_channel.currentData(), "green")  # unchanged
+
 
 class PhoneLensWindowTests(unittest.TestCase):
     """One iPhone with three back cameras: one drop-down entry each, one streaming."""

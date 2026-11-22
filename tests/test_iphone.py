@@ -86,6 +86,73 @@ class ProtocolTests(unittest.TestCase):
                 with self.assertRaises(iphone.LinkError):
                     iphone.decode_frame(bytearray(payload))
 
+    def test_raw_frame_round_trip(self):
+        """A RAW plane decodes to float grey levels: black 0, white 255, below black negative.
+
+        Args: None.
+        Returns: None.
+        """
+        plane = np.array([[64, 1023, 543], [32, 64, 1023]], np.uint16)
+        data = iphone.encode_raw_frame(plane, 64.0, 1023.0, channel=1, pattern=2,
+                                       sequence=7, timestamp_ns=11, exposure_us=2000.0,
+                                       iso=50.0, lens_position=0.5)
+        kind, payload = iphone.read_message(FakeSocket(data))
+        meta, decoded = iphone.decode_frame(payload)
+        self.assertEqual(kind, iphone.KIND_FRAME)
+        self.assertEqual(decoded.dtype, np.float32)
+        expected = (plane.astype(np.float64) - 64.0) * (255.0 / (1023.0 - 64.0))
+        np.testing.assert_allclose(decoded, expected, rtol=1e-6, atol=1e-4)
+        self.assertEqual((decoded[0, 0], decoded[0, 1]), (0.0, 255.0))
+        self.assertLess(decoded[1, 0], 0.0)  # under the black level, kept for averaging
+        self.assertEqual((meta.width, meta.height, meta.sequence, meta.timestamp_ns),
+                         (3, 2, 7, 11))
+        self.assertEqual((meta.raw, meta.channel, meta.black_level, meta.white_level),
+                         (True, 1, 64.0, 1023.0))
+        self.assertEqual((meta.exposure_us, meta.iso, meta.lens_position), (2000.0, 50.0, 0.5))
+
+    def test_padded_raw_rows_are_dropped(self):
+        """A RAW stride wider than the plane is cut back to contiguous rows.
+
+        Args: None.
+        Returns: None.
+        """
+        meta = iphone.FRAME_META.pack(2, 2, 3, iphone.PIXEL_MONO16, 0, 0, 0, 0, 0, 0)
+        raw = iphone.RAW_META.pack(0.0, 255.0, 0, 0)
+        body = np.array([1, 2, 9, 3, 4, 9], "<u2").tobytes()
+        frame_meta, image = iphone.decode_frame(bytearray(meta + raw + body))
+        np.testing.assert_array_equal(image, [[1.0, 2.0], [3.0, 4.0]])
+        self.assertTrue(image.flags.c_contiguous)
+        self.assertEqual(frame_meta.channel, 0)
+
+    def test_bad_raw_frames(self):
+        """Truncated, wrongly sized, levelless and unknown-colour RAW frames are LinkErrors.
+
+        Args: None.
+        Returns: None.
+        """
+        def raw_payload(width=2, height=1, stride=2, black=0.0, white=255.0, channel=0,
+                        values=2):
+            """Build a RAW FRAME payload.
+
+            Args: width, height and stride fill FRAME_META; black, white and
+                channel fill RAW_META; values is how many 16-bit values follow.
+            Returns: The payload bytes.
+            """
+            return (iphone.FRAME_META.pack(width, height, stride, iphone.PIXEL_MONO16,
+                                           0, 0, 0, 0, 0, 0)
+                    + iphone.RAW_META.pack(black, white, channel, 0) + bytes(2 * values))
+
+        meta_only = iphone.FRAME_META.pack(2, 1, 2, iphone.PIXEL_MONO16, 0, 0, 0, 0, 0, 0)
+        cases = {"truncated RAW_META": meta_only + bytes(4),
+                 "short body": raw_payload(values=1),
+                 "narrow stride": raw_payload(stride=1, values=1),
+                 "white at black": raw_payload(black=64.0, white=64.0),
+                 "white below black": raw_payload(black=64.0, white=10.0),
+                 "unknown colour": raw_payload(channel=len(iphone.RAW_CHANNELS))}
+        for name, payload in cases.items():
+            with self.subTest(name), self.assertRaises(iphone.LinkError):
+                iphone.decode_frame(bytearray(payload))
+
     def test_bad_headers(self):
         """Foreign data, another version and oversized messages are refused.
 
@@ -170,6 +237,28 @@ class IdentityAndListingTests(unittest.TestCase):
         self.assertIn("rolling shutter", known.warnings()[0])
         minimal = iphone.IPhoneIdentity(device_model="iPhone16,1")
         self.assertEqual(len(minimal.description()), 1)
+
+    def test_raw_identity_text(self):
+        """In RAW mode the description names the Bayer plane and the caution changes.
+
+        Args: None.
+        Returns: None.
+        """
+        raw = iphone.IPhoneIdentity(serial=UDID, device_model="iPhone16,1",
+                                    system_version="27.1", app_version="0.1 (5)",
+                                    camera="Back", width=1920, height=1080, raw=True,
+                                    raw_channel="green")
+        lines = raw.description()
+        self.assertEqual(lines[1], "Back: Bayer RAW green plane, 16-bit, no image "
+                                   "processing, uncompressed over USB")
+        self.assertNotIn("Mono8", " ".join(lines))
+        self.assertIn(UDID, lines[-1])
+        warning = raw.warnings()[0]
+        self.assertIn("RAW mode", warning)
+        self.assertIn("noise is the sensor's own", warning)
+        self.assertNotIn("noise reduction", warning)
+        unnamed = iphone.IPhoneIdentity(device_model="iPhone16,1", raw=True)
+        self.assertTrue(unnamed.description()[1].startswith("Camera: Bayer RAW red plane"))
 
     def test_list_iphones(self):
         """Each USB device becomes an iphone CameraInfo; no service means none.
@@ -558,6 +647,34 @@ class SessionFrameTests(SessionCase):
         self.assertIn("closed", str(error))
         sleep.assert_called_once_with(0.01)
 
+    def test_raw_frames_are_deep_and_described(self):
+        """RAW planes arrive as float frames; identity and status line follow the mode.
+
+        Args: None.
+        Returns: None.
+        """
+        sock = self.open()
+        self.assertFalse(self.session.identity.raw)
+        sock.feed(iphone.encode_json(iphone.KIND_STATUS, status(
+            settings=phone_settings(raw=True, raw_channel="green"))))
+        plane = np.full((4, 8), 543, np.uint16)
+        sock.feed(iphone.encode_raw_frame(plane, 64.0, 1023.0, channel=1,
+                                          exposure_us=2000.0, iso=64.0))
+        frame, state = self.session.grab(1000)
+        self.assertEqual((state, frame.dtype, frame.shape), ("ok", np.float32, (4, 8)))
+        self.assertAlmostEqual(float(frame[0, 0]), 479 * 255 / 959, places=4)
+        identity = self.session.identity
+        self.assertEqual((identity.raw, identity.raw_channel), (True, "green"))
+        self.assertEqual(identity.device_model, "iPhone16,1")  # the rest is kept
+        self.assertIn("Bayer RAW green plane", " ".join(identity.description()))
+        text = self.session.describe(self.session.read_values())
+        for part in ("iPhone iPhone16,1 8 × 4 RAW green over USB",
+                     "black 64, white 1023 counts", "exposure 2000 µs, ISO 64"):
+            self.assertIn(part, text)
+        sock.feed(iphone.encode_json(iphone.KIND_STATUS, status()))
+        self.assertTrue(wait_until(lambda: not self.session.identity.raw))
+        self.assertEqual(self.session.identity.raw_channel, "red")
+
     def test_silent_link_counts_as_lost(self):
         """No message for STALL_S drops and re-opens the link.
 
@@ -646,6 +763,31 @@ class SessionSettingsTests(SessionCase):
         self.session.send_command(lens_position=0.2)
         self.session._requested_at.pop("lens_position")
         self.assertIsNone(self.session.take_settings_update())
+
+    def test_take_settings_update_reports_raw_mode(self):
+        """The phone's capture mode is reported once, and the viewer's own echo not at all.
+
+        Args: None.
+        Returns: None.
+        """
+        sock = self.open()
+        self.session._requested_at = {key: 0.0 for key in self.session._requested_at}
+        first = self.session.take_settings_update()
+        self.assertNotIn("raw", first)  # the HELLO did not say
+        sock.feed(iphone.encode_json(iphone.KIND_STATUS, status(
+            settings=phone_settings(raw=True, raw_channel="green"))))
+        self.assertTrue(wait_until(lambda: self.session.status.get("settings", {})
+                                   .get("raw") is True))
+        self.assertEqual(self.session.take_settings_update(),
+                         {"raw": True, "raw_channel": "green"})
+        self.assertIsNone(self.session.take_settings_update())  # reported once
+        self.session.send_command(raw=False)
+        self.assertEqual(commands(sock)[-1], {"raw": False})
+        self.assertIs(self.session._starting_command()["raw"], False)  # kept for a reconnect
+        sock.feed(iphone.encode_json(iphone.KIND_STATUS, status(
+            settings=phone_settings(raw=False, raw_channel="green"))))
+        self.assertTrue(wait_until(lambda: self.session.status["settings"]["raw"] is False))
+        self.assertIsNone(self.session.take_settings_update())  # just sent by the viewer
 
     def test_take_settings_update_without_iso(self):
         """Without an ISO the gain is left out.

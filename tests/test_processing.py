@@ -7,16 +7,17 @@ import unittest
 
 import numpy as np
 
-from espi_live.processing import (MAX_BRIGHTNESS_GAIN, MAX_DENOISE_PERCENT,
-                                  MAX_DENOISE_STRENGTH, MAX_FRAMES_BACK,
-                                  NOISE_MARGIN, PEAK_SLICES, DemoSource,
-                                  ESPIProcessor, NoiseCalibration, PeakHold,
-                                  RangeTracker, apply_gain, apply_levels,
-                                  denoise_strength, display_lut,
-                                  even_out_brightness, local_normalize,
-                                  normalize_min_max, reject_outliers,
-                                  single_field, stretch_contrast,
-                                  stretch_levels, watermark_demo)
+from espi_live.processing import (FULL_SCALE, MAX_BRIGHTNESS_GAIN,
+                                  MAX_DENOISE_PERCENT, MAX_DENOISE_STRENGTH,
+                                  MAX_FRAMES_BACK, NOISE_MARGIN, PEAK_SLICES,
+                                  DemoSource, ESPIProcessor, NoiseCalibration,
+                                  PeakHold, RangeTracker, ReferenceCapture,
+                                  apply_gain, apply_levels, denoise_strength,
+                                  display_lut, even_out_brightness,
+                                  local_normalize, normalize_min_max,
+                                  reject_outliers, saturate, single_field,
+                                  stretch_contrast, stretch_levels, to_uint8,
+                                  watermark_demo)
 
 
 class NormalizeTests(unittest.TestCase):
@@ -527,6 +528,196 @@ class FringeEnhancementTests(unittest.TestCase):
         self.assertLess(int(curve[64]), 64)
         self.assertGreater(int(curve[192]), 192)
         self.assertEqual(int(display_lut(brightness=10)[0]), 10)
+
+
+def deep(value, shape=(2, 2)):
+    """Make a constant deep (float32) frame.
+
+    Args: value is the grey level, fractions allowed; shape is the array shape.
+    Returns: A float32 array.
+    """
+    return np.full(shape, value, np.float32)
+
+
+class DeepFrameTests(unittest.TestCase):
+    """Deep (float32) frames, as the iPhone's RAW mode sends, keep their fractions."""
+
+    def test_to_uint8_rounds_and_clips_negatives_to_black(self):
+        """A deep image becomes the 8-bit picture: rounded, black below 0, white above 255.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.array([[-3.0, 0.4, 127.6, 300.0]], np.float32)
+        result = to_uint8(image)
+        self.assertEqual(result.dtype, np.uint8)
+        self.assertEqual(result.tolist(), [[0, 0, 128, 255]])  # -3 is black, not 3
+        picture = np.array([[1, 2]], np.uint8)
+        self.assertIs(to_uint8(picture), picture)
+
+    def test_saturate_follows_the_frames_type(self):
+        """A product is rounded to uint8 for 8-bit frames, capped in place for deep ones.
+
+        Args: None.
+        Returns: None.
+        """
+        product = np.array([[1.4, 1.6, 300.0]], np.float32)
+        rounded = saturate(product.copy(), np.zeros(1, np.uint8))
+        self.assertEqual(rounded.dtype, np.uint8)
+        self.assertEqual(rounded.tolist(), [[1, 2, 255]])
+        capped = saturate(product, product)
+        self.assertIs(capped, product)
+        self.assertEqual(capped.dtype, np.float32)
+        self.assertEqual(capped.tolist(), [[np.float32(1.4), np.float32(1.6), FULL_SCALE]])
+
+    def test_stretch_levels_of_a_deep_image_keep_fractions(self):
+        """A difference under one grey level gets fractional levels, not 0 and 1.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.linspace(0.0, 1.0, 100, dtype=np.float32).reshape(10, 10)
+        self.assertEqual(stretch_levels(image, 0), (0.0, 1.0))
+        low, high = stretch_levels(image, 5)
+        self.assertIsInstance(low, float)
+        # The uint8 rule on 0..99 gives (5, 94); here within two of 1024 bins.
+        self.assertAlmostEqual(low, 5 / 99, delta=0.002)
+        self.assertAlmostEqual(high, 94 / 99, delta=0.002)
+        flat = deep(0.3, (3, 3))
+        self.assertEqual(stretch_levels(flat, 5), (float(np.float32(0.3)),) * 2)
+
+    def test_apply_levels_maps_fractional_levels(self):
+        """Levels half a grey level apart still span black to white.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.array([[0.5, 1.0, 1.5, 2.0]], np.float32)
+        result = apply_levels(image, 0.5, 1.5)
+        self.assertEqual(result.dtype, np.uint8)
+        self.assertEqual(result.tolist(), [[0, 128, 255, 255]])
+        self.assertFalse(apply_levels(image, 1.0, 1.0).any())
+
+    def test_range_tracker_fine_keeps_fractions(self):
+        """For deep images the tracked levels and the floor stay fractional.
+
+        Args: None.
+        Returns: None.
+        """
+        tracker = RangeTracker()
+        self.assertEqual(tracker.update(0.2, 0.7, 0, 0, 0.0, fine=True), (0.2, 0.7))
+        low, high = tracker.update(0.2, 0.7, 2, 0, 1.0, fine=True)
+        self.assertEqual(low, 0.2)
+        self.assertAlmostEqual(high, 2.2)  # the floor widens the range
+        self.assertEqual(tracker.update(0.2, 0.7, 0, 0, 2.0), (0, 1))  # 8-bit rounding
+
+    def test_noise_calibration_allows_no_floor_for_quiet_deep_frames(self):
+        """A RAW still scene under half a grey level of noise needs no floor.
+
+        Args: None.
+        Returns: None.
+        """
+        quiet = NoiseCalibration(now=0.0)
+        for level in (0.2, 0.3, 0.4):
+            quiet.add(deep(level, (10, 10)))
+        self.assertTrue(quiet.deep)
+        noise, floor = quiet.result()
+        self.assertAlmostEqual(noise, 0.3, places=6)
+        self.assertEqual(floor, 0)
+        louder = NoiseCalibration(now=0.0)
+        louder.add(deep(2.0, (10, 10)))
+        self.assertEqual(louder.result(), (2.0, int(2 * NOISE_MARGIN)))
+        eight_bit = NoiseCalibration(now=0.0)  # 8-bit frames keep the 1-level minimum
+        eight_bit.add(np.zeros((10, 10), np.uint8))
+        self.assertEqual(eight_bit.result(), (0.0, 1))
+
+    def test_apply_gain_keeps_fractions_and_caps_at_full_scale(self):
+        """Gain on a deep frame keeps fractions and stops at 255 without rounding.
+
+        Args: None.
+        Returns: None.
+        """
+        image = np.array([[0.25, 1.5, 100.0]], np.float32)
+        result = apply_gain(image, 42.0)
+        self.assertEqual(result.dtype, np.float32)
+        self.assertEqual(result.tolist(), [[10.5, 63.0, 255.0]])
+        self.assertEqual(image.tolist(), [[0.25, 1.5, 100.0]])  # the input is kept
+        self.assertIs(apply_gain(image, 1.0), image)
+
+    def test_reference_capture_mean_of_deep_frames(self):
+        """A deep reference is the exact float mean of its frames.
+
+        Args: None.
+        Returns: None.
+        """
+        capture = ReferenceCapture(2, 0.0, 0.0, True)
+        self.assertIsNone(capture.add(deep(1.0)))
+        mean = capture.add(deep(2.5))
+        self.assertEqual(mean.dtype, np.float32)
+        self.assertTrue((mean == 1.75).all())  # uint8 would round to 2
+
+    def test_average_frames_of_deep_frames(self):
+        """Frames averaged before the difference keep the fractional mean.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        self.assertIsNone(processor.average_frames(deep(1.0), 2))
+        mean = processor.average_frames(deep(2.5), 2)
+        self.assertEqual(mean.dtype, np.float32)
+        self.assertTrue((mean == 1.75).all())
+        self.assertIsNone(processor.frame_accum)  # the next block starts fresh
+
+    def test_denoise_of_deep_frames_hands_out_a_copy(self):
+        """Noise reduction keeps fractions and never hands out its running sum.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        first = deep(1.0)
+        self.assertIs(processor.denoise(first, 0.5), first)
+        blended = processor.denoise(deep(2.0), 0.5)
+        self.assertEqual(blended.dtype, np.float32)
+        self.assertTrue((blended == 1.5).all())
+        self.assertIsNot(blended, processor.denoised)
+        processor.denoise(deep(4.0), 0.5)
+        self.assertTrue((blended == 1.5).all())  # a later frame leaves it alone
+
+    def test_block_average_of_deep_frames(self):
+        """The block mean keeps fractions; a scale multiplies it and caps at 255.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        self.assertIsNone(processor.average(deep(0.5), 2, 3.0))
+        scaled = processor.average(deep(1.0), 2, 3.0)
+        self.assertEqual(scaled.dtype, np.float32)
+        self.assertTrue((scaled == 2.25).all())  # (0.5 + 1.0) x 3 / 2
+        self.assertIsNone(processor.average(deep(100.0), 2, 400.0))
+        self.assertTrue((processor.average(deep(100.0), 2, 400.0) == FULL_SCALE).all())
+        self.assertIsNone(processor.average(deep(0.5), 2))
+        plain = processor.average(deep(1.0), 2)
+        self.assertEqual(plain.dtype, np.float32)
+        self.assertTrue((plain == 0.75).all())
+
+    def test_rolling_average_of_deep_frames(self):
+        """The running average keeps fractions; a scale multiplies it and caps at 255.
+
+        Args: None.
+        Returns: None.
+        """
+        processor = ESPIProcessor()
+        first = processor.rolling_average(deep(0.25), 4)
+        self.assertEqual(first.dtype, np.float32)
+        self.assertTrue((first == 0.25).all())
+        self.assertIsNot(first, processor.rolling)
+        scaled = processor.rolling_average(deep(1.25), 4, 2.0)
+        self.assertTrue((scaled == 1.0).all())  # (0.25 + (1.25 - 0.25) / 4) x 2
+        bright = ESPIProcessor().rolling_average(deep(200.0), 4, 2.0)
+        self.assertTrue((bright == FULL_SCALE).all())
 
 
 if __name__ == "__main__":
