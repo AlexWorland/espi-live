@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-21 — Dummy mode simulates an ESPI signal
+
+### Previous state
+
+- Dummy mode (`--demo`) showed a moving test pattern (a gradient, a checkerboard and a bouncing circle). It exercised the plumbing, but the ESPI processing meant nothing on it: no speckle, no fringes.
+
+### Current state
+
+- **Dummy mode is a simulated ESPI signal**: an ideal camera (no sensor noise; brightness proportional to exposure × gain; 8-bit, clipping at 255) looking at a speckle interferometer whose specimen is a **drumhead**, an ideal circular membrane clamped at its rim. Previous and Reference views, averaging, gain or stretch, the LabVIEW flow and the noise floor now run on a signal whose correct result is known, to check the processing by eye.
+- A **Simulated object** control (Camera section, demo cameras only, saved per demo camera) chooses **Still**, **Slow deformation** (the default: pressed in to 8 fringes and released every 12 s), **Vibration** (drum mode (1, 1) at 1000 Hz) or **Follow DAQ** (the NI DAQ window's generator drives the drum's resonant modes; the Simulated device works). A note under it says what drives the drum.
+- The DAQ piezo moves the simulated reference mirror in every case (1500 nm per DAQ volt; the default 0.05 V step is about 85°), and its sine modulates the reference in Follow DAQ.
+- Vibration is averaged exactly over each exposure: a whole number of drive cycles per exposure gives steady J0 fringes, a fractional number flickers as on a real camera.
+- Each demo camera has its own speckle pattern. The **DUMMY MODE ACTIVE** watermark, banner and `dummy_` file names are unchanged.
+
 ## 2026-11-21 — iPhone back cameras listed one by one
 
 ### Previous state
