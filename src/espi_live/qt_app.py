@@ -3077,39 +3077,73 @@ class DaqDialog(QDialog):
 
 WIRING_TITLE = "Where to plug in (NI USB-6251)"
 ROLE_COLORS = {daq.PIEZO_ROLE: "#d9480f", daq.GENERATOR_ROLE: "#1c7ed6"}
-PANEL_SIZE = (940.0, 450.0)  # the drawing's own units; it is scaled to the widget
-BNC_RADIUS = 22.0
-# Group boxes (x, y, width, height) and the sockets in each, in drawing units.
-PANEL_BOXES = (("ANALOG INPUTS", (20, 50, 340, 240)),
-               ("ANALOG OUTPUTS", (380, 50, 180, 115)),
-               ("APFI", (380, 175, 180, 115)),
-               ("USER", (380, 300, 180, 100)),
-               ("PFI (DIGITAL / TIMING)", (580, 50, 340, 240)))
+# The drawing follows NI's "NI USB-6251 BNC Front Panel and Pinout" figure
+# (NI 6251 Specifications), in its own units; it is scaled to the widget.
+PANEL_SIZE = (1270.0, 2010.0)
+PANEL_TOP = 40.0  # below the blue end cap
+BNC_RADIUS = 64.0
+PANEL_INK, PANEL_FACE, PANEL_CAP = "#24405f", "#f6f6f2", "#2f5d9b"
+# Boxes printed on the panel: (title, x, y, width, height).
+PANEL_BOXES = (("DIGITAL AND TIMING I/O", 12, 88, 750, 372),
+               ("APFI", 12, 470, 310, 206),
+               ("ANALOG OUTPUT", 12, 686, 482, 205),
+               ("ANALOG INPUT", 12, 902, 750, 918),
+               ("POWER (+5 V)", 772, 88, 168, 108),
+               ("DIGITAL AND TIMING I/O", 772, 208, 486, 1612))
+# The screw terminals from top to bottom: (label as printed, socket name or "").
+SCREW_ROWS = (("USER 1", "user1"), ("USER 2", "user2"), ("D GND", ""), ("+5 V", ""),
+              ("D GND", ""), ("P0.0", ""), ("P0.1", ""), ("P0.2", ""), ("P0.3", ""),
+              ("D GND", ""), ("P0.4", ""), ("P0.5", ""), ("P0.6", ""), ("P0.7", ""),
+              ("D GND", ""), ("PFI 8/P2.0", "pfi8"), ("PFI 9/P2.1", "pfi9"),
+              ("PFI 10/P2.2", "pfi10"), ("PFI 11/P2.3", "pfi11"), ("D GND", ""),
+              ("PFI 12/P2.4", "pfi12"), ("PFI 13/P2.5", "pfi13"),
+              ("PFI 14/P2.6", "pfi14"), ("PFI 15/P2.7", "pfi15"), ("D GND", ""),
+              ("D GND", ""), ("AI GND", ""), ("AI SENSE", ""), ("NC", ""), ("CHS GND", ""))
+SCREW_TOP, SCREW_PITCH = 572.0, 38.66  # first row's centre and the row spacing
+SCREW_TERMINALS = {name: index for index, (_, name) in enumerate(SCREW_ROWS)
+                   if name.startswith("pfi")}
 
 
 def panel_positions():
     """Place every BNC socket of the USB-6251 BNC in the drawing.
 
     Args: None.
-    Returns: A dict from socket name ("ai0", "ao1", "pfi4", ...) to its
-        centre (x, y) in drawing units.
+    Returns: A dict from socket name ("ai0", "ao1", "pfi4", ...) to
+        (centre x, centre y, label as printed) in drawing units.
     """
+    columns = (168, 340, 512, 684)
     places = {}
-    for index in range(8):
-        column, row = index % 4, index // 4
-        places[f"ai{index}"] = (65 + 80 * column, 115 + 110 * row)
-        places[f"pfi{index}"] = (625 + 80 * column, 115 + 110 * row)
-    places.update(ao0=(430, 115), ao1=(510, 115), apfi0=(470, 240),
-                  user1=(430, 345), user2=(510, 345))
+    for index in range(4):
+        x = columns[index]
+        places[f"pfi{index}"] = (x, 213, f"PFI {index}/P1.{index}")
+        places[f"pfi{index + 4}"] = (x, 380, f"PFI {index + 4}/P1.{index + 4}")
+        places[f"ai{index}"] = (x, 1027, f"AI {index}")
+        places[f"ai{index + 4}"] = (x, 1243, f"AI {index + 4}")
+    places.update(apfi0=(168, 597, "APFI 0"), ao0=(168, 812, "AO 0"),
+                  ao1=(340, 812, "AO 1"), user1=(938, 380, "USER 1"),
+                  user2=(1112, 380, "USER 2"))
     return places
 
 
-class DaqPanelView(QWidget):
-    """A drawing of the USB-6251 BNC's panel with the sockets to use marked.
+def panel_place(terminal):
+    """Say where a socket is on the USB-6251 BNC.
 
-    The drawing is schematic: socket names as printed on the device,
-    positions approximate. Each socket in use gets its role's colour and
-    the number of its line in the legend.
+    Args: terminal is a socket name such as "ao1" or "pfi12".
+    Returns: "bnc", "screw" (PFI 8-15 on the terminal strip) or "" when
+        the USB-6251 BNC has no such socket.
+    """
+    if terminal in panel_positions():
+        return "bnc"
+    return "screw" if terminal in SCREW_TERMINALS else ""
+
+
+class DaqPanelView(QWidget):
+    """A drawing of the USB-6251 BNC's front panel with the sockets to use marked.
+
+    It follows NI's front-panel figure: the PFI BNCs at the top, APFI 0,
+    the analog outputs, the analog inputs with their FS/GS switches, and
+    on the right USER 1/2 and the screw-terminal strip. Each socket in use
+    gets its role's colour and the number of its line in the legend.
     """
 
     def __init__(self, parent=None):
@@ -3120,19 +3154,21 @@ class DaqPanelView(QWidget):
         """
         super().__init__(parent)
         self.marks = {}  # socket -> (number, colour)
-        self.setMinimumSize(ui_scale.px(470), ui_scale.px(225))
-        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setMinimumSize(ui_scale.px(290), ui_scale.px(459))
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         policy.setHeightForWidth(True)
         self.setSizePolicy(policy)
 
     def set_connections(self, connections):
         """Mark the sockets a list of connections uses.
 
-        Args: connections is a list of daq.Connection, numbered from 1 in order.
+        Args: connections is a list of daq.Connection, numbered from 1 in order;
+            sockets this panel does not have are left out.
         Returns: None.
         """
         self.marks = {item.terminal: (number, ROLE_COLORS[item.role])
-                      for number, item in enumerate(connections, 1) if item.bnc}
+                      for number, item in enumerate(connections, 1)
+                      if panel_place(item.terminal)}
         self.update()
 
     def heightForWidth(self, width):
@@ -3151,8 +3187,21 @@ class DaqPanelView(QWidget):
         """
         return True
 
+    @staticmethod
+    def _font(base, size, bold=False):
+        """Make a font in drawing units.
+
+        Args: base is the widget's font; size is the pixel size in drawing
+            units; bold makes it bold.
+        Returns: A QFont.
+        """
+        font = QFont(base)
+        font.setPixelSize(size)
+        font.setBold(bold)
+        return font
+
     def paintEvent(self, event):
-        """Draw the panel, its groups and sockets, and the marks.
+        """Draw the panel, its printed boxes and labels, the sockets and the marks.
 
         Args: event is the Qt paint event.
         Returns: None.
@@ -3163,98 +3212,147 @@ class DaqPanelView(QWidget):
         painter.translate((self.width() - PANEL_SIZE[0] * scale) / 2,
                           (self.height() - PANEL_SIZE[1] * scale) / 2)
         painter.scale(scale, scale)
-        painter.setPen(QPen(QColor("#5a6470"), 3))
-        painter.setBrush(QColor("#e6e9ed"))
-        painter.drawRoundedRect(QRectF(4, 4, PANEL_SIZE[0] - 8, PANEL_SIZE[1] - 8), 18, 18)
-        font = QFont(self.font())
-        font.setPixelSize(15)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor("#202830"))
-        painter.drawText(QPointF(24, 36), "NI USB-6251 BNC")
-        font.setPixelSize(12)
-        painter.setFont(font)
-        for title, (x, y, w, h) in PANEL_BOXES:
-            painter.setPen(QPen(QColor("#8a94a0"), 1.5))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(QRectF(x, y, w, h), 8, 8)
-            painter.setPen(QColor("#3a4450"))
-            painter.drawText(QRectF(x, y + 4, w, 16), Qt.AlignHCenter, title)
-        self._draw_extras(painter, font)
-        font.setBold(False)
-        font.setPixelSize(13)
-        for name, (x, y) in panel_positions().items():
-            self._draw_socket(painter, font, name, x, y)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(PANEL_CAP))
+        painter.drawRoundedRect(QRectF(0, 0, PANEL_SIZE[0], PANEL_SIZE[1]), 40, 40)
+        painter.setBrush(QColor(PANEL_FACE))
+        painter.setPen(QPen(QColor(PANEL_INK), 3))
+        painter.drawRect(QRectF(0, PANEL_TOP, PANEL_SIZE[0], PANEL_SIZE[1] - 2 * PANEL_TOP))
+        painter.translate(0, PANEL_TOP)
+        self._draw_printing(painter)
+        for name, (x, y, label) in panel_positions().items():
+            self._draw_bnc(painter, name, x, y, label)
+        self._draw_terminals(painter)
         painter.end()
 
-    @staticmethod
-    def _draw_extras(painter, font):
-        """Draw the screw terminals, the USB socket and the caption.
+    def _draw_printing(self, painter):
+        """Draw the boxes, titles, switches, model text and logo printed on the panel.
 
-        Args: painter is the active QPainter (in drawing units); font is the
-            group-title font.
+        Args: painter is the active QPainter, in drawing units.
         Returns: None.
         """
-        painter.setPen(QPen(QColor("#8a94a0"), 1.5))
-        painter.setBrush(QColor("#d3d8de"))
-        painter.drawRoundedRect(QRectF(580, 300, 340, 100), 8, 8)
-        painter.setBrush(QColor("#9aa3ad"))
-        for index in range(16):
-            painter.drawRect(QRectF(592 + 20.5 * index, 330, 14, 14))
-        painter.setPen(QColor("#3a4450"))
-        painter.drawText(QRectF(580, 304, 340, 16), Qt.AlignHCenter, "SCREW TERMINALS")
-        painter.drawText(QRectF(580, 352, 340, 40), Qt.AlignHCenter | Qt.TextWordWrap,
-                         "PFI 8–15, P0.0–7, +5 V, D GND (no BNC)")
-        painter.setPen(QPen(QColor("#8a94a0"), 1.5))
-        painter.setBrush(QColor("#d3d8de"))
-        painter.drawRoundedRect(QRectF(20, 300, 340, 100), 8, 8)
-        painter.setBrush(QColor("#5a6470"))
-        painter.drawRect(QRectF(160, 330, 60, 26))
-        painter.setPen(QColor("#3a4450"))
-        painter.drawText(QRectF(20, 304, 340, 16), Qt.AlignHCenter, "USB AND POWER")
-        painter.drawText(QRectF(20, 362, 340, 20), Qt.AlignHCenter, "USB to the PC")
-        caption = QFont(font)
-        caption.setBold(False)
-        caption.setItalic(True)
-        painter.setFont(caption)
-        painter.drawText(QRectF(20, 410, 900, 30), Qt.AlignLeft | Qt.AlignVCenter,
-                         "Schematic: socket names as printed on the device; "
-                         "positions approximate.")
-        painter.setFont(font)
+        base = self.font()
+        for title, x, y, w, h in PANEL_BOXES:
+            painter.setPen(QPen(QColor(PANEL_INK), 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(x, y, w, h), 8, 8)
+            painter.setFont(self._font(base, 19, True))
+            painter.drawText(QRectF(x, y + 6, w, 26), Qt.AlignHCenter, title)
+        painter.setBrush(QColor("#9fd59a"))
+        painter.drawEllipse(QPointF(856, 158), 17, 17)  # the power light
+        for x, y in ((47, 242), (1224, 246), (47, 1785), (1224, 1785)):
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPointF(x, y), 23, 23)  # mounting screws
+        painter.setFont(self._font(base, 16))
+        for x in (168, 340, 512, 684):
+            for y in (1128, 1344):  # the FS/GS switch under each AI
+                painter.drawRect(QRectF(x - 34, y - 14, 68, 28))
+                painter.drawText(QRectF(x - 74, y - 12, 36, 24), Qt.AlignRight, "FS")
+                painter.drawText(QRectF(x + 40, y - 12, 36, 24), Qt.AlignLeft, "GS")
+        painter.drawText(QRectF(60, 1500, 300, 24), Qt.AlignHCenter, "Floating Source (FS)")
+        painter.drawText(QRectF(390, 1500, 300, 24), Qt.AlignHCenter,
+                         "Ground Ref. Source (GS)")
+        painter.drawText(QRectF(560, 552, 80, 50), Qt.AlignCenter, "⚠")
+        painter.setFont(self._font(base, 24, True))
+        painter.drawText(QRectF(940, 104, 318, 30), Qt.AlignRight, "NI USB-6251")
+        painter.setFont(self._font(base, 17))
+        painter.drawText(QRectF(900, 136, 358, 70), Qt.AlignRight,
+                         "8 Inputs, 16-bit, 1.25 MS/s\nMultifunction I/O with\n"
+                         "Correlated Digital I/O for USB")
+        for x in (864, 1038):  # the write-on name boxes under USER 1/2
+            painter.drawRect(QRectF(x, 478, 148, 48))
+            painter.drawText(QRectF(x, 452, 148, 24), Qt.AlignHCenter, "NAME")
+        painter.setPen(QPen(QColor(PANEL_INK), 2))
+        painter.drawPolyline([QPointF(876, 388), QPointF(832, 428), QPointF(832, 572),
+                              QPointF(878, 572)])
+        painter.drawPolyline([QPointF(1174, 388), QPointF(1215, 428), QPointF(1215, 608),
+                              QPointF(1110, 608)])
+        painter.setFont(self._font(base, 44, True))
+        painter.setPen(QColor(PANEL_INK))
+        painter.drawText(QRectF(0, 1835, PANEL_SIZE[0], 100), Qt.AlignCenter,
+                         "NATIONAL INSTRUMENTS")
 
-    def _draw_socket(self, painter, font, name, x, y):
-        """Draw one BNC socket, its name, and its mark when it is in use.
+    def _draw_bnc(self, painter, name, x, y, label):
+        """Draw one BNC socket with its printed name, and its mark when in use.
 
-        Args: painter is the active QPainter; font is the label font; name
-            is the socket ("ao1"); x and y are its centre.
+        Args: painter is the active QPainter; name is the socket ("ao1");
+            x and y are its centre; label is the name printed above it.
         Returns: None.
         """
         mark = self.marks.get(name)
         centre = QPointF(x, y)
-        painter.setPen(QPen(QColor(mark[1]) if mark else QColor("#6b7580"), 7 if mark else 2))
-        painter.setBrush(QColor("#c4c9cf"))
-        painter.drawEllipse(centre, BNC_RADIUS, BNC_RADIUS)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#2a2f35"))
-        painter.drawEllipse(centre, BNC_RADIUS * 0.55, BNC_RADIUS * 0.55)
-        painter.setBrush(QColor("#d8b45a"))
-        painter.drawEllipse(centre, 3.5, 3.5)
-        label = QFont(font)
-        label.setBold(mark is not None)
-        painter.setFont(label)
-        painter.setPen(QColor(mark[1]) if mark else QColor("#202830"))
-        painter.drawText(QRectF(x - 40, y + BNC_RADIUS + 4, 80, 18), Qt.AlignHCenter,
-                         daq.socket_label(name))
         if mark:
-            badge = QPointF(x + BNC_RADIUS, y - BNC_RADIUS)
-            painter.setPen(QPen(QColor("white"), 2))
+            painter.setPen(QPen(QColor(mark[1]), 14))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(centre, BNC_RADIUS + 12, BNC_RADIUS + 12)
+        painter.setPen(QPen(QColor(PANEL_INK), 3))
+        painter.setBrush(QColor("#c9cdd2"))
+        painter.drawEllipse(centre, BNC_RADIUS, BNC_RADIUS)
+        painter.setBrush(QColor("#a7adb4"))
+        painter.drawEllipse(centre, BNC_RADIUS * 0.78, BNC_RADIUS * 0.78)
+        painter.setBrush(QColor("#2a2f35"))
+        painter.drawEllipse(centre, BNC_RADIUS * 0.47, BNC_RADIUS * 0.47)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#d8b45a"))
+        painter.drawEllipse(centre, 9, 9)
+        font = self._font(self.font(), 17, mark is not None)
+        painter.setFont(font)
+        # As on NI's figure: the name sits just above the socket, under the box title.
+        box = QRectF(x - 110, y - 93, 220, 26)
+        if mark:  # a tag in the role's colour, so the ring cannot hide the name
+            width = QFontMetrics(font).horizontalAdvance(label) + 16
+            painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(mark[1]))
-            painter.drawEllipse(badge, 12, 12)
-            number = QFont(font)
-            number.setBold(True)
-            painter.setFont(number)
-            painter.drawText(QRectF(badge.x() - 12, badge.y() - 12, 24, 24),
-                             Qt.AlignCenter, str(mark[0]))
+            painter.drawRoundedRect(QRectF(x - width / 2, box.y(), width, box.height()), 6, 6)
+        painter.setPen(QColor("white") if mark else QColor(PANEL_INK))
+        painter.drawText(box, Qt.AlignCenter, label)
+        if mark:
+            self._draw_badge(painter, QPointF(x + BNC_RADIUS * 0.9, y - BNC_RADIUS * 0.9),
+                             mark)
+
+    def _draw_badge(self, painter, centre, mark):
+        """Draw a numbered badge in a role's colour.
+
+        Args: painter is the active QPainter; centre is a QPointF; mark is
+            (number, colour).
+        Returns: None.
+        """
+        painter.setPen(QPen(QColor("white"), 4))
+        painter.setBrush(QColor(mark[1]))
+        painter.drawEllipse(centre, 28, 28)
+        painter.setFont(self._font(self.font(), 30, True))
+        painter.drawText(QRectF(centre.x() - 28, centre.y() - 28, 56, 56), Qt.AlignCenter,
+                         str(mark[0]))
+
+    def _draw_terminals(self, painter):
+        """Draw the screw-terminal strip with its printed labels and any marks.
+
+        Args: painter is the active QPainter, in drawing units.
+        Returns: None.
+        """
+        top = SCREW_TOP - SCREW_PITCH / 2
+        painter.setPen(QPen(QColor(PANEL_INK), 3))
+        painter.setBrush(QColor("#2f3338"))
+        painter.drawRect(QRectF(878, top - 6, 150, SCREW_PITCH * len(SCREW_ROWS) + 30))
+        for index, (label, name) in enumerate(SCREW_ROWS):
+            y = SCREW_TOP + index * SCREW_PITCH
+            mark = self.marks.get(name) if name else None
+            if mark:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(mark[1]))
+                painter.drawRect(QRectF(880, y - SCREW_PITCH / 2, 146, SCREW_PITCH))
+            painter.setPen(QPen(QColor("#9aa1a8"), 2))
+            painter.setBrush(QColor("#4a4f55"))
+            painter.drawRect(QRectF(902, y - 14, 50, 28))  # the wire opening
+            painter.setBrush(QColor("#b9bec4"))
+            painter.drawEllipse(QPointF(976, y), 13, 13)  # the screw
+            painter.drawLine(QPointF(967, y - 9), QPointF(985, y + 9))
+            painter.setFont(self._font(self.font(), 17, mark is not None))
+            painter.setPen(QColor(mark[1]) if mark else QColor(PANEL_INK))
+            painter.drawText(QRectF(1045, y - 13, 210, 26), Qt.AlignLeft | Qt.AlignVCenter,
+                             label)
+            if mark:
+                self._draw_badge(painter, QPointF(848, y), mark)
 
 
 class DaqWiringDialog(QDialog):
@@ -3269,15 +3367,19 @@ class DaqWiringDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(WIRING_TITLE)
         room = parent.screen().availableGeometry()  # a large interface size must fit
-        self.resize(min(ui_scale.px(720), room.width() * 9 // 10),
-                    min(ui_scale.px(640), room.height() * 9 // 10))
+        self.resize(min(ui_scale.px(920), room.width() * 9 // 10),
+                    min(ui_scale.px(720), room.height() * 9 // 10))
         self.panel = DaqPanelView(self)
         self.legend = QLabel()
         self.legend.setWordWrap(True)
         self.legend.setTextFormat(Qt.RichText)
+        self.legend.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.device_note = QLabel()
         self.device_note.setWordWrap(True)
         self.device_note.setStyleSheet("color: gray;")
+        source = QLabel("Drawn from NI's “NI USB-6251 BNC Front Panel and Pinout” figure.")
+        source.setWordWrap(True)
+        source.setStyleSheet("color: gray;")
         safety = QLabel(
             "<b>Never connect the MDT694A's OUTPUT (up to 150 V) to the DAQ.</b> "
             "Switch the MDT694A on after ESPI live is running and the device is "
@@ -3288,13 +3390,16 @@ class DaqWiringDialog(QDialog):
         safety.setStyleSheet("color:#c00000;")
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.panel)
-        layout.addWidget(self.legend)
-        layout.addWidget(self.device_note)
-        layout.addWidget(safety)
-        layout.addStretch(1)
-        layout.addWidget(buttons)
+        side = QVBoxLayout()
+        side.addWidget(self.legend)
+        side.addWidget(self.device_note)
+        side.addWidget(safety)
+        side.addStretch(1)
+        side.addWidget(source)
+        side.addWidget(buttons)
+        layout = QHBoxLayout(self)
+        layout.addWidget(self.panel, 3)
+        layout.addLayout(side, 2)
 
     def show_settings(self, settings, device=None):
         """Mark the sockets and list the cables for these settings.
@@ -3308,7 +3413,8 @@ class DaqWiringDialog(QDialog):
         lines = []
         for number, item in enumerate(connections, 1):
             colour = ROLE_COLORS[item.role]
-            where = "" if item.bnc else " (screw terminal, not drawn)"
+            where = {"bnc": "", "screw": " (screw terminal)"}.get(
+                panel_place(item.terminal), " (not on the USB-6251 BNC)")
             lines.append(f'<p><span style="color:{colour}; font-weight:bold;">'
                          f"{number}. {item.label}{where}</span> → {item.target} "
                          f"<i>({item.role.lower()})</i><br>{item.note}</p>")

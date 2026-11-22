@@ -245,23 +245,43 @@ class DaqDialogTests(DaqWindowTestCase):
         dialog._set_combo(dialog.generator_output, "ctr0")
         self.assertEqual(wiring.panel.marks["pfi4"], (2, blue))
         dialog._set_combo(dialog.generator_terminal, "pfi12")
-        self.assertNotIn("pfi12", wiring.panel.marks)
-        self.assertIn("screw terminal, not drawn", wiring.legend.text())
+        self.assertEqual(wiring.panel.marks["pfi12"], (2, blue))  # its screw-terminal row
+        self.assertIn("PFI 12 (screw terminal)", wiring.legend.text())
         dialog._set_combo(dialog.generator_output, daq.OFF)
         dialog._set_combo(dialog.piezo_output, daq.OFF)
         self.assertEqual(wiring.panel.marks, {})
         self.assertIn("Nothing to plug in yet", wiring.legend.text())
         # The drawing paints at any size and keeps its proportions.
         dialog._set_combo(dialog.piezo_output, "ao1")
-        wiring.panel.resize(700, 340)
+        dialog._set_combo(dialog.generator_output, "ctr0")  # a marked screw row is drawn
+        wiring.panel.resize(400, 640)
         self.assertFalse(wiring.panel.grab().isNull())
         self.assertTrue(wiring.panel.hasHeightForWidth())
-        self.assertEqual(wiring.panel.heightForWidth(940), 450)
+        self.assertEqual(wiring.panel.heightForWidth(1270), 2010)
+        # A socket the USB-6251 BNC does not have is listed but not marked.
+        wiring.show_settings(daq.DaqSettings(piezo_output="ao2", generator_output=daq.OFF))
+        self.assertEqual(wiring.panel.marks, {})
+        self.assertIn("AO 2 (not on the USB-6251 BNC)", wiring.legend.text())
         # A second press reuses the window.
         wiring.hide()
         dialog.wiring_button.click()
         self.assertIs(dialog.wiring, wiring)
         self.assertTrue(wiring.isVisible())
+
+    def test_panel_follows_the_ni_figure(self):
+        """Every socket the device prints has a place: BNCs and the PFI screw rows.
+
+        Args: None.
+        Returns: None.
+        """
+        places = qt_app.panel_positions()
+        self.assertEqual(set(places), set(daq.BNC_TERMINALS))
+        self.assertEqual(places["pfi0"][2], "PFI 0/P1.0")
+        self.assertEqual(len(qt_app.SCREW_ROWS), 30)
+        self.assertEqual(sorted(qt_app.SCREW_TERMINALS),
+                         sorted(f"pfi{index}" for index in range(8, 16)))
+        self.assertEqual([qt_app.panel_place(name) for name in ("ao1", "pfi12", "ao2")],
+                         ["bnc", "screw", ""])
 
     def test_where_to_plug_in_names_the_device(self):
         """The note says when there is no device, a simulated one or another model.
