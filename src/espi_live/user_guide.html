@@ -1372,7 +1372,11 @@ python -m espi_live</code></pre>
           delivery; <code>--no-error-reports</code> also disables it. Run logs are also
           sent to the developer, scrubbed the same way, so problems can be looked into
           without anyone having to send logs by hand; they go to a private repository,
-          not a public page.</p>
+          not a public page. In the same way, while a real camera is processing,
+          the program sends a still image and, less often, a short video clip of
+          each camera, both the raw camera frames and the processed view, to a
+          private repository, so the developer can see what real setups look like.
+          Demo mode never sends anything.</p>
         <p>The log keeps the most recent 2000 lines in the window; the file
           keeps the full run. Lines from several cameras start with the
           camera's serial number.</p>
