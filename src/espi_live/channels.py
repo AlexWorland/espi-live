@@ -104,7 +104,8 @@ def default_settings(info, demo=False):
     """Choose the starting settings for a camera.
 
     Args: info is the camera's CameraInfo; demo is True for a synthetic source.
-    Returns: A Settings: an analog camera starts in the LabVIEW flow, and
+    Returns: A Settings: every camera starts with the default noise
+        pipeline, an analog one in Reference view with Fixed gain, and
         every capture device's own settings carry the ANALOG_MIN_RANGE
         sensitivity floor (see engine.default_settings and own_settings).
     """
@@ -139,8 +140,8 @@ class Channel:
         self.report = None  # last "camera_report" payload (camera_reports.Report)
         self.frozen = None  # FramePacket held on screen while the display is frozen
         self.frozen_at = None  # datetime the display was frozen
-        # The user's settings while the LabVIEW flow is on; analog cameras
-        # start in the flow.
+        # The user's settings while the LabVIEW flow is on (None while off,
+        # as every camera starts; a saved profile may have it on).
         self.labview_saved = default_profile(info, demo).labview_saved
         self.retired = []  # stopped engines that may still be finishing
         self.drive = Drive()  # the DAQ outputs, for a demo channel's simulated drumhead

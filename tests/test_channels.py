@@ -14,7 +14,7 @@ from unittest import mock
 from espi_live import camera, capture, channels, iphone, paths, profiles
 from espi_live.camera import CameraInfo
 from espi_live.daq import Drive
-from espi_live.engine import Engine
+from espi_live.engine import LABVIEW_FLOW, Engine
 from fake_capture import FakeCaptureFactory, FakeEnumerator, usb_live2, webcam
 from fake_pyspin import FakeCamera, FakeSystem, make_pyspin
 from test_engine_camera import ListLog, wait_until
@@ -133,8 +133,8 @@ class ChannelTests(ChannelTestCase):
         self.assertTrue(self.channel(CameraInfo("DEMO1"), demo=True).demo)
         self.assertEqual(idle.engines(), [])
 
-    def test_analog_channel_starts_in_the_labview_flow(self):
-        """An analog channel starts in the LabVIEW flow and keeps its own settings.
+    def test_analog_channel_starts_with_the_noise_pipeline(self):
+        """An analog channel starts in Reference view with the LabVIEW flow off.
 
         Args: None.
         Returns: None.
@@ -143,8 +143,8 @@ class ChannelTests(ChannelTestCase):
                                          kind="capture", vid=0x2040, pid=0xC200))
         self.assertEqual(analog.settings.mode, "Reference")
         self.assertTrue(analog.settings.auto_reference)
-        self.assertEqual(analog.labview_saved["mode"], "Raw")
-        self.assertFalse(analog.labview_saved["auto_reference"])
+        self.assertTrue(analog.settings.average_frames_first)
+        self.assertIsNone(analog.labview_saved)
         self.assertIsNone(self.channel(CameraInfo("1", "BFS")).labview_saved)
         demo = self.channel(CameraInfo("video 1", "Hauppauge USB-Live2", kind="capture",
                                        vid=0x2040, pid=0xC200), demo=True)
@@ -580,22 +580,27 @@ class ProfileChannelTests(ChannelTestCase):
         self.assertEqual(found[0].engine.settings().gain_db, 0.0)
 
     def test_an_analog_profile_restores_the_labview_state(self):
-        """Turned off last time, the analog camera starts with the flow off.
+        """Left on last time, the analog camera starts with the flow on again.
+
+        A camera PC whose analog profile was saved in the LabVIEW flow (the
+        old default) keeps it; only a camera with nothing saved gets the
+        noise pipeline.
 
         Args: None.
         Returns: None.
         """
         analog = CameraInfo("video 1", "Hauppauge USB-Live2", kind="capture",
                             vid=0x2040, pid=0xC200)
-        own = profiles.default_profile(analog).labview_saved
+        default = profiles.default_profile(analog)
+        own = {key: getattr(default.settings, key) for key in LABVIEW_FLOW}
         self.profiles.save_profile(profiles.profile_key(analog), profiles.Profile(
-            replace(profiles.default_profile(analog).settings, **own)))
+            replace(default.settings, **LABVIEW_FLOW), own))
         restored = channels.restore_channel(self.log, analog, profiles=self.profiles)
-        self.assertIsNone(restored.labview_saved)
-        self.assertEqual(restored.settings.mode, "Raw")
+        self.assertEqual(restored.labview_saved, own)
+        self.assertFalse(restored.settings.average_frames_first)
         self.assertTrue(self.log.has("saved settings restored"))
         fresh = channels.restore_channel(self.log, analog, profiles=None)
-        self.assertIsNotNone(fresh.labview_saved)
+        self.assertIsNone(fresh.labview_saved)
 
 
 class ReportingStartupTests(ChannelTestCase):

@@ -149,18 +149,20 @@ class DefaultProfileTests(unittest.TestCase):
             self.assertFalse(profile.labview_flow)
             self.assertIsNone(profile.labview_saved)
 
-    def test_an_analog_camera_starts_in_the_labview_flow(self):
-        """The analog camera's own Fixed-gain settings are kept to return to.
+    def test_an_analog_camera_starts_with_the_noise_pipeline(self):
+        """Reference view and Fixed gain, the noise pipeline on, the LabVIEW flow off.
 
         Args: None.
         Returns: None.
         """
         profile = profiles.default_profile(ANALOG)
-        self.assertTrue(profile.labview_flow)
-        self.assertEqual(profile.settings.mode, "Reference")
-        self.assertEqual(set(profile.labview_saved), set(LABVIEW_FLOW))
-        self.assertFalse(profile.labview_saved["scale_range"])
-        self.assertEqual(profile.labview_saved["mode"], "Raw")
+        self.assertFalse(profile.labview_flow)
+        self.assertIsNone(profile.labview_saved)
+        s = profile.settings
+        self.assertEqual(s.mode, "Reference")
+        self.assertFalse(s.scale_range)
+        self.assertEqual((s.average, s.average_frames_first, s.ref_frames,
+                          s.smoothing_method), (4, True, 16, "Oriented"))
 
     def test_another_capture_device_keeps_its_own_settings(self):
         """An unrecognised video device gets the analog floor but no LabVIEW flow.
@@ -184,7 +186,12 @@ class SummaryTests(unittest.TestCase):
         """
         self.assertEqual(profiles.summary(profiles.default_profile(FLIR)),
                          "exposure 8000 µs, gain 0 dB, 30 fps, Raw view")
-        self.assertEqual(profiles.summary(profiles.default_profile(ANALOG)),
+        analog = profiles.default_profile(ANALOG)
+        self.assertEqual(profiles.summary(analog),
+                         "exposure 8000 µs, gain 0 dB, 30 fps, Reference view")
+        flow = profiles.Profile(analog.settings,
+                                {key: getattr(analog.settings, key) for key in LABVIEW_FLOW})
+        self.assertEqual(profiles.summary(flow),
                          "exposure 8000 µs, gain 0 dB, 30 fps, Reference view, LabVIEW flow")
 
 
@@ -361,7 +368,7 @@ class ParseProfileTests(unittest.TestCase):
             "gamma": 9.0, "fps": 25, "record": True}})
         s = profile.settings
         self.assertEqual((s.gain_db, s.average, s.mode, s.invert, s.gamma),
-                         (0.0, 1, "Raw", False, 1.0))
+                         (0.0, 4, "Raw", False, 1.0))
         self.assertEqual(s.fps, 25.0)
         self.assertFalse(s.record)  # never restored, even when a store holds it
         self.assertEqual(len(self.log.lines), 5)
@@ -399,8 +406,7 @@ class ParseProfileTests(unittest.TestCase):
         """
         self.assertFalse(self.parse({"settings": {}, "labview_flow": "yes"}).labview_flow)
         analog = profiles.default_profile(ANALOG)
-        self.assertEqual(self.parse({"settings": {}}, analog).labview_saved,
-                         {**analog.labview_saved})  # nothing said: the default (on)
+        self.assertIsNone(self.parse({"settings": {}}, analog).labview_saved)  # default: off
         profile = self.parse({"settings": {"gamma": 2.0}, "labview_flow": True,
                               "labview_saved": "lost"})
         self.assertEqual(profile.labview_saved,
@@ -409,7 +415,8 @@ class ParseProfileTests(unittest.TestCase):
         profile = self.parse({"settings": {}, "labview_flow": True,
                               "labview_saved": {"gamma": "x", "invert": True}}, analog)
         self.assertEqual(profile.labview_saved,
-                         {**analog.labview_saved, "invert": True})
+                         {**{key: getattr(analog.settings, key) for key in LABVIEW_FLOW},
+                          "invert": True})
         lines = "\n".join(self.log.lines)
         self.assertIn("labview_flow = 'yes' is not true or false", lines)
         self.assertIn("the settings kept for the LabVIEW flow are missing", lines)
@@ -677,7 +684,7 @@ class PresetTests(unittest.TestCase):
         self.assertEqual(loaded.settings.exposure_us, 20000.0)
         self.assertEqual(loaded.settings.gamma, analog.settings.gamma)
         self.assertEqual(loaded.settings.mode, "Reference")  # the analog default
-        self.assertTrue(loaded.labview_flow)
+        self.assertFalse(loaded.labview_flow)  # the analog default since the noise pipeline
 
 
 if __name__ == "__main__":

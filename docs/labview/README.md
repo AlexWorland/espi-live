@@ -115,11 +115,15 @@ depend on it.
 
 The **LabVIEW flow** toggle in the ESPI measurement section switches the
 displayed camera to this processing with the saved defaults above and back to
-the user's own settings. It is on by default for the Sony XC-ST50. It sets
-Reference view and captures a reference at once (and whenever Reference view
-has none), full frames, Fixed gain 42 applied to each frame, the outlier
-filter off, Average N 1, Average multiplier 1, Frames back 1, and turns
-off everything the VI does not have (noise reduction, noise threshold,
+the user's own settings. It is off by default: every camera, the Sony
+XC-ST50 included, starts with the noise pipeline (camera frames averaged
+before the difference, a 16-frame reference, the Oriented speckle filter),
+which the VI did not have; earlier builds started the XC-ST50 in this flow.
+It sets Reference view and captures a one-frame reference at once (and
+whenever Reference view has none), full frames, Fixed gain 42 applied to
+each frame, the outlier filter off, Average N 1, Ref. frames 1, Average
+multiplier 1, Frames back 1, and turns off everything the VI does not have
+(camera-frame averaging, noise reduction, noise threshold,
 beam-brightness correction, speckle filter, peak hold, local normalization,
 stretch, invert, gamma, display brightness, gain and contrast). Exposure, gain, frame rate, recording and the image
 flip are not changed.

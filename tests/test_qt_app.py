@@ -1715,8 +1715,10 @@ class SimpleUiTests(WindowTestCase):
         """
         w = self.window
         w.show()
-        for shown in (w.exposure, w.gain, w.record_button, *w.mode_group.buttons()):
+        modes = [b for b in w.mode_group.buttons() if b.text() != "Phase"]
+        for shown in (w.exposure, w.gain, w.record_button, *modes):
             self.assertTrue(shown.isVisibleTo(w), shown)
+        self.assertFalse(w.phase_mode_action.isVisible())  # no piezo: no Phase button
         for hidden in (w.fps, w.noise_reduction, w.average, w.rolling, w.ref_refresh,
                        w.frames_back, w.smoothing_combo, w.smoothing, w.scaling,
                        w.invert, w.clip, w.gamma, w.brightness,
@@ -1900,11 +1902,16 @@ class SettingsGuideTests(WindowTestCase):
         w = self.window
         expected = {
             w.noise_reduction: ("sensor noise", "Start at 0"),
-            w.average: ("difference frames", "Start at 8"),
+            w.average: ("difference frames", "square root of N", "Starts at 4"),
             w.rolling: ("one image", "frame rate", "lag"),
             w.ref_refresh: ("drift", "Start at 0"),
-            w.smoothing_combo: ("Gaussian", "Median", "5 px"),
-            w.smoothing: ("fringe spacing", "Start at 3"),
+            w.smoothing_combo: ("Oriented", "along them", "Gaussian", "Median", "5 px",
+                                "Start with Oriented"),
+            w.smoothing: ("fringe spacing", "Starts at 11"),
+            w.phase_steps: ("Hariharan", "quarter wave", "Start with 5-step"),
+            w.phase_filter: ("sine/cosine", "black to white", "Starts at 9"),
+            w.phase_settle: ("piezo step", "Starts at 2"),
+            w.calibrate_phase_button: ("90°", "saved"),
             w.scaling: ("Fixed gain", "Auto stretch", "0 and 255", "Start with Fixed gain"),
             w.difference_gain: ("255", "Start at 42"),
             w.gain_before_average: ("LabVIEW", "Start off"),
@@ -1912,7 +1919,7 @@ class SettingsGuideTests(WindowTestCase):
             w.frames_back: ("Previous view", "Start at 1"),
             w.outlier_filter: ("neighbourhood", "Start at 0"),
             w.labview_button: ("LabVIEW ESPI 1.5", "Fixed gain", "your own settings",
-                               "analog camera"),
+                               "Off by default", "noise pipeline"),
             w.invert: ("bright and dark", "Start off"),
             w.flip_button: ("left to right", "Start off"),
             w.clip: ("speckles", "Start at 0"),
@@ -2054,13 +2061,14 @@ class FringeControlsTests(WindowTestCase):
         Returns: None.
         """
         w = self.window
-        self.assertFalse(w.frames_first.isChecked())
+        self.assertTrue(w.frames_first.isChecked())  # the default noise pipeline
+        self.assertFalse(w.rolling.isEnabled())  # block averages only
+        w.frames_first.setChecked(False)
+        self.assertFalse(self.engine.settings().average_frames_first)
         self.assertTrue(w.rolling.isEnabled())
         w.frames_first.setChecked(True)
         self.assertTrue(self.engine.settings().average_frames_first)
-        self.assertFalse(w.rolling.isEnabled())  # block averages only
-        w.frames_first.setChecked(False)
-        self.assertTrue(w.rolling.isEnabled())
+        self.assertFalse(w.rolling.isEnabled())
         w.floor_subtract.setChecked(True)
         self.assertTrue(self.engine.settings().floor_subtract)
         self.queued()
@@ -2658,7 +2666,7 @@ class ReferenceCompareTests(WindowTestCase):
         """
         self.window.ref_frames.spin.setValue(12)
         self.assertEqual(self.engine.settings().ref_frames, 12)
-        self.assertIn("Start at 1", self.window.ref_frames.toolTip())
+        self.assertIn("Starts at 16", " ".join(self.window.ref_frames.toolTip().split()))
         self.window._load_settings(replace(self.engine.settings(), ref_frames=3), {})
         self.assertEqual(self.window.ref_frames.spin.value(), 3)
         self.assertEqual(self.engine.settings().ref_frames, 12)  # not sent back
@@ -5883,7 +5891,7 @@ class CaptureWindowTests(unittest.TestCase):
         self.assertEqual(window.scaling.currentText(), "Fixed gain")
         self.assertTrue(window.difference_gain.isEnabled())
         self.assertFalse(window.clip.isEnabled())
-        self.assertTrue(window.labview_button.isChecked())  # on by default
+        self.assertFalse(window.labview_button.isChecked())  # off: the noise pipeline
         self.assertEqual(window.mode_group.checkedButton().text(), "Reference")
         self.assertTrue(window.report_label.isHidden())
         window.show_channel(self.flir)
@@ -5898,9 +5906,14 @@ class CaptureWindowTests(unittest.TestCase):
         self.assertTrue(window.clip.isEnabled())
         self.assertFalse(window.labview_button.isChecked())
         window.show_channel(self.usb)
+        window.labview_button.setChecked(True)  # the VI's flow: no noise pipeline
+        s = self.usb.engine.settings()
+        self.assertEqual((s.mode, s.average_frames_first, s.ref_frames, s.smoothing),
+                         ("Reference", False, 1, 0))
         window.labview_button.setChecked(False)  # back to the analog camera's own
         s = self.usb.engine.settings()
-        self.assertEqual((s.mode, s.scale_range, s.auto_reference), ("Raw", False, False))
+        self.assertEqual((s.mode, s.scale_range, s.auto_reference, s.average_frames_first,
+                          s.smoothing_method), ("Reference", False, True, True, "Oriented"))
 
     def test_single_field_checkbox_updates_engine(self):
         """Unticking the field toggle switches the engine to full frames.

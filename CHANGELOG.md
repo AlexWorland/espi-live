@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-11-21 — Noise pipeline by default, and phase-shifting ESPI
+
+### Previous state
+
+- Every camera started with Average N 1, a one-frame reference and the speckle filter off. Averaging, when turned on, averaged the difference images, whose camera noise is always positive, so it settled into a grey floor instead of averaging out.
+- The analog Sony XC-ST50 started in the LabVIEW flow (a one-frame automatic reference, Fixed gain 42×, no averaging or filters).
+- The speckle filter was Gaussian or Median; a width large enough to quiet the speckle also blurred dense fringes away.
+- The NI DAQ could step the reference piezo only by hand (Step −/+), and only subtraction fringes (|live − reference|) could be shown.
+
+### Current state
+
+- **Default noise pipeline** for every camera, analog included: **Average camera frames, then subtract** on with **Average N** 4 (camera and capture noise fall by √4 = 2 before the difference), **Ref. frames** 16 with a reference that Reference view captures by itself, and the new **Oriented** speckle filter at 11 px. The full frame rate needs Average N 1. A camera with a saved profile keeps the values it was left with; **Reset camera to defaults…** brings the pipeline in. The run log's settings summary now says whether camera frames or differences are averaged, and the reference frame count.
+- The analog camera starts in Reference view with Fixed gain 42× and the pipeline; the **LabVIEW flow** is a toggle, off by default (it also turns the averaged reference off now). A camera PC whose analog profile was saved in the LabVIEW flow keeps it.
+- **Oriented** speckle filter: smooths along the local fringe direction (measured from the structure tensor) instead of across it, and acts like a Gaussian where no direction stands out. On simulated subtraction fringes it matched or beat a Gaussian of the same width at every fringe spacing tried (correlation with the true fringes 0.844 against 0.757 at a 20 px spacing); about 45 ms on a 6 MP frame.
+- **Phase view** (phase-shifting ESPI): with the piezo driver applied in the NI DAQ window, the engine steps the piezo between frames (Average N frames per step, the **Settle** frames after each move dropped) and shows each pixel's phase change since the phase reference, wrapped to one fringe with its sign: mid-grey is no change, black to white 2π. **5-step (Hariharan)** (default) tolerates a wrong step (1° phase error at a 75° step in simulation, against 7.5° for **4-step**) and measures the step made; the change is filtered as sine and cosine (**Phase filter**, 9 px). **Calibrate phase step** measures the step over five sets and saves the voltage per step for 90°. When that device connects (at startup or from the DAQ window) the displayed camera switches to the Phase view and its toolbar button appears; opening the DAQ window alone never drives the piezo, and every step stays inside the piezo's safety limit. In dummy mode with the simulated device, the synthetic camera becomes a speckle interferometer that follows the simulated piezo.
+- The comparison window names frame-first averaging correctly ("4 camera frames averaged before the difference").
+- Research and measurements: `docs/notes/espi-noise-and-capture-research.md`.
+
 ## 2026-11-21 — Dummy mode simulates an ESPI signal
 
 ### Previous state

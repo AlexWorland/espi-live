@@ -18,6 +18,7 @@ has its own settings, reference frame, averaging and recording.
 """
 
 import ctypes
+import math
 import os
 import queue
 import threading
@@ -35,6 +36,10 @@ from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.capture_models import adapter_for
+from espi_live.phase import (CALIBRATION_SETS, DEFAULT_PHASE_FILTER,
+                             DEFAULT_PHASE_STEPS, DEFAULT_SETTLE_FRAMES, NOMINAL_STEP,
+                             DemoInterferometer, PhaseState, PiezoMoveError,
+                             calibrated_step)
 from espi_live.processing import (DEEP_DTYPE, DEFAULT_DIFFERENCE_GAIN,
                                   ESPIProcessor, MAX_FRAMES_BACK,
                                   NoiseCalibration, NoiseFloorMap, PeakHold,
@@ -62,6 +67,18 @@ COMPARE_INTERVAL_S = 0.1
 RAW_DIFFERENCE = "RawDiff"
 
 
+# The default noise pipeline (every camera; the LabVIEW flow turns it off):
+# camera frames are averaged in blocks of DEFAULT_AVERAGE before they are
+# subtracted, which cuts temporal sensor and capture noise by sqrt(N) instead
+# of averaging rectified noise into a grey floor; the reference averages
+# DEFAULT_REF_FRAMES frames so its own noise is not frozen into every
+# difference; and the Oriented speckle filter smooths along the fringes.
+DEFAULT_AVERAGE = 4
+DEFAULT_REF_FRAMES = 16
+DEFAULT_SMOOTHING = 11
+DEFAULT_SMOOTHING_METHOD = "Oriented"
+
+
 @dataclass
 class Settings:
     """User-adjustable acquisition, measurement and display settings."""
@@ -71,12 +88,12 @@ class Settings:
     gain_db: float = 0.0
     fps: float = 30.0
     noise_reduction: float = 0.0  # 0–95 slider; 0 = off. See denoise_strength.
-    average: int = 1
+    average: int = DEFAULT_AVERAGE
     rolling: bool = False         # running average instead of one image per N frames
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
-    ref_frames: int = 1           # camera frames averaged into each reference
-    smoothing: int = 0            # speckle filter width in pixels; 0 = off
-    smoothing_method: str = "Gaussian"
+    ref_frames: int = DEFAULT_REF_FRAMES  # camera frames averaged into each reference
+    smoothing: int = DEFAULT_SMOOTHING    # speckle filter width in pixels; 0 = off
+    smoothing_method: str = DEFAULT_SMOOTHING_METHOD
     frames_back: int = 1          # Previous view compares with the frame N back
     outlier_filter: int = 0       # IMAQ LowPass-style width in px, per frame; 0 = off
     scale_range: bool = True      # True: Auto stretch; False: Fixed gain
@@ -98,12 +115,15 @@ class Settings:
     contrast: float = 0.0         # S-curve contrast strength, 0–100 %; 0 = off
     record: bool = False
     single_field: bool = False    # interlaced sources: even rows only, line-doubled
-    auto_reference: bool = False  # Reference view captures one when it has none
-    average_frames_first: bool = False  # Average N averages camera frames, then subtracts
+    auto_reference: bool = True   # Reference view captures one when it has none
+    average_frames_first: bool = True  # Average N averages camera frames, then subtracts
     floor_subtract: bool = False  # take the measured per-pixel noise floor off each difference
     raw_difference: bool = False  # |live - previous| raw frames; every other step off
     demo_object: str = DEFAULT_OBJECT  # what the simulated drumhead does (demo only)
     demo_piezo: bool = False      # demo only: the reference piezo's triangle (decorrelation)
+    phase_steps: int = DEFAULT_PHASE_STEPS  # Phase view: 4-step or 5-step (Hariharan)
+    phase_filter: int = DEFAULT_PHASE_FILTER  # Phase view sine/cosine filter, px; 0 = off
+    phase_settle_frames: int = DEFAULT_SETTLE_FRAMES  # frames dropped after each piezo move
 
 
 # The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
@@ -125,6 +145,7 @@ LABVIEW_FLOW = {
     "average": 1,
     "rolling": False,
     "ref_refresh_s": 0.0,
+    "ref_frames": 1,
     "smoothing": 0,
     "threshold": 0,
     "even_brightness": False,
@@ -165,33 +186,36 @@ ANALOG_MIN_RANGE = 30
 def own_settings(info):
     """Choose a camera's own starting settings, without the LabVIEW flow.
 
-    An analog camera uses Fixed gain, as the LabVIEW ESPI 1.5 VI showed it:
-    its few levels of capture noise stay dark instead of being stretched to
-    full contrast. Other cameras and demo sources use Auto stretch. Every
-    video-capture device gets the ANALOG_MIN_RANGE sensitivity floor for when
-    Auto stretch is chosen. These are what turning the LabVIEW flow off
-    returns to.
+    Every camera gets the default noise pipeline (Settings' defaults: camera
+    frames averaged before the difference, a multi-frame reference that is
+    captured automatically, the Oriented speckle filter). An analog camera
+    starts in Reference view with Fixed gain, as the LabVIEW ESPI 1.5 VI
+    showed it: its few levels of capture noise stay dark instead of being
+    stretched to full contrast. Other cameras and demo sources start in Raw
+    view (for aiming) with Auto stretch. Every video-capture device gets the
+    ANALOG_MIN_RANGE sensitivity floor for when Auto stretch is chosen.
+    These are also what turning the LabVIEW flow off returns to.
 
     Args: info is a CameraInfo, or None for a demo source.
     Returns: A new Settings.
     """
     capture = info is not None and info.kind == "capture"
-    return Settings(scale_range=not is_analog(info),
+    analog = is_analog(info)
+    return Settings(mode="Reference" if analog else "Raw", scale_range=not analog,
                     min_range=ANALOG_MIN_RANGE if capture else 0)
 
 
 def default_settings(info):
     """Choose the settings a camera starts with.
 
-    An analog camera starts in the LabVIEW flow (LABVIEW_FLOW on top of its
-    own settings), the known-good processing for the Sony XC-ST50. Other
-    cameras and demo sources start with their own settings.
+    Every camera, analog included, starts with its own settings and the
+    default noise pipeline. The LabVIEW flow (the VI's processing, which
+    has none of it) is a toggle in the window.
 
     Args: info is a CameraInfo, or None for a demo source.
     Returns: A new Settings.
     """
-    settings = own_settings(info)
-    return replace(settings, **LABVIEW_FLOW) if is_analog(info) else settings
+    return own_settings(info)
 
 
 @dataclass(frozen=True)
@@ -240,18 +264,53 @@ class ComparePacket:
     baseline_label: str = "Reference"   # the panel's name, e.g. "Previous (2 frames back)"
 
 
+def phase_frames_per_image(s):
+    """Count the camera frames one Phase-view image takes.
+
+    Args: s is the Settings snapshot.
+    Returns: Steps times (frames averaged per step plus the settle frames
+        dropped after each move), plus one for the return to step 0.
+    """
+    per_step = s.average if s.average_frames_first else 1
+    return s.phase_steps * (max(1, per_step) + s.phase_settle_frames) + 1
+
+
+def phase_range_text(s):
+    """Describe the Phase view's grey scale for the status bar.
+
+    Args: s is the Settings snapshot.
+    Returns: Text such as "Phase: black to white is one fringe (2π), grey no
+        change; filter 9 px".
+    """
+    size = int(s.phase_filter)
+    detail = f"filter {size} px" if size > 1 else "no filter"
+    return f"Phase: black to white is one fringe (2π), grey no change; {detail}"
+
+
+def averaging_text(s):
+    """Say how Average N is applied, for the comparison window.
+
+    Args: s is the Settings snapshot.
+    Returns: "4 camera frames averaged before the difference", "average 4
+        rolling", "average 4" or "no averaging".
+    """
+    if s.average <= 1:
+        return "no averaging"
+    if s.average_frames_first:
+        return f"{s.average} camera frames averaged before the difference"
+    return f"average {s.average}{' rolling' if s.rolling else ''}"
+
+
 def previous_wording(s):
     """Word the Previous comparison's labels from the settings in force.
 
     Args: s is the Settings snapshot.
     Returns: (frames, label, averaging): "2 frames", "Previous (2 frames back)"
-        and "average 4 rolling" (or "no averaging").
+        and averaging_text(s), such as "average 4 rolling" or "no averaging".
     """
     back = min(max(1, int(s.frames_back)), MAX_FRAMES_BACK)
     frames = f"{back} {'frame' if back == 1 else 'frames'}"
-    averaging = (f"average {s.average}{' rolling' if s.rolling else ''}"
-                 if s.average > 1 else "no averaging")
-    return frames, f"Previous ({frames} back)", averaging
+    return frames, f"Previous ({frames} back)", averaging_text(s)
 
 
 def present(image, flip, demo, tone=None):
@@ -418,11 +477,12 @@ def reference_text(processor, now):
             f"{max(0.0, now - processor.ref_time):.0f} s old")
 
 
-def view_hint(s, processor, floor_note=None):
+def view_hint(s, processor, floor_note=None, phase_note=None):
     """Choose the status-bar hint for the current view and reference state.
 
     Args: s is the Settings snapshot; processor is the ESPIProcessor;
-        floor_note is the noise floor's state (Engine._floor_note), or None.
+        floor_note is the noise floor's state (Engine._floor_note), or None;
+        phase_note is the Phase view's state (Engine._phase_note), or None.
     Returns: One short sentence (no longer than the Qt LONGEST_HINT).
     """
     capture = processor.ref_capture
@@ -431,6 +491,8 @@ def view_hint(s, processor, floor_note=None):
         return f"Capturing reference: {capture.count}/{capture.target} frames{kept}"
     if s.raw_difference:
         return "Raw difference: live minus previous raw frame, nothing else"
+    if s.mode == "Phase":
+        return phase_note or "Phase view: wrapped phase change, black to white"
     if floor_note is not None:
         return floor_note
     if s.mode == "Raw":
@@ -534,6 +596,11 @@ class Engine:
         self.camera = None
         self.demo_source = None
         self.preview_timer = WindowsPreviewTimer()
+        self._stepper = None        # phase.PiezoStepper for the Phase view, or None
+        self._phase = PhaseState()  # worker thread only
+        self._phase_stepper = None  # the stepper the phase state was built for (worker)
+        self._phase_problem = None  # the last stepper problem logged (worker)
+        self._interferometer = None  # dummy mode's Phase-view source (worker)
 
     # ----- setup (front-end thread, before start) -----------------------
 
@@ -709,6 +776,10 @@ class Engine:
             pixel's still-scene difference level, the map Subtract noise
             floor takes off), "switch_live" (the
             "switched_live" event then carries every detected CameraInfo) or
+            "calibrate_phase" (measure the piezo's phase step over a few
+            5-step sets in the Phase view, then send "phase_calibrated" or
+            "phase_calibration_failed"; in the Phase view "reference" makes
+            the next complete set the phase reference) or
             "camera_command" (payload: phone-only settings such as
             lens_position, width and height, crop_width and crop_height,
             max_send_fps or refocus, sent to a source that takes them, the
@@ -730,6 +801,27 @@ class Engine:
         """
         with self._saves_lock:
             return self._saves_waiting > 0
+
+    def set_phase_stepper(self, stepper):
+        """Give the Phase view a piezo to step, or take it away.
+
+        Only one engine should hold the stepper of a piezo at a time. A new
+        stepper (another device or step voltage) makes the next complete set
+        the new phase reference.
+
+        Args: stepper is a phase.PiezoStepper, or None.
+        Returns: None.
+        """
+        self._stepper = stepper  # one reference assignment; the worker reads it
+
+    @property
+    def phase_stepper(self):
+        """The piezo stepper the Phase view uses.
+
+        Args: None.
+        Returns: A phase.PiezoStepper, or None.
+        """
+        return self._stepper
 
     def latest_packet(self):
         """Return the newest published frame.
@@ -930,7 +1022,9 @@ class Engine:
         while not self._stop.is_set():
             s = self.settings()
             self._reap_recorders()
+            phase_view = s.mode == "Phase" and not s.raw_difference
             signature = ((RAW_DIFFERENCE, 1, False) if s.raw_difference else
+                         ("Phase", phase_frames_per_image(s), False) if phase_view else
                          (s.mode, s.average if s.mode != "Raw" else 1,
                           s.rolling and not s.average_frames_first))
             recorder = self._recorder
@@ -962,6 +1056,7 @@ class Engine:
                 processor.reset_frame_average()
                 ranges.reset()
                 peaks.reset()
+                self._phase.restart()  # a Phase set restarts at step 0
                 if s.mode == "Previous":
                     processor.reset_previous()
                 self.log.write(f"View: {s.mode}")
@@ -999,18 +1094,12 @@ class Engine:
                 self._noise_changed(processor, last_noise, s.noise_reduction)
                 last_noise = s.noise_reduction
             self._set_status(hint=view_hint(
-                s, processor, self._floor_note(s, processor, last_shape)))
+                s, processor, self._floor_note(s, processor, last_shape),
+                self._phase_note(s)))
 
             work_started = time.monotonic()
             if self.demo:
-                if s.demo_object != self.demo_source.object:
-                    self.demo_source.set_object(s.demo_object)
-                    self.log.write(f"Simulated object: {s.demo_object}")
-                if s.demo_piezo != self.demo_source.piezo_on:
-                    self.demo_source.set_piezo(s.demo_piezo)
-                    self.log.write("Reference piezo: triangle on (decorrelation)"
-                                   if s.demo_piezo else "Reference piezo: off")
-                frame = self.demo_source.next_frame(s.exposure_us, s.gain_db, s.fps)
+                frame = self._demo_frame(s, work_started)
             else:
                 grabbed, state = self.camera.grab(CAMERA_TIMEOUT_MS)
                 if state != "ok":
@@ -1070,10 +1159,17 @@ class Engine:
                     last_setting_time = now
 
             reference_view = s.mode == "Reference" and not s.raw_difference
-            if reference_view and s.auto_reference and processor.ref is None:
-                processor.set_reference(frame, now)  # as the LabVIEW VI did at start
-                processor.reset_avg()
-                self.log.write("Captured reference frame (automatic).")
+            if (reference_view and s.auto_reference and processor.ref is None
+                    and processor.ref_capture is None):
+                if s.ref_frames > 1:  # averaged, so its noise is not frozen in
+                    processor.start_reference(s.ref_frames, s.noise_reduction,
+                                              now, manual=False)
+                    self.log.write(f"Capturing reference automatically: averaging "
+                                   f"the next {s.ref_frames} frames.")
+                else:
+                    processor.set_reference(frame, now)  # as the LabVIEW VI did at start
+                    processor.reset_avg()
+                    self.log.write("Captured reference frame (automatic).")
             if reference_view and s.ref_refresh_s > 0 and (
                     processor.ref_capture is None) and (
                     processor.ref is None or
@@ -1103,6 +1199,15 @@ class Engine:
                 if update_range:
                     self._set_status(range="Raw difference: |live - previous|, "
                                      "no gain, filters or scaling")
+                    last_range_time = now
+            elif phase_view:
+                gamma = 1.0  # the grey level is the phase: no curve
+                image = self._phase_frame(frame, s, now)
+                if image is not None:
+                    self._cut_square(image, True, "Phase", s.flip_horizontal, now)
+                self._drop_calibration("Phase view")
+                if update_range:
+                    self._set_status(range=phase_range_text(s))
                     last_range_time = now
             elif s.mode == "Raw":
                 image = frame  # gamma curve only; Raw skips stretch
@@ -1157,6 +1262,8 @@ class Engine:
                     shown_sharpness.observe(image, now, context)
                 if s.raw_difference:  # no flip or display tone either
                     image = present(image, False, self.demo)
+                elif phase_view:  # the grey level is the phase: no display tone
+                    image = present(image, s.flip_horizontal, self.demo)
                 else:  # every view; before the watermark so its text reads normally
                     image = present(image, s.flip_horizontal, self.demo,
                                     display_lut(s.display_gain, s.contrast, s.brightness))
@@ -1167,7 +1274,7 @@ class Engine:
                     self._packet = packet
                 record_signature = self._feed_recorder(
                     s, signature, record_signature, packet, resulting_fps)
-                if (self._compare.is_set() and
+                if (self._compare.is_set() and not phase_view and
                         now - last_compare >= COMPARE_INTERVAL_S):
                     if s.raw_difference:
                         self._publish_raw_compare(frame, earlier, packet)
@@ -1206,6 +1313,137 @@ class Engine:
                 if demo_next < now - interval:
                     demo_next = now  # fell behind; restart the schedule
                 self._stop.wait(max(0.0, demo_next - now))
+
+    def _demo_frame(self, s, now):
+        """Make dummy mode's next frame.
+
+        The Phase view gets speckle interferograms that follow the piezo's
+        phase steps, so phase stepping can be tried without hardware; every
+        other view gets the simulated drumhead (simulation.DemoSource), with
+        the object and reference-piezo choice in force.
+
+        Args: s is the Settings snapshot; now is the monotonic time.
+        Returns: A 2-D uint8 frame.
+        """
+        if s.mode == "Phase" and not s.raw_difference:
+            if self._interferometer is None:
+                self._interferometer = DemoInterferometer()
+            stepper = self._stepper
+            return self._interferometer.frame(0.0 if stepper is None else stepper.phase(),
+                                              now)
+        if s.demo_object != self.demo_source.object:
+            self.demo_source.set_object(s.demo_object)
+            self.log.write(f"Simulated object: {s.demo_object}")
+        if s.demo_piezo != self.demo_source.piezo_on:
+            self.demo_source.set_piezo(s.demo_piezo)
+            self.log.write("Reference piezo: triangle on (decorrelation)"
+                           if s.demo_piezo else "Reference piezo: off")
+        return self.demo_source.next_frame(s.exposure_us, s.gain_db, s.fps)
+
+    def _phase_frame(self, frame, s, now):
+        """Run one frame of the Phase view: collect it, then step the piezo.
+
+        Args: frame is the camera frame (after single field and noise
+            reduction); s is the Settings snapshot; now is the monotonic time.
+        Returns: The uint8 phase image when this frame completed a set; the
+            camera frame itself while no piezo can be stepped (so the view
+            still shows the camera); otherwise None (the last image stays).
+        """
+        stepper = self._stepper
+        if stepper is not self._phase_stepper:  # attached, removed or recalibrated
+            self._phase_stepper = stepper
+            self._phase.restart()
+            self._phase.clear_reference()
+            self._phase_problem = None
+            if stepper is None:
+                self._phase.calibration = None
+        if stepper is None:
+            return frame
+        calibrating = self._phase.calibration is not None
+        steps = 5 if calibrating else s.phase_steps  # calibration needs Hariharan's 5
+        found = stepper.problems(steps)
+        if found:
+            if found[0] != self._phase_problem:
+                self.log.warning(f"Phase view: {found[0]}")
+                self._phase_problem = found[0]
+            return frame
+        self._phase_problem = None
+        per_step = s.average if s.average_frames_first else 1
+        sequence = self._phase.configure(steps, per_step, s.phase_settle_frames)
+        done = sequence.add(frame)
+        image = None
+        if done is not None:
+            image, new_reference = self._phase.complete(done, s.phase_filter)
+            if new_reference:
+                self.log.write(f"Phase reference captured ({len(done)}-step).")
+            self._finish_phase_calibration(stepper)
+        if sequence.move_pending:
+            try:
+                stepper.move(sequence.step)
+            except PiezoMoveError as exc:
+                self._phase_failed(stepper, exc)
+                return image
+            sequence.moved()
+        return image
+
+    def _finish_phase_calibration(self, stepper):
+        """Report Calibrate phase step's result once enough sets are measured.
+
+        Args: stepper is the PiezoStepper the sets were taken with.
+        Returns: None. Sends "phase_calibrated" ((degrees measured, new volts
+            per step)) or "phase_calibration_failed" (degrees measured).
+        """
+        angle = self._phase.calibration_result()
+        if angle is None:
+            return
+        degrees = math.degrees(angle)
+        volts = calibrated_step(stepper.step_v, angle)
+        if volts is None:
+            self.log.warning(f"Phase step calibration: {stepper.step_v:.4g} V moved "
+                             f"{degrees:.0f}° per step, too far from 90° to correct; "
+                             "check the piezo, its amplifier and the step voltage.")
+            self.events.put(("phase_calibration_failed", degrees))
+            return
+        self.log.write(f"Phase step calibration: {stepper.step_v:.4g} V gave "
+                       f"{degrees:.1f}° per step; {volts:.4g} V gives "
+                       f"{math.degrees(NOMINAL_STEP):.0f}°.")
+        self.events.put(("phase_calibrated", (degrees, volts)))
+
+    def _phase_failed(self, stepper, exc):
+        """Stop phase stepping after the piezo could not be moved.
+
+        Args: stepper is the PiezoStepper that failed; exc is the
+            PiezoMoveError.
+        Returns: None; sends a "phase_stopped" event with the reason.
+        """
+        self.log.warning(f"Phase view stopped: the piezo could not be moved ({exc}).")
+        if self._stepper is stepper:
+            self._stepper = None
+        self._phase.calibration = None
+        self.events.put(("phase_stopped", str(exc)))
+
+    def _phase_note(self, s):
+        """Describe the Phase view's state for the status-bar hint.
+
+        Args: s is the Settings snapshot.
+        Returns: A short sentence in the Phase view, otherwise None.
+        """
+        if s.mode != "Phase" or s.raw_difference:
+            return None
+        if self._stepper is None:
+            return "Phase view needs the piezo: open Devices > NI DAQ"
+        if self._phase_problem is not None:
+            return "Phase view: the piezo steps need attention (see the log)"
+        calibration = self._phase.calibration
+        if calibration is not None:
+            return (f"Calibrating phase step: set {len(calibration) + 1} of "
+                    f"{CALIBRATION_SETS}; keep still")
+        if self._phase.reference is None:
+            return "Phase: measuring the reference; keep the object still"
+        if self._phase.angle is not None:
+            return (f"Phase change, {s.phase_steps}-step; step measured "
+                    f"{math.degrees(self._phase.angle):.0f}°")
+        return f"Phase change, {s.phase_steps}-step; F takes a new reference"
 
     def _reference_frame(self, processor, frame, s):
         """Add a frame to the reference capture in progress; log when it ends.
@@ -1318,9 +1556,7 @@ class Engine:
             info = f"capturing {capture.count}/{capture.target}; in use: {info}"
         reference = difference = None
         if s.mode == "Reference":
-            averaging = (f"average {s.average}{' rolling' if s.rolling else ''}"
-                         if s.average > 1 else "no averaging")
-            detail = f"the Reference view, {averaging}"
+            detail = f"the Reference view, {averaging_text(s)}"
         else:
             detail = f"one difference, no averaging (the view is {s.mode})"
         if ref is not None and ref.shape == frame.shape:
@@ -1642,6 +1878,19 @@ class Engine:
                 self._floor_measure = (None, NoiseFloorMap(time.monotonic()))
                 self.log.write("Measuring the noise floor: keep the object still "
                                "for at least 2 s.")
+            elif action == "reference" and self.settings().mode == "Phase":
+                self._phase.clear_reference()
+                self.log.write("Phase reference: the next complete set of phase "
+                               "steps becomes the reference.")
+            elif action == "calibrate_phase":
+                if self._stepper is None:
+                    self.log.warning("Calibrate phase step needs the piezo: connect "
+                                     "the NI DAQ and assign the piezo driver.")
+                else:
+                    self._phase.start_calibration()
+                    self._phase.restart()
+                    self.log.write(f"Calibrating the phase step over {CALIBRATION_SETS} "
+                                   "5-step sets: keep the object still.")
             elif action == "reference":
                 s = self.settings()
                 if s.ref_frames > 1:

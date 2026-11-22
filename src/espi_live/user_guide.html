@@ -506,6 +506,7 @@
         <li><a href="#profiles">Camera profiles and presets</a></li>
         <li><a href="#analog">Analog camera</a></li>
         <li><a href="#daq">Frequency generator and piezo (NI DAQ)</a></li>
+        <li><a href="#phase">Phase view (phase-shifting ESPI)</a></li>
         <li><a href="#iphone">iPhone camera</a></li>
         <li><a href="#defaults">Defaults and limits</a></li>
         <li><a href="#operations">Common operations</a>
@@ -846,10 +847,12 @@ python -m espi_live</code></pre>
 
       <section id="view">
         <h3>View <a class="anchor" href="#view" aria-label="Link to View">#</a></h3>
-        <p>Choose how each frame is built. All three modes use the same camera
-          frames; with <strong>Average N = 1</strong> they update at the same
-          rate. With <strong>N &gt; 1</strong>, Previous and Reference publish
-          a new image only after N frames.</p>
+        <p>Choose how each frame is built. The modes use the same camera
+          frames; with <strong>Average N = 1</strong> Raw, Previous and
+          Reference update at the same rate. With <strong>N &gt; 1</strong>
+          (4 by default), Previous and Reference publish a new image only after
+          N frames. The <strong>Phase</strong> button appears once the NI DAQ's
+          piezo driver is assigned; see <a href="#phase">Phase view</a>.</p>
         <div class="card-grid">
           <div class="card">
             <h4>Raw</h4>
@@ -868,8 +871,17 @@ python -m espi_live</code></pre>
             <h4>Reference</h4>
             <p>The absolute difference between this frame and a stored
               reference frame. Capture the resting state once, then watch how
-              the specimen changes against it. Until a reference exists, the
-              view is black and a hint tells you to press <kbd>F</kbd>.</p>
+              the specimen changes against it. With nothing stored, Reference
+              view averages the next <strong>Ref. frames</strong> frames into
+              one by itself (16 by default); <kbd>F</kbd> takes a new one.</p>
+          </div>
+          <div class="card">
+            <h4>Phase</h4>
+            <p>Phase-shifting ESPI: the piezo steps the reference beam between
+              frames and each pixel's phase change since the phase reference is
+              shown, with its sign: mid-grey is no change, black to white one
+              fringe (2π). Needs the NI DAQ's piezo driver; the view starts by
+              itself once the piezo has been applied in the DAQ window.</p>
           </div>
         </div>
         <p>Changing the view mode clears any partial average. Switching
@@ -969,14 +981,25 @@ python -m espi_live</code></pre>
           noise</strong> with the drive off to measure it. No preset changes
           exposure, gain, frame rate or recording, and each turns off the
           fringe-enhancement and display controls it does not use.</p>
+        <p><strong>The default noise pipeline.</strong> Every camera, the
+          analog one included, starts with <strong>Average camera frames, then
+          subtract</strong> on and <strong>Average N</strong> 4 (camera and
+          capture noise fall by half before the difference), a 16-frame
+          reference that Reference view captures by itself, and the
+          <strong>Oriented</strong> speckle filter at 11 px. A camera with a
+          saved profile keeps what it was left with; <strong>Reset camera to
+          defaults…</strong> brings the pipeline in. For the full frame rate,
+          set Average N to 1.</p>
         <p><strong>LabVIEW flow</strong>, the toggle under them, switches the
           displayed camera to the processing of the LabVIEW ESPI 1.5 program
           with that program's saved defaults, the known-good flow for the Sony
-          XC-ST50. It is on by default for that camera. It sets Reference view
-          and captures a reference at once (and whenever Reference has none),
-          full frames, Fixed gain 42× applied to each frame before averaging,
-          and turns off noise reduction, the noise threshold, beam-brightness
-          correction, the speckle and outlier filters, peak hold, local
+          XC-ST50. It is off by default (it used to be on for that camera).
+          It sets Reference view and captures a one-frame reference at once
+          (and whenever Reference has none), full frames, Fixed gain 42×
+          applied to each frame before averaging, and turns off camera-frame
+          averaging, the averaged reference, noise reduction, the noise
+          threshold, beam-brightness correction, the speckle and outlier
+          filters, peak hold, local
           normalization, stretch, the display brightness, gain and contrast,
           and invert. If you turn averaging on, it sums N + 1
           frames and divides by N, as the program did. Exposure, gain, frame
@@ -990,13 +1013,16 @@ python -m espi_live</code></pre>
           (N frames back) → noise threshold → beam brightness → outlier filter
           → average → speckle filter → noise floor → peak hold → fixed gain,
           stretch or local normalization → invert → brightness,
-          gain and contrast → gamma. The frame average and the noise floor
-          run only when their checkboxes are on. With <strong>Gain before averaging</strong>, the fixed
+          gain and contrast → gamma. Phase view: piezo phase steps → wrapped
+          phase → minus the reference phase → sine/cosine filter. The frame
+          average and the noise floor run only when their checkboxes are on. With <strong>Gain before averaging</strong>, the fixed
           gain moves to just before the outlier filter. Raw skips difference
           processing and still applies noise reduction, display gamma and the
           display brightness, gain and contrast.</p>
         <ul>
-          <li><strong>Average N</strong> — each displayed image becomes the
+          <li><strong>Average N</strong> (default 4) — with Average camera
+            frames on (the default) N camera frames are averaged before each
+            difference; with it off, each displayed image becomes the
             mean of N consecutive difference frames. Averaging reduces random
             noise at the cost of a slower displayed update: at 30 fps and
             N = 5, a new averaged image appears about six times per second.
@@ -1015,11 +1041,12 @@ python -m espi_live</code></pre>
             by the square root of N and keeps a steady change such as
             time-averaged fringes. Rolling average does not apply; in Previous
             view Frames back counts averages; in Reference view, set Ref. frames
-            to N or more so the reference is as quiet. Off by default; try it
-            with Average N 4–8 on a noisy or analog camera.</li>
+            to N or more so the reference is as quiet. On by default, with
+            Average N 4 and 16 reference frames. In the Phase view each phase
+            step averages N frames.</li>
           <li><strong>Ref. frames</strong> — how many camera frames
-            <kbd>F</kbd> averages into the reference (1–60; 1 is one frame, as
-            before). A one-frame reference keeps that frame's sensor noise, and
+            <kbd>F</kbd> (and the automatic reference) averages into the
+            reference (1–60, default 16; 1 is one frame). A one-frame reference keeps that frame's sensor noise, and
             the noise then shows in every Reference difference as a fixed grain
             that Average N cannot remove; averaging 8–30 frames of a still
             object quiets it, which matters most for a noisy or analog camera.
@@ -1053,13 +1080,16 @@ python -m espi_live</code></pre>
             Isolated hot or dark pixels go; fringes and smooth areas stay. This
             is NI Vision's Lowpass filter from the LabVIEW program. Width in
             pixels, 0 = off; try 3 px.</li>
-          <li><strong>Speckle filter</strong> — <strong>Gaussian</strong>, or
-            edge-keeping <strong>Median</strong> (capped at 5 px to keep the
-            frame rate). Use Median when a wide Gaussian blurs fringe
-            edges.</li>
+          <li><strong>Speckle filter</strong> — <strong>Oriented</strong>
+            (the default), <strong>Gaussian</strong>, or edge-keeping
+            <strong>Median</strong> (capped at 5 px to keep the frame rate).
+            Oriented measures which way the fringes run and smooths along them,
+            not across, so dense fringes survive a width that would blur them
+            away with Gaussian; where no direction stands out it acts like a
+            Gaussian. It takes about 45 ms on a 6 MP frame.</li>
           <li><strong>Filter width</strong> — blur in pixels that removes
-            pixel-scale speckle; keep it well below the fringe spacing. 0 = off.
-            A typical start is 0, then a few pixels.</li>
+            pixel-scale speckle; keep it below the fringe spacing. 0 = off.
+            11 px by default; lower it if dense fringes fade.</li>
           <li><strong>Scaling</strong> — how difference values become
             brightness. <strong>Fixed gain</strong> multiplies every difference
             by <strong>Difference gain</strong> and shows anything above 255 as
@@ -1464,7 +1494,8 @@ python -m espi_live</code></pre>
           profile.</li>
         <li>A camera seen for the first time starts from the defaults in
           <a href="#defaults">Defaults and limits</a> (exposure 8000 µs,
-          gain 0 dB, 30 fps; the LabVIEW flow on for the analog camera).
+          gain 0 dB, 30 fps, the default noise pipeline; the LabVIEW flow is
+          off, also for the analog camera, which used to start in it).
           Exposure, gain and frame rate are still clamped to what the camera
           reports.</li>
         <li><strong>Reset camera to defaults…</strong> puts the displayed
@@ -1517,12 +1548,15 @@ python -m espi_live</code></pre>
           fields, doubled to full height, removing the 1/60 s offset between
           fields at the cost of half the vertical detail. Differences compare
           rows woven the same way, so the offset rarely matters for ESPI.</li>
-        <li>It starts in the <strong>LabVIEW flow</strong>: the known-good
-          LabVIEW ESPI 1.5 processing with that program's saved defaults
-          (Fixed gain 42×, Reference view with an automatic reference, no
-          averaging or filters). Turn the toggle off for your own settings,
-          which also start in Fixed gain: Auto stretch would blow the capture
-          noise (3–5 grey levels) up to full-contrast grain.</li>
+        <li>It starts in Reference view with Fixed gain 42× and the default
+          noise pipeline: four frames averaged before the difference (which
+          also averages the capture stick's own noise and line jitter), a
+          16-frame automatic reference and the Oriented speckle filter. Fixed
+          gain, because Auto stretch would blow the capture noise (3–5 grey
+          levels) up to full-contrast grain. The <strong>LabVIEW flow</strong>
+          toggle gives the known-good LabVIEW ESPI 1.5 processing with that
+          program's saved defaults instead (Fixed gain 42×, a one-frame
+          automatic reference, no averaging or filters).</li>
         <li><strong>Raw difference</strong> on the toolbar shows the bare
           |live − previous| of the capture frames, with none of the above
           processing, to see what the camera itself delivers.</li>
@@ -1551,7 +1585,8 @@ python -m espi_live</code></pre>
         USB-6251: the <strong>frequency generator</strong>, which excites the
         specimen through its shaker or PZT amplifier, and the <strong>piezo
         driver</strong>, which sets the reference piezo through its amplifier.
-        The camera is not involved: frames are not synchronised to the drive.</p>
+        Frames are not synchronised to the generator's drive; the piezo's
+        phase steps are, in the <a href="#phase">Phase view</a>.</p>
       <ul>
         <li><strong>Device</strong> — the NI devices NI-DAQmx can see, plus a
           <strong>Simulated device (no hardware)</strong> for trying the
@@ -1595,6 +1630,51 @@ python -m espi_live</code></pre>
         the simulated device is offered, and the window says what is
         missing. The log records every setting applied, including the
         frequency the device really produces.</p>
+    </section>
+
+    <section id="phase">
+      <h2>Phase view (phase-shifting ESPI) <a class="anchor" href="#phase" aria-label="Link to Phase view">#</a></h2>
+      <p>Subtraction fringes are broken into speckle and lose the sign of the
+        change. The <strong>Phase</strong> view instead steps the reference
+        piezo through quarter-wave phase steps between frames, computes each
+        pixel's speckle phase and shows its change since the phase reference,
+        wrapped to one fringe: mid-grey is no change, black to white is 2π,
+        and the direction of the ramp shows which way the surface moved.</p>
+      <ul>
+        <li><strong>Starting it</strong> — assign the piezo driver in
+          <a href="#daq">the NI DAQ window</a> and press <strong>Apply</strong>.
+          From then on, whenever that device connects (at startup, or from the
+          window) the displayed camera switches to the Phase view and its
+          toolbar button appears. The piezo follows the displayed camera.
+          Opening the DAQ window alone never drives the piezo.</li>
+        <li><strong>Each step</strong> — the DAQ holds the piezo at the piezo
+          <strong>Voltage</strong> plus N × <strong>Step</strong>, then the next
+          <strong>Settle</strong> frames are dropped (they were exposed while
+          the piezo moved; one more after the return to step 0), then
+          Average N frames are averaged when Average camera frames is on.
+          Every level stays inside the piezo's safety limit.</li>
+        <li><strong>Phase steps</strong> — <strong>5-step (Hariharan)</strong>
+          (default) tolerates a step that is not exactly 90° and measures the
+          step it made, shown in the status bar; <strong>4-step</strong> is
+          faster but turns a wrong step into ripple.</li>
+        <li><strong>Phase filter</strong> (default 9 px) — smooths the phase
+          change as its sine and cosine, weighting strongly interfering
+          speckles, so it never blurs across the jump from white to black.</li>
+        <li><strong>Reference</strong> — the first complete set after the view
+          starts (or the piezo changes) is the phase reference;
+          <kbd>F</kbd> takes a new one. Keep the object still while it is
+          taken.</li>
+        <li><strong>Calibrate phase step</strong> — with the object still,
+          measures the step over five 5-step sets and sets the DAQ's step
+          voltage for 90°; the voltage is saved with the DAQ settings.</li>
+        <li><strong>Stopping</strong> — All outputs to 0 V, a DAQ error or a
+          disconnect stops the stepping; the view then shows the camera frame
+          and says what it needs.</li>
+        <li><strong>Dummy mode</strong> — with the simulated device, the
+          synthetic camera becomes a speckle interferometer that follows the
+          simulated piezo (72° per 0.05 V, so calibration has something to
+          correct) and a slowly growing dome.</li>
+      </ul>
     </section>
 
     <section id="iphone">
@@ -1657,20 +1737,21 @@ python -m espi_live</code></pre>
               <td>What the simulated drumhead does.</td></tr>
             <tr><td>Reference piezo</td><td>Off (demo only)</td><td>On / off</td>
               <td>1 Hz triangle, 1.2 µm peak to peak on the reference mirror.</td></tr>
-            <tr><td>Average N</td><td>1 (off)</td><td>1–60, step 1</td>
-              <td>Ignored in Raw view.</td></tr>
+            <tr><td>Average N</td><td>4</td><td>1–60, step 1</td>
+              <td>Ignored in Raw view; per phase step in the Phase view.</td></tr>
             <tr><td>Rolling average</td><td>Off</td><td>On / off</td>
               <td>Updates every frame instead of one per N.</td></tr>
-            <tr><td>Average camera frames, then subtract</td><td>Off</td>
+            <tr><td>Average camera frames, then subtract</td><td>On</td>
               <td>On / off</td><td>Average N averages frames, not differences.</td></tr>
-            <tr><td>Ref. frames</td><td>1</td><td>1–60, step 1</td>
-              <td>Frames averaged into each reference.</td></tr>
+            <tr><td>Ref. frames</td><td>16</td><td>1–60, step 1</td>
+              <td>Frames averaged into each reference; Reference view captures
+                one by itself when it has none.</td></tr>
             <tr><td>Ref. refresh</td><td>0 s (never)</td>
               <td>0–10 s, step 0.1</td>
               <td>Recaptures the Reference periodically.</td></tr>
-            <tr><td>Speckle filter</td><td>Gaussian</td>
-              <td>Gaussian / Median</td><td>Median is capped at 5 px.</td></tr>
-            <tr><td>Filter width</td><td>0 px (off)</td>
+            <tr><td>Speckle filter</td><td>Oriented</td>
+              <td>Oriented / Gaussian / Median</td><td>Median is capped at 5 px.</td></tr>
+            <tr><td>Filter width</td><td>11 px</td>
               <td>0–31 px, step 1</td><td>Keep below the fringe spacing.</td></tr>
             <tr><td>Frames back</td><td>1</td><td>1–30, step 1</td>
               <td>Previous view only.</td></tr>
@@ -1716,6 +1797,12 @@ python -m espi_live</code></pre>
               <td>&lt; 1 darkens midtones; &gt; 1 brightens.</td></tr>
             <tr><td>Interface size</td><td>100%</td><td>70–200%, step 5%</td>
               <td>Scales the whole window; remembered for the next run.</td></tr>
+            <tr><td>Phase steps</td><td>5-step (Hariharan)</td><td>5 / 4</td>
+              <td>Phase view.</td></tr>
+            <tr><td>Phase filter</td><td>9 px</td><td>0–31 px, step 1</td>
+              <td>Sine/cosine filter on the phase change.</td></tr>
+            <tr><td>Settle</td><td>2 frames</td><td>0–10 frames</td>
+              <td>Dropped after each piezo step.</td></tr>
             <tr><td>Record AVI</td><td>Off</td><td>On / off</td>
               <td>Output capped at 30 fps, floor 1 fps.</td></tr>
           </tbody>

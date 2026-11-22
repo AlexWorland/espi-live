@@ -24,6 +24,7 @@ from espi_live.processing import (SMOOTHING_METHODS, ESPIProcessor,
                                   smooth_speckle,
                                   stretch_contrast)
 from espi_live.daq import Drive
+from classic_pipeline import CLASSIC_PIPELINE, classic_settings
 from list_log import ListLog
 
 
@@ -128,6 +129,7 @@ class EngineDemoTests(unittest.TestCase):
         paths.OUTPUT_DIR = self.tmp.name
         self.log = ListLog()
         self.engine = Engine(self.log)
+        self.engine.update_settings(**CLASSIC_PIPELINE)
         self.engine.use_demo()
         self.engine.start()
 
@@ -395,7 +397,10 @@ class EngineDemoTests(unittest.TestCase):
             raw_difference(frame, np.full((4, 6), 12, np.uint8)), np.full((4, 6), 3))
 
     def test_default_settings_choose_fixed_gain_for_analog_cameras(self):
-        """Only a recognised capture adapter starts in Fixed gain, full frames.
+        """Every camera starts with the noise pipeline; analog ones in Reference, Fixed gain.
+
+        The LabVIEW flow is no longer the analog default: it is a toggle, and
+        LABVIEW_FLOW still turns every step of the pipeline off.
 
         Args: None.
         Returns: None.
@@ -408,12 +413,18 @@ class EngineDemoTests(unittest.TestCase):
         self.assertFalse(is_analog(CameraInfo("123")))
         self.assertFalse(is_analog(None))
         started = default_settings(analog)
-        for key, value in LABVIEW_FLOW.items():
-            self.assertEqual(getattr(started, key), value, key)
+        self.assertEqual(started, own_settings(analog))
+        self.assertEqual(started.mode, "Reference")
+        self.assertFalse(started.scale_range)
         self.assertEqual(started.difference_gain, 42.0)
-        self.assertFalse(own_settings(analog).scale_range)
-        self.assertFalse(own_settings(analog).auto_reference)
-        self.assertEqual(own_settings(analog).mode, "Raw")
+        for source in (analog, webcam, None):
+            s = default_settings(source)
+            self.assertEqual((s.average, s.average_frames_first, s.ref_frames,
+                              s.smoothing, s.smoothing_method, s.auto_reference),
+                             (4, True, 16, 11, "Oriented", True), source)
+        for key, value in {"average": 1, "average_frames_first": False, "ref_frames": 1,
+                           "smoothing": 0}.items():
+            self.assertEqual(LABVIEW_FLOW[key], value, key)
         self.assertTrue(default_settings(webcam).scale_range)
         self.assertTrue(default_settings(None).scale_range)
         self.assertFalse(Engine(self.log, info=analog).settings().scale_range)

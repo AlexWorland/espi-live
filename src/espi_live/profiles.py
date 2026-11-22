@@ -6,7 +6,9 @@ values and every processing and display control) plus its LabVIEW-flow state
 profile is saved under a key of its own (profile_key), so a change made to
 one camera never reaches another, and a camera that comes back starts with
 its own last values. A camera with nothing saved starts from
-default_profile, exactly the defaults it always had.
+default_profile: the default noise pipeline, LabVIEW flow off. A saved
+profile keeps its own values, so a camera that has been used keeps the
+processing it was left with when the defaults change.
 
 A preset is the same snapshot saved under a name the user chose. It belongs
 to no camera: applying it changes only the displayed camera's profile, with
@@ -39,7 +41,8 @@ from dataclasses import asdict, dataclass, fields, replace
 from urllib.parse import unquote
 
 from espi_live.camera import CAMERA_RANGES
-from espi_live.engine import LABVIEW_FLOW, Settings, default_settings, is_analog, own_settings
+from espi_live.engine import LABVIEW_FLOW, Settings, default_settings
+from espi_live.phase import MAX_PHASE_FILTER, MAX_SETTLE_FRAMES, PHASE_STEPS
 from espi_live.simulation import SIMULATED_OBJECTS
 from espi_live.processing import (MAX_DENOISE_PERCENT, MAX_FRAMES_BACK,
                                   MAX_REFERENCE_FRAMES, SMOOTHING_METHODS, VIEW_MODES)
@@ -85,6 +88,9 @@ RANGES = {
     "brightness": (0, 128),
     "display_gain": (1, 8),
     "contrast": (0, 100),
+    "phase_steps": (min(PHASE_STEPS), max(PHASE_STEPS)),
+    "phase_filter": (0, MAX_PHASE_FILTER),
+    "phase_settle_frames": (0, MAX_SETTLE_FRAMES),
 }
 CHOICES = {"mode": VIEW_MODES, "smoothing_method": SMOOTHING_METHODS,
            "demo_object": SIMULATED_OBJECTS}
@@ -154,15 +160,10 @@ def default_profile(info, demo=False):
 
     Args: info is the camera's CameraInfo; demo is True for a synthetic source.
     Returns: A Profile: engine.default_settings for the camera (exposure
-        8000 µs, gain 0 dB, 30 fps), and for an analog camera the LabVIEW
-        flow on, keeping its own settings to return to.
+        8000 µs, gain 0 dB, 30 fps, the default noise pipeline), with the
+        LabVIEW flow off for every camera, analog included.
     """
-    source = None if demo else info
-    labview_saved = None
-    if is_analog(source):
-        own = own_settings(source)
-        labview_saved = {key: getattr(own, key) for key in LABVIEW_FLOW}
-    return Profile(default_settings(source), labview_saved)
+    return Profile(default_settings(None if demo else info), None)
 
 
 def summary(profile):

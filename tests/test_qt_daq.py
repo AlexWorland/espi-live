@@ -432,3 +432,184 @@ class HelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhaseWindowTests(DaqWindowTestCase):
+    """The window follows the piezo: Phase view, steps, calibration."""
+
+    def pump(self, predicate, timeout=5.0):
+        """Run the window's DAQ events until a condition holds.
+
+        Args: predicate is a zero-argument callable; timeout is in seconds.
+        Returns: None. Fails the test when the condition never holds.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            APP.processEvents()
+            self.window.poll_daq()
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail("the window never reached the expected state")
+
+    def save(self, **fields):
+        """Store DAQ settings as Apply would have saved them.
+
+        Args: fields are DaqSettings values.
+        Returns: The DaqSettings stored.
+        """
+        settings = daq.DaqSettings(**fields)
+        FakeSettings.store[qt_app.DAQ_SETTINGS_KEY] = json.dumps(settings.to_dict())
+        return settings
+
+    def test_startup_reconnects_the_saved_piezo_and_opens_the_phase_view(self):
+        """A saved device with a piezo connects at startup and selects Phase.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertFalse(w.phase_mode_action.isVisible())
+        self.assertFalse(w.calibrate_phase_button.isEnabled())
+        self.assertIn("not connected", w.phase_state.text())
+        self.save(device="Dev1", piezo_output="ao1", piezo_voltage_v=0.2, piezo_step_v=0.06,
+                  generator_on=True)
+        w._auto_connect_daq()
+        self.assertTrue(self.log.has("looking for Dev1"))
+        self.pump(lambda: w.phase_stepper is not None)
+        stepper = w.phase_stepper
+        self.assertIs(self.engine.phase_stepper, stepper)
+        self.assertFalse(stepper.simulated)
+        self.assertFalse(stepper.settings.generator_on)  # all outputs are at 0 V now
+        self.assertEqual(self.engine.settings().mode, "Phase")
+        self.assertTrue(w.phase_mode_action.isVisible())
+        self.assertTrue(w.calibrate_phase_button.isEnabled())
+        self.assertIn("AO 1, from 0.2 V in steps of 0.06 V.", w.phase_state.text())
+        self.assertNotIn("Simulated", w.phase_state.text())
+        self.assertTrue(self.log.has("Phase view on (phase-shifting ESPI)"))
+        w.poll_daq()  # nothing waiting: returns quietly
+
+    def test_startup_leaves_what_it_cannot_use(self):
+        """Nothing saved, no piezo, a simulated device for a real camera, a missing device.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w._auto_connect_daq()
+        self.assertIsNone(w.daq)
+        w.poll_daq()  # no controller yet: nothing to do
+        self.save(device="Dev1", piezo_output=daq.OFF)
+        w._auto_connect_daq()
+        self.assertIsNone(w.daq)
+        self.save(device="", piezo_output="ao1")
+        w._auto_connect_daq()
+        self.assertIsNone(w.daq)
+        self.save(device=daq.SIMULATED, piezo_output="ao1")
+        with mock.patch.object(w, "current", mock.Mock(demo=False)):
+            w._auto_connect_daq()
+        self.assertIsNone(w.daq)
+        self.save(device="Dev9", piezo_output="ao1")
+        w._auto_connect_daq()
+        self.pump(lambda: self.log.has("Dev9 was not found"))
+        self.assertIsNone(w.phase_stepper)
+
+    def test_simulated_piezo_for_dummy_mode(self):
+        """The saved simulated device reconnects for a synthetic camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.save(device=daq.SIMULATED, piezo_output="ao1")
+        self.window._auto_connect_daq()
+        self.pump(lambda: self.window.phase_stepper is not None)
+        self.assertTrue(self.window.phase_stepper.simulated)
+        self.assertIn("Simulated device: nothing is driven.", self.window.phase_state.text())
+
+    def test_opening_the_daq_window_alone_never_drives_the_piezo(self):
+        """Without settings saved by Apply, connecting attaches no piezo.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertIsNone(self.window.phase_stepper)
+        self.assertNotEqual(self.engine.settings().mode, "Phase")
+        dialog.piezo_output.setCurrentIndex(dialog.piezo_output.findData(daq.OFF))
+        dialog.apply()
+        self.settle(dialog, lambda: "Outputs:" in dialog.state_label.text()
+                    and "applying" not in dialog.state_label.text())
+        self.assertIsNone(self.window.phase_stepper)
+
+    def test_apply_attaches_the_piezo_and_zero_takes_it_away(self):
+        """Apply with a piezo gives the Phase view a stepper; 0 V removes it.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.apply()  # the defaults assign the piezo to AO 1
+        self.settle(dialog, lambda: self.window.phase_stepper is not None)
+        self.assertEqual(self.engine.settings().mode, "Phase")
+        self.engine.update_settings(mode="Reference")  # moved away by hand
+        dialog.apply()
+        self.settle(dialog, lambda: self.window.phase_stepper is not None
+                    and "applying" not in dialog.state_label.text())
+        self.assertEqual(self.engine.settings().mode, "Reference")  # not forced back
+        dialog.zero_button.click()
+        self.settle(dialog, lambda: self.window.phase_stepper is None)
+        self.assertTrue(self.log.has("piezo stepping stopped"))
+        self.assertIsNone(self.engine.phase_stepper)
+
+    def test_calibration_and_stop_events(self):
+        """A calibrated step is saved and used; failures and stops are reported.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.calibrate_phase()
+        self.dialogs.information.assert_called_once()
+        self.assertEqual(self.queued(), [])
+        stepper = qt_app.phase.PiezoStepper(mock.Mock(), daq.DaqSettings(piezo_step_v=0.05))
+        w._attach_stepper(stepper)
+        self.engine.update_settings(mode="Reference")
+        w.calibrate_phase()
+        self.assertEqual(self.engine.settings().mode, "Phase")
+        self.assertIn(("calibrate_phase", {}), self.queued())
+        w._handle_event(w.current, "phase_calibrated", (72.0, 0.0625))
+        self.assertEqual(w.phase_stepper.step_v, 0.0625)
+        self.assertIs(self.engine.phase_stepper, w.phase_stepper)
+        saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
+        self.assertEqual(saved["piezo_step_v"], 0.0625)
+        self.assertIn("now 0.0625 V per step", w.statusBar().currentMessage())
+        w._show_daq_dialog()
+        w._handle_event(w.current, "phase_calibrated", (88.0, 0.07))
+        self.assertEqual(w.daq_dialog.piezo_step.value(), 0.07)
+        w._handle_event(w.current, "phase_calibration_failed", 12.0)
+        self.assertIn("12° per step", w.statusBar().currentMessage())
+        w._handle_event(w.current, "phase_stopped", "gone")
+        self.assertIsNone(w.phase_stepper)
+        self.assertIn("Phase view stopped: gone", w.statusBar().currentMessage())
+        w._handle_event(w.current, "phase_calibrated", (90.0, 0.08))  # no piezo now
+        self.assertIsNone(w.phase_stepper)
+        w._handle_event(mock.Mock(), "phase_stopped", "elsewhere")  # not displayed
+
+    def test_phase_controls_reach_the_engine(self):
+        """Steps, filter and settle are sent and shown per camera.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertEqual(w.phase_steps.currentData(), 5)
+        w.phase_steps.setCurrentIndex(w.phase_steps.findData(4))
+        w.phase_filter.spin.setValue(5)
+        w.phase_settle.spin.setValue(3)
+        s = self.engine.settings()
+        self.assertEqual((s.phase_steps, s.phase_filter, s.phase_settle_frames), (4, 5, 3))
+        w._load_settings(daq.replace(s, phase_steps=5, phase_filter=11,
+                                     phase_settle_frames=1), {})
+        self.assertEqual((w.phase_steps.currentData(), w.phase_filter.spin.value(),
+                          w.phase_settle.spin.value()), (5, 11, 1))
+        self.assertEqual(self.engine.settings().phase_steps, 4)  # not sent back
