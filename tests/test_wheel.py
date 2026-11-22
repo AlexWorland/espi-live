@@ -11,6 +11,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import inspect
 import sys
 import tempfile
 import unittest
@@ -19,7 +20,7 @@ from unittest import mock
 import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication, QSlider
+from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QSlider
 
 from espi_live import paths, qt_app
 from espi_live.channels import demo_channels
@@ -149,6 +150,64 @@ class WheelIgnoringWidgetTests(unittest.TestCase):
         self.assertEqual(spin.value(), 2.0)
 
 
+class WheelIgnoringComboBoxTests(unittest.TestCase):
+    """The drop-down subclass, tested without a parent so nothing scrolls."""
+
+    def make_combo(self, cls):
+        """Build a three-entry drop-down of the given class, set to the middle entry.
+
+        Args: cls is QComboBox or WheelIgnoringComboBox.
+        Returns: The combo box.
+        """
+        combo = cls()
+        combo.addItems(["one", "two", "three"])
+        combo.setCurrentIndex(1)
+        return combo
+
+    def test_plain_combo_changes_on_wheel(self):
+        """Control case: a stock QComboBox does change on a wheel notch.
+
+        Args: None.
+        Returns: None.
+        """
+        combo = self.make_combo(QComboBox)
+        send_wheel(combo, NOTCH_DOWN)
+        self.assertNotEqual(combo.currentIndex(), 1)
+
+    def test_wheel_combo_keeps_entry_and_ignores_event(self):
+        """A wheel notch over the subclass leaves the entry alone and is not accepted.
+
+        Args: None.
+        Returns: None.
+        """
+        combo = self.make_combo(qt_app.WheelIgnoringComboBox)
+        for delta in (NOTCH_UP, NOTCH_DOWN):
+            event = send_wheel(combo, delta)
+            self.assertEqual(combo.currentIndex(), 1)
+            self.assertFalse(event.isAccepted())
+
+    def test_combo_takes_focus_by_click_or_tab_only(self):
+        """The drop-down does not take keyboard focus from a wheel (StrongFocus).
+
+        Args: None.
+        Returns: None.
+        """
+        combo = qt_app.WheelIgnoringComboBox()
+        self.assertEqual(combo.focusPolicy(), Qt.StrongFocus)
+
+    def test_combo_keyboard_still_chooses(self):
+        """Down and Up arrows still change the entry.
+
+        Args: None.
+        Returns: None.
+        """
+        combo = self.make_combo(qt_app.WheelIgnoringComboBox)
+        send_key(combo, Qt.Key_Down)
+        self.assertEqual(combo.currentIndex(), 2)
+        send_key(combo, Qt.Key_Up)
+        self.assertEqual(combo.currentIndex(), 1)
+
+
 class ControlsWheelTests(unittest.TestCase):
     """The real window: the Controls panel scrolls, and no value changes under the wheel."""
 
@@ -228,6 +287,48 @@ class ControlsWheelTests(unittest.TestCase):
         self.assertIsInstance(control.spin, qt_app.WheelIgnoringSpinBox)
         self.assertIsInstance(control.slider, qt_app.WheelIgnoringSlider)
         self.assertEqual(control.spin.focusPolicy(), Qt.StrongFocus)
+
+    def test_no_input_in_the_window_changes_on_wheel(self):
+        """Wheel notches change no drop-down, slider or number box anywhere in the window.
+
+        Every such widget the window owns is sent notches in both directions,
+        unfocused and focused. Catches a plain QComboBox, QSlider or
+        QDoubleSpinBox added later.
+
+        Args: None.
+        Returns: None.
+        """
+        checked = 0
+        for cls in (QComboBox, QSlider, QAbstractSpinBox):
+            for widget in self.window.findChildren(cls):
+                if isinstance(widget, QComboBox):
+                    state = widget.currentIndex
+                elif isinstance(widget, QSlider):
+                    state = widget.value
+                elif widget.lineEdit() is not None:
+                    state = widget.value
+                else:
+                    continue
+                for focus in (False, True):
+                    before = state()
+                    if focus:
+                        widget.setFocus()
+                    for delta in (NOTCH_DOWN, NOTCH_UP, NOTCH_DOWN):
+                        send_wheel(widget, delta)
+                    self.assertEqual(state(), before, f"{type(widget).__name__} "
+                                     f"{widget.toolTip()[:50]!r} changed on wheel")
+                checked += 1
+        self.assertGreater(checked, 20)
+
+    def test_every_drop_down_in_the_dialogs_ignores_the_wheel(self):
+        """The drop-downs inside the DAQ and pixel-square dialogs ignore the wheel too.
+
+        Args: None.
+        Returns: None.
+        """
+        for name in ("DaqDialog", "PixelSquareDialog"):
+            source = inspect.getsource(getattr(qt_app, name))
+            self.assertNotRegex(source, r"=\s*QComboBox\(\)", name)
 
     def test_zoom_slider_ignores_wheel_but_keys_still_zoom(self):
         """The toolbar Zoom slider keeps its value on a wheel notch; arrow keys still zoom.

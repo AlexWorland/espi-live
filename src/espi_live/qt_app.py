@@ -1615,6 +1615,34 @@ class WheelIgnoringSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
+class WheelIgnoringComboBox(QComboBox):
+    """A drop-down that leaves the mouse wheel to the widgets around it.
+
+    Qt's default steps to the next entry on a wheel notch over a closed
+    drop-down, which silently changes a setting while the Controls panel is
+    being scrolled. The wheel is ignored here so the panel scrolls instead; a
+    click, the keyboard and the open list still choose an entry. Like the
+    number box it takes focus only by a click or Tab, not from a wheel.
+    """
+
+    def __init__(self):
+        """Create the drop-down with click-and-Tab focus only.
+
+        Args: None.
+        Returns: None.
+        """
+        super().__init__()
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        """Ignore the wheel so the parent widget gets it.
+
+        Args: event is the Qt wheel event.
+        Returns: None.
+        """
+        event.ignore()
+
+
 class SliderSpin(QWidget):
     """A slider and exact-entry spin box sharing one numeric value."""
 
@@ -2303,7 +2331,7 @@ class PixelSquareDialog(QDialog):
             f"background:#8b0000;color:white;font-weight:bold;"
             f"padding:{ui_scale.px(4)}px;border-radius:{ui_scale.px(4)}px;")
         self.demo_label.setVisible(False)
-        self.size_combo = QComboBox()
+        self.size_combo = WheelIgnoringComboBox()
         for size in SQUARE_SIZES:
             self.size_combo.addItem(f"{size} × {size} pixels", size)
         self.size_combo.setCurrentIndex(SQUARE_SIZES.index(self.size))
@@ -2510,7 +2538,7 @@ class DaqDialog(QDialog):
         self.resize(ui_scale.px(620), ui_scale.px(640))
         saved = self._saved_settings()
 
-        self.device_box = QComboBox()
+        self.device_box = WheelIgnoringComboBox()
         set_tooltip(self.device_box,
                     "The NI device to drive. The simulated device drives nothing: "
                     "use it to try the controls without hardware.")
@@ -2522,16 +2550,16 @@ class DaqDialog(QDialog):
         device_row.addWidget(self.device_box, 1)
         device_row.addWidget(self.rescan_button)
 
-        self.generator_output = QComboBox()
+        self.generator_output = WheelIgnoringComboBox()
         set_tooltip(self.generator_output,
                     "Which output produces the frequency generator's signal. An analog "
                     "output gives a sine for the shaker or PZT amplifier; a counter gives a "
                     "5 V square wave on a PFI terminal.")
-        self.generator_terminal = QComboBox()
+        self.generator_terminal = WheelIgnoringComboBox()
         set_tooltip(self.generator_terminal,
                     "The PFI terminal a counter's square wave comes out on. On the "
                     "USB-6251 BNC, PFI 0–7 have BNC sockets.")
-        self.piezo_output = QComboBox()
+        self.piezo_output = WheelIgnoringComboBox()
         set_tooltip(self.piezo_output,
                     "Which analog output drives the reference piezo's amplifier.")
         generator_row = QHBoxLayout()
@@ -2571,7 +2599,7 @@ class DaqDialog(QDialog):
 
         self.piezo_on = QCheckBox("Piezo on")
         set_tooltip(self.piezo_on, "Drive the piezo after Apply. Off holds it at 0 V.")
-        self.piezo_mode = QComboBox()
+        self.piezo_mode = WheelIgnoringComboBox()
         for mode, text in PIEZO_MODE_TEXT:
             self.piezo_mode.addItem(text, mode)
         set_tooltip(self.piezo_mode,
@@ -4002,7 +4030,7 @@ class MainWindow(QMainWindow):
         cameras.addWidget(title)
         display_row = QHBoxLayout()
         display_row.addWidget(QLabel("Display"))
-        self.camera_combo = QComboBox()
+        self.camera_combo = WheelIgnoringComboBox()
         set_tooltip(self.camera_combo,
                     "Camera shown in the window. The controls below change this "
                     "camera's settings.")
@@ -4185,7 +4213,7 @@ class MainWindow(QMainWindow):
         add(self.exposure, "Exposure", basic=True)
         add(self.gain, "Gain", basic=True)
         add(self.fps, "Requested FPS")
-        self.simulated_object = QComboBox()
+        self.simulated_object = WheelIgnoringComboBox()
         self.simulated_object.addItems(simulation.SIMULATED_OBJECTS)
         self.simulated_object.setCurrentText(s.demo_object)
         set_tooltip(self.simulated_object, SIMULATED_OBJECT_TIP)
@@ -4348,7 +4376,7 @@ class MainWindow(QMainWindow):
         self.outlier_filter.valueChanged.connect(
             lambda v: self.engine.update_settings(outlier_filter=int(v)))
         add(self.outlier_filter, "Outlier filter")
-        self.smoothing_combo = QComboBox()
+        self.smoothing_combo = WheelIgnoringComboBox()
         self.smoothing_combo.addItems(SMOOTHING_METHODS)
         self.smoothing_combo.setCurrentText(s.smoothing_method)
         set_tooltip(self.smoothing_combo,
@@ -4371,7 +4399,7 @@ class MainWindow(QMainWindow):
             lambda v: self.engine.update_settings(smoothing=int(v)))
         add(self.smoothing_combo, "Speckle filter")
         add(self.smoothing, "Filter width")
-        self.scaling = QComboBox()
+        self.scaling = WheelIgnoringComboBox()
         self.scaling.addItems(SCALING_MODES)
         self.scaling.setCurrentText(SCALING_MODES[1] if s.scale_range else SCALING_MODES[0])
         set_tooltip(self.scaling, SCALING_TIP,
@@ -4657,7 +4685,7 @@ class MainWindow(QMainWindow):
         Args: add places a widget on the next controls-grid row.
         Returns: None.
         """
-        self.preset_combo = QComboBox()
+        self.preset_combo = WheelIgnoringComboBox()
         self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.preset_combo.setMinimumContentsLength(12)
         set_tooltip(self.preset_combo, PRESET_COMBO_TIP)
@@ -4859,7 +4887,7 @@ class MainWindow(QMainWindow):
         Args: add is _build_controls' add(widget, label, basic) helper.
         Returns: None.
         """
-        self.phone_capture = QComboBox()
+        self.phone_capture = WheelIgnoringComboBox()
         self.phone_capture.addItem("Video (the phone's processed luma)", False)
         self.phone_capture.addItem("Bayer RAW (sensor data)", True)
         set_tooltip(self.phone_capture,
@@ -4873,7 +4901,7 @@ class MainWindow(QMainWindow):
         self.phone_capture.activated.connect(
             lambda index: self._phone_command(raw=self.phone_capture.itemData(index)))
         add(self.phone_capture, "Capture", basic=True)
-        self.phone_raw_channel = QComboBox()
+        self.phone_raw_channel = WheelIgnoringComboBox()
         for channel, text in (("red", "Red (633 nm laser)"),
                               ("green", "Green (532 nm laser)"), ("blue", "Blue")):
             self.phone_raw_channel.addItem(text, channel)
@@ -4886,19 +4914,19 @@ class MainWindow(QMainWindow):
             lambda index: self._phone_command(
                 raw_channel=self.phone_raw_channel.itemData(index)))
         add(self.phone_raw_channel, "RAW colour", basic=True)
-        self.phone_fps = QComboBox()
+        self.phone_fps = WheelIgnoringComboBox()
         set_tooltip(self.phone_fps,
                     "Frame rate the iPhone captures at. A USB 2 iPhone carries about "
                     "30 MB/s: 1920 × 1080 at about 15 fps, or a smaller crop at 30 fps.")
         self.phone_fps.activated.connect(self._phone_fps_chosen)
         add(self.phone_fps, "Frame rate", basic=True)
-        self.phone_size = QComboBox()
+        self.phone_size = WheelIgnoringComboBox()
         set_tooltip(self.phone_size,
                     "Frame size the iPhone camera captures. Larger frames show finer "
                     "speckle but need more USB bandwidth.")
         self.phone_size.activated.connect(self._phone_size_chosen)
         add(self.phone_size, "Frame size", basic=True)
-        self.phone_crop = QComboBox()
+        self.phone_crop = WheelIgnoringComboBox()
         for size in iphone.CROP_SIZES:
             self.phone_crop.addItem("Full frame" if size == 0 else f"{size} × {size} centre",
                                     size)
@@ -4909,7 +4937,7 @@ class MainWindow(QMainWindow):
             lambda index: self._phone_command(crop_width=self.phone_crop.itemData(index),
                                               crop_height=self.phone_crop.itemData(index)))
         add(self.phone_crop, "Crop", basic=True)
-        self.phone_send_cap = QComboBox()
+        self.phone_send_cap = WheelIgnoringComboBox()
         for cap in iphone.SEND_CAPS:
             self.phone_send_cap.addItem("Every frame" if cap == 0 else f"{cap:g} fps", cap)
         set_tooltip(self.phone_send_cap,
@@ -6213,7 +6241,7 @@ class MainWindow(QMainWindow):
             _build_controls); s is the displayed camera's Settings.
         Returns: None.
         """
-        self.phase_steps = QComboBox()
+        self.phase_steps = WheelIgnoringComboBox()
         for steps, text in PHASE_STEP_TEXT:
             self.phase_steps.addItem(text, steps)
         self.phase_steps.setCurrentIndex(self.phase_steps.findData(s.phase_steps))
