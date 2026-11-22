@@ -6,12 +6,16 @@ Run from the project root:
 
 import math
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from espi_live import simulation
+from espi_live.daq import HOLD, SINE, Drive
 from espi_live.simulation import (DEFAULT_OBJECT, K_PER_NM, SIMULATED_OBJECTS,
-                                  DemoSource, FringeTable, deformation_nm)
+                                  DemoSource, FringeTable, deformation_nm,
+                                  mode_frequency_hz, object_note)
+from list_log import ListLog
 
 
 def brute(u, beta, n, samples=20000):
@@ -102,6 +106,17 @@ class FringeTableTests(unittest.TestCase):
         edge = table.values(np.array([12.0]), np.array([0.0]))
         self.assertTrue(np.isfinite(far).all())
         self.assertEqual(far[0], edge[0])
+
+    def test_whole_cycles_ignore_the_start_phase(self):
+        """Only a fractional cycle count makes the average depend on the start phase.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertFalse(FringeTable(16, 8).depends_on_beta)
+        self.assertFalse(FringeTable(16, 8000e-6 * 1000).depends_on_beta)
+        self.assertTrue(FringeTable(16, 8.7).depends_on_beta)
+        self.assertTrue(FringeTable(16, 0.3).depends_on_beta)
 
     def test_values_keep_the_input_shape(self):
         """A 2-D amplitude map gives a 2-D complex64 result.
@@ -312,6 +327,258 @@ class SceneTests(unittest.TestCase):
         source.set_object("Still")
         source.set_object("Still")
         self.assertEqual(source.object, "Still")
+
+
+def brute_frame(source, exposure_us, t0, samples=8000):
+    """Integrate the ideal sensor's exposure by brute force.
+
+    Args: source is a DemoSource whose object and drive are set; exposure_us
+        is the exposure; t0 is the exposure start (s); samples is how many
+        instants to average.
+    Returns: The float intensity map, scaled for the exposure (0 dB).
+    """
+    frequency, path = source.harmonic_path_nm()
+    static = source.speckle_phase.astype(np.float64) - K_PER_NM * source.static_piezo_nm()
+    duration = exposure_us * 1e-6
+    total = np.zeros(static.shape)
+    for step in range(samples):
+        t = t0 + (step + 0.5) * duration / samples
+        motion = K_PER_NM * np.imag(path * np.exp(2j * np.pi * frequency * t))
+        total += np.cos(static + motion)
+    intensity = source.background + source.modulation * total / samples
+    return intensity * exposure_us / 8000
+
+
+class VibrationTests(unittest.TestCase):
+    """Time-averaged vibration, the DAQ drive and the piezo reference mirror."""
+
+    def source(self, obj, drive=None, width=96, height=64, log=None):
+        """Make a small simulated source with an object and a drive.
+
+        Args: obj is a SIMULATED_OBJECTS name; drive is a Drive or None;
+            width and height are the frame size; log is passed through.
+        Returns: The DemoSource.
+        """
+        source = DemoSource(width, height, "DEMO1", log)
+        source.set_object(obj)
+        if drive is not None:
+            source.set_drive(drive)
+        return source
+
+    def test_mode_frequencies(self):
+        """The plate's modes sit where the design puts them; (2, 1) is exactly 1000 Hz.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertAlmostEqual(mode_frequency_hz(1, 1), 520.0)
+        self.assertAlmostEqual(mode_frequency_hz(2, 1), 1000.0, delta=1e-9)
+        self.assertAlmostEqual(mode_frequency_hz(1, 2), 520 * (1 / 2.25 + 4) / (1 / 2.25 + 1))
+
+    def test_vibration_has_a_still_nodal_line(self):
+        """The built-in mode (2, 1) peaks at 16 rad and has a still line down the middle.
+
+        Args: None.
+        Returns: None.
+        """
+        source = self.source("Vibration", width=97)
+        frequency, path = source.harmonic_path_nm()
+        amplitude = np.abs(path)
+        self.assertAlmostEqual(frequency, 1000.0, delta=1e-9)
+        self.assertAlmostEqual(float(K_PER_NM * amplitude.max()), 16.0, delta=1e-3)
+        self.assertLess(float(amplitude[:, 48].max()), 1e-3 * float(amplitude.max()))
+        self.assertEqual(float(amplitude[~source.plate_mask].max()), 0.0)
+        self.assertEqual(self.source("Still").harmonic_path_nm(), (0.0, None))
+        self.assertEqual(self.source("Slow deformation").harmonic_path_nm(), (0.0, None))
+
+    def test_vibration_matches_brute_force_whole_and_fractional(self):
+        """Frames equal the exposure integral within a grey level, whole or fractional cycles.
+
+        Args: None.
+        Returns: None.
+        """
+        for exposure in (8000, 8700):
+            for t0 in (0.0, 0.0123):
+                source = self.source("Vibration")
+                source.clock_s = t0
+                frame = source.next_frame(exposure, 0, 30)
+                expected = expected_frame(brute_frame(source, exposure, t0))
+                self.assertLessEqual(max_error(frame, expected), 1, (exposure, t0))
+
+    def test_follow_daq_matches_brute_force_with_reference_modulation(self):
+        """A driven plate with a piezo sine and a held centre is integrated exactly.
+
+        Args: None.
+        Returns: None.
+        """
+        drive = Drive("sine", 1000.0, 0.4, piezo_mode=SINE, piezo_v=0.02,
+                      piezo_amplitude_v=0.3, piezo_phase_deg=40.0)
+        source = self.source("Follow DAQ", drive)
+        source.clock_s = 0.0071
+        frame = source.next_frame(3300, 0, 30)
+        expected = expected_frame(brute_frame(source, 3300, 0.0071))
+        self.assertLessEqual(max_error(frame, expected), 1)
+
+    def test_whole_cycles_do_not_flicker(self):
+        """With whole cycles per exposure every frame is the same; otherwise the phase walks.
+
+        Args: None.
+        Returns: None.
+        """
+        source = self.source("Vibration")
+        first = source.next_frame(8000, 0, 30)
+        for _ in range(4):
+            np.testing.assert_array_equal(source.next_frame(8000, 0, 30), first)
+        walking = self.source("Vibration")
+        frames = [walking.next_frame(8700, 0, 30) for _ in range(2)]
+        self.assertFalse(np.array_equal(frames[0], frames[1]))
+
+    def test_follow_daq_resonance(self):
+        """0.1 V at the first resonance gives 16 rad; off resonance far less; off is still.
+
+        Args: None.
+        Returns: None.
+        """
+        _, path = self.source("Follow DAQ", Drive("sine", 520.0, 0.1)).harmonic_path_nm()
+        peak = float(K_PER_NM * np.abs(path).max())
+        self.assertAlmostEqual(peak, 16.0, delta=0.32)
+        _, off = self.source("Follow DAQ", Drive("sine", 700.0, 0.1)).harmonic_path_nm()
+        self.assertLess(float(K_PER_NM * np.abs(off).max()), 0.3 * peak)
+        idle = self.source("Follow DAQ", Drive())
+        self.assertEqual(idle.harmonic_path_nm(), (0.0, None))
+        still = self.source("Still")
+        np.testing.assert_array_equal(idle.next_frame(8000, 0, 30), still.next_frame(8000, 0, 30))
+
+    def test_follow_daq_square_uses_the_fundamental(self):
+        """A TTL square wave drives like a sine of (4 / pi) x 2.5 V.
+
+        Args: None.
+        Returns: None.
+        """
+        square = self.source("Follow DAQ", Drive("square", 520.0)).harmonic_path_nm()[1]
+        sine = self.source("Follow DAQ", Drive("sine", 520.0, 4 / np.pi * 2.5)).harmonic_path_nm()[1]
+        np.testing.assert_allclose(square, sine, rtol=1e-6, atol=1e-6)
+
+    def test_piezo_hold_shifts_the_phase_in_every_object(self):
+        """A held piezo level moves the reference mirror 1500 nm per volt.
+
+        Args: None.
+        Returns: None.
+        """
+        hold = Drive(piezo_mode=HOLD, piezo_v=0.05)
+        for obj in SIMULATED_OBJECTS:
+            self.assertAlmostEqual(self.source(obj, hold).static_piezo_nm(), 75.0)
+        source = self.source("Still", hold)
+        phase = source.speckle_phase - K_PER_NM * 75.0
+        intensity = source.background + source.modulation * np.cos(phase)
+        self.assertLessEqual(max_error(source.next_frame(8000, 0, 30),
+                                       expected_frame(intensity)), 1)
+        self.assertEqual(self.source("Still", Drive()).static_piezo_nm(), 0.0)
+
+    def test_piezo_sine_only_in_follow_daq(self):
+        """The piezo's sine is locked to the generator; elsewhere only its centre acts.
+
+        Args: None.
+        Returns: None.
+        """
+        drive = Drive("sine", 1000.0, 0.1, piezo_mode=SINE, piezo_v=0.01,
+                      piezo_amplitude_v=0.02, piezo_phase_deg=30.0)
+        vibrating = self.source("Vibration", drive)
+        builtin = self.source("Vibration")
+        np.testing.assert_allclose(vibrating.harmonic_path_nm()[1], builtin.harmonic_path_nm()[1])
+        self.assertAlmostEqual(vibrating.static_piezo_nm(), 15.0)
+        following = self.source("Follow DAQ", drive)
+        plain = self.source("Follow DAQ", Drive("sine", 1000.0, 0.1))
+        reference = 30.0 * np.exp(1j * np.pi / 6)
+        np.testing.assert_allclose(following.harmonic_path_nm()[1],
+                                   plain.harmonic_path_nm()[1] - reference,
+                                   rtol=1e-5, atol=1e-4)
+
+    def test_reference_modulation_cancels_where_matched(self):
+        """A piezo sine equal to the plate's motion at a pixel makes that pixel still.
+
+        Args: None.
+        Returns: None.
+        """
+        _, motion = self.source("Follow DAQ", Drive("sine", 520.0, 0.1)).harmonic_path_nm()
+        target = complex(motion[30, 40])
+        drive = Drive("sine", 520.0, 0.1, piezo_mode=SINE,
+                      piezo_amplitude_v=abs(target) / 1500.0,
+                      piezo_phase_deg=math.degrees(np.angle(target)))
+        _, path = self.source("Follow DAQ", drive).harmonic_path_nm()
+        self.assertLess(abs(complex(path[30, 40])), 1e-3)
+
+    def test_drag_rebuilds_table_once_per_change(self):
+        """The exposure table is rebuilt only when the cycle count changes.
+
+        Args: None.
+        Returns: None.
+        """
+        built = []
+        real = simulation.FringeTable
+
+        def counting(u_max, cycles):
+            """Build a real table and count it.
+
+            Args: u_max and cycles are FringeTable's.
+            Returns: The FringeTable.
+            """
+            built.append(cycles)
+            return real(u_max, cycles)
+        source = self.source("Vibration")
+        with mock.patch.object(simulation, "FringeTable", counting):
+            for exposure in (8000, 8000, 8100, 8100):
+                source.next_frame(exposure, 0, 30)
+        self.assertEqual(len(built), 2)
+
+    def test_strong_drive_stays_finite(self):
+        """An overdriven plate clamps the table range, warns once and stays finite.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        source = self.source("Follow DAQ", Drive("sine", 520.0, 10.0), log=log)
+        for _ in range(2):
+            frame = source.next_frame(8000, 0, 30)
+        self.assertEqual(frame.dtype, np.uint8)
+        warnings = [m for level, m, _ in log.records if level == "WARNING"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("finer than", warnings[0])
+        self.source("Follow DAQ", Drive("sine", 520.0, 10.0)).next_frame(8000, 0, 30)
+
+    def test_object_note_texts(self):
+        """The note under the control says what the simulation is doing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIn("Nothing moves", object_note("Still", Drive()))
+        self.assertIn("12 s", object_note("Slow deformation", Drive()))
+        vibration = object_note("Vibration", Drive())
+        self.assertIn("mode (2, 1)", vibration)
+        self.assertIn("1000 Hz", vibration)
+        idle = object_note("Follow DAQ", Drive())
+        self.assertIn("no DAQ drive", idle)
+        self.assertIn("Devices → NI DAQ…", idle)
+        sine = object_note("Follow DAQ", Drive("sine", 1000.0, 0.1, device="Dev1: USB-6251",
+                                               piezo_mode=HOLD, piezo_v=0.05))
+        self.assertIn("Dev1: USB-6251", sine)
+        self.assertIn("1000 Hz sine, 0.10 V", sine)
+        self.assertIn("piezo holds 0.05 V", sine)
+        square = object_note("Follow DAQ", Drive("square", 777.0, device="Sim"))
+        self.assertIn("777 Hz square", square)
+        piezo = object_note("Follow DAQ", Drive("sine", 1000.0, 0.1, piezo_mode=SINE,
+                                                piezo_amplitude_v=0.2, piezo_phase_deg=90))
+        self.assertIn("piezo sine 0.20 V at 90°", piezo)
+        self.assertIn("piezo holds 0.05 V",
+                      object_note("Still", Drive(piezo_mode=HOLD, piezo_v=0.05)))
+        self.assertIn("piezo holds 0.01 V",
+                      object_note("Vibration", Drive(piezo_mode=SINE, piezo_v=0.01,
+                                                     piezo_amplitude_v=0.2)))
+        self.assertIn("generator off",
+                      object_note("Follow DAQ", Drive(piezo_mode=HOLD, piezo_v=0.05,
+                                                      device="Sim")))
 
 
 if __name__ == "__main__":

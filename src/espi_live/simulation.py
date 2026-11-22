@@ -22,6 +22,8 @@ import zlib
 import cv2
 import numpy as np
 
+from espi_live.daq import SINE, Drive
+
 # Optics.
 WAVELENGTH_NM = 632.8  # HeNe
 K_PER_NM = 4 * math.pi / WAVELENGTH_NM  # phase per nm of out-of-plane motion
@@ -73,6 +75,9 @@ DEFAULT_OBJECT = "Slow deformation"
 TABLE_U_STEP = 0.08
 TABLE_BETA_ERROR = 1e-3
 MAX_TABLE_POINTS = 1 << 15
+# Above this phase amplitude a vibration's fringes are finer than the
+# speckle; pixels beyond it are simulated at this amplitude (with a warning).
+TABLE_U_LIMIT = 64.0
 
 
 def _power_of_two(count):
@@ -107,7 +112,8 @@ class FringeTable:
 
         Args: u_max is the largest phase amplitude (radians) to cover;
             cycles is the number of drive cycles per exposure (n >= 0).
-        Returns: None.
+        Returns: None. depends_on_beta is False for a whole number of cycles,
+            where F is exactly J0(u) whatever the start phase.
         """
         self.u_max = u_max
         self.cycles = cycles
@@ -119,7 +125,13 @@ class FringeTable:
         theta = 2 * np.pi * np.arange(coarse) / coarse
         k = np.fft.fftfreq(coarse, 1.0 / coarse)
         spectrum = np.fft.fft(np.exp(1j * u[:, None] * np.sin(theta[None, :])), axis=1)
-        spectrum *= np.exp(1j * np.pi * k * cycles) * np.sinc(k * cycles) / coarse
+        weights = np.exp(1j * np.pi * k * cycles) * np.sinc(k * cycles)
+        # A whole number of cycles leaves exactly J0: drop the k != 0 terms,
+        # whose weights are only rounding noise, so beta cannot matter at all.
+        self.depends_on_beta = not (cycles >= 0.5 and abs(cycles - round(cycles)) < 1e-9)
+        if not self.depends_on_beta:
+            weights[1:] = 0
+        spectrum *= weights / coarse
         # |d2F/dbeta2| is at most sum k^2 |a_k| and at most u + u^2.
         curvature = min(float(np.max(np.abs(spectrum) @ (k * k))), top + top * top)
         fine = coarse
@@ -193,6 +205,52 @@ def deformation_nm(t_s):
     if t < 2 * RAMP_S + HOLD_S:
         return peak * (1 + math.cos(math.pi * (t - RAMP_S - HOLD_S) / RAMP_S)) / 2
     return 0.0
+
+
+def mode_frequency_hz(m, n):
+    """Resonance frequency of plate mode (m, n).
+
+    Args: m and n are the mode's half-wave counts along the plate's long
+        and short sides.
+    Returns: The frequency in Hz; (1, 1) is F11_HZ and (2, 1) is 1000 Hz.
+    """
+    return F11_HZ * ((m / PLATE_ASPECT) ** 2 + n ** 2) / ((1 / PLATE_ASPECT) ** 2 + 1)
+
+
+def object_note(name, drive):
+    """Say in a line what the simulation is doing, for the note under the control.
+
+    Args: name is a SIMULATED_OBJECTS name; drive is the DAQ's Drive.
+    Returns: The text. A held piezo level is named in every object; the
+        piezo's sine only in Follow DAQ, which it is locked to.
+    """
+    if name == "Still":
+        parts = ["Nothing moves"]
+    elif name == "Slow deformation":
+        parts = [f"The plate bulges to {DEFORMATION_FRINGES} fringes and back every "
+                 f"{CYCLE_S:g} s, resting for the last {STILL_S:g} s"]
+    elif name == "Vibration":
+        m, n = VIBRATION_MODE
+        parts = [f"Built-in drive: mode ({m}, {n}) at {mode_frequency_hz(m, n):.0f} Hz, "
+                 "peak 16 rad (5 J0 fringes). Set the reference on Still first"]
+    elif not drive.active:
+        return ("Follow DAQ: no DAQ drive — open Devices → NI DAQ… and choose the "
+                "Simulated device.")
+    else:
+        if drive.waveform == "sine":
+            generator = f"{drive.frequency_hz:.6g} Hz sine, {drive.amplitude_v:.2f} V"
+        elif drive.waveform == "square":
+            generator = f"{drive.frequency_hz:.6g} Hz square (TTL)"
+        else:
+            generator = "generator off"
+        parts = [f"{drive.device}: {generator}"]
+    if drive.piezo_mode == SINE and name == "Follow DAQ":
+        parts.append(f"piezo sine {drive.piezo_amplitude_v:.2f} V at "
+                     f"{drive.piezo_phase_deg:.0f}°, centre {drive.piezo_v:.2f} V")
+    elif drive.piezo_mode:
+        shift = math.degrees(K_PER_NM * PIEZO_NM_PER_V * drive.piezo_v)
+        parts.append(f"piezo holds {drive.piezo_v:.2f} V ({shift:.0f}° reference shift)")
+    return "; ".join(parts) + "."
 
 
 def _plate_axis(size):
@@ -270,7 +328,11 @@ class DemoSource:
         self.height = height
         self.log = log
         self.object = DEFAULT_OBJECT
+        self.drive = Drive()
         self.clock_s = 0.0
+        self._harmonic = None   # (key, frequency, Z, u map, arg Z map)
+        self._table = None      # (key, FringeTable, prepared lookup, fixed F or None)
+        self._warned = False
         rng = np.random.default_rng(zlib.crc32((label or "DEMO").encode()))
         noise = rng.standard_normal((height, width)) + 1j * rng.standard_normal((height, width))
         fy = np.fft.fftfreq(height)[:, None]
@@ -318,6 +380,125 @@ class DemoSource:
             raise ValueError(f"Unknown simulated object: {name!r}")
         self.object = name
 
+    def set_drive(self, drive):
+        """Follow what the DAQ outputs produce.
+
+        Args: drive is a daq.Drive (Drive() when nothing is driven).
+        Returns: None.
+        """
+        self.drive = drive
+
+    def static_piezo_nm(self):
+        """The reference mirror's steady displacement.
+
+        Args: None.
+        Returns: PIEZO_NM_PER_V times the piezo's held level (or its sine's
+            centre), in nm; 0 when the piezo is off.
+        """
+        return PIEZO_NM_PER_V * self.drive.piezo_v if self.drive.piezo_mode else 0.0
+
+    def harmonic_path_nm(self):
+        """The vibration's complex path-difference amplitude, object minus mirror.
+
+        With Z this map, the harmonic phase is K * Im(Z exp(i omega t)).
+
+        Args: None.
+        Returns: (frequency_hz, Z) with Z a complex64 (height, width) map in
+            nm, or (0.0, None) when nothing vibrates.
+        """
+        state = self._harmonic_state()
+        return (state[1], state[2]) if state[2] is not None else (0.0, None)
+
+    def _harmonic_state(self):
+        """Work out (and cache) the vibration for the current object and drive.
+
+        Args: None.
+        Returns: (key, frequency, Z, K|Z| as float32, arg Z as float32); Z
+            and the maps are None when nothing vibrates.
+        """
+        key = (self.object, self.drive if self.object == "Follow DAQ" else None)
+        if self._harmonic is not None and self._harmonic[0] == key:
+            return self._harmonic
+        frequency, path = 0.0, None
+        if self.object == "Vibration":
+            m, n = VIBRATION_MODE
+            coefficients = np.zeros((MAX_MODE, MAX_MODE))
+            coefficients[n - 1, m - 1] = 1.0
+            shape = self.mode_sum(coefficients)
+            frequency = mode_frequency_hz(m, n)
+            path = shape * (VIBRATION_PEAK_RAD / K_PER_NM / np.abs(shape).max())
+        elif self.object == "Follow DAQ" and self.drive.waveform:
+            frequency = self.drive.frequency_hz
+            volts = (self.drive.amplitude_v if self.drive.waveform == "sine"
+                     else 4 / math.pi * TTL_HIGH_V / 2)
+            path = volts * self._plate_response(frequency)
+            if self.drive.piezo_mode == SINE:
+                path = path - PIEZO_NM_PER_V * self.drive.piezo_amplitude_v * np.exp(
+                    1j * math.radians(self.drive.piezo_phase_deg))
+        if path is None:
+            self._harmonic = (key, 0.0, None, None, None)
+        else:
+            path = path.astype(np.complex64)
+            self._harmonic = (key, frequency, path,
+                              (K_PER_NM * np.abs(path)).astype(np.float32),
+                              np.angle(path).astype(np.float32))
+        self._table = None
+        return self._harmonic
+
+    def _plate_response(self, frequency):
+        """The plate's displacement per volt of a sine drive at one frequency.
+
+        Each mode responds as a resonator of quality MODE_Q, weighted by its
+        shape at DRIVE_POINT over (f_mn / f11)^2, so at 0 Hz the sum is the
+        point-load deflection. The scale makes GENERATOR_REFERENCE_V at
+        f(1, 1) peak at GENERATOR_PEAK_RAD.
+
+        Args: frequency is the drive frequency in Hz.
+        Returns: A complex (height, width) map in nm per volt.
+        """
+        stiffness = _mode_stiffness()
+        weights = _drive_participation() * (stiffness[0, 0] / stiffness) ** 2
+
+        def response(f):
+            """Sum the modes' responses at one frequency, unscaled.
+
+            Args: f is the frequency in Hz.
+            Returns: The complex (height, width) mode sum.
+            """
+            ratio = f * stiffness[0, 0] / (F11_HZ * stiffness)
+            return self.mode_sum(weights / (1 - ratio ** 2 + 1j * ratio / MODE_Q))
+        reference = np.abs(response(F11_HZ)).max() * GENERATOR_REFERENCE_V
+        return response(frequency) * (GENERATOR_PEAK_RAD / K_PER_NM / reference)
+
+    def _fringe_map(self, state, exposure_us, t0):
+        """The exposure average F at every pixel for this frame.
+
+        Args: state is _harmonic_state(); exposure_us is the exposure; t0 is
+            the exposure's start on the sensor clock.
+        Returns: A complex64 (height, width) map.
+        """
+        _, frequency, _, amplitude, angle = state
+        cycles = frequency * exposure_us * 1e-6
+        needed = float(amplitude.max())
+        if needed > TABLE_U_LIMIT and not self._warned and self.log is not None:
+            self.log.warning(
+                f"Simulated vibration reaches {needed:.0f} rad; above {TABLE_U_LIMIT:.0f} "
+                "rad its fringes are finer than the speckle, so those pixels are "
+                f"simulated at {TABLE_U_LIMIT:.0f} rad.")
+            self._warned = True
+        key = (cycles, min(needed, TABLE_U_LIMIT))
+        if self._table is None or self._table[0] != key:
+            table = FringeTable(key[1], cycles)
+            self._table = (key, table, table.prepare(amplitude), None)
+        _, table, prepared, fixed = self._table
+        if not table.depends_on_beta:  # whole cycles: the same every frame
+            if fixed is None:
+                fixed = table.lookup(prepared, angle)
+                self._table = self._table[:3] + (fixed,)
+            return fixed
+        shift = np.float32(2 * math.pi * ((frequency * t0) % 1.0))
+        return table.lookup(prepared, angle + shift)
+
     def next_frame(self, exposure_us, gain_db, fps):
         """Expose one frame starting at clock_s, then advance the clock a frame period.
 
@@ -325,10 +506,17 @@ class DemoSource:
             fps is the requested frame rate (the sensor clock's rate).
         Returns: A new (height, width) uint8 frame.
         """
-        phase = self.speckle_phase
+        static = -K_PER_NM * self.static_piezo_nm()
+        phase = self.speckle_phase + np.float32(static) if static else self.speckle_phase
         if self.object == "Slow deformation":
             phase = phase + np.float32(K_PER_NM * deformation_nm(self.clock_s)) * self.load_shape
-        intensity = self.background + self.modulation * np.cos(phase)
+        state = self._harmonic_state()
+        if state[2] is None:
+            intensity = self.background + self.modulation * np.cos(phase)
+        else:
+            fringe = self._fringe_map(state, exposure_us, self.clock_s)
+            intensity = self.background + self.modulation * (
+                fringe.real * np.cos(phase) - fringe.imag * np.sin(phase))
         scale = exposure_us / REFERENCE_EXPOSURE_US * 10.0 ** (gain_db / 20.0)
         self.clock_s += 1.0 / max(float(fps), 1.0)
         return cv2.convertScaleAbs(intensity, alpha=scale)
