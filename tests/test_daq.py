@@ -393,6 +393,77 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(empty.summary, "no outputs assigned")
 
 
+class DriveTests(unittest.TestCase):
+    """Each output plan says what the outputs produce, for the ESPI simulation."""
+
+    SIMULATED_LABEL = "Simulated device (no hardware)"
+
+    def test_sine_generator_and_held_piezo(self):
+        """A sine and a held piezo level are described with the real frequency.
+
+        Args: None.
+        Returns: None.
+        """
+        p = daq.plan(daq.DaqSettings(generator_on=True, generator_frequency_hz=1000,
+                                     generator_amplitude_v=0.1, piezo_on=True,
+                                     piezo_voltage_v=0.05))
+        self.assertEqual(p.drive, daq.Drive("sine", p.frequency_hz, 0.1, 0.0, daq.HOLD,
+                                            0.05, 0.0, 0.0, self.SIMULATED_LABEL, True))
+        self.assertTrue(p.drive.active)
+
+    def test_square_counter(self):
+        """A counter's square wave has the counter's frequency and no amplitude.
+
+        Args: None.
+        Returns: None.
+        """
+        s = daq.DaqSettings(generator_output="ctr0", generator_on=True,
+                            generator_frequency_hz=777.0, generator_amplitude_v=0.3)
+        drive = daq.plan(s).drive
+        self.assertEqual((drive.waveform, drive.frequency_hz, drive.amplitude_v),
+                         ("square", daq.square_frequency(777.0), 0.0))
+        self.assertEqual(drive.piezo_mode, "")
+
+    def test_sine_piezo(self):
+        """A piezo sine keeps its centre, amplitude and phase.
+
+        Args: None.
+        Returns: None.
+        """
+        s = daq.DaqSettings(generator_on=True, piezo_on=True, piezo_mode=daq.SINE,
+                            piezo_voltage_v=0.01, piezo_amplitude_v=0.2,
+                            piezo_phase_deg=90.0)
+        drive = daq.plan(s).drive
+        self.assertEqual((drive.piezo_mode, drive.piezo_v, drive.piezo_amplitude_v,
+                          drive.piezo_phase_deg), (daq.SINE, 0.01, 0.2, 90.0))
+
+    def test_off_is_inactive(self):
+        """Outputs that are off describe no drive.
+
+        Args: None.
+        Returns: None.
+        """
+        drive = daq.plan(daq.DaqSettings()).drive
+        self.assertFalse(drive.active)
+        self.assertEqual((drive.waveform, drive.piezo_mode), ("", ""))
+        self.assertFalse(daq.Drive().active)
+        unassigned = daq.plan(daq.DaqSettings(generator_output=daq.OFF, piezo_output=daq.OFF,
+                                              generator_on=True, piezo_on=True)).drive
+        self.assertFalse(unassigned.active)
+
+    def test_real_device_label(self):
+        """A real device is named and not marked simulated.
+
+        Args: None.
+        Returns: None.
+        """
+        outputs = daq.DeviceOutputs(daq.DeviceInfo("Dev1", "USB-6251"))
+        drive = daq.plan(daq.DaqSettings(piezo_on=True, piezo_voltage_v=0.2), outputs).drive
+        self.assertEqual((drive.device, drive.simulated), ("Dev1: USB-6251", False))
+        self.assertEqual((drive.piezo_mode, drive.piezo_v), (daq.HOLD, 0.2))
+        self.assertTrue(drive.active)
+
+
 class SimulatedBackendTests(unittest.TestCase):
     """The stand-in device."""
 
