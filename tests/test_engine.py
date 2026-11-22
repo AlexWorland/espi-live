@@ -179,6 +179,9 @@ class EngineDemoTests(unittest.TestCase):
         first = self.engine.latest_raw()
         self.assertEqual(first.image.dtype, np.uint8)
         self.assertEqual(first.image.ndim, 2)
+        # The tap stores the raw frame before processing, so on a slow runner the
+        # first packet may not be published yet when the raw frame appears.
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
         self.assertIsNot(first.image, self.engine.latest_packet().image)
         before = first.image.copy()
         first.image[:] = 7  # a reader scribbling on it must not reach the engine
