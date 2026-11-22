@@ -16,6 +16,19 @@
 - The real USB-6251 also lists its `freqout` channel among its counter outputs; the DAQ window offered it as a generator output named "FREQOUT (sine)", which pyLabLib cannot use for the square wave. Only `ctr` counters are listed now.
 - Dummy mode does not sweep the simulated reference mirror with a DAQ triangle: the image keeps the triangle's centre, and the **Follow DAQ** note says so.
 
+## 2026-11-22 — The iPhone difference view says why it has no image, and falls back to luma video
+
+### Previous state
+
+- When the Bayer RAW stills never produced an image, the difference view stayed on a black screen headed "Choosing the camera source…" with nothing to act on: the still loop re-polled silently every 50 ms, and the only way out was to close the view.
+
+### Current state
+
+- Before the first image the header says which source is running, how many stills were asked for, returned and discarded, and what is holding the next still up (session not running, camera interrupted, previous still not back, photo connection missing, disabled or inactive, or the Bayer format no longer offered, with the formats that are).
+- If no Bayer still produces an image within 6 s, the view switches to luma video by itself and shows an orange note with the reason.
+- A **Source** switch (Rawest (Bayer RAW) / Luma video) in the view forces either one. The view starts on the rawest source each time it opens.
+- Not confirmed on a phone: why the Bayer stills stalled on the reporter's iPhone. The new header text and note name it on the next run.
+
 ## 2026-11-22 — The mouse wheel no longer changes drop-downs
 
 ### Previous state
