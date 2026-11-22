@@ -320,6 +320,55 @@ class DaqDialogTests(DaqWindowTestCase):
         self.assertEqual(qt_app.DaqDialog._saved_settings(), daq.DaqSettings())
 
 
+class DriveHandOffTests(DaqWindowTestCase):
+    """What the DAQ outputs produce reaches the simulated drumhead."""
+
+    def test_applied_drive_reaches_the_window_and_channels(self):
+        """Apply hands the plan's drive to the window and every channel.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        self.assertEqual(self.window.daq_drive, daq.Drive())
+        dialog.frequency.setValue(1000.0)
+        dialog.generator_on.setChecked(True)
+        dialog.apply()
+        self.settle(dialog, lambda: self.window.daq_drive.waveform == "sine")
+        self.assertAlmostEqual(self.window.daq_drive.frequency_hz, 1000.0, delta=0.01)
+        self.assertIs(self.window.current.drive, self.window.daq_drive)
+
+    def test_zero_and_failure_switch_the_drive_off(self):
+        """All outputs to 0 V, or a DAQ error, leaves the drum undriven.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        on = daq.Drive("sine", 1000.0, 0.1)
+        self.window.set_daq_drive(on)
+        self.window.daq.events.put(("zeroed", None))
+        dialog.poll()
+        self.assertEqual(self.window.daq_drive, daq.Drive())
+        self.window.set_daq_drive(on)
+        self.window.daq.events.put(("failed", "DaqError: gone"))
+        dialog.poll()
+        self.assertEqual(self.window.daq_drive, daq.Drive())
+
+    def test_hidden_dialog_still_hands_off(self):
+        """The window drains the DAQ's events while its window is closed.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.hide()
+        self.window.set_daq_drive(daq.Drive("sine", 1000.0, 0.1))
+        self.window.daq.events.put(("failed", "DaqError: gone"))
+        self.window._poll_status()
+        self.assertEqual(self.window.daq_drive, daq.Drive())
+
+
 class NoDeviceTests(DaqWindowTestCase):
     """Without NI support or devices, only the simulated device is offered."""
 
