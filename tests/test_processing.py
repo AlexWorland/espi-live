@@ -9,7 +9,7 @@ import numpy as np
 
 from espi_live.processing import (MAX_BRIGHTNESS_GAIN, MAX_DENOISE_PERCENT,
                                   MAX_DENOISE_STRENGTH, MAX_FRAMES_BACK,
-                                  NOISE_MARGIN, PEAK_SLICES, DemoSource,
+                                  NOISE_MARGIN, PEAK_SLICES,
                                   ESPIProcessor, NoiseCalibration, PeakHold,
                                   RangeTracker, apply_gain, apply_levels,
                                   denoise_strength, display_lut,
@@ -304,16 +304,7 @@ class SingleFieldTests(unittest.TestCase):
 
 
 class DemoTests(unittest.TestCase):
-    """Demo frames and the watermark."""
-
-    def test_demo_frames_have_requested_shape(self):
-        """DemoSource produces uint8 frames of the configured size.
-
-        Args: None.
-        Returns: None.
-        """
-        frame = DemoSource(64, 48).next_frame(8000, 0, 0.0)
-        self.assertEqual((frame.shape, frame.dtype), ((48, 64), np.uint8))
+    """The dummy-mode watermark."""
 
     def test_watermark_leaves_source_unchanged_for_gray_and_bgr(self):
         """Watermarking copies gray and BGR frames and marks the copy.

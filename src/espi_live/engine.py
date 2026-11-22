@@ -35,7 +35,7 @@ from espi_live.diagnostics import (FrameGapMonitor, SharpnessMonitor,
 from espi_live.camera_reports import capture_report
 from espi_live.camera import CameraSession
 from espi_live.capture_models import adapter_for
-from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
+from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN,
                                   ESPIProcessor, MAX_FRAMES_BACK,
                                   NoiseCalibration, NoiseFloorMap, PeakHold,
                                   RangeTracker, apply_display, apply_gain,
@@ -44,6 +44,7 @@ from espi_live.processing import (DEFAULT_DIFFERENCE_GAIN, DemoSource,
                                   raw_difference, reject_outliers,
                                   single_field, smooth_speckle, stretch_levels,
                                   subtract_floor, watermark_demo)
+from espi_live.simulation import DEFAULT_OBJECT, DemoSource
 from espi_live.recording import (AVIRecorder, recording_path, save_frame,
                                  save_frame_set)
 
@@ -101,6 +102,7 @@ class Settings:
     average_frames_first: bool = False  # Average N averages camera frames, then subtracts
     floor_subtract: bool = False  # take the measured per-pixel noise floor off each difference
     raw_difference: bool = False  # |live - previous| raw frames; every other step off
+    demo_object: str = DEFAULT_OBJECT  # what the simulated drumhead does (demo only)
 
 
 # The processing of the LabVIEW ESPI 1.5 VI with its saved front-panel
@@ -562,10 +564,12 @@ class Engine:
             synthetic cameras look different.
         Returns: None.
         """
-        self.demo_source = DemoSource(label=label)
+        self.demo_source = DemoSource(label=label, log=self.log)
         self._set_status(demo=True, camera=(
-            "DUMMY MODE ACTIVE — exposure, gain, and FPS are simulated"))
-        self.log.write("DUMMY MODE ACTIVE: synthetic video; no camera acquired.")
+            "DUMMY MODE ACTIVE — simulated ESPI signal, ideal sensor; exposure, "
+            "gain and FPS are simulated"))
+        self.log.write("DUMMY MODE ACTIVE: simulated ESPI signal (ideal sensor); "
+                       "no camera acquired.")
 
     def _attach_camera(self, session):
         """Make an opened camera session the frame source.
@@ -685,7 +689,9 @@ class Engine:
             "camera_command" (payload: phone-only settings such as
             lens_position, width and height, crop_width and crop_height,
             max_send_fps or refocus, sent to a source that takes them, the
-            iPhone; ignored by other cameras).
+            iPhone; ignored by other cameras) or "drive" (payload drive, a
+            daq.Drive: what the DAQ outputs produce, for the simulated
+            drumhead in demo mode; ignored by cameras).
         Returns: None.
         """
         if action in ("save", "save_compare"):
@@ -974,8 +980,10 @@ class Engine:
 
             work_started = time.monotonic()
             if self.demo:
-                frame = self.demo_source.next_frame(
-                    s.exposure_us, s.gain_db, work_started)
+                if s.demo_object != self.demo_source.object:
+                    self.demo_source.set_object(s.demo_object)
+                    self.log.write(f"Simulated object: {s.demo_object}")
+                frame = self.demo_source.next_frame(s.exposure_us, s.gain_db, s.fps)
             else:
                 grabbed, state = self.camera.grab(CAMERA_TIMEOUT_MS)
                 if state != "ok":
@@ -1623,6 +1631,8 @@ class Engine:
                 processor, frame = self._switch_live(processor, frame)
             elif action == "camera_command":
                 self._camera_command(payload)
+            elif action == "drive" and self.demo:
+                self.demo_source.set_drive(payload["drive"])
 
     def _camera_command(self, fields):
         """Send phone-only settings to a source that takes them.

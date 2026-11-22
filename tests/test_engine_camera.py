@@ -16,6 +16,7 @@ import numpy as np
 
 from espi_live import camera, capture, diagnostics, engine, iphone, paths
 from espi_live.camera import CameraInfo
+from espi_live.daq import Drive
 from espi_live.engine import Engine, WindowsPreviewTimer
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, bgr_frame,
                           interlaced_frame, usb_live2, webcam)
@@ -545,15 +546,15 @@ class DemoLoopTests(CameraEngineCase):
         """
         real = engine.DemoSource.next_frame
 
-        def slow(source, exposure, gain, now):
+        def slow(source, exposure, gain, fps):
             """Produce a frame after exceeding the frame interval.
 
-            Args: source is the DemoSource; exposure, gain and now are the
+            Args: source is the DemoSource; exposure, gain and fps are the
                 usual arguments.
             Returns: The synthetic frame.
             """
             time.sleep(0.08)
-            return real(source, exposure, gain, now)
+            return real(source, exposure, gain, fps)
         with mock.patch.object(engine.DemoSource, "next_frame", slow):
             self.engine.use_demo()
             self.engine.start()
@@ -568,6 +569,24 @@ class DemoLoopTests(CameraEngineCase):
         Returns: True if it appeared.
         """
         return wait_until(lambda: self.log.has(text))
+
+
+class DriveWithoutDemoTests(CameraEngineCase):
+    """A camera engine ignores the simulation's DAQ drive."""
+
+    def test_drive_is_ignored_without_demo(self):
+        """The drive action does nothing for a real camera and raises nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.open_camera()
+        self.engine.start()
+        self.engine.request("drive", drive=Drive("sine", 1000.0, 0.1))
+        self.assertTrue(wait_until(lambda: self.engine.latest_packet() is not None))
+        self.engine.request("reset_average")
+        self.assertTrue(wait_until(lambda: self.log.has("Reset averaging.")))
+        self.assertIsNone(self.engine.demo_source)
 
 
 class SwitchLiveTests(CameraEngineCase):

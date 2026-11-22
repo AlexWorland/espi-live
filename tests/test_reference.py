@@ -724,7 +724,7 @@ class EngineLoopReferenceTests(unittest.TestCase):
         frames = [flat(value) for value in (10, 20, 30, 40)]
         counter = iter(range(10 ** 9))
         self.engine.demo_source.next_frame = (
-            lambda exposure_us, gain_db, now: frames[next(counter) % 4].copy())
+            lambda exposure_us, gain_db, fps: frames[next(counter) % 4].copy())
         self.engine.update_settings(fps=200, mode="Reference")
         self.engine.start()
 

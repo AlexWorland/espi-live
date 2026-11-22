@@ -7,7 +7,6 @@ thread and from camera-free tests.
 import collections
 import functools
 import math
-import time
 from collections import deque
 
 import cv2
@@ -915,45 +914,6 @@ class ESPIProcessor:
         else:
             cv2.accumulateWeighted(image, self.rolling, 1.0 / count)
         return cv2.convertScaleAbs(self.rolling, alpha=1.0 if scale is None else scale)
-
-
-class DemoSource:
-    """Generate moving Mono8 test frames without a camera or SDK."""
-
-    def __init__(self, width=960, height=640, label=None):
-        """Build a repeatable test pattern with a broad brightness range.
-
-        Args: width and height are the synthetic frame dimensions in pixels;
-            label is optional text that replaces the pattern's caption.
-        Returns: None.
-        """
-        self.width = width
-        self.height = height
-        x = np.linspace(16, 215, width, dtype=np.float32)
-        gradient = np.broadcast_to(x, (height, width)).copy()
-        checker = (((np.arange(height)[:, None] // 40 +
-                     np.arange(width)[None, :] // 40) % 2) * 28)
-        self.base = np.clip(gradient + checker, 0, 255).astype(np.uint8)
-        cv2.putText(self.base, label or "ESPI DEMO PATTERN", (30, height - 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.15, 255, 2, cv2.LINE_AA)
-        self.start_time = time.monotonic()
-
-    def next_frame(self, exposure_us, gain_db, now):
-        """Make one moving grayscale frame using the simulated camera sliders.
-
-        Args: exposure_us and gain_db are control values; now is monotonic time.
-        Returns: A new two-dimensional uint8 frame, independent of the base.
-        """
-        frame = self.base.copy()
-        phase = now - self.start_time
-        center_x = int(self.width * (0.5 + 0.32 * math.sin(phase * 1.3)))
-        center_y = int(self.height * (0.48 + 0.23 * math.cos(phase * 0.9)))
-        cv2.circle(frame, (center_x, center_y), 65, 255, -1, cv2.LINE_AA)
-        cv2.circle(frame, (center_x, center_y), 30, 0, -1, cv2.LINE_AA)
-        cv2.rectangle(frame, (30, 90), (105, 165), 0, -1)
-        brightness = max(0.1, min(2.5, exposure_us / 8000.0))
-        brightness *= max(1.0, min(4.0, 10.0 ** (gain_db / 20.0)))
-        return cv2.convertScaleAbs(frame, alpha=brightness)
 
 
 def watermark_demo(image):
