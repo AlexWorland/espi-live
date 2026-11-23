@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-23 — Remote control of the running app from the terminal
+
+### Previous state
+
+- Once the windowed app was running, every setting change had to go through its window; there was no way to query or adjust it from a terminal, so scripted or agent-driven experiments had to drive the GUI by hand. (`--headless --control` drove headless runs only.)
+
+### Current state
+
+- While the Qt app runs it serves a control API on `http://127.0.0.1:8364/` (loopback only; the next free ports are tried if 8364 is taken, and the chosen port is written to `output/control.json`). `GET /` describes the whole API — every setting with its type, choices and range, and every command; `GET /status` reports every camera's settings, limits and status; `POST /settings` changes them; `POST /command` runs one-shot commands (`save` with optional title/notes, `reference`, `reset_previous`, `reset_average`, `switch_live`, `display`, `processing_on`, `processing_off`); `GET /log` returns the run log's tail.
+- A built-in terminal client covers the same ground: `python -m espi_live control status|cameras|get|set|run|log`, with `--camera` to pick a camera by index, serial or label and `--json` for raw output. `save` saves the frozen frame when the display is frozen, like the Save button.
+- Settings changes apply through the running engines and the window's controls follow along; the change is saved to the camera's profile like a hand-made one. Camera values are clamped to the device's reported limits, other values to their controls' ranges. Start the app with `--control-port N` to fix the port or `--no-control` to turn the server off. The API is unauthenticated and bound to 127.0.0.1, so nothing outside the machine can reach it.
+
 ## 2026-11-22 — Experimental auto-tune of the piezo triangle, and a piezo debug overlay
 
 ### Previous state

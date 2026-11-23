@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 import types
 import unittest
 from dataclasses import replace
@@ -32,9 +33,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSl
                                QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QStyle, QTextEdit, QToolTip, QWidget)
 
-from espi_live import (camera, camera_reports, capture, feedback, iphone, paths, qt_app,
-                       sources, tips,
-                       ui_scale, updater)
+from espi_live import (camera, camera_reports, capture, control, feedback, iphone,
+                       paths, qt_app, sources, tips, ui_scale, updater)
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, integrated_webcam,
                           interlaced_frame, usb_live2, webcam)
 from fake_iphone import commands, lens_socket, phone_socket
@@ -5105,6 +5105,7 @@ class RunTests(unittest.TestCase):
         self.startup_cleanup = mock.MagicMock(return_value=self.cleanup)
         self.reporting = mock.MagicMock()
         self.reporting_class = mock.MagicMock(return_value=self.reporting)
+        self.start_control = mock.MagicMock(return_value=mock.MagicMock())
         FakeSettings.store = {}
         for patcher in (
                 mock.patch.object(qt_app, "QSettings", FakeSettings),
@@ -5118,6 +5119,7 @@ class RunTests(unittest.TestCase):
                 mock.patch.object(qt_app, "opengl_available", self.opengl),
                 mock.patch.object(qt_app, "MainWindow", self.main_window),
                 mock.patch.object(qt_app, "finish_update", self.finish),
+                mock.patch.object(qt_app, "start_control", self.start_control),
                 mock.patch.object(qt_app.QApplication, "exec", return_value=7)):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -5247,6 +5249,34 @@ class RunTests(unittest.TestCase):
         self.log.start = lambda: None
         qt_app.run(force_demo=True)
         self.assertFalse(any(line.startswith("Log file:") for line in self.log.lines))
+
+    def test_the_control_server_starts_and_stops_with_the_app(self):
+        """run() starts the control server after the window and stops it.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.run(force_demo=True)
+        self.start_control.assert_called_once_with(self.window, self.log, None)
+        self.start_control.return_value.stop.assert_called_once_with()
+
+    def test_the_control_port_is_forwarded(self):
+        """A --control-port value reaches start_control.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.run(force_demo=True, control_port=9000)
+        self.start_control.assert_called_once_with(self.window, self.log, 9000)
+
+    def test_no_control_skips_the_server(self):
+        """no_control starts no server and stops nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        qt_app.run(force_demo=True, no_control=True)
+        self.start_control.assert_not_called()
 
 
 class FeatureRequestTests(WindowTestCase):
@@ -8256,6 +8286,512 @@ class PixelSquareWindowTests(WindowTestCase):
         self.assertIsNone(self.engine._square_request)
         self.assertEqual(other._square_request, (8, None))
         self.assertFalse(dialog.freeze_button.isChecked())
+
+
+class MainThreadCallerTests(unittest.TestCase):
+    """Running window code on the GUI thread from other threads."""
+
+    def setUp(self):
+        """Create a caller owned by the GUI (test) thread.
+
+        Args: None.
+        Returns: None.
+        """
+        self.caller = qt_app.MainThreadCaller()
+        self.addCleanup(self.caller.deleteLater)
+
+    def _boom(self):
+        """Raise the error the direct-path test expects.
+
+        Args: None.
+        Returns: None. Raises ValueError.
+        """
+        raise ValueError("boom")
+
+    def test_call_on_the_gui_thread_runs_directly(self):
+        """On the GUI thread the call runs inline, errors included.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.caller.call(lambda: 7), 7)
+        with self.assertRaises(ValueError):
+            self.caller.call(self._boom)
+
+    def test_call_from_another_thread_waits_for_the_gui(self):
+        """A call from a worker thread is queued and answered.
+
+        Args: None.
+        Returns: None.
+        """
+        results, errors = [], []
+
+        def worker():
+            try:
+                results.append(self.caller.call(lambda: 21 * 2, timeout=5.0))
+            except Exception as exc:  # reported through errors
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        deadline = time.monotonic() + 5.0
+        while thread.is_alive() and time.monotonic() < deadline:
+            APP.processEvents()
+            time.sleep(0.005)
+        thread.join(5.0)
+        self.assertEqual(results, [42])
+        self.assertEqual(errors, [])
+
+    def test_call_times_out_without_the_gui(self):
+        """A GUI thread that never pumps events times the caller out.
+
+        Args: None.
+        Returns: None.
+        """
+        errors = []
+
+        def worker():
+            try:
+                self.caller.call(lambda: 1, timeout=0.05)
+            except RuntimeError as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        time.sleep(0.2)  # deliberately no event pump here
+        thread.join(5.0)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("did not respond", str(errors[0]))
+
+    def test_call_async_runs_without_waiting(self):
+        """call_async queues the job; on the GUI thread it runs at once.
+
+        Args: None.
+        Returns: None.
+        """
+        seen = []
+        self.caller.call_async(lambda: seen.append(1))
+        self.assertEqual(seen, [1])
+
+    def test_run_captures_the_error_for_the_caller(self):
+        """An exception inside a queued job reaches the caller.
+
+        Args: None.
+        Returns: None.
+        """
+        job = control.Job(self._boom)
+        self.caller._run(job)
+        self.assertTrue(job.done.is_set())
+        self.assertIsInstance(job.error, ValueError)
+        self.assertIsNone(job.result)
+
+
+class ControlBackendTestCase(unittest.TestCase):
+    """Shared setup: an offscreen window with three synthetic cameras."""
+
+    def setUp(self):
+        """Build the window and its control backend.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        self.dialogs = make_dialogs()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        self.channels = demo_channels(self.log, 3)
+        self.window = qt_app.MainWindow(self.channels, self.log, False, False)
+        for timer in (self.window.frame_timer, self.window.status_timer,
+                      self.window.tip_timer, self.window.profile_timer):
+            timer.stop()
+        self.caller = qt_app.MainThreadCaller(self.window)
+        self.backend = qt_app.ControlBackend(self.window, self.caller)
+        self.addCleanup(self.cleanup_window)
+
+    def cleanup_window(self):
+        """Close the window, which stops and waits for every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.close()
+        self.window.deleteLater()
+
+
+class ControlBackendDescriptionTests(ControlBackendTestCase):
+    """Reading channels, settings, limits and status over the backend."""
+
+    def test_channels_describe_every_camera(self):
+        """Each channel reports its index, identity and state.
+
+        Args: None.
+        Returns: None.
+        """
+        channels = self.backend.channels()
+        self.assertEqual([channel["index"] for channel in channels], [0, 1, 2])
+        self.assertEqual(channels[0]["serial"], "DEMO1")
+        self.assertEqual(channels[0]["label"], "Synthetic camera (DEMO1)")
+        self.assertTrue(channels[0]["displayed"])
+        self.assertTrue(channels[0]["active"])
+        self.assertTrue(channels[0]["demo"])
+        self.assertFalse(channels[1]["active"])
+        self.assertFalse(channels[1]["displayed"])
+
+    def test_settings_limits_and_status_are_reported(self):
+        """Active channels read the engine; idle ones their saved settings.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = self.backend.settings(0)
+        self.assertEqual(settings["exposure_us"], 8000.0)
+        self.assertEqual(settings["mode"], "Raw")
+        self.assertEqual(self.backend.settings(1)["exposure_us"], 8000.0)
+        self.assertEqual(self.backend.limits(0), {})
+        self.assertEqual(self.backend.limits(2), {})
+        self.assertIn("processing", self.backend.status(0))
+        self.assertEqual(self.backend.status(1), {"processing": "off"})
+
+    def test_an_unknown_index_is_refused(self):
+        """A bad index is a 404 that names the cameras.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaises(control.ControlError) as raised:
+            self.backend.settings(7)
+        self.assertEqual(raised.exception.status, 404)
+        self.assertIn("cameras: 0: Synthetic camera (DEMO1)", str(raised.exception))
+
+    def test_a_closing_window_refuses_requests(self):
+        """Requests during shutdown fail with 503.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.closing = True
+        with self.assertRaises(control.ControlError) as raised:
+            self.backend.channels()
+        self.assertEqual(raised.exception.status, 503)
+
+    def test_log_tail_reads_the_log_file(self):
+        """The tail comes from the run log file when there is one.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.backend.log_tail(5), [])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "run.log")
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("a\nb\nc\n")
+        self.window.log.path = path
+        self.assertEqual(self.backend.log_tail(2), ["b", "c"])
+
+
+class ControlBackendChangeTests(ControlBackendTestCase):
+    """Applying settings and commands over the backend."""
+
+    def drain_actions(self, engine):
+        """Empty the engine's action queue, left over from window setup.
+
+        Args: engine is the Engine whose queue to clear.
+        Returns: None.
+        """
+        while True:
+            try:
+                engine._actions.get_nowait()
+            except queue.Empty:
+                return
+
+    def test_apply_changes_settings_and_the_widgets(self):
+        """Applied settings reach the engine and refresh the controls.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = self.backend.apply(0, {"exposure_us": 5000.0,
+                                          "mode": "Reference"})
+        self.assertEqual(settings["exposure_us"], 5000.0)
+        self.assertEqual(self.channels[0].engine.settings().exposure_us, 5000.0)
+        self.assertEqual(self.window.exposure.value(), 5000.0)
+        reference_button = self.window.mode_group.buttons()[
+            qt_app.VIEW_MODES.index("Reference")]
+        self.assertTrue(reference_button.isChecked())
+
+    def test_apply_clamps_to_the_default_ranges(self):
+        """Camera values are clamped to the built-in ranges.
+
+        Args: None.
+        Returns: None.
+        """
+        self.backend.apply(0, {"exposure_us": 999999.0, "gain_db": -5.0,
+                               "fps": 999.0})
+        settings = self.channels[0].engine.settings()
+        self.assertEqual(settings.exposure_us, 50000.0)
+        self.assertEqual(settings.gain_db, 0.0)
+        self.assertEqual(settings.fps, 60.0)
+
+    def test_apply_clamps_to_reported_limits(self):
+        """A camera's reported limits outrank the defaults.
+
+        Args: None.
+        Returns: None.
+        """
+        self.channels[0].limits = {"ExposureTime": (100.0, 200.0)}
+        self.backend.apply(0, {"exposure_us": 5000.0})
+        self.assertEqual(self.channels[0].engine.settings().exposure_us, 200.0)
+
+    def test_apply_to_an_idle_camera_is_refused(self):
+        """A camera that is not processing cannot be changed.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaises(control.ControlError) as raised:
+            self.backend.apply(1, {"exposure_us": 5000.0})
+        self.assertEqual(raised.exception.status, 409)
+        self.assertIn("processing_on", str(raised.exception))
+
+    def test_engine_commands_reach_the_engine(self):
+        """One-shot commands are queued on the engine.
+
+        Args: None.
+        Returns: None.
+        """
+        engine = self.channels[0].engine
+        self.drain_actions(engine)
+        result = self.backend.command(0, "save", {"title": "Band", "notes": "N"})
+        self.assertEqual(result, {"requested": "save"})
+        self.assertEqual(engine._actions.get(),
+                         ("save", {"title": "Band", "notes": "N"}))
+        self.backend.command(0, "reference", {})
+        self.assertEqual(engine._actions.get(), ("reference", {}))
+
+    def test_save_sends_the_frozen_frame_when_the_display_is_frozen(self):
+        """A frozen display's save carries the held packet, as the button does.
+
+        Args: None.
+        Returns: None.
+        """
+        frozen_at = datetime(2026, 11, 23, 12, 0, 0)
+        engine = self.channels[0].engine
+        self.drain_actions(engine)
+        self.channels[0].frozen = make_packet(sequence=9)
+        self.channels[0].frozen_at = frozen_at
+        result = self.backend.command(0, "save", {})
+        self.assertEqual(result, {"requested": "save", "frozen": True})
+        action, payload = engine._actions.get()
+        self.assertEqual(action, "save")
+        self.assertEqual(payload["frozen_at"], frozen_at)
+        self.assertEqual(payload["packet"].sequence, 9)
+
+    def test_switch_live_only_applies_in_demo_mode(self):
+        """switch_live is queued in demo mode and refused on a camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.backend.command(0, "switch_live", {})
+        engine = self.channels[0].engine
+        self.drain_actions(engine)
+        self.backend.command(0, "switch_live", {})
+        self.assertEqual(engine._actions.get(), ("switch_live", {}))
+        with mock.patch.object(type(engine), "demo",
+                               new_callable=mock.PropertyMock,
+                               return_value=False):
+            with self.assertRaises(control.ControlError) as raised:
+                self.backend.command(0, "switch_live", {})
+        self.assertEqual(raised.exception.status, 409)
+
+    def test_display_switches_the_camera(self):
+        """display shows another camera, starting it if needed.
+
+        Args: None.
+        Returns: None.
+        """
+        result = self.backend.command(0, "display", {})
+        self.assertEqual(result, {"displayed": "Synthetic camera (DEMO1)"})
+        result = self.backend.command(1, "display", {})
+        self.assertEqual(result, {"displayed": "Synthetic camera (DEMO2)"})
+        self.assertIs(self.window.current, self.channels[1])
+        self.assertTrue(self.channels[1].active)
+        self.assertIn("Displaying Synthetic camera (DEMO2)", self.log.lines)
+
+    def test_processing_turns_a_background_camera_on_and_off(self):
+        """processing_on starts an idle camera; off stops it again.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.backend.command(1, "processing_on", {}),
+                         {"active": True})
+        self.assertTrue(self.channels[1].active)
+        self.assertEqual(self.backend.command(1, "processing_off", {}),
+                         {"active": False})
+        self.assertFalse(self.channels[1].active)
+
+    def test_processing_off_without_a_camera_is_a_no_op(self):
+        """processing_off on an idle camera reports it is already off.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.backend.command(2, "processing_off", {}),
+                         {"active": False})
+
+    def test_the_displayed_camera_keeps_processing(self):
+        """processing_off on the displayed camera is refused.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaises(control.ControlError) as raised:
+            self.backend.command(0, "processing_off", {})
+        self.assertEqual(raised.exception.status, 409)
+        self.assertIn("displayed", str(raised.exception))
+
+    def test_commands_on_an_idle_camera_are_refused(self):
+        """Engine commands need a processing camera.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaises(control.ControlError) as raised:
+            self.backend.command(2, "reference", {})
+        self.assertEqual(raised.exception.status, 409)
+
+    def test_control_sync_refreshes_and_ignores_strangers(self):
+        """_control_sync reloads the displayed camera and skips old ones.
+
+        Args: None.
+        Returns: None.
+        """
+        self.channels[0].engine.update_settings(exposure_us=1234.0)
+        self.window._control_sync(self.channels[0])
+        self.assertEqual(self.window.exposure.value(), 1234.0)
+        self.window._control_sync(mock.MagicMock())  # not in the list: no-op
+
+
+class StartControlTests(unittest.TestCase):
+    """start_control wires the window into the control server."""
+
+    def setUp(self):
+        """Build a single-camera demo window.
+
+        Args: None.
+        Returns: None.
+        """
+        FakeSettings.store = {}
+        self.dialogs = make_dialogs()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patcher in (
+                mock.patch.object(qt_app, "QSettings", FakeSettings),
+                mock.patch.object(qt_app, "QMessageBox", self.dialogs),
+                mock.patch.object(qt_app.updater, "UpdateWorker", FakeUpdateWorker),
+                mock.patch.object(qt_app.updater, "unavailable_reason",
+                                  return_value="disabled in tests"),
+                mock.patch.object(paths, "OUTPUT_DIR", tmp.name)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.log = FakeLog()
+        engine = Engine(self.log)
+        engine.use_demo()
+        self.window = demo_window(engine, self.log)
+        for timer in (self.window.frame_timer, self.window.status_timer,
+                      self.window.tip_timer, self.window.profile_timer):
+            timer.stop()
+        self.addCleanup(self.window.close)
+        self.addCleanup(self.window.deleteLater)
+
+    def test_a_started_server_is_reported_in_the_log(self):
+        """Success logs the loopback URL and returns the server.
+
+        Args: None.
+        Returns: None.
+        """
+        created = []
+
+        class FakeServer:
+            """Record the arguments and pretend to serve."""
+
+            def __init__(self, service, port=None, log=None):
+                created.append((service, port, log))
+                self.port = 8364
+
+            def start(self):
+                return True
+
+            def stop(self):
+                pass
+
+        with mock.patch.object(qt_app.control, "ControlServer", FakeServer):
+            server = qt_app.start_control(self.window, self.log, 9000)
+        self.assertIsInstance(created[0][0], control.ControlService)
+        self.assertEqual(created[0][1], 9000)
+        self.assertEqual(created[0][2], self.log)
+        self.assertEqual(server.port, 8364)
+        self.assertTrue(any("http://127.0.0.1:8364/" in line
+                            for line in self.log.lines))
+
+    def test_no_free_port_logs_and_returns_none(self):
+        """Every port busy leaves a log line and no server.
+
+        Args: None.
+        Returns: None.
+        """
+
+        class BusyServer:
+            """Pretend every port was taken."""
+
+            def __init__(self, service, port=None, log=None):
+                self.port = None
+
+            def start(self):
+                return False
+
+            def stop(self):
+                pass
+
+        with mock.patch.object(qt_app.control, "ControlServer", BusyServer):
+            self.assertIsNone(qt_app.start_control(self.window, self.log, None))
+        self.assertTrue(any("Remote control unavailable" in line
+                            for line in self.log.lines))
+
+    def test_the_backend_wraps_the_window(self):
+        """The service's backend is bound to this window.
+
+        Args: None.
+        Returns: None.
+        """
+        class FakeServer:
+            """Pretend to serve."""
+
+            def __init__(self, service, port=None, log=None):
+                self.service = service
+                self.port = 8364
+
+            def start(self):
+                return True
+
+            def stop(self):
+                pass
+
+        with mock.patch.object(qt_app.control, "ControlServer", FakeServer):
+            server = qt_app.start_control(self.window, self.log, None)
+        self.assertIs(server.service.backend.window, self.window)
 
 
 if __name__ == "__main__":

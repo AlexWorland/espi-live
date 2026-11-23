@@ -120,7 +120,9 @@ class CliDispatchTests(unittest.TestCase):
         with fake_submodule("qt_app", qt):
             code, _, _ = run_cli([])
         qt.run.assert_called_once_with(force_demo=False, check_updates=True,
-                                       demo_cameras=1, log_level=None, send_reports=True)
+                                       demo_cameras=1, log_level=None,
+                                       send_reports=True, control_port=None,
+                                       no_control=False)
         self.assertEqual(code, 5)
 
     def test_demo_and_no_update_check_reach_qt(self):
@@ -133,7 +135,9 @@ class CliDispatchTests(unittest.TestCase):
         with fake_submodule("qt_app", qt):
             code, _, _ = run_cli(["--demo", "--demo-cameras", "3", "--no-update-check"])
         qt.run.assert_called_once_with(force_demo=True, check_updates=False,
-                                       demo_cameras=3, log_level=None, send_reports=True)
+                                       demo_cameras=3, log_level=None,
+                                       send_reports=True, control_port=None,
+                                       no_control=False)
         self.assertEqual(code, 0)
 
     def test_missing_pyside_exits_with_message(self):
@@ -181,6 +185,68 @@ class ControlOptionTests(unittest.TestCase):
             code, _, _ = run_cli(["--headless", "--control", "--daq-checklist-done"])
         args = headless.main.call_args.args[0]
         self.assertEqual((code, args.control, args.daq_checklist_done), (0, True, True))
+
+
+class RemoteControlDispatchTests(unittest.TestCase):
+    """The `control` subcommand dispatches to the remote-control client."""
+
+    def test_control_dispatches_to_the_client(self):
+        """The control subcommand runs the client and exits with its code.
+
+        Args: None.
+        Returns: None.
+        """
+        run_client = mock.Mock(return_value=3)
+        with mock.patch.object(cli.control, "run_cli", run_client):
+            code, _, _ = run_cli(["control", "status"])
+        self.assertEqual(code, 3)
+        self.assertEqual(run_client.call_args.args[0].subcommand, "control")
+        self.assertEqual(run_client.call_args.args[0].action, "status")
+
+    def test_control_without_an_action_shows_usage(self):
+        """`control` with no action is an argument error (exit 2).
+
+        Args: None.
+        Returns: None.
+        """
+        code, _, err = run_cli(["control"])
+        self.assertEqual(code, 2)
+        self.assertIn("ACTION", err)
+
+    def test_unknown_control_action_is_rejected(self):
+        """An unknown control action is an argument error (exit 2).
+
+        Args: None.
+        Returns: None.
+        """
+        code, _, err = run_cli(["control", "reboot"])
+        self.assertEqual(code, 2)
+        self.assertIn("invalid choice", err)
+
+    def test_control_flags_reach_the_qt_front_end(self):
+        """--control-port and --no-control are passed to run().
+
+        Args: None.
+        Returns: None.
+        """
+        qt = types.SimpleNamespace(run=mock.Mock(return_value=0))
+        with fake_submodule("qt_app", qt):
+            run_cli(["--control-port", "9000", "--no-control"])
+        self.assertEqual(qt.run.call_args.kwargs["control_port"], 9000)
+        self.assertTrue(qt.run.call_args.kwargs["no_control"])
+
+    def test_the_headless_control_flag_is_untouched(self):
+        """--control still means the headless JSON-lines mode.
+
+        Args: None.
+        Returns: None.
+        """
+        headless = types.SimpleNamespace(main=mock.Mock(return_value=0))
+        with fake_submodule("headless", headless):
+            run_cli(["--headless", "--control"])
+        args = headless.main.call_args.args[0]
+        self.assertIs(args.control, True)
+        self.assertIsNone(args.subcommand)
 
 
 class SelfCheckTests(unittest.TestCase):
