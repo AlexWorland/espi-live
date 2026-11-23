@@ -2556,7 +2556,7 @@ class DaqDialog(QDialog):
         self.scanned = False
         self.scan_note = ""  # why no real device is listed, from the last scan
         self.setWindowTitle(DAQ_TITLE)
-        self.resize(ui_scale.px(620), ui_scale.px(820))
+        self.sized = False  # the first show fits the window to its contents and the screen
         saved = self._saved_settings()
 
         self.device_box = WheelIgnoringComboBox()
@@ -2780,17 +2780,28 @@ class DaqDialog(QDialog):
         for button in buttons.buttons():
             button.setAutoDefault(False)  # Enter in a number box must not apply
 
+        # The settings scroll; the note and the buttons stay in view below them,
+        # so Apply and the other buttons never fall off a small screen.
+        self.body = QWidget()
+        body_layout = QVBoxLayout(self.body)
+        body_layout.addLayout(device_row)
+        body_layout.addWidget(self.device_status)
+        body_layout.addWidget(assign)
+        body_layout.addWidget(generator)
+        body_layout.addWidget(piezo)
+        body_layout.addWidget(self.problem_label)
+        body_layout.addWidget(self.state_label)
+        body_layout.addWidget(self.safety_label)
+        body_layout.addWidget(self.test_label)
+        body_layout.addStretch(1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidget(self.body)
+        self.footer = [note, buttons]
         layout = QVBoxLayout(self)
-        layout.addLayout(device_row)
-        layout.addWidget(self.device_status)
-        layout.addWidget(assign)
-        layout.addWidget(generator)
-        layout.addWidget(piezo)
-        layout.addWidget(self.problem_label)
-        layout.addWidget(self.state_label)
-        layout.addWidget(self.safety_label)
-        layout.addWidget(self.test_label)
-        layout.addStretch(1)
+        layout.addWidget(self.scroll, 1)
         layout.addWidget(note)
         layout.addWidget(buttons)
 
@@ -2847,6 +2858,34 @@ class DaqDialog(QDialog):
         self.timer.start(DAQ_POLL_MS)
         if not self.scanned:
             self.scan()
+        self.fit_to_screen()
+
+    def fit_to_screen(self):
+        """Size the window to show every control, but never taller than the screen.
+
+        The first call picks the size that fits the whole form (or 90% of the
+        screen's usable height when the form is taller, and then the form
+        scrolls). Later calls only shrink a window that has outgrown the
+        screen, so a size the user chose is kept.
+
+        Args: None.
+        Returns: None.
+        """
+        room = self.screen().availableGeometry()
+        margins = self.layout().contentsMargins()
+        gap = self.layout().spacing()
+        footer_height = sum(widget.sizeHint().height() + gap for widget in self.footer)
+        wanted_width = (self.body.sizeHint().width() + self.scroll.verticalScrollBar()
+                        .sizeHint().width() + margins.left() + margins.right())
+        wanted_height = (self.body.sizeHint().height() + footer_height
+                         + margins.top() + margins.bottom())
+        if self.sized:
+            wanted_width, wanted_height = self.width(), self.height()
+        else:
+            wanted_width = max(wanted_width, ui_scale.px(620))
+        self.sized = True
+        self.resize(min(wanted_width, room.width() * 9 // 10),
+                    min(wanted_height, room.height() * 9 // 10))
 
     def hideEvent(self, event):
         """Stop following the controller while hidden.
