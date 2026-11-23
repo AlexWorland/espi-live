@@ -528,6 +528,7 @@
           </ol>
         </li>
         <li><a href="#shortcuts">Keyboard and mouse</a></li>
+        <li><a href="#remote-control">Remote control</a></li>
         <li><a href="#files">Files and output folders</a></li>
         <li><a href="#troubleshooting">Troubleshooting</a>
           <ol>
@@ -2252,6 +2253,53 @@ python -m espi_live</code></pre>
           </tbody>
         </table>
       </div>
+    </section>
+
+    <section id="remote-control">
+      <h2>Remote control <a class="anchor" href="#remote-control" aria-label="Link to Remote control">#</a></h2>
+      <p>While the app runs it serves a small control API on
+        <code>http://127.0.0.1:8364/</code>, so a second terminal — or a
+        script or AI agent — can query and drive the running instance. The
+        server listens on the loopback interface only: nothing outside this
+        computer can reach it, and there is no password, so do not forward
+        the port to another machine.</p>
+      <p>The API describes itself: open <code>http://127.0.0.1:8364/</code>
+        (or <code>curl</code> it) for every endpoint, every setting with its
+        type, choices and range, and every command. The built-in terminal
+        client covers the same ground:</p>
+      <pre tabindex="0"><code>PYTHONPATH=src python -m espi_live control status                 # app and cameras at a glance
+PYTHONPATH=src python -m espi_live control get                    # every setting of the shown camera
+PYTHONPATH=src python -m espi_live control set exposure_us=5000 mode=Reference
+PYTHONPATH=src python -m espi_live control set record=true --camera 12345678
+PYTHONPATH=src python -m espi_live control run reference          # capture a reference frame
+PYTHONPATH=src python -m espi_live control run save title=Band notes="before pump"
+PYTHONPATH=src python -m espi_live control log --lines 100        # the run log's tail</code></pre>
+      <p><code>set</code> takes any setting name <code>GET /</code> lists;
+        <code>run</code> takes <code>save</code> (with optional
+        <code>title</code> and <code>notes</code>; a frozen display saves its
+        held frame), <code>reference</code>,
+        <code>reset_previous</code>, <code>reset_average</code>,
+        <code>switch_live</code>, <code>display</code>,
+        <code>processing_on</code> and <code>processing_off</code>. Use
+        <code>--camera</code> to point at a camera other than the displayed
+        one, by index, serial or label, and <code>--json</code> for raw
+        output a script can read.</p>
+      <p>Changes apply through the running engines, and the window's controls
+        follow along: a value set from the terminal shows up on the sliders
+        within a moment and is saved to the camera's profile exactly like a
+        hand-made change. Values are clamped the same way the controls clamp
+        them — camera values to the device's own limits, the rest to the
+        ranges the controls accept — and the reply's <code>applied</code>
+        section shows what was actually used. A camera that is not
+        processing must be started first:
+        <code>run processing_on --camera …</code>.</p>
+      <p>The chosen port is written to
+        <code>output/control.json</code> for the client to find; start the
+        app with <code>--control-port N</code> to fix the port (useful with
+        several instances: pass the same <code>--port</code> to the client)
+        or <code>--no-control</code> to turn the server off. To script a
+        windowless run instead, see the README's <code>--headless
+        --control</code> section.</p>
     </section>
 
     <section id="files">

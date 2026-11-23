@@ -55,9 +55,10 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QTextEdit, QToolBar, QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
-from espi_live import (camera, camera_reports, capture_uploads, codex, daq, error_reports,
-                       feedback, iphone, log_uploads, paths, phase, profiles, simulation, source_code,
-                       step_tuning, tips, ui_scale, updater)
+from espi_live import (camera, camera_reports, capture_uploads, codex, control,
+                       daq, error_reports, feedback, iphone, log_uploads, paths,
+                       phase, profiles, simulation, source_code, step_tuning,
+                       tips, ui_scale, updater)
 from espi_live.channels import demo_channels, open_camera_channels, restore_channel
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
@@ -4192,6 +4193,238 @@ class WhatsNewDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class MainThreadCaller(QObject):
+    """Run functions on the GUI thread and wait for the result.
+
+    The control server's thread uses this to touch window code: emitting a
+    signal from another thread queues the call on the GUI event loop, and
+    the caller blocks until the GUI thread has run it.
+    """
+
+    _submit = Signal(object)
+
+    def __init__(self, parent=None):
+        """Attach to the GUI thread.
+
+        Args: parent is an object owned by the GUI thread.
+        Returns: None.
+        """
+        super().__init__(parent)
+        self._submit.connect(self._run)
+
+    def call(self, fn, timeout=control.CALL_TIMEOUT_S):
+        """Run fn on the GUI thread and return its result.
+
+        Args: fn is a callable with no arguments; timeout is the maximum
+            wait in seconds when calling from another thread.
+        Returns: Whatever fn returned. Raises the call's exception, or
+            RuntimeError when the GUI thread did not answer in time.
+        """
+        job = control.Job(fn)
+        if self.thread().isCurrentThread():
+            self._run(job)
+        else:
+            self._submit.emit(job)
+            if not job.done.wait(timeout):
+                raise RuntimeError("the app did not respond in time; is it busy?")
+        if job.error is not None:
+            raise job.error
+        return job.result
+
+    def call_async(self, fn):
+        """Queue fn on the GUI thread without waiting.
+
+        Args: fn is a callable with no arguments.
+        Returns: None.
+        """
+        self._submit.emit(control.Job(fn))
+
+    def _run(self, job):
+        """Run one job and release its caller.
+
+        Args: job is the control.Job emitted by call() or call_async().
+        Returns: None.
+        """
+        try:
+            job.result = job.fn()
+        except Exception as exc:  # reported to the waiting control request
+            job.error = exc
+        finally:
+            job.done.set()
+
+
+class ControlBackend:
+    """Answer control-server requests from the window's channels.
+
+    The methods run on the control server's thread. Engine calls
+    (update_settings, request, status) are thread-safe by design and run
+    directly; anything that touches widgets goes through the caller to the
+    GUI thread, which refreshes the controls afterwards.
+    """
+
+    def __init__(self, window, caller):
+        """Bind to a window.
+
+        Args: window is the MainWindow; caller runs closures on the GUI
+            thread.
+        Returns: None.
+        """
+        self.window = window
+        self.caller = caller
+
+    def _channels(self):
+        """Snapshot the window's channel list.
+
+        Args: None.
+        Returns: A list copy, safe to index while the window rebuilds the
+            list. Raises ControlError (503) when the app is closing.
+        """
+        if self.window.closing:
+            raise control.ControlError("the app is closing", 503)
+        return list(self.window.channels)
+
+    def _channel(self, index):
+        """Return one channel.
+
+        Args: index is the channel's position in the window's list.
+        Returns: The Channel. Raises ControlError (404) when the index is
+            out of range.
+        """
+        channels = self._channels()
+        if not isinstance(index, int) or not 0 <= index < len(channels):
+            names = ", ".join(f"{position}: {channel.label}"
+                              for position, channel in enumerate(channels))
+            raise control.ControlError(
+                f"no camera at index {index!r}; cameras: {names or 'none'}", 404)
+        return channels[index]
+
+    def channels(self):
+        """Describe every channel.
+
+        Args: None.
+        Returns: A list of {index, label, serial, demo, active, displayed}.
+        """
+        return [{"index": index, "label": channel.label,
+                 "serial": channel.info.serial, "demo": channel.demo,
+                 "active": channel.active,
+                 "displayed": channel is self.window.current}
+                for index, channel in enumerate(self._channels())]
+
+    def settings(self, index):
+        """Return one channel's settings.
+
+        Args: index is the channel's position.
+        Returns: The Settings dict.
+        """
+        channel = self._channel(index)
+        engine = channel.engine
+        return asdict(engine.settings() if engine is not None
+                      else channel.settings)
+
+    def limits(self, index):
+        """Return one channel's device limits.
+
+        Args: index is the channel's position.
+        Returns: {node name: [low, high]} (lists, for JSON).
+        """
+        return {name: list(bounds)
+                for name, bounds in self._channel(index).limits.items()}
+
+    def status(self, index):
+        """Return one channel's engine status.
+
+        Args: index is the channel's position.
+        Returns: The engine's status dict, or {"processing": "off"} when
+            the channel is not processing.
+        """
+        engine = self._channel(index).engine
+        return engine.status() if engine is not None else {"processing": "off"}
+
+    def apply(self, index, changes):
+        """Change one channel's settings.
+
+        Args: index is the channel's position; changes maps Settings field
+            names to coerced, range-clamped values.
+        Returns: The resulting settings dict. Raises ControlError (409)
+            when the channel is not processing.
+        """
+        channel = self._channel(index)
+        engine = channel.engine
+        if engine is None:
+            raise control.ControlError(
+                f"{channel.label} is not processing; run command "
+                "processing_on first", 409)
+        engine.update_settings(**self._clamp(channel, changes))
+        self.caller.call_async(lambda: self.window._control_sync(channel))
+        return asdict(engine.settings())
+
+    def _clamp(self, channel, changes):
+        """Keep camera values inside the device's reported or default range.
+
+        Args: channel is the target Channel; changes is the coerced change
+            dict.
+        Returns: The change dict with the camera fields clamped.
+        """
+        limits = {**DEFAULT_LIMITS, **channel.limits}
+        for field, (node, _, _) in profiles.CAMERA_FIELDS.items():
+            if field in changes:
+                low, high = limits[node]
+                changes[field] = min(max(changes[field], low), high)
+        return changes
+
+    def command(self, index, name, payload):
+        """Run a one-shot command on one channel.
+
+        Args: index is the channel's position; name is a COMMANDS key;
+            payload holds validated string arguments (title, notes).
+        Returns: A small result dict for the response.
+        """
+        channel = self._channel(index)
+        if name == "display":
+            if channel is not self.window.current:
+                self.caller.call(lambda: self.window.show_channel(channel))
+            return {"displayed": self.window.current.label}
+        if name == "processing_on":
+            if not channel.active:
+                self.caller.call(lambda: self.window._set_processing(channel, True))
+            return {"active": channel.active}
+        if name == "processing_off":
+            if channel is self.window.current:
+                raise control.ControlError(
+                    f"{channel.label} is displayed; display another camera "
+                    "first", 409)
+            if channel.active:
+                self.caller.call(lambda: self.window._set_processing(channel, False))
+            return {"active": channel.active}
+        engine = channel.engine
+        if engine is None:
+            raise control.ControlError(
+                f"{channel.label} is not processing; run command "
+                "processing_on first", 409)
+        if name == "switch_live" and not engine.demo:
+            raise control.ControlError(
+                "the camera is already live; switch_live applies in demo "
+                "mode only", 409)
+        if name == "save" and channel.frozen is not None:
+            # A frozen display saves its held frame, as the Save button does.
+            packet, frozen_at = self.caller.call(
+                lambda: (channel.frozen, channel.frozen_at))
+            payload = {**payload, "packet": packet, "frozen_at": frozen_at}
+        engine.request(name, **payload)
+        result = {"requested": name}
+        if name == "save" and channel.frozen is not None:
+            result["frozen"] = True
+        return result
+
+    def log_tail(self, lines):
+        """Return the last lines of the run log.
+
+        Args: lines is how many to return.
+        Returns: A list of lines (oldest first), possibly empty.
+        """
+        return control.tail(getattr(self.window.log, "path", None), lines)
+
+
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
 
@@ -6577,6 +6810,20 @@ class MainWindow(QMainWindow):
                 widget.set_range(*limits[name])
                 widget.blockSignals(False)
 
+    def _control_sync(self, channel):
+        """Refresh the controls after the control server changed a camera.
+
+        Runs on the GUI thread (scheduled by the control backend).
+
+        Args: channel is the Channel whose settings or state changed.
+        Returns: None.
+        """
+        if channel not in self.channels:
+            return
+        if channel is self.current and channel.engine is not None:
+            self._load_settings(self.engine.settings(), channel.limits)
+        self._sync_cameras()
+
     def _camera_state(self, channel):
         """Summarize a camera for its row in the camera list.
 
@@ -8258,8 +8505,28 @@ def finish_update(window, log):
         log.warning(f"Update could not be installed: {exc}")
 
 
+def start_control(window, log, port=None):
+    """Start the localhost control server for a window.
+
+    Args: window is the MainWindow to control; log is the AppLog; port is
+        a fixed port (None: pick the first free port from the default
+        range).
+    Returns: The ControlServer, or None when no port was free.
+    """
+    service = control.ControlService(ControlBackend(window, MainThreadCaller(window)))
+    server = control.ControlServer(service, port=port, log=log)
+    if not server.start():
+        log.write("Remote control unavailable: every port "
+                  f"{control.DEFAULT_PORT}–{control.DEFAULT_PORT + control.PORT_SCAN - 1}"
+                  " is busy")
+        return None
+    log.write(f"Remote control: http://127.0.0.1:{server.port}/ "
+              "(GET / describes the API; `espi_live control` is the client)")
+    return server
+
+
 def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
-        send_reports=True):
+        send_reports=True, control_port=None, no_control=False):
     """Start the Qt front end.
 
     Args: force_demo skips camera detection and starts synthetic video;
@@ -8268,7 +8535,9 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
         at startup;
         demo_cameras is how many synthetic cameras demo mode simulates;
         log_level is the --log-level name or None; send_reports is False
-        for --no-error-reports.
+        for --no-error-reports; control_port is the remote-control server's
+        port (None: pick a free port from the default range); no_control
+        skips the server.
     Returns: The process exit code.
     """
     request_gl_format()
@@ -8283,6 +8552,7 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
     cleanup = updater.StartupCleanup(log.write)
     window = None
     channels = []
+    server = None
     try:
         if path:
             log.write(f"Log file: {path}")
@@ -8312,6 +8582,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
         reporting.reporter.update_context(display=display)
         window = MainWindow(channels, log, use_gl, check_updates, reporting, store)
         window.show()
+        if not no_control:
+            server = start_control(window, log, control_port)
         for channel in channels:
             if channel.active:
                 channel.engine.start()
@@ -8322,6 +8594,8 @@ def run(force_demo=False, check_updates=True, demo_cameras=1, log_level=None,
         error_reports.caught(log, exc, "main_thread", "ESPI live stopped", fatal=True)
         raise
     finally:
+        if server is not None:
+            server.stop()
         if window is None:
             for channel in channels:
                 if channel.active:

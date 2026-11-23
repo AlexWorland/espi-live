@@ -5,7 +5,7 @@ import importlib
 import os
 import sys
 
-from espi_live import updater
+from espi_live import control, updater
 from espi_live.guide import guide_path
 from espi_live.logs import LEVELS
 
@@ -69,6 +69,16 @@ def cli(argv=None):
     parser.add_argument("--daq-checklist-done", action="store_true",
                         help="--control: allow the daq_arm command, i.e. say the NI DAQ "
                              "safety checklist has been ticked for this wiring")
+    parser.add_argument("--control-port", type=int, default=None, metavar="PORT",
+                        help="port for the windowed app's remote-control server "
+                             "(default: 8364, then the next free ports)")
+    parser.add_argument("--no-control", action="store_true",
+                        help="don't start the windowed app's remote-control server")
+    sub = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
+    control_parser = sub.add_parser(
+        "control", help="query or change an already-running windowed instance "
+                        "from the terminal")
+    control.add_parser(control_parser)
     args = parser.parse_args(argv)
     if args.control and not args.headless:
         parser.error("--control needs --headless")
@@ -84,6 +94,8 @@ def cli(argv=None):
     if args.send_changes:
         from espi_live import changes
         sys.exit(changes.send_from_cli())
+    if args.subcommand == "control":
+        sys.exit(control.run_cli(args))
     if args.headless:
         from espi_live import headless
         sys.exit(headless.main(args))
@@ -95,7 +107,9 @@ def cli(argv=None):
                         check_updates=not args.no_update_check,
                         demo_cameras=args.demo_cameras,
                         log_level=args.log_level,
-                        send_reports=not args.no_error_reports))
+                        send_reports=not args.no_error_reports,
+                        control_port=args.control_port,
+                        no_control=args.no_control))
 
 
 def self_check():
