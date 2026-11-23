@@ -2504,6 +2504,20 @@ def daq_spin(minimum, maximum, decimals, suffix, step):
     return spin
 
 
+def fit_label(label):
+    """Give a word-wrapped label the height its text needs, or hide it when empty.
+
+    A wrapped label in a QFormLayout keeps the height of its first text, so
+    a longer one is cut off, and an empty one still takes a row.
+
+    Args: label is a word-wrapped QLabel.
+    Returns: None.
+    """
+    label.setVisible(bool(label.text()))
+    label.setMinimumHeight(label.heightForWidth(max(1, label.width()))
+                           if label.text() else 0)
+
+
 def generator_choice_text(output):
     """Describe a frequency-generator output choice.
 
@@ -2989,11 +3003,12 @@ class DaqDialog(QDialog):
             self.piezo_frequency.blockSignals(True)
             self.piezo_frequency.setValue(s.piezo_frequency_hz)
             self.piezo_frequency.blockSignals(False)
-        self.piezo_follow_result.setText(self._follow_text(s))
         for widget in (self.piezo_step, self.step_down, self.step_up):
             widget.setEnabled(has_piezo and s.piezo_mode == daq.HOLD)
         found = daq.problems(s, outputs)
         self.problem_label.setText("\n".join(found))
+        self.piezo_follow_result.setText("" if found else self._follow_text(s))
+        fit_label(self.piezo_follow_result)
         self.apply_button.setEnabled(self.outputs is not None and not found)
         self.test_button.setEnabled(self.outputs is not None)
         self.safety_label.setText(self._safety_text(s))

@@ -265,8 +265,7 @@ class DaqDialogTests(DaqWindowTestCase):
         self.assertTrue(dialog.piezo_phase_per_frame.isEnabled())
         self.assertFalse(dialog.piezo_um_per_v.isEnabled())
         self.assertIn("Calibrate phase step has not measured", dialog.problem_label.text())
-        self.assertIn("Calibrate phase step has not measured",
-                      dialog.piezo_follow_result.text())
+        self.assertEqual(dialog.piezo_follow_result.text(), "")  # said once, above
         self.assertFalse(dialog.apply_button.isEnabled())
         self.assertEqual(dialog.settings().piezo_frequency_hz, 0.281)  # typed
         dialog.set_quarter_wave(0.075)
