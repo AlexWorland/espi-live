@@ -10,7 +10,8 @@ adds one to piped text) is ignored.
 A command is ``{"cmd": "<name>", "id": <optional, echoed back>, ...arguments}``.
 A reply is ``{"ok": true, "id": ..., ...result}`` or ``{"ok": false, "error":
 "<text>", "problems": [...]}``. A DAQ fault arrives on its own as
-``{"event": "fault", "reason": "<text>"}``.
+``{"event": "fault", "reason": "<text>"}``, and auto-tune reports what it is
+doing as ``{"event": "tune", ...}``.
 
 Commands (cameras are chosen with an optional ``camera``: a position, a label or
 a serial number; the default is the first running camera)::
@@ -25,10 +26,17 @@ a serial number; the default is the first running camera)::
                                         needs --daq-checklist-done, and a real
                                         device takes no drive signal without it
     daq_apply {settings}                change DaqSettings fields and write them
+    daq_follow {camera?}                set a frame-rate-following triangle's
+                                        frequency from the camera's frame rate
     daq_zero                            every output to 0 V
     daq_self_test                       step each analog output and read it back
     piezo_step {volts}                  hold the piezo at a level (the Phase view's call)
+    piezo_tune {on?, camera?}           experimental: tune the triangle's frequency
+                                        for a 180° step per frame from the frames
+                                        (sends "tune" events; on false keeps the frequency)
     phase_attach / phase_detach         give the piezo to a camera's Phase view, or take it away
+    phase_calibrate {camera?}           measure the piezo's phase step and report the
+                                        voltage that gives 90° (attach the piezo first)
     set_camera {settings, camera?}      change camera settings (checked like a saved profile)
     save {camera?, title?, notes?}      save the newest frame
     reference {camera?}                 capture the reference
@@ -49,16 +57,18 @@ import threading
 import time
 from dataclasses import asdict, replace
 
-from espi_live import daq, phase, profiles
+from espi_live import daq, phase, profiles, step_tuning
 from espi_live.daq import DaqSettings
 
 POLL_S = 0.1  # how often the loop feeds the DAQ watchdog while idle
 DAQ_TIMEOUT_S = 10.0  # longest wait for the DAQ thread to answer one command
 SELF_TEST_TIMEOUT_S = 30.0
 SAVE_TIMEOUT_S = 30.0
+CALIBRATION_TIMEOUT_S = 120.0  # longest wait for Calibrate phase step's five sets
 MAX_WAIT_S = 3600.0
 CLOSE_TIMEOUT_S = 5.0
 MAX_FAULTS = 20  # faults remembered for status
+MAX_EVENTS = 50  # engine events kept for a command that waits on one
 ROLE_NAMES = {"generator": daq.GENERATOR_ROLE, "piezo": daq.PIEZO_ROLE}
 
 
@@ -137,6 +147,11 @@ class ControlSession:
         self.stepper = None
         self.stepper_channel = None
         self.faults = []
+        self.seen_events = []  # engine events since the last command that waits on one
+        self.tuner = None  # step_tuning.StepTuner while auto-tune runs
+        self.tune_channel = None  # the camera whose frames it measures
+        self.tune_base = None  # the applied settings it started from
+        self.tune_sent = None  # (settings, factor, holding) last sent to the DAQ
         self.stopping = False
         self.closed = False
 
@@ -194,7 +209,7 @@ class ControlSession:
         """Do the housekeeping between commands.
 
         Feeds the DAQ watchdog, handles the DAQ's events (a fault is sent as an
-        event line) and the engines' events.
+        event line), the engines' events and a running auto-tune.
 
         Args: None.
         Returns: None.
@@ -207,6 +222,35 @@ class ControlSession:
                 break
             self._absorb(kind, payload)
         self.pump()
+        self._run_tuner()
+        self._follow()
+
+    def note_event(self, kind, payload, channel):
+        """Keep one engine event for a command that waits on one.
+
+        Args: kind and payload are the engine's event; channel is the Channel
+            it came from.
+        Returns: None.
+        """
+        self.seen_events = (self.seen_events + [(kind, payload, channel)])[-MAX_EVENTS:]
+
+    def _await_engine(self, kinds, timeout):
+        """Wait for one of the engines' events, keeping the housekeeping going.
+
+        Args: kinds is a tuple of event kinds that end the wait; timeout is in
+            seconds.
+        Returns: (kind, payload) of the event that ended it. Raises
+            CommandError when none arrives in time.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            self.tick()
+            for kind, payload, _ in list(self.seen_events):
+                if kind in kinds:
+                    return kind, payload
+            if time.monotonic() >= deadline:
+                raise CommandError(f"no answer from the cameras within {timeout:g} s")
+            time.sleep(POLL_S)
 
     def close(self):
         """Take the piezo away from the cameras and set the DAQ outputs to 0 V.
@@ -217,6 +261,7 @@ class ControlSession:
         if self.closed:
             return
         self.closed = True
+        self._stop_tuning("the session ended")
         self._attach(None)
         if not self.daq.shutdown(CLOSE_TIMEOUT_S):
             self.log.warning("NI DAQ: the device thread did not finish within "
@@ -231,12 +276,14 @@ class ControlSession:
         Returns: None. A fault or failure is remembered and sent as an event line.
         """
         if kind == "connected":
+            self._stop_tuning("a new connection was made")
             self._attach(None)
             self._set_drive(daq.Drive())
         elif kind == "applied":
             self._set_drive(payload.drive)
             self._refresh_stepper()
         elif kind in ("zeroed", "failed", "closed", "fault"):
+            self._stop_tuning(f"the DAQ reported {kind}")
             self._set_drive(daq.Drive())
             self._attach(None)
             if kind in ("failed", "fault"):
@@ -418,7 +465,8 @@ class ControlSession:
                         "pending_settings": self.settings.to_dict(),
                         "checklist_done": self.daq.checklist_done(),
                         "allow_arm": self.allow_arm},
-                "stepper": self.stepper is not None, "faults": list(self.faults)}
+                "stepper": self.stepper is not None, "tuning": self._tune_status(),
+                "faults": list(self.faults)}
 
     def cmd_daq_scan(self, command):
         """List the NI devices.
@@ -491,6 +539,38 @@ class ControlSession:
         return {"summary": payload.summary, "active": daq.drives(merged),
                 "simulated": device.simulated, "drive": asdict(payload.drive)}
 
+    def cmd_daq_follow(self, command):
+        """Set a frame-rate-following triangle's frequency from the camera now.
+
+        The window does this on a timer; a script does it with this command.
+
+        Args: command is the command dict; "camera" picks the camera whose
+            frame rate is used.
+        Returns: The reply fields: the camera, its frame rate, the frequency
+            and whether the triangle was changed.
+        """
+        channel = self._channel(command)
+        applied = self.daq.status()["settings"]
+        if applied is None:
+            raise CommandError("apply the piezo settings first (daq_apply)")
+        s = applied
+        if not (s.piezo_follow_fps and s.piezo_mode == daq.TRIANGLE
+                and s.piezo_output != daq.OFF):
+            raise CommandError(
+                "the piezo triangle does not follow the camera: daq_apply with "
+                "piezo_mode triangle, piezo_on true, the piezo assigned and "
+                "piezo_follow_fps true")
+        settings, fps = self._follow_once(channel, s)
+        if settings is None:
+            return {"camera": channel.label, "fps": fps, "changed": False,
+                    "frequency_hz": s.piezo_frequency_hz, "text": daq.follow_text(s, fps)}
+        kind, payload = self._await(("applied", "rejected"))
+        if kind == "rejected":
+            raise CommandError("the DAQ rejected the settings", payload)
+        return {"camera": channel.label, "fps": fps, "changed": True,
+                "frequency_hz": settings.piezo_frequency_hz,
+                "text": daq.follow_text(settings, fps)}
+
     def cmd_daq_zero(self, command):
         """Set every output to 0 V.
 
@@ -530,6 +610,263 @@ class ControlSession:
             raise CommandError(str(exc)) from None
         return {"volts": volts, "summary": written.summary}
 
+    def cmd_piezo_tune(self, command):
+        """Start or stop the experimental auto-tune of the piezo triangle.
+
+        It needs an applied triangle with the piezo on. Stopping by hand keeps
+        the tuned frequency; stopping for a reason (the camera stopped, the
+        Phase view, the checklist) sends nothing. While it runs, tick() measures
+        and applies, and "tune" events say what it is doing.
+
+        Args: command is the command dict; "on" is False to stop (default
+            True); "camera" picks the camera whose frames are measured.
+        Returns: The reply fields: the camera, the state and what it is doing.
+        """
+        on = command.get("on", True)
+        if not isinstance(on, bool):
+            raise CommandError('"on" must be true or false')
+        if not on:
+            if self.tuner is None:
+                raise CommandError("auto-tune is not running")
+            reply = self._stop_tuning("")
+            reply["camera"] = self.tune_channel.label
+            return reply
+        if self.tuner is not None:
+            raise CommandError("auto-tune is already running (piezo_tune with on false "
+                               "stops it)")
+        channel = self._channel(command)
+        applied = self.daq.status()["settings"]
+        if applied is None or not applied.piezo_on or applied.piezo_output == daq.OFF \
+                or applied.piezo_mode != daq.TRIANGLE:
+            raise CommandError(
+                "auto-tune needs an applied piezo triangle: daq_apply with "
+                "piezo_mode triangle, piezo_on true and the piezo assigned")
+        if not self.daq.is_armed(applied):
+            raise CommandError(daq.CHECKLIST_REQUIRED)
+        self.tuner = step_tuning.StepTuner()
+        self.tune_channel, self.tune_base, self.tune_sent = channel, applied, None
+        self._sync_step_monitor()
+        self.log.write("Auto-tune (experimental): on. The piezo holds still to measure "
+                       "the camera noise, then the triangle's frequency is tuned for a "
+                       "180° step per frame. Keep the object still.")
+        return {"camera": channel.label, "state": self.tuner.state,
+                "text": self.tuner.describe()}
+
+    def _stop_tuning(self, reason=""):
+        """Stop auto-tune: measure no more, and keep the frequency it found.
+
+        Args: reason says why it stops, "" when the user turned it off (then
+            the tuned triangle is applied; a reason sends nothing).
+        Returns: The reply fields: the frequency kept, the factor and the
+            tuner's last state (empty when it was not running).
+        """
+        tuner, self.tuner = self.tuner, None
+        self._sync_step_monitor()
+        if tuner is None:
+            return {}
+        wanted = self._tune_target(tuner.scale, False)
+        if not reason and self.daq.is_armed(wanted):
+            if self.tune_sent is None or self.tune_sent[0] != wanted:
+                self.daq.request("apply", settings=wanted)
+                self.settings = wanted
+        self.log.write(f"Auto-tune (experimental): stopped"
+                       f"{', ' + reason if reason else ''}.")
+        return {"frequency_hz": wanted.piezo_frequency_hz, "scale": tuner.scale,
+                "state": tuner.state, "text": tuner.describe()}
+
+    def _tune_target(self, scale, hold):
+        """Work out the piezo settings auto-tune wants now.
+
+        Args: scale is the tuner's factor on the frequency; hold is True while
+            it measures the noise with the piezo still.
+        Returns: daq.DaqSettings: the tuned triangle (its frequency follows the
+            frame rate when Follow is on), or the piezo held at the triangle's
+            centre.
+        """
+        base = self.tune_base
+        if hold:
+            return replace(base, piezo_mode=daq.HOLD,
+                           piezo_voltage_v=(base.piezo_bottom_v + base.piezo_top_v) / 2)
+        frequency = base.piezo_frequency_hz
+        if base.piezo_follow_fps:
+            computed, _ = daq.follow_frequency(base, self._received_fps(self.tune_channel))
+            frequency = computed or frequency
+        frequency = min(daq.MAX_TRIANGLE_HZ, max(daq.MIN_TRIANGLE_HZ, frequency * scale))
+        return replace(base, piezo_frequency_hz=frequency)
+
+    def _run_tuner(self):
+        """Measure, let the tuner decide, and apply what it wants.
+
+        Args: None.
+        Returns: None.
+        """
+        tuner = self.tuner
+        if tuner is None:
+            return
+        channel = self.tune_channel
+        if channel.engine is None:
+            self._stop_tuning("the camera stopped")
+            return
+        if channel.engine.settings().mode == "Phase":
+            self._stop_tuning("the Phase view steps the piezo itself; use the "
+                              "Previous view")
+            return
+        now = time.monotonic()
+        before = tuner.state
+        tuner.update(now, channel.engine.step_monitor)
+        if tuner.state != before and tuner.state in ("holding", "lost"):
+            self.log.write(f"Auto-tune (experimental): {tuner.describe()}")
+            self.emit({"event": "tune", "state": tuner.state, "scale": tuner.scale,
+                       "text": tuner.describe()})
+        wanted = self._tune_target(tuner.scale, tuner.wants_hold)
+        if self.tune_sent is not None and \
+                (self.tune_sent[1], self.tune_sent[2]) == (tuner.scale, tuner.wants_hold):
+            old = self.tune_sent[0].piezo_frequency_hz
+            if abs(wanted.piezo_frequency_hz - old) <= daq.FOLLOW_TOLERANCE * old:
+                return  # nothing new (a small frame-rate drift is left alone)
+        if not self.daq.is_armed(wanted):
+            self._stop_tuning("the safety checklist does not cover these outputs")
+            return
+        self.daq.request("apply", settings=wanted)
+        self.settings = wanted
+        self.tune_sent = (wanted, tuner.scale, tuner.wants_hold)
+        tuner.changed(now)
+        if not tuner.wants_hold:
+            self.log.write(f"Auto-tune (experimental): "
+                           f"{wanted.piezo_frequency_hz:.4g} Hz (×{tuner.scale:.3f}).")
+            self.emit({"event": "tune", "state": tuner.state, "scale": tuner.scale,
+                       "frequency_hz": wanted.piezo_frequency_hz,
+                       "text": tuner.describe()})
+
+    def _sync_step_monitor(self):
+        """Measure the step only on the tuned camera, and only while tuning.
+
+        Args: None.
+        Returns: None.
+        """
+        for channel in self.channels:
+            engine = channel.engine
+            if engine is not None:
+                on = self.tuner is not None and channel is self.tune_channel
+                if engine.step_monitor.on != on:
+                    engine.step_monitor.switch(on)
+
+    def _received_fps(self, channel):
+        """The rate frames arrive from a camera.
+
+        Args: channel is a Channel.
+        Returns: Frames per second, 0.0 before any arrive or when it stopped.
+        """
+        engine = channel.engine
+        if engine is None:
+            return 0.0
+        return float(engine.status().get("processed_fps") or 0.0)
+
+    def _follow_once(self, channel, applied):
+        """Give a frame-rate-following triangle the frequency the frames need.
+
+        Args: channel is the camera whose frames are counted; applied is the
+            daq.DaqSettings last written.
+        Returns: (settings, fps): the settings sent to the DAQ, or None when
+            the triangle already has the right frequency, and the frame rate
+            used. Raises CommandError when the frequency cannot be worked out
+            or the safety checklist does not cover it.
+        """
+        fps = self._received_fps(channel)
+        frequency, reason = daq.follow_frequency(applied, fps)
+        if frequency is None:
+            raise CommandError(reason)
+        settings = daq.followed(applied, fps)
+        if settings is None:
+            if not daq.MIN_TRIANGLE_HZ <= frequency <= daq.MAX_TRIANGLE_HZ:
+                raise CommandError(daq.follow_text(applied, fps))
+            return None, fps
+        if not self.daq.is_armed(settings):
+            raise CommandError(daq.CHECKLIST_REQUIRED)
+        self.daq.request("apply", settings=settings)
+        self.settings = settings
+        self.log.write(f"NI DAQ: the piezo triangle follows the camera's {fps:.1f} fps: "
+                       f"{settings.piezo_frequency_hz:.4g} Hz for "
+                       f"{settings.piezo_phase_per_frame_deg:g}° per frame.")
+        return settings, fps
+
+    def _follow(self):
+        """Keep a frame-rate-following triangle at the frequency the frames need.
+
+        This is the window's timer, for a run with no window: it does nothing
+        while auto-tune runs (which follows the frame rate itself) and leaves
+        the triangle alone when anything is wrong.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.tuner is not None:
+            return
+        applied = self.daq.status()["settings"]
+        if applied is None or not applied.piezo_follow_fps:
+            return
+        try:
+            self._follow_once(self._channel({}), applied)
+        except CommandError:
+            return
+
+    def configure_daq(self, config):
+        """Connect the DAQ and apply a config file's "daq" block.
+
+        The settings go on with the outputs switched off first, so the safety
+        checklist can be recorded for the sockets they use; then the block's
+        own settings go on, which may switch them on.
+
+        Args: config is the run config's "daq" dict: "device" (a DAQmx name or
+            "Simulated"), "settings" (DaqSettings fields), "arm" (record the
+            safety checklist; needs --daq-checklist-done) and "tune" (start
+            auto-tune). An empty block does nothing.
+        Returns: None. Raises CommandError when the block is malformed or the
+            DAQ refuses it, so a batch run stops instead of running blind.
+        """
+        if not config:
+            return
+        if not isinstance(config, dict):
+            raise CommandError('"daq" must be an object with "device", "settings", '
+                               '"arm" and "tune"')
+        unknown = sorted(set(config) - {"device", "settings", "arm", "tune"})
+        if unknown:
+            raise CommandError(f"unknown daq keys: {', '.join(unknown)}")
+        device = config.get("device")
+        if not device:
+            return
+        if not isinstance(device, str):
+            raise CommandError('"daq.device" must be a device name (or "Simulated")')
+        settings = config.get("settings", {})
+        arm, tune = config.get("arm", False), config.get("tune", False)
+        if not isinstance(settings, dict):
+            raise CommandError('"daq.settings" must be an object of DaqSettings fields')
+        if not isinstance(arm, bool) or not isinstance(tune, bool):
+            raise CommandError('"daq.arm" and "daq.tune" must be true or false')
+        self.cmd_daq_connect({"device": device})
+        if settings:
+            self.cmd_daq_apply({"settings": dict(settings, generator_on=False, piezo_on=False)})
+            if arm:
+                self.cmd_daq_arm({})
+            self.cmd_daq_apply({"settings": settings})
+        elif arm:
+            self.cmd_daq_arm({})
+        if tune:
+            self.cmd_piezo_tune({"on": True})
+
+    def _tune_status(self):
+        """Describe a running auto-tune, for status.
+
+        Args: None.
+        Returns: None when it is off, otherwise a dict of what it is doing.
+        """
+        tuner = self.tuner
+        if tuner is None:
+            return None
+        return {"camera": self.tune_channel.label, "state": tuner.state,
+                "scale": tuner.scale, "noise": tuner.noise,
+                "text": tuner.describe()}
+
     def cmd_phase_attach(self, command):
         """Give the piezo to a camera's Phase view.
 
@@ -549,6 +886,36 @@ class ControlSession:
         self._attach(phase.PiezoStepper(self.daq, base, device.simulated), channel)
         channel.engine.update_settings(mode="Phase")
         return {"camera": channel.label, "mode": "Phase"}
+
+    def cmd_phase_calibrate(self, command):
+        """Measure the piezo's phase step and report the voltage that gives 90°.
+
+        Args: command is the command dict; "camera" picks the camera whose
+            Phase view steps the piezo.
+        Returns: The reply fields: the camera, the step measured in degrees and
+            the new voltage per step (also kept for the next daq_apply).
+        """
+        channel = self._channel(command)
+        if self.stepper is None or self.stepper_channel is not channel:
+            raise CommandError("attach the piezo to this camera's Phase view first "
+                               "(phase_attach)")
+        channel.engine.update_settings(mode="Phase")
+        self.seen_events = []
+        channel.engine.request("calibrate_phase")
+        kind, payload = self._await_engine(
+            ("phase_calibrated", "phase_calibration_failed", "phase_stopped"),
+            CALIBRATION_TIMEOUT_S)
+        if kind == "phase_calibration_failed":
+            raise CommandError(
+                f"the piezo moved {payload:.0f}° per step, too far from 90° to correct: "
+                "check the piezo, its amplifier and the step voltage")
+        if kind == "phase_stopped":
+            raise CommandError(f"the Phase view stopped: {payload}")
+        degrees, volts = payload
+        self.settings = replace(self.settings, piezo_step_v=volts,
+                                piezo_quarter_wave_v=volts)
+        self._attach(self.stepper.with_step(volts), channel)
+        return {"camera": channel.label, "degrees": degrees, "step_v": volts}
 
     def cmd_phase_detach(self, command):
         """Take the piezo away from the cameras.

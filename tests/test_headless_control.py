@@ -14,6 +14,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from datetime import datetime
@@ -77,6 +78,10 @@ class SessionCase(unittest.TestCase):
         self.controller = daq.DaqController(self.log)
         self.session = ControlSession(self.channels, self.log, self.controller,
                                       allow_arm=True, emit=self.events.append)
+        # As in a control run: the session hears the engines' events too.
+        self.failures = []
+        self.session.pump = lambda: headless.pump_events(
+            self.channels, self.log, self.failures, self.session.note_event)
         self.addCleanup(self.session.close)
 
     def stop_cameras(self):
@@ -127,6 +132,37 @@ class SessionCase(unittest.TestCase):
         Returns: The reply dict.
         """
         return self.good("daq_connect", device=daq.SIMULATED)
+
+    def wait_daq(self, predicate, timeout=5):
+        """Poll a DAQ condition while keeping the DAQ's watchdog fed.
+
+        The window feeds the watchdog from its timer; a test does it here
+        with session.tick() between the polls, or the self-check stops the
+        outputs after WATCHDOG_S of silence and the poll sees 0 V.
+
+        Args: predicate is a zero-argument callable; timeout is in seconds.
+        Returns: True when predicate() holds, False at the timeout.
+        """
+        def polled():
+            """One poll after the housekeeping."""
+            self.session.tick()
+            return predicate()
+        return wait_until(polled, timeout)
+
+    @staticmethod
+    def triangle(**extra):
+        """The DAQ settings of a frame-rate-following piezo triangle.
+
+        Args: extra are DaqSettings fields to change.
+        Returns: A dict for daq_apply's "settings".
+        """
+        settings = {"piezo_mode": daq.TRIANGLE, "piezo_on": True, "piezo_output": "ao1",
+                    "piezo_bottom_v": 1.0, "piezo_top_v": 10.0, "piezo_limit_v": 10.0,
+                    "piezo_scale": daq.MANUAL, "piezo_um_per_v": 0.1,
+                    "piezo_gain": 15.0, "piezo_angle_deg": 45.0,
+                    "piezo_frequency_hz": 0.25, "piezo_follow_fps": True}
+        settings.update(extra)
+        return settings
 
 
 class ProtocolTests(SessionCase):
@@ -706,6 +742,573 @@ class PhaseTests(SessionCase):
         self.assertEqual(self.attached(), [])
 
 
+class StubTuner:
+    """A stand-in for step_tuning.StepTuner that reports what a test sets."""
+
+    def __init__(self, state="measuring", scale=1.0, wants_hold=False):
+        """Make a tuner in a state.
+
+        Args: state is its state name; scale is its factor on the frequency;
+            wants_hold is True while it measures the noise.
+        Returns: None.
+        """
+        self.state = state
+        self.scale = scale
+        self.wants_hold = wants_hold
+        self.noise = 0.0
+        self.changes = []
+
+    def update(self, now, monitor):
+        """Take a measurement (the stub reports a state set on it).
+
+        Args: now is the time; monitor is the engine's StepMonitor.
+        Returns: None.
+        """
+        if getattr(self, "next_state", None) is not None:
+            self.state, self.next_state = self.next_state, None
+        return None
+
+    def changed(self, now):
+        """Note that the frequency was applied.
+
+        Args: now is the time.
+        Returns: None.
+        """
+        self.changes.append(now)
+
+    def describe(self):
+        """Say what the tuner is doing.
+
+        Args: None.
+        Returns: One sentence.
+        """
+        return f"Auto-tune: stub {self.state} ×{self.scale:.3f}."
+
+
+class FollowTests(SessionCase):
+    """Setting a frame-rate-following triangle's frequency from the camera."""
+
+    def applied(self):
+        """The settings the DAQ has written.
+
+        Args: None.
+        Returns: daq.DaqSettings, or None before the first apply.
+        """
+        return self.controller.status()["settings"]
+
+    def test_follow_sets_the_frequency_the_formula_gives(self):
+        """The reply and the DAQ carry the frequency for the camera's rate.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle(piezo_frequency_hz=0.1))
+        self.session._received_fps = lambda channel: 30.0
+        reply = self.good("daq_follow")
+        expected, _ = daq.follow_frequency(self.session.settings, 30.0)
+        self.assertTrue(reply["changed"])
+        self.assertEqual(reply["fps"], 30.0)
+        self.assertAlmostEqual(reply["frequency_hz"], expected, places=9)
+        self.assertAlmostEqual(expected, 0.2486, places=4)
+        self.assertAlmostEqual(self.applied().piezo_frequency_hz, expected, places=9)
+
+    def test_a_settled_triangle_is_left_alone(self):
+        """A rate that asks for the same frequency again sends nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.session._received_fps = lambda channel: 30.0
+        self.good("daq_follow")
+        again = self.good("daq_follow")
+        self.assertFalse(again["changed"])
+        self.assertIn("Follows the camera", again["text"])
+
+    def test_follow_needs_an_applied_triangle_that_follows(self):
+        """Nothing applied, a hold, or Follow off are refused with the reason.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.bad("daq_follow", "apply the piezo settings first")
+        for settings in (self.triangle(piezo_follow_fps=False),
+                         self.triangle(piezo_mode=daq.HOLD),
+                         self.triangle(piezo_output=daq.OFF, piezo_on=False)):
+            self.good("daq_apply", settings=settings)
+            self.bad("daq_follow", "does not follow the camera")
+
+    def test_follow_waits_for_frames(self):
+        """Before any frame arrives there is no rate to follow.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.session._received_fps = lambda channel: 0.0
+        self.bad("daq_follow", "Waiting for frames")
+
+    def test_follow_refuses_a_frequency_outside_the_range(self):
+        """A calibrated scale that would need an impossible rate says so.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle(
+            piezo_scale=daq.CALIBRATED, piezo_quarter_wave_v=1e-5))
+        self.session._received_fps = lambda channel: 30.0
+        self.bad("daq_follow", "outside")
+
+    def test_follow_needs_the_checklist_for_a_drive_signal(self):
+        """An unarmed real device takes no new frequency.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle(piezo_frequency_hz=0.1))
+        self.session._received_fps = lambda channel: 30.0
+        with mock.patch.object(self.session.daq, "is_armed", return_value=False):
+            self.bad("daq_follow", "checklist")
+
+    def test_tick_follows_the_frame_rate_by_itself(self):
+        """A batch run has no timer: tick() keeps the triangle in step.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle(piezo_frequency_hz=0.1))
+        self.session._received_fps = lambda channel: 30.0
+        self.session.tick()
+        expected, _ = daq.follow_frequency(self.session.settings, 30.0)
+        self.assertTrue(self.wait_daq(
+            lambda: self.applied() is not None
+            and abs(self.applied().piezo_frequency_hz - expected) < 1e-9))
+
+    def test_the_rejected_follow_apply_is_an_error(self):
+        """A settings rejection on the way through comes back with its reasons.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle(piezo_frequency_hz=0.1))
+        self.session._received_fps = lambda channel: 30.0
+        with mock.patch.object(daq, "problems", return_value=["No today."]):
+            reply = self.bad("daq_follow", "rejected the settings")
+        self.assertEqual(reply["problems"], ["No today."])
+
+    def test_tick_leaves_the_triangle_alone_when_it_cannot_follow(self):
+        """No frames, an unarmed device or no camera: the frequency stays put.
+
+        Args: None.
+        Returns: None.
+        """
+        self.session.tick()  # nothing applied yet
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.session._received_fps = lambda channel: 0.0
+        self.session.tick()  # no frames yet
+        self.session._received_fps = lambda channel: 30.0
+        with mock.patch.object(self.session.daq, "is_armed", return_value=False):
+            self.session.tick()  # the checklist does not cover it
+        self.channels[0].stop()
+        self.assertTrue(wait_until(lambda: self.channels[0].engine is None, timeout=10))
+        self.session.tick()  # no camera
+        self.assertAlmostEqual(self.controller.status()["settings"].piezo_frequency_hz,
+                               0.25, places=9)
+
+    def test_tick_does_not_follow_while_auto_tune_runs(self):
+        """Auto-tune follows the frame rate itself, so tick() leaves it alone.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        with mock.patch.object(self.session, "_follow_once") as follow:
+            self.session.tick()
+        follow.assert_not_called()
+
+
+class PiezoTuneTests(SessionCase):
+    """The experimental auto-tune over the JSON protocol."""
+
+    def test_tune_needs_an_applied_triangle(self):
+        """Nothing applied, a hold or an unassigned piezo are refused.
+
+        Args: None.
+        Returns: None.
+        """
+        self.bad("piezo_tune", "needs an applied piezo triangle")
+        self.connect_simulated()
+        for settings in (self.triangle(piezo_mode=daq.HOLD),
+                         self.triangle(piezo_on=False, piezo_output=daq.OFF)):
+            self.good("daq_apply", settings=settings)
+            self.bad("piezo_tune", "needs an applied piezo triangle")
+
+    def test_tune_validates_and_cannot_start_twice(self):
+        """The flag must be a boolean, and one run at a time.
+
+        Args: None.
+        Returns: None.
+        """
+        self.bad("piezo_tune", '"on" must be true or false', on="yes")
+        self.bad("piezo_tune", "not running", on=False)
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        self.bad("piezo_tune", "already running")
+
+    def test_tune_starts_measures_and_stops_keeping_the_frequency(self):
+        """Starting switches the monitor on; stopping keeps what it found.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        reply = self.good("piezo_tune")
+        self.assertEqual(reply["state"], "noise")
+        self.assertTrue(self.channels[0].engine.step_monitor.on)
+        self.assertEqual(self.good("status")["tuning"]["camera"], self.channels[0].label)
+        stopped = self.good("piezo_tune", on=False)
+        self.assertFalse(self.channels[0].engine.step_monitor.on)
+        self.assertIsNone(self.session.tuner)
+        self.assertIsNone(self.good("status")["tuning"])
+        self.assertAlmostEqual(stopped["frequency_hz"], 0.25, places=9)
+        self.assertEqual(stopped["camera"], self.channels[0].label)
+
+    def test_tune_measures_only_the_chosen_camera(self):
+        """Only one engine measures, so the numbers belong to one camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.channels[1].start()
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune", camera=1)
+        self.assertTrue(self.channels[1].engine.step_monitor.on)
+        self.assertFalse(self.channels[0].engine.step_monitor.on)
+
+    def test_tune_holds_the_piezo_then_applies_the_tuned_frequency(self):
+        """The noise hold and each new factor reach the DAQ, with events.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        stub = StubTuner(state="noise", wants_hold=True)
+        self.session.tuner = stub
+        self.session.tick()
+        self.assertTrue(self.wait_daq(
+            lambda: self.controller.status()["settings"] is not None
+            and self.controller.status()["settings"].piezo_mode == daq.HOLD))
+        self.assertAlmostEqual(self.controller.status()["settings"].piezo_voltage_v, 5.5)
+        stub.state, stub.wants_hold, stub.scale = "measuring", False, 1.2
+        self.session.tick()
+        self.assertTrue(self.wait_daq(
+            lambda: self.controller.status()["settings"] is not None
+            and abs(self.controller.status()["settings"].piezo_frequency_hz - 0.3) < 1e-9))
+        self.assertEqual(len(stub.changes), 2)
+        self.session.tick()  # nothing new: no second apply
+        self.assertEqual(len(stub.changes), 2)
+        self.assertTrue(any(event.get("event") == "tune" for event in self.events))
+
+    def test_tune_with_follow_uses_the_frame_rate(self):
+        """Follow on: the factor is applied to the frequency the frames need.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.session._received_fps = lambda channel: 30.0
+        self.good("piezo_tune")
+        self.session.tuner = StubTuner(scale=2.0)
+        self.session.tick()
+        expected, _ = daq.follow_frequency(self.session.tune_base, 30.0)
+        self.assertTrue(self.wait_daq(
+            lambda: self.controller.status()["settings"] is not None
+            and abs(self.controller.status()["settings"].piezo_frequency_hz
+                    - 2 * expected) < 1e-9))
+
+    def test_tune_needs_the_checklist_for_a_real_device(self):
+        """A device the checklist does not cover takes no auto-tune.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        with mock.patch.object(self.session.daq, "is_armed", return_value=False):
+            self.bad("piezo_tune", "checklist")
+        self.assertIsNone(self.session.tuner)
+
+    def test_tune_logs_and_emits_a_state_change(self):
+        """Reaching holding or lost is logged and sent as a tune event.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        stub = StubTuner(state="measuring", scale=1.5)
+        self.session.tuner = stub
+        self.session.tick()
+        self.assertFalse(any(event.get("state") == "holding" for event in self.events))
+        stub.next_state = "holding"
+        self.session.tick()
+        self.assertTrue(any(event.get("event") == "tune"
+                            and event.get("state") == "holding" for event in self.events))
+        self.assertTrue(self.log.has("Auto-tune (experimental):"))
+
+    def test_tune_stops_when_the_phase_view_takes_the_piezo(self):
+        """The Phase view steps the piezo itself, so auto-tune gives way.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        self.good("set_camera", settings={"mode": "Phase"})
+        self.assertTrue(wait_until(
+            lambda: self.channels[0].engine.settings().mode == "Phase", timeout=10))
+        self.session.tick()
+        self.assertIsNone(self.session.tuner)
+        self.assertTrue(self.log.has("Phase view steps the piezo"))
+
+    def test_tune_stops_when_the_camera_stops(self):
+        """A camera that goes away ends the tuning with a reason.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        self.channels[0].stop()
+        self.assertTrue(wait_until(lambda: self.channels[0].engine is None, timeout=10))
+        self.session.tick()
+        self.assertIsNone(self.session.tuner)
+        self.assertTrue(self.log.has("the camera stopped"))
+
+    def test_tune_stops_when_the_checklist_does_not_cover_the_outputs(self):
+        """Settings the checklist no longer covers stop it rather than run on.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        self.session.tuner = StubTuner(scale=1.3)
+        with mock.patch.object(self.session.daq, "is_armed", return_value=False):
+            self.session.tick()
+        self.assertIsNone(self.session.tuner)
+        self.assertTrue(self.log.has("safety checklist does not cover"))
+
+    def test_a_fault_stops_the_tuning_too(self):
+        """A DAQ fault stops the stepping and the tuner, and says so.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        self.controller.events.put(("fault", "AO 1 read 0.9 V"))
+        self.session.tick()
+        self.assertIsNone(self.session.tuner)
+        self.assertFalse(self.channels[0].engine.step_monitor.on)
+        self.assertTrue(self.log.has("the DAQ reported fault"))
+
+    def test_close_stops_tuning(self):
+        """Closing the session measures no more.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings=self.triangle())
+        self.good("piezo_tune")
+        self.session.close()
+        self.assertIsNone(self.session.tuner)
+        self.assertFalse(self.channels[0].engine.step_monitor.on)
+
+
+class PhaseCalibrateTests(SessionCase):
+    """Measuring the piezo's phase step over the JSON protocol."""
+
+    def test_calibrate_needs_the_piezo_attached_to_that_camera(self):
+        """Calibrating needs the stepper, on the camera it is asked about.
+
+        Args: None.
+        Returns: None.
+        """
+        self.bad("phase_calibrate", "attach the piezo")
+        self.channels[1].start()
+        self.connect_simulated()
+        self.good("daq_apply", settings={"piezo_step_v": 0.05})
+        self.good("phase_attach")
+        self.bad("phase_calibrate", "attach the piezo", camera=1)
+
+    def test_calibrate_measures_the_demo_piezo(self):
+        """The demo's 8π rad/V step is measured and corrected towards 90°.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings={"piezo_step_v": 0.05, "piezo_on": True})
+        self.good("phase_attach")
+        reply = self.good("phase_calibrate")
+        self.assertGreater(reply["degrees"], 40)
+        self.assertLess(reply["degrees"], 110)
+        self.assertAlmostEqual(reply["step_v"], 0.0625, delta=0.03)
+        self.assertAlmostEqual(self.session.stepper.step_v, reply["step_v"])
+        self.assertAlmostEqual(self.session.settings.piezo_quarter_wave_v, reply["step_v"])
+        self.assertAlmostEqual(self.session.settings.piezo_step_v, reply["step_v"])
+        self.assertEqual(self.channels[0].engine.settings().mode, "Phase")
+
+    def test_calibrate_reports_a_step_too_far_from_90(self):
+        """A step outside the trusted range is an error, not a new voltage.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings={"piezo_step_v": 0.05})
+        self.good("phase_attach")
+        self.channels[0].engine.events.put(("phase_calibration_failed", 12.0))
+        self.bad("phase_calibrate", "too far from 90")
+
+    def test_calibrate_reports_a_phase_view_that_stopped(self):
+        """A piezo that could not be moved ends the wait with its reason.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect_simulated()
+        self.good("daq_apply", settings={"piezo_step_v": 0.05})
+        self.good("phase_attach")
+        self.channels[0].engine.events.put(("phase_stopped", "the piezo could not move"))
+        self.bad("phase_calibrate", "Phase view stopped")
+
+    def test_waiting_for_an_event_times_out(self):
+        """A calibration that never answers does not hang the session.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaises(CommandError):
+            self.session._await_engine(("never",), 0.05)
+
+    def test_engine_events_are_kept_up_to_a_limit(self):
+        """Only the newest events are remembered.
+
+        Args: None.
+        Returns: None.
+        """
+        for number in range(headless_control.MAX_EVENTS + 3):
+            self.session.note_event("x", number, self.channels[0])
+        self.assertEqual(len(self.session.seen_events), headless_control.MAX_EVENTS)
+        self.assertEqual(self.session.seen_events[-1][1], headless_control.MAX_EVENTS + 2)
+
+    def test_a_camera_that_never_started_has_no_frame_rate(self):
+        """A stopped channel reads 0 fps rather than failing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.session._received_fps(self.channels[1]), 0.0)
+
+
+class ConfigDaqTests(SessionCase):
+    """The config file's "daq" block."""
+
+    def test_configure_connects_arms_and_applies(self):
+        """The block connects, records the checklist, then switches the outputs on.
+
+        Args: None.
+        Returns: None.
+        """
+        self.session.configure_daq({"device": daq.SIMULATED, "arm": True,
+                                    "settings": self.triangle()})
+        applied = self.controller.status()["settings"]
+        self.assertEqual(applied.piezo_mode, daq.TRIANGLE)
+        self.assertTrue(applied.piezo_on)
+        self.assertTrue(self.session.daq.checklist_done())
+
+    def test_configure_can_start_auto_tune(self):
+        """A block with "tune" starts the tuner on the first running camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.session.configure_daq({"device": daq.SIMULATED, "arm": True,
+                                    "settings": self.triangle(), "tune": True})
+        self.assertIsNotNone(self.session.tuner)
+        self.assertTrue(self.channels[0].engine.step_monitor.on)
+
+    def test_configure_arms_without_settings(self):
+        """A block with only a device and "arm" still records the checklist.
+
+        Args: None.
+        Returns: None.
+        """
+        self.session.configure_daq({"device": daq.SIMULATED, "arm": True})
+        self.assertTrue(self.session.daq.checklist_done())
+
+    def test_an_empty_block_does_nothing(self):
+        """No block, or no device, leaves the DAQ alone.
+
+        Args: None.
+        Returns: None.
+        """
+        for block in ({}, {"settings": self.triangle()}, {"device": ""}):
+            self.session.configure_daq(block)
+        self.assertIsNone(self.controller.status()["device"])
+
+    def test_a_malformed_block_is_refused(self):
+        """Every wrong shape names what it wanted.
+
+        Args: None.
+        Returns: None.
+        """
+        for block, text in (({"device": "Simulated", "tune": "yes"}, "true or false"),
+                            ({"device": "Simulated", "settings": []}, "daq.settings"),
+                            ({"device": 3}, "daq.device"),
+                            ({"device": "Simulated", "extra": 1}, "unknown daq keys"),
+                            (["Simulated"], "must be an object")):
+            with self.assertRaises(CommandError) as caught:
+                self.session.configure_daq(block)
+            self.assertIn(text, str(caught.exception))
+
+    def test_a_drive_signal_without_the_checklist_is_refused(self):
+        """Arming is what lets the block switch a real output on.
+
+        Args: None.
+        Returns: None.
+        """
+        fake_nidaqmx.install(self)
+        with self.assertRaises(CommandError) as caught:
+            self.session.configure_daq({"device": "Dev1", "settings": self.triangle()})
+        self.assertTrue(caught.exception.problems)
+
+
 class CameraCommandTests(SessionCase):
     """Camera settings, saving and the reference."""
 
@@ -1029,6 +1632,52 @@ class HeadlessRunTests(unittest.TestCase):
         self.assertFalse(json.loads(out.splitlines()[1])["ok"])
         _, out, _ = self.run_control(text, checklist_done=True)
         self.assertTrue(json.loads(out.splitlines()[1])["ok"])
+
+    def test_a_daq_block_drives_the_outputs_in_a_batch_run(self):
+        """The config file's "daq" block connects, arms and applies with no stdin.
+
+        Args: None.
+        Returns: None.
+        """
+        out, err = io.StringIO(), io.StringIO()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        config = dict(headless.DEFAULTS, demo=True, duration_s=0.4,
+                      daq={"device": daq.SIMULATED, "arm": True,
+                           "settings": {"piezo_mode": daq.TRIANGLE, "piezo_on": True,
+                                        "piezo_bottom_v": 1.0, "piezo_top_v": 10.0,
+                                        "piezo_limit_v": 10.0,
+                                        "piezo_scale": daq.MANUAL,
+                                        "piezo_frequency_hz": 0.25,
+                                        "piezo_follow_fps": True}})
+        with mock.patch.object(paths, "OUTPUT_DIR", tmp.name), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = headless.run(config, checklist_done=True)
+        self.assertEqual(code, 0)
+        text = out.getvalue() + err.getvalue()  # a batch run logs to stdout
+        self.assertIn("NI DAQ: connected", text)
+        self.assertIn("triangle", text)
+
+    def test_a_malformed_daq_block_stops_the_run(self):
+        """A block the DAQ cannot use is an error, not a silent run.
+
+        Args: None.
+        Returns: None.
+        """
+        out, err = io.StringIO(), io.StringIO()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        config = dict(headless.DEFAULTS, demo=True, duration_s=0.2,
+                      daq={"device": daq.SIMULATED,
+                           "settings": {"piezo_mode": daq.TRIANGLE, "piezo_on": True,
+                                        "piezo_bottom_v": 10.0, "piezo_top_v": 1.0}})
+        with mock.patch.object(paths, "OUTPUT_DIR", tmp.name), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = headless.run(config)
+        self.assertEqual(code, 1)
+        text = out.getvalue() + err.getvalue()
+        self.assertIn("Headless run failed", text)
+        self.assertIn("device released", text)  # the refused block still closed the DAQ
 
 
 if __name__ == "__main__":
