@@ -56,6 +56,18 @@ MAX_SQUARE_HZ = 1_000_000.0
 MIN_TRIANGLE_HZ = 0.01
 MAX_TRIANGLE_HZ = 1000.0
 MAX_VOLTS = 10.0  # the AO range
+
+# The triangle's frequency can follow the camera: a steady ramp changes the
+# reference phase by the same amount between successive frames, set by the
+# ramp's speed and the frame rate. The piezo's phase per DAQ volt comes from
+# Calibrate phase step, or from numbers typed in for the HeNe laser.
+HENE_WAVELENGTH_NM = 632.8  # the lab laser; the manual scale assumes it
+CALIBRATED, MANUAL = "calibrated", "manual"  # where the phase per volt comes from
+PIEZO_SCALES = (CALIBRATED, MANUAL)
+DEFAULT_PHASE_PER_FRAME_DEG = 180.0  # half a wavelength of path between frames
+MAX_PHASE_PER_FRAME_DEG = 360.0
+MAX_MIRROR_ANGLE_DEG = 80.0  # beyond this the path change is too small to trust
+FOLLOW_TOLERANCE = 0.03  # re-apply only when the frequency would move by more
 MIN_WRITE_S = 0.001  # pyLabLib writes at least this much waveform per start
 
 # The USB-6251 BNC's sockets, as printed on its panel. PFI 8-15, P0.0-7, +5 V
@@ -351,6 +363,13 @@ class DaqSettings:
     piezo_frequency_hz: float = 0.25  # triangle frequency, on its own clock
     piezo_step_v: float = 0.05  # what one Step button press adds
     piezo_limit_v: float = 1.0
+    piezo_follow_fps: bool = False  # triangle frequency follows the camera's frame rate
+    piezo_phase_per_frame_deg: float = DEFAULT_PHASE_PER_FRAME_DEG
+    piezo_scale: str = CALIBRATED  # phase per volt: CALIBRATED or MANUAL
+    piezo_quarter_wave_v: float = 0.0  # DAQ volts per 90° from Calibrate phase step; 0: none
+    piezo_um_per_v: float = 0.1  # manual: piezo travel per volt at the piezo (PE4 ~15 µm/150 V)
+    piezo_gain: float = 15.0  # manual: amplifier gain (MDT694A at its 150 V limit)
+    piezo_angle_deg: float = 45.0  # manual: angle of incidence on the piezo mirror (lab: 45°)
 
     def to_dict(self):
         """Describe the settings for storage.
@@ -520,6 +539,109 @@ def piezo_range(settings):
     return s.piezo_voltage_v, s.piezo_voltage_v
 
 
+def phase_per_volt(settings):
+    """Work out the reference phase one DAQ volt on the piezo gives.
+
+    CALIBRATED uses the volts per 90° step that Calibrate phase step
+    measured. MANUAL uses the piezo's travel per volt, the amplifier gain and
+    the mirror's angle of incidence, at the HeNe wavelength: a mirror moved
+    by d changes the path by 2 d cos(angle), so the phase by
+    4 pi d cos(angle) / wavelength.
+
+    Args: settings is DaqSettings.
+    Returns: (radians per DAQ volt, "") or (None, a sentence saying what is
+        missing).
+    """
+    s = settings
+    if s.piezo_scale == CALIBRATED:
+        if s.piezo_quarter_wave_v > 0:
+            return (math.pi / 2) / s.piezo_quarter_wave_v, ""
+        return None, ("Calibrate phase step has not measured this piezo yet: run it "
+                      "in the Phase view, or choose Manual and type the piezo's numbers.")
+    if s.piezo_scale != MANUAL:
+        return None, f"Unknown piezo scale {s.piezo_scale!r}."
+    if s.piezo_um_per_v <= 0 or s.piezo_gain <= 0:
+        return None, "The piezo's travel per volt and the amplifier gain must be above 0."
+    if not 0 <= s.piezo_angle_deg <= MAX_MIRROR_ANGLE_DEG:
+        return None, (f"The mirror's angle of incidence must be between 0° and "
+                      f"{MAX_MIRROR_ANGLE_DEG:g}°.")
+    travel_nm = s.piezo_um_per_v * 1000.0 * s.piezo_gain  # per DAQ volt
+    cosine = math.cos(math.radians(s.piezo_angle_deg))
+    return 4 * math.pi * travel_nm * cosine / HENE_WAVELENGTH_NM, ""
+
+
+def follow_frequency(settings, fps):
+    """Work out the triangle frequency for a phase change per camera frame.
+
+    The triangle covers its span up and back each cycle, so the DAQ voltage
+    moves at 2 (top - bottom) f volts a second, and the phase between
+    successive frames is that times the phase per volt, divided by fps:
+    f = step x fps / (2 (top - bottom) x phase per volt).
+
+    Args: settings is DaqSettings in triangle mode; fps is the rate frames
+        arrive from the camera (0 or None when unknown).
+    Returns: (frequency in Hz, "") or (None, a sentence saying why not).
+    """
+    s = settings
+    per_volt, reason = phase_per_volt(s)
+    if per_volt is None:
+        return None, reason
+    if not 0 < s.piezo_phase_per_frame_deg <= MAX_PHASE_PER_FRAME_DEG:
+        return None, (f"The phase per frame must be above 0° and at most "
+                      f"{MAX_PHASE_PER_FRAME_DEG:g}°.")
+    span = s.piezo_top_v - s.piezo_bottom_v
+    if span <= 0:
+        return None, "The piezo triangle's top must be above its bottom."
+    if not fps or fps <= 0:
+        return None, "Waiting for frames from the camera to measure its frame rate."
+    step = math.radians(s.piezo_phase_per_frame_deg)
+    return step * fps / (2 * span * per_volt), ""
+
+
+def follow_text(settings, fps):
+    """Describe the frequency the triangle follows, for the DAQ window.
+
+    Args: settings is DaqSettings in triangle mode with piezo_follow_fps;
+        fps is the camera's measured frame rate (0 or None when unknown).
+    Returns: One sentence.
+    """
+    s = settings
+    frequency, reason = follow_frequency(s, fps)
+    if frequency is None:
+        return reason
+    if not MIN_TRIANGLE_HZ <= frequency <= MAX_TRIANGLE_HZ:
+        return (f"Following {fps:.1f} fps would need {frequency:.4g} Hz, outside "
+                f"{MIN_TRIANGLE_HZ:g}–{MAX_TRIANGLE_HZ:,.0f} Hz: change Bottom and Top "
+                "(a wider span needs a lower frequency). The frequency is left as it is.")
+    if s.piezo_scale == CALIBRATED:
+        scale = f"calibrated {s.piezo_quarter_wave_v:.4g} V per 90°"
+    else:
+        scale = (f"manual {s.piezo_um_per_v:g} µm/V × {s.piezo_gain:g} at "
+                 f"{s.piezo_angle_deg:g}°, {HENE_WAVELENGTH_NM:g} nm")
+    return (f"Follows the camera: {frequency:.4g} Hz for "
+            f"{s.piezo_phase_per_frame_deg:g}° per frame at {fps:.1f} fps ({scale}).")
+
+
+def followed(settings, fps):
+    """Settings with the triangle's frequency set from the frame rate, if it changed enough.
+
+    Args: settings is DaqSettings; fps is the camera's measured frame rate.
+    Returns: New DaqSettings when the piezo triangle follows the frame rate
+        and its frequency would move by more than FOLLOW_TOLERANCE (and stay
+        within the triangle's range), otherwise None.
+    """
+    s = settings
+    if not (s.piezo_follow_fps and s.piezo_mode == TRIANGLE and s.piezo_output != OFF):
+        return None
+    frequency, _ = follow_frequency(s, fps)
+    if frequency is None or not MIN_TRIANGLE_HZ <= frequency <= MAX_TRIANGLE_HZ:
+        return None
+    old = s.piezo_frequency_hz
+    if old > 0 and abs(frequency - old) <= FOLLOW_TOLERANCE * old:
+        return None
+    return replace(s, piezo_frequency_hz=frequency)
+
+
 def drives(settings):
     """Tell whether settings send any drive signal.
 
@@ -660,6 +782,10 @@ def _piezo_mode_problems(settings, outputs):
     found = []
     if s.piezo_top_v <= s.piezo_bottom_v:
         found.append("The piezo triangle's top must be above its bottom.")
+    elif s.piezo_follow_fps:
+        _, reason = follow_frequency(s, 1.0)  # the scale, whatever the frame rate
+        if reason:
+            found.append(reason)
     if not MIN_TRIANGLE_HZ <= s.piezo_frequency_hz <= MAX_TRIANGLE_HZ:
         found.append(f"The piezo triangle's frequency must be between "
                      f"{MIN_TRIANGLE_HZ:g} Hz and {MAX_TRIANGLE_HZ:,.0f} Hz.")
