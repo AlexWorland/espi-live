@@ -50,6 +50,7 @@ from espi_live.processing import (DEEP_DTYPE, DEFAULT_DIFFERENCE_GAIN,
                                   single_field, smooth_speckle, stretch_levels,
                                   subtract_floor, to_uint8, watermark_demo)
 from espi_live.simulation import DEFAULT_OBJECT, DemoSource
+from espi_live.step_tuning import StepMonitor
 from espi_live.recording import (AVIRecorder, recording_path, save_frame,
                                  save_frame_set)
 
@@ -616,6 +617,9 @@ class Engine:
         self._phase_stepper = None  # the stepper the phase state was built for (worker)
         self._phase_problem = None  # the last stepper problem logged (worker)
         self._interferometer = None  # dummy mode's Phase-view source (worker)
+        # Measures the piezo's phase step from successive frames while the
+        # window switches it on (auto-tune, debug overlay); fed by the worker.
+        self.step_monitor = StepMonitor()
 
     # ----- setup (front-end thread, before start) -----------------------
 
@@ -1172,6 +1176,7 @@ class Engine:
                     if self._raw_tap.is_set():
                         self._raw = raw_frame
             now = time.monotonic()
+            self.step_monitor.feed(frame, now)  # nothing while it is off
             gaps.frame_ok(now, 1.0 / max(1.0, resulting_fps or s.fps), context)
             if not self.demo:  # simulated fringes come and go; there is no blur
                 camera_sharpness.observe(frame, now, context)
