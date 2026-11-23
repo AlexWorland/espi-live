@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-22 — Experimental auto-tune of the piezo triangle, and a piezo debug overlay
+
+### Previous state
+
+- The piezo triangle's frequency came from the formula (Follow the camera's frame rate) or was typed in. Nothing checked, from the image, whether the reference phase really moved by 180° between frames; an open-loop piezo's travel, the mirror angle or the frame timing could leave it off.
+
+### Current state
+
+- **Auto-tune (experimental)** in the DAQ window's piezo section tunes the applied triangle's frequency from the camera frames for a 180° step per frame, where the Previous-view difference is strongest and least sensitive to small changes of the step (so it flickers least), and keeps it there. It holds the piezo still at the triangle's centre for a few seconds to measure the camera noise, compares frames one and two apart (at 180° frames two apart match: D(2)/D(1) falls to its least), finds the side of 180° with a 5% trial change, jumps close and finishes with small steps. Each change restarts the triangle and is logged. It stops by itself on a camera switch, the Phase view, new settings or the outputs stopping, and if it cannot find the step it returns to the computed frequency and says so. Turning it off keeps the tuned frequency. In simulation (turning points, ±10% step wobble, camera noise) it settled within 6% of 180° from steps between 0.5× and 1.8× of it.
+- **View → Piezo debug overlay** shows, in a strip along the top of the image area (covering neither the image nor the dummy-mode watermark), the frames received per second, the triangle applied and the formula's frequency, the step measured from the frames (D2/D1, D1, noise, flicker) and the tuner's state. On screen only: saved frames and recordings never show it.
+- Defaults are unchanged: both are off until turned on.
+
 ## 2026-11-22 — The piezo triangle can follow the camera's frame rate
 
 ### Previous state
