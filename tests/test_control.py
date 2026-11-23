@@ -47,6 +47,7 @@ class FakeBackend:
         self.applied = []  # (index, changes) passed to apply()
         self.commands = []  # (index, name, payload) passed to command()
         self.log_lines = ["one", "two", "three"]
+        self.update_calls = []  # action names passed to update_action()
         self.fail = None  # exception raised by every call when set
 
     def _check(self):
@@ -149,6 +150,27 @@ class FakeBackend:
         self._check()
         return {"connected": False, "device": None, "active": False,
                 "summary": "Not connected", "checklist_done": False}
+
+    def update_state(self):
+        """Return an update state with nothing available yet.
+
+        Args: None.
+        Returns: A dict as qt_app.ControlBackend.update_state() does.
+        """
+        self._check()
+        return {"current": 7, "latest": None, "label": None, "downloaded": False,
+                "busy": False, "downloading": False,
+                "progress": [0, 0], "unavailable": None, "recording": False}
+
+    def update_action(self, name):
+        """Record an update action.
+
+        Args: name is the action name.
+        Returns: A small result dict.
+        """
+        self._check()
+        self.update_calls.append(name)
+        return {"started": name}
 
 
 def response_of(raw):
@@ -347,6 +369,81 @@ class OverviewTests(ServiceTestCase):
         self.assertEqual(payload["settings"]["rolling"], {"type": "bool"})
         self.assertEqual(set(payload["commands"]), set(control.COMMANDS))
         self.assertIn("GET /status", payload["endpoints"])
+
+
+class UpdateTests(ServiceTestCase):
+    """GET /update reports the update state; POST /update runs an action."""
+
+    def test_get_update_returns_backend_state(self):
+        """GET /update wraps the backend's state with ok.
+
+        Args: None.
+        Returns: None.
+        """
+        code, payload = self.service.handle("GET", "/update", {}, None)
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["current"], 7)
+        self.assertIsNone(payload["latest"])
+
+    def test_post_update_runs_the_action(self):
+        """POST /update passes the action to the backend.
+
+        Args: None.
+        Returns: None.
+        """
+        code, payload = self.service.handle("POST", "/update", {}, {"action": "check"})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload, {"ok": True, "action": "check",
+                                   "result": {"started": "check"}})
+        self.assertEqual(self.backend.update_calls, ["check"])
+
+    def test_unknown_action_lists_the_choices(self):
+        """An unknown or missing action is refused with the valid names.
+
+        Args: None.
+        Returns: None.
+        """
+        code, payload = self.service.handle("POST", "/update", {},
+                                            {"action": "reboot"})
+        self.assertEqual(code, 400)
+        self.assertIn("check, download, install, restart", payload["error"])
+        code, _ = self.service.handle("POST", "/update", {}, {})
+        self.assertEqual(code, 400)
+        self.assertEqual(self.backend.update_calls, [])
+
+    def test_body_must_be_an_object(self):
+        """A list body is refused.
+
+        Args: None.
+        Returns: None.
+        """
+        code, payload = self.service.handle("POST", "/update", {}, [])
+        self.assertEqual(code, 400)
+        self.assertEqual(payload["error"], "the body must be a JSON object")
+
+    def test_backend_refusals_keep_their_status(self):
+        """A 409 from the backend (e.g. recording) reaches the client unchanged.
+
+        Args: None.
+        Returns: None.
+        """
+        self.backend.fail = control.ControlError("a recording is running", 409)
+        code, payload = self.service.handle("POST", "/update", {},
+                                            {"action": "install"})
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["error"], "a recording is running")
+
+    def test_overview_lists_update_endpoints(self):
+        """GET / names both /update endpoints and the actions.
+
+        Args: None.
+        Returns: None.
+        """
+        _, payload = self.service.handle("GET", "/", {}, None)
+        self.assertIn("GET /update", payload["endpoints"])
+        self.assertIn("POST /update", payload["endpoints"])
+        self.assertIn("install", payload["endpoints"]["POST /update"])
 
 
 class StatusTests(ServiceTestCase):

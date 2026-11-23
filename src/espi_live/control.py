@@ -27,6 +27,12 @@ NI DAQ window offers (scan, connect, apply, zero, self-test, piezo step,
 Phase-view attach, auto-tune). DAQ settings are DaqSettings fields; every
 change is logged and the window's controls follow, like camera changes.
 
+GET /update reports the app's build and update state; POST /update checks
+for, downloads or installs a newer build, or restarts into a downloaded
+one. Control-triggered updates never open a dialog. An install closes the
+window after every engine has stopped, and the installer then relaunches
+the app, as the window's own Restart button does.
+
 The module also holds the terminal client used by `espi_live control ...`,
 which discovers the server through output/control.json or the default
 port range.
@@ -98,6 +104,15 @@ DAQ_ACTIONS = {
                   {"settings": ("settings", False)}),
     "tune": ("start or stop the experimental piezo auto-tune",
              {"on": ("flag", True)}),
+}
+
+# The update actions POST /update runs: description per action name.
+UPDATE_ACTIONS = {
+    "check": "look for a newer build on GitHub (no download)",
+    "download": "download the newer build found by the last check",
+    "install": ("download the newer build if needed, then close the app and "
+                "restart into it; refused while a recording or frame save runs"),
+    "restart": "restart into a build that is already downloaded",
 }
 
 COMMANDS = {
@@ -378,6 +393,8 @@ class ControlService:
                     return 200, self._log(query)
                 if route == "/daq":
                     return 200, self._daq()
+                if route == "/update":
+                    return 200, {"ok": True, **self.backend.update_state()}
             elif method == "POST":
                 if route == "/settings":
                     return 200, self._post_settings(body)
@@ -385,6 +402,8 @@ class ControlService:
                     return 200, self._post_command(body)
                 if route == "/daq":
                     return 200, self._post_daq(body)
+                if route == "/update":
+                    return 200, self._post_update(body)
             else:
                 raise ControlError(f"{method} is not supported here", 405)
             raise ControlError(f"unknown address {route}; GET / lists the API",
@@ -425,6 +444,10 @@ class ControlService:
                              "and what the outputs produce"),
                 "POST /daq": ('{"action": "apply", "settings": {"piezo_on": '
                               'true}} runs a DAQ action'),
+                "GET /update": "the app's build, the newest known build and the update state",
+                "POST /update": ('{"action": "install"} checks, downloads, or '
+                                 "restarts into a newer build; actions: "
+                                 + ", ".join(UPDATE_ACTIONS)),
                 "GET /log?lines=200": "the last lines of the run log",
             },
             "settings": settings,
@@ -607,6 +630,21 @@ class ControlService:
         if name == "attach":
             arguments["camera_index"] = self._resolve(payload.get("camera"))["index"]
         result = self.backend.daq_action(name, **arguments)
+        return {"ok": True, "action": name, "result": result}
+
+    def _post_update(self, body):
+        """Run one update action.
+
+        Args: body carries "action", one of UPDATE_ACTIONS.
+        Returns: The payload for POST /update.
+        """
+        if not isinstance(body, dict):
+            raise ControlError("the body must be a JSON object")
+        name = body.get("action")
+        if name not in UPDATE_ACTIONS:
+            raise ControlError(f"unknown update action {name!r}; actions: "
+                               + ", ".join(sorted(UPDATE_ACTIONS)))
+        result = self.backend.update_action(name)
         return {"ok": True, "action": name, "result": result}
 
 
@@ -959,6 +997,14 @@ def add_parser(parser):
     log.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     log.set_defaults(handler=_run_log)
     _add_daq_parser(actions)
+    update = actions.add_parser(
+        "update", help="show the update state, or check, download, install or restart")
+    update.add_argument("update_action", nargs="?", default=None,
+                        choices=sorted(UPDATE_ACTIONS), metavar="ACTION",
+                        help="check, download, install or restart (default: show the state)")
+    update.add_argument("--json", action="store_true", help="print raw JSON")
+    update.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
+    update.set_defaults(handler=_run_update)
 
 
 def _daq_flags(parser):
@@ -1119,6 +1165,34 @@ def _run_set(args, port):
         return 0
     for key, value in payload["applied"].items():
         print(f"{key} = {value}")
+    return 0
+
+
+def _run_update(args, port):
+    """Show the update state, or run one update action.
+
+    Args: args carries the optional update_action and --json; port is the
+        server port.
+    Returns: The exit code, 0, or 1 when the server refused.
+    """
+    if args.update_action is None:
+        _, payload = request(port, "GET", "/update")
+    else:
+        _, payload = request(port, "POST", "/update", {"action": args.update_action})
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    if args.update_action is not None:
+        print(f"update {args.update_action}: started "
+              f"{payload['result']['started']}")
+        return 0
+    print(f"build {payload['current']}; newest known: "
+          f"{payload['label'] or 'none'}")
+    if payload["unavailable"]:
+        print(f"updating unavailable: {payload['unavailable']}")
+    print(f"downloaded: {'yes' if payload['downloaded'] else 'no'}"
+          f"  busy: {'yes' if payload['busy'] else 'no'}"
+          f"  recording: {'yes' if payload['recording'] else 'no'}")
     return 0
 
 
