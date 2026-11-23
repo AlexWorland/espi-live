@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-22 — The piezo triangle can follow the camera's frame rate
+
+### Previous state
+
+- The NI DAQ piezo triangle ran at the frequency typed into the DAQ window. Changing the camera's frame rate (for example from 30 to 20 fps) changed how far the reference phase moved between frames, so the frequency had to be worked out and retyped by hand.
+
+### Current state
+
+- **Follow the camera's frame rate** (Triangle mode, **Devices → Frequency generator and piezo (NI DAQ)…**) sets the triangle's frequency from the rate frames arrive from the displayed camera, so the reference phase moves by **Phase per frame** (default 180°, half a wavelength of path) between successive frames. It is set again whenever the frame rate moves the frequency by more than 3%; each change restarts the triangle at its bottom and is logged.
+- **Piezo scale**: **Calibrated** uses the volts per 90° measured by **Calibrate phase step** (now also saved for this: frequency = frame rate × volts per 90° ÷ (Top − Bottom) at 180°); **Manual** uses **Piezo travel** (default 0.1 µm/V, about a Thorlabs PE4's 15 µm at 150 V), **Amplifier gain** (default 15, the MDT694A at 150 V) and **Mirror angle** (default 45°, the lab's) at the HeNe wavelength, 632.8 nm. With the defaults, Manual gives 0.249 Hz at 30 fps and 0.166 Hz at 20 fps for a 0.5–9.5 V triangle.
+- Following needs a scale: with Calibrated and no calibration yet, the window says so and Apply stays off. The triangle's **Frequency** box shows the followed value and takes four decimals.
+- Defaults, exposure, gain and frame rate are unchanged; following is off until ticked. A Calibrate phase step result from an earlier build is not on record for Calibrated: run it again.
+
 ## 2026-11-22 — Headless control accepts a byte-order mark; NI MAX simulated DAQ devices are marked
 
 ### Previous state

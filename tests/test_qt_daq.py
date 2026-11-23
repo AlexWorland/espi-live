@@ -239,6 +239,65 @@ class DaqDialogTests(DaqWindowTestCase):
         self.assertEqual((dialog.piezo_bottom.value(), dialog.piezo_top.value(),
                           dialog.piezo_frequency.value()), (0.0, 1.0, 0.25))
 
+    def test_triangle_follows_the_frame_rate(self):
+        """Follow sets the frequency from the frame rate, by calibration or typed numbers.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        fps = mock.patch.object(self.window, "received_fps", return_value=30.0)
+        fps.start()
+        self.addCleanup(fps.stop)
+        for widget in (dialog.piezo_follow, dialog.piezo_phase_per_frame,
+                       dialog.piezo_scale, dialog.piezo_um_per_v):
+            self.assertFalse(widget.isEnabled())  # hold mode
+        dialog._set_combo(dialog.piezo_mode, daq.TRIANGLE)
+        dialog.piezo_limit.setValue(10.0)
+        dialog.piezo_bottom.setValue(0.5)
+        dialog.piezo_top.setValue(9.5)
+        dialog.piezo_frequency.setValue(0.281)
+        self.assertTrue(dialog.piezo_follow.isEnabled())
+        self.assertFalse(dialog.piezo_phase_per_frame.isEnabled())
+        self.assertEqual(dialog.piezo_follow_result.text(), "")
+        dialog.piezo_follow.setChecked(True)  # no calibration yet
+        self.assertFalse(dialog.piezo_frequency.isEnabled())
+        self.assertTrue(dialog.piezo_phase_per_frame.isEnabled())
+        self.assertFalse(dialog.piezo_um_per_v.isEnabled())
+        self.assertIn("Calibrate phase step has not measured", dialog.problem_label.text())
+        self.assertEqual(dialog.piezo_follow_result.text(), "")  # said once, above
+        self.assertFalse(dialog.apply_button.isEnabled())
+        self.assertEqual(dialog.settings().piezo_frequency_hz, 0.281)  # typed
+        dialog.set_quarter_wave(0.075)
+        self.assertEqual(dialog.piezo_step.value(), 0.075)
+        self.assertAlmostEqual(dialog.settings().piezo_frequency_hz, 0.25)
+        self.assertAlmostEqual(dialog.piezo_frequency.value(), 0.25)
+        self.assertIn("0.25 Hz for 180° per frame at 30.0 fps (calibrated 0.075 V per 90°)",
+                      dialog.piezo_follow_result.text())
+        self.assertTrue(dialog.apply_button.isEnabled())
+        dialog._set_combo(dialog.piezo_scale, daq.MANUAL)
+        for widget in (dialog.piezo_um_per_v, dialog.piezo_gain, dialog.piezo_angle):
+            self.assertTrue(widget.isEnabled())
+        dialog.piezo_angle.setValue(45.0)
+        self.assertAlmostEqual(dialog.settings().piezo_frequency_hz, 0.2486, places=4)
+        self.assertIn("manual 0.1 µm/V × 15 at 45°, 632.8 nm",
+                      dialog.piezo_follow_result.text())
+        self.window.received_fps.return_value = 20.0
+        dialog.follow_frame_rate()
+        self.assertIn("at 20.0 fps", dialog.piezo_follow_result.text())
+        self.window.received_fps.return_value = 0.0
+        dialog.follow_frame_rate()
+        self.assertIn("Waiting for frames", dialog.piezo_follow_result.text())
+        s = dialog.settings()
+        self.assertAlmostEqual(s.piezo_frequency_hz, 0.1657, places=4)  # the last one shown
+        self.assertEqual((s.piezo_follow_fps, s.piezo_scale, s.piezo_angle_deg,
+                          s.piezo_quarter_wave_v), (True, daq.MANUAL, 45.0, 0.075))
+        dialog.load(s)
+        self.assertEqual(dialog._typed_settings(), s)
+        dialog.piezo_follow.setChecked(False)
+        dialog.follow_frame_rate()  # not following: nothing to show
+        self.assertEqual(dialog.piezo_follow_result.text(), "")
+
     def test_where_to_plug_in(self):
         """The help window marks the sockets in use and follows the form.
 
@@ -874,6 +933,68 @@ class PhaseWindowTests(DaqWindowTestCase):
         w._handle_event(w.current, "phase_calibrated", (90.0, 0.08))  # no piezo now
         self.assertIsNone(w.phase_stepper)
         w._handle_event(mock.Mock(), "phase_stopped", "elsewhere")  # not displayed
+
+    def test_calibration_is_kept_for_the_follow_scale(self):
+        """Calibrate phase step's volts are saved as the volts per 90°.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w._attach_stepper(qt_app.phase.PiezoStepper(mock.Mock(),
+                                                    daq.DaqSettings(piezo_step_v=0.05)))
+        w._handle_event(w.current, "phase_calibrated", (72.0, 0.0625))
+        saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
+        self.assertEqual(saved["piezo_quarter_wave_v"], 0.0625)
+        w._show_daq_dialog()
+        w._handle_event(w.current, "phase_calibrated", (88.0, 0.07))
+        self.assertEqual(w.daq_dialog.quarter_wave_v, 0.07)
+
+    def test_the_window_keeps_the_triangle_on_the_frame_rate(self):
+        """A following triangle is re-applied when the frame rate moves it enough.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertGreaterEqual(w.received_fps(), 0.0)
+        w._follow_frame_rate()  # no DAQ yet
+        applied = daq.DaqSettings(piezo_on=True, piezo_mode=daq.TRIANGLE,
+                                  piezo_bottom_v=0.5, piezo_top_v=9.5, piezo_limit_v=10.0,
+                                  piezo_frequency_hz=0.25, piezo_follow_fps=True,
+                                  piezo_quarter_wave_v=0.075)
+        controller = mock.Mock()
+        controller.status.return_value = {"settings": None}
+        controller.is_armed.return_value = True
+        w.daq = controller
+        fps = mock.patch.object(w, "received_fps", return_value=20.0)
+        fps.start()
+        self.addCleanup(fps.stop)
+        w._follow_frame_rate()  # nothing applied
+        controller.status.return_value = {"settings": daq.replace(applied, piezo_on=False)}
+        w._follow_frame_rate()  # piezo off
+        controller.request.assert_not_called()
+        controller.status.return_value = {"settings": applied}
+        w._follow_frame_rate()
+        (action,), payload = controller.request.call_args
+        self.assertEqual(action, "apply")
+        self.assertAlmostEqual(payload["settings"].piezo_frequency_hz, 20.0 * 0.075 / 9.0)
+        self.assertTrue(self.log.has("follows the camera's 20.0 fps: 0.1667 Hz"))
+        w._follow_frame_rate()  # the change is on its way: not sent twice
+        self.assertEqual(controller.request.call_count, 1)
+        w._daq_event("rejected", ["no"])
+        self.assertIsNone(w.piezo_follow_hz)
+        controller.is_armed.return_value = False
+        w._follow_frame_rate()  # not allowed to drive: nothing sent
+        self.assertEqual(controller.request.call_count, 1)
+        controller.is_armed.return_value = True
+        w.daq_dialog = mock.Mock()
+        w.daq_dialog.isVisible.return_value = True
+        w._follow_frame_rate()
+        w.daq_dialog.follow_frame_rate.assert_called_once()
+        self.assertEqual(controller.request.call_count, 2)
+        w.daq_dialog = None
+        w.daq = None
 
     def test_phase_controls_reach_the_engine(self):
         """Steps, filter and settle are sent and shown per camera.

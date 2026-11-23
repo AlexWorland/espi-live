@@ -2482,6 +2482,8 @@ GENERATOR_KINDS = {"ao": "sine", "ctr": "square, 5 V TTL"}
 PIEZO_MODE_TEXT = ((daq.HOLD, "Hold a voltage"),
                    (daq.SINE, "Sine at the generator's frequency"),
                    (daq.TRIANGLE, "Triangle at its own frequency"))
+PIEZO_SCALE_TEXT = ((daq.CALIBRATED, "Calibrated (Calibrate phase step)"),
+                    (daq.MANUAL, "Manual (typed in)"))
 PHASE_STEP_TEXT = ((5, "5-step (Hariharan)"), (4, "4-step"))
 PHASE_MESSAGE_MS = 10000  # how long phase-step notices stay in the status bar
 
@@ -2500,6 +2502,20 @@ def daq_spin(minimum, maximum, decimals, suffix, step):
     spin.setSuffix(suffix)
     spin.setKeyboardTracking(False)
     return spin
+
+
+def fit_label(label):
+    """Give a word-wrapped label the height its text needs, or hide it when empty.
+
+    A wrapped label in a QFormLayout keeps the height of its first text, so
+    a longer one is cut off, and an empty one still takes a row.
+
+    Args: label is a word-wrapped QLabel.
+    Returns: None.
+    """
+    label.setVisible(bool(label.text()))
+    label.setMinimumHeight(label.heightForWidth(max(1, label.width()))
+                           if label.text() else 0)
 
 
 def generator_choice_text(output):
@@ -2536,7 +2552,7 @@ class DaqDialog(QDialog):
         self.scanned = False
         self.scan_note = ""  # why no real device is listed, from the last scan
         self.setWindowTitle(DAQ_TITLE)
-        self.resize(ui_scale.px(620), ui_scale.px(640))
+        self.resize(ui_scale.px(620), ui_scale.px(820))
         saved = self._saved_settings()
 
         self.device_box = WheelIgnoringComboBox()
@@ -2625,13 +2641,51 @@ class DaqDialog(QDialog):
         set_tooltip(self.piezo_top,
                     "The triangle's highest voltage, at most the safety limit. "
                     "Triangle mode only.")
-        self.piezo_frequency = daq_spin(daq.MIN_TRIANGLE_HZ, daq.MAX_TRIANGLE_HZ, 3,
+        self.piezo_frequency = daq_spin(daq.MIN_TRIANGLE_HZ, daq.MAX_TRIANGLE_HZ, 4,
                                         " Hz", 0.01)
         set_tooltip(self.piezo_frequency,
                     "How many times a second the triangle goes up and down. The device "
                     "rounds it slightly; the value it produces is shown below. Needs "
                     "the frequency generator off or on a counter, because both analog "
                     "outputs share one sample clock. Triangle mode only.")
+        self.piezo_follow = QCheckBox("Follow the camera's frame rate")
+        set_tooltip(self.piezo_follow,
+                    "Set the triangle's frequency from the rate frames arrive from the "
+                    "displayed camera, so the reference phase changes by the same amount "
+                    "(Phase per frame) between successive frames. It is set again "
+                    f"whenever the frame rate moves the frequency by more than "
+                    f"{daq.FOLLOW_TOLERANCE:.0%}. Triangle mode only.")
+        self.piezo_phase_per_frame = daq_spin(1.0, daq.MAX_PHASE_PER_FRAME_DEG, 1, "°",
+                                              10.0)
+        set_tooltip(self.piezo_phase_per_frame,
+                    "How far the reference phase moves from one frame to the next. 180° "
+                    "(half a wavelength of path) gives the strongest Previous-view "
+                    "difference; with Frames back N, use 180° / N.")
+        self.piezo_scale = WheelIgnoringComboBox()
+        for scale, text in PIEZO_SCALE_TEXT:
+            self.piezo_scale.addItem(text, scale)
+        set_tooltip(self.piezo_scale,
+                    "Where the piezo's phase per volt comes from. Calibrated uses the "
+                    "voltage per 90° step that Calibrate phase step measured (the mirror "
+                    "angle and piezo are then included). Manual works it out from the "
+                    "numbers below for the HeNe laser "
+                    f"({daq.HENE_WAVELENGTH_NM:g} nm).")
+        self.piezo_um_per_v = daq_spin(0.0001, 10.0, 4, " µm/V", 0.01)
+        set_tooltip(self.piezo_um_per_v,
+                    "Manual: how far the piezo moves per volt across it. A Thorlabs PE4 "
+                    "moves about 15 µm at 150 V, about 0.1 µm/V (open loop, approximate).")
+        self.piezo_gain = daq_spin(0.1, 100.0, 2, " ×", 0.5)
+        set_tooltip(self.piezo_gain,
+                    "Manual: the piezo amplifier's gain from the DAQ to the piezo (15 for "
+                    "the Thorlabs MDT694A at its 150 V limit).")
+        self.piezo_angle = daq_spin(0.0, daq.MAX_MIRROR_ANGLE_DEG, 1, "°", 5.0)
+        set_tooltip(self.piezo_angle,
+                    "Manual: the angle of incidence of the reference beam on the piezo "
+                    "mirror (0° straight on; 45° in the lab's setup). The path changes by "
+                    "twice the mirror's travel times the cosine of this angle.")
+        self.piezo_follow_result = QLabel()
+        self.piezo_follow_result.setWordWrap(True)
+        self.quarter_wave_v = 0.0  # volts per 90° from Calibrate phase step (0: none)
         self.piezo_step = daq_spin(0.0001, daq.MAX_VOLTS, 4, " V", 0.01)
         set_tooltip(self.piezo_step,
                     "How far one Step press moves the held voltage (for example the "
@@ -2661,6 +2715,13 @@ class DaqDialog(QDialog):
         piezo_form.addRow("Bottom", self.piezo_bottom)
         piezo_form.addRow("Top", self.piezo_top)
         piezo_form.addRow("Frequency", self.piezo_frequency)
+        piezo_form.addRow(self.piezo_follow)
+        piezo_form.addRow("Phase per frame", self.piezo_phase_per_frame)
+        piezo_form.addRow("Piezo scale", self.piezo_scale)
+        piezo_form.addRow("Piezo travel", self.piezo_um_per_v)
+        piezo_form.addRow("Amplifier gain", self.piezo_gain)
+        piezo_form.addRow("Mirror angle", self.piezo_angle)
+        piezo_form.addRow(self.piezo_follow_result)
         piezo_form.addRow("Step", step_row)
         piezo_form.addRow("Safety limit", self.piezo_limit)
         piezo_form.addRow(self.piezo_result)
@@ -2729,14 +2790,15 @@ class DaqDialog(QDialog):
         self._fill_outputs(daq.DeviceOutputs(daq.SIMULATED_DEVICE))
         self.load(saved)
         for box in (self.generator_output, self.generator_terminal, self.piezo_output,
-                    self.piezo_mode):
+                    self.piezo_mode, self.piezo_scale):
             box.currentIndexChanged.connect(self.refresh)
         for spin in (self.frequency, self.amplitude, self.offset, self.generator_limit,
                      self.piezo_voltage, self.piezo_amplitude, self.piezo_phase,
                      self.piezo_bottom, self.piezo_top, self.piezo_frequency,
-                     self.piezo_step, self.piezo_limit):
+                     self.piezo_step, self.piezo_limit, self.piezo_phase_per_frame,
+                     self.piezo_um_per_v, self.piezo_gain, self.piezo_angle):
             spin.valueChanged.connect(self.refresh)
-        for check in (self.generator_on, self.piezo_on):
+        for check in (self.generator_on, self.piezo_on, self.piezo_follow):
             check.toggled.connect(self.refresh)
         self.connected(None)
         self.timer = QTimer(self)
@@ -2845,10 +2907,34 @@ class DaqDialog(QDialog):
         self.piezo_frequency.setValue(s.piezo_frequency_hz)
         self.piezo_step.setValue(s.piezo_step_v)
         self.piezo_limit.setValue(s.piezo_limit_v)
+        self.piezo_follow.setChecked(s.piezo_follow_fps)
+        self.piezo_phase_per_frame.setValue(s.piezo_phase_per_frame_deg)
+        self._set_combo(self.piezo_scale, s.piezo_scale)
+        self.piezo_um_per_v.setValue(s.piezo_um_per_v)
+        self.piezo_gain.setValue(s.piezo_gain)
+        self.piezo_angle.setValue(s.piezo_angle_deg)
+        self.quarter_wave_v = s.piezo_quarter_wave_v
         self.wanted_device = s.device
 
     def settings(self):
         """Read the form.
+
+        With Follow the camera's frame rate on, the triangle's frequency is
+        the one the displayed camera's frame rate needs, once it is measured
+        and within the triangle's range; otherwise the typed one.
+
+        Args: None.
+        Returns: daq.DaqSettings.
+        """
+        typed = self._typed_settings()
+        frequency, _ = daq.follow_frequency(typed, self.window.received_fps())
+        if (typed.piezo_follow_fps and frequency is not None and
+                daq.MIN_TRIANGLE_HZ <= frequency <= daq.MAX_TRIANGLE_HZ):
+            return replace(typed, piezo_frequency_hz=frequency)
+        return typed
+
+    def _typed_settings(self):
+        """Read the form as typed.
 
         Args: None.
         Returns: daq.DaqSettings.
@@ -2872,7 +2958,14 @@ class DaqDialog(QDialog):
             piezo_top_v=self.piezo_top.value(),
             piezo_frequency_hz=self.piezo_frequency.value(),
             piezo_step_v=self.piezo_step.value(),
-            piezo_limit_v=self.piezo_limit.value())
+            piezo_limit_v=self.piezo_limit.value(),
+            piezo_follow_fps=self.piezo_follow.isChecked(),
+            piezo_phase_per_frame_deg=self.piezo_phase_per_frame.value(),
+            piezo_scale=self.piezo_scale.currentData(),
+            piezo_quarter_wave_v=self.quarter_wave_v,
+            piezo_um_per_v=self.piezo_um_per_v.value(),
+            piezo_gain=self.piezo_gain.value(),
+            piezo_angle_deg=self.piezo_angle.value())
 
     def refresh(self, *_):
         """Enable the controls that apply, and preview or explain the result.
@@ -2898,12 +2991,24 @@ class DaqDialog(QDialog):
         self.piezo_voltage.setEnabled(has_piezo and not triangle_piezo)
         for widget in (self.piezo_amplitude, self.piezo_phase):
             widget.setEnabled(sine_piezo)
-        for widget in (self.piezo_bottom, self.piezo_top, self.piezo_frequency):
+        for widget in (self.piezo_bottom, self.piezo_top, self.piezo_follow):
             widget.setEnabled(triangle_piezo)
+        following = triangle_piezo and s.piezo_follow_fps
+        self.piezo_frequency.setEnabled(triangle_piezo and not following)
+        for widget in (self.piezo_phase_per_frame, self.piezo_scale):
+            widget.setEnabled(following)
+        for widget in (self.piezo_um_per_v, self.piezo_gain, self.piezo_angle):
+            widget.setEnabled(following and s.piezo_scale == daq.MANUAL)
+        if following:
+            self.piezo_frequency.blockSignals(True)
+            self.piezo_frequency.setValue(s.piezo_frequency_hz)
+            self.piezo_frequency.blockSignals(False)
         for widget in (self.piezo_step, self.step_down, self.step_up):
             widget.setEnabled(has_piezo and s.piezo_mode == daq.HOLD)
         found = daq.problems(s, outputs)
         self.problem_label.setText("\n".join(found))
+        self.piezo_follow_result.setText("" if found else self._follow_text(s))
+        fit_label(self.piezo_follow_result)
         self.apply_button.setEnabled(self.outputs is not None and not found)
         self.test_button.setEnabled(self.outputs is not None)
         self.safety_label.setText(self._safety_text(s))
@@ -2944,6 +3049,39 @@ class DaqDialog(QDialog):
         rate, samples, actual = daq.choose_timing(settings.generator_frequency_hz, channels)
         return (f"Produces {actual:.6g} Hz: {samples} samples per cycle at "
                 f"{rate:,.0f} samples/s.")
+
+    def _follow_text(self, settings):
+        """Say what frequency the triangle follows, and the scale behind it.
+
+        Args: settings is the form's daq.DaqSettings.
+        Returns: One line of text ("" when the triangle does not follow the
+            frame rate, and the calibration on record otherwise).
+        """
+        s = settings
+        if s.piezo_output == daq.OFF or s.piezo_mode != daq.TRIANGLE:
+            return ""
+        if not s.piezo_follow_fps:
+            return ""
+        return daq.follow_text(s, self.window.received_fps())
+
+    def follow_frame_rate(self):
+        """Show the frequency the newest frame rate needs, while following it.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.piezo_follow.isChecked() and self.piezo_follow.isEnabled():
+            self.refresh()
+
+    def set_quarter_wave(self, volts):
+        """Take a new Calibrate phase step result for the Calibrated scale.
+
+        Args: volts is the DAQ voltage per 90° step.
+        Returns: None.
+        """
+        self.quarter_wave_v = volts
+        self.piezo_step.setValue(volts)
+        self.refresh()
 
     @staticmethod
     def _piezo_preview(settings, outputs, found):
@@ -4081,6 +4219,7 @@ class MainWindow(QMainWindow):
         self.compare_dialog = None  # ReferenceCompareDialog, built on first use
         self.pixels_dialog = None  # PixelSquareDialog, built on first use
         self.daq = None  # daq.DaqController, made when the DAQ window first opens
+        self.piezo_follow_hz = None  # a frame-rate frequency change sent, not yet applied
         self.daq_drive = daq.Drive()  # what its outputs produce, for demo cameras
         self.daq_dialog = None  # DaqDialog, built on first use
         self.daq_auto = None  # device name startup connects to once the scan ends
@@ -6725,6 +6864,42 @@ class MainWindow(QMainWindow):
         for event in later:
             self.daq.events.put(event)
 
+    def received_fps(self):
+        """The rate frames arrive from the displayed camera.
+
+        Args: None.
+        Returns: Frames per second over the last second (0.0 before any arrive).
+        """
+        return float(self.engine.status().get("processed_fps") or 0.0)
+
+    def _follow_frame_rate(self):
+        """Keep a piezo triangle that follows the frame rate at the frequency it needs.
+
+        The frequency is set again only when the frame rate moves it by more
+        than daq.FOLLOW_TOLERANCE, since each change restarts the triangle.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.daq is None or self.closing:
+            return
+        applied = self.daq.status()["settings"]
+        if applied is None or not applied.piezo_on:
+            return
+        if self.piezo_follow_hz is not None:  # a change is on its way
+            applied = replace(applied, piezo_frequency_hz=self.piezo_follow_hz)
+        fps = self.received_fps()
+        settings = daq.followed(applied, fps)
+        if self.daq_dialog is not None and self.daq_dialog.isVisible():
+            self.daq_dialog.follow_frame_rate()
+        if settings is None or not self.daq.is_armed(settings):
+            return
+        self.piezo_follow_hz = settings.piezo_frequency_hz
+        self.log.write(f"NI DAQ: the piezo triangle follows the camera's {fps:.1f} fps: "
+                       f"{settings.piezo_frequency_hz:.4g} Hz for "
+                       f"{settings.piezo_phase_per_frame_deg:g}° per frame.")
+        self.daq.request("apply", settings=settings)
+
     def _daq_event(self, kind, payload):
         """Follow the piezo: attach it to the Phase view, or take it away.
 
@@ -6736,6 +6911,8 @@ class MainWindow(QMainWindow):
         Args: kind and payload are the controller's event.
         Returns: None.
         """
+        if kind in ("applied", "rejected", "zeroed", "failed", "closed", "fault"):
+            self.piezo_follow_hz = None  # a frequency change sent has been answered
         if kind == "devices" and self.daq_auto is not None and self.daq_dialog is None:
             wanted, self.daq_auto = self.daq_auto, None
             names = [info.name for info in payload[0]] + [daq.SIMULATED]
@@ -6847,11 +7024,12 @@ class MainWindow(QMainWindow):
         Args: volts is the new voltage per phase step.
         Returns: None.
         """
-        saved = replace(DaqDialog._saved_settings(), piezo_step_v=volts)
+        saved = replace(DaqDialog._saved_settings(), piezo_step_v=volts,
+                        piezo_quarter_wave_v=volts)
         QSettings("ESPI", "espi_live").setValue(DAQ_SETTINGS_KEY,
                                                 json.dumps(saved.to_dict()))
         if self.daq_dialog is not None:
-            self.daq_dialog.piezo_step.setValue(volts)
+            self.daq_dialog.set_quarter_wave(volts)
 
     def _build_phase_controls(self, add, note, s):
         """Create the Phase shifting controls.
@@ -7128,6 +7306,7 @@ class MainWindow(QMainWindow):
         if text:
             self.log_view.appendPlainText(text.rstrip("\n"))
         self.poll_daq()  # the drive for demo cameras and the piezo for the Phase view
+        self._follow_frame_rate()
         now = time.monotonic()
         if now - self.fps_window_start >= 1.0:
             self.display_fps = self.drawn_frames / (now - self.fps_window_start)

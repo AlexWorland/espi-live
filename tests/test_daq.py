@@ -8,6 +8,7 @@ in-memory nidaqmx (fake_nidaqmx), and the controller is checked with the
 simulated backend.
 """
 
+import math
 import queue
 import time
 import types
@@ -259,6 +260,135 @@ class SettingsTests(unittest.TestCase):
         self.assertIsInstance(restored.piezo_voltage_v, float)
         self.assertEqual(restored.device, default.device)
         self.assertEqual(restored.piezo_mode, daq.SINE)
+
+
+class FollowFrequencyTests(unittest.TestCase):
+    """The piezo triangle's frequency worked out from the camera's frame rate."""
+
+    def triangle(self, **fields):
+        """Build triangle settings that follow the frame rate.
+
+        Args: fields override DaqSettings values.
+        Returns: DaqSettings: 0.5-9.5 V triangle, calibrated at 0.075 V per 90°.
+        """
+        values = dict(piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.5, piezo_top_v=9.5,
+                      piezo_limit_v=10.0, piezo_follow_fps=True,
+                      piezo_quarter_wave_v=0.075)
+        values.update(fields)
+        return daq.DaqSettings(**values)
+
+    def test_calibrated_scale(self):
+        """f = fps x V90 / (top - bottom) for 180° per frame, and scales with fps.
+
+        Args: None.
+        Returns: None.
+        """
+        s = self.triangle()
+        self.assertAlmostEqual(daq.phase_per_volt(s)[0], (math.pi / 2) / 0.075)
+        self.assertAlmostEqual(daq.follow_frequency(s, 30.0)[0], 30.0 * 0.075 / 9.0)
+        self.assertAlmostEqual(daq.follow_frequency(s, 20.0)[0], 20.0 * 0.075 / 9.0)
+        quarter = daq.replace(s, piezo_phase_per_frame_deg=90.0)
+        self.assertAlmostEqual(daq.follow_frequency(quarter, 30.0)[0], 0.125)
+        self.assertEqual(daq.follow_frequency(s, 30.0)[1], "")
+
+    def test_manual_scale_at_the_hene_wavelength(self):
+        """Travel x gain x cos(angle) at 632.8 nm gives the phase per volt.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(daq.DaqSettings().piezo_angle_deg, 45.0)  # the lab's fold mirror
+        s = self.triangle(piezo_scale=daq.MANUAL, piezo_um_per_v=0.1, piezo_gain=15.0,
+                          piezo_angle_deg=0.0)
+        per_volt = 4 * math.pi * 1500.0 / 632.8
+        self.assertEqual(daq.HENE_WAVELENGTH_NM, 632.8)
+        self.assertAlmostEqual(daq.phase_per_volt(s)[0], per_volt)
+        self.assertAlmostEqual(daq.follow_frequency(s, 30.0)[0],
+                               math.pi * 30.0 / (2 * 9.0 * per_volt))
+        tilted = daq.replace(s, piezo_angle_deg=45.0)
+        self.assertAlmostEqual(daq.follow_frequency(tilted, 30.0)[0],
+                               daq.follow_frequency(s, 30.0)[0] / math.cos(math.pi / 4))
+        self.assertAlmostEqual(daq.follow_frequency(tilted, 30.0)[0], 0.2486, places=4)
+
+    def test_what_stops_it(self):
+        """A missing calibration, bad numbers or no frame rate give a reason instead.
+
+        Args: None.
+        Returns: None.
+        """
+        cases = (
+            (self.triangle(piezo_quarter_wave_v=0.0), 30.0, "Calibrate phase step"),
+            (self.triangle(piezo_scale="odd"), 30.0, "Unknown piezo scale"),
+            (self.triangle(piezo_scale=daq.MANUAL, piezo_gain=0.0), 30.0,
+             "must be above 0"),
+            (self.triangle(piezo_scale=daq.MANUAL, piezo_um_per_v=0.0), 30.0,
+             "must be above 0"),
+            (self.triangle(piezo_scale=daq.MANUAL, piezo_angle_deg=85.0), 30.0,
+             "angle of incidence"),
+            (self.triangle(piezo_phase_per_frame_deg=0.0), 30.0, "phase per frame"),
+            (self.triangle(piezo_phase_per_frame_deg=400.0), 30.0, "phase per frame"),
+            (self.triangle(piezo_top_v=0.5), 30.0, "top must be above"),
+            (self.triangle(), 0.0, "Waiting for frames"),
+            (self.triangle(), None, "Waiting for frames"))
+        for settings, fps, words in cases:
+            frequency, reason = daq.follow_frequency(settings, fps)
+            self.assertIsNone(frequency)
+            self.assertIn(words, reason)
+            self.assertEqual(daq.follow_text(settings, fps), reason)
+
+    def test_text(self):
+        """The window's line names the frequency, the frame rate and the scale.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(daq.follow_text(self.triangle(), 30.0),
+                         "Follows the camera: 0.25 Hz for 180° per frame at 30.0 fps "
+                         "(calibrated 0.075 V per 90°).")
+        manual = self.triangle(piezo_scale=daq.MANUAL, piezo_angle_deg=45.0)
+        self.assertIn("manual 0.1 µm/V × 15 at 45°, 632.8 nm", daq.follow_text(manual, 20.0))
+        fast = self.triangle(piezo_quarter_wave_v=5.0, piezo_top_v=0.51)
+        self.assertIn("outside 0.01–1,000 Hz", daq.follow_text(fast, 30.0))
+
+    def test_followed_only_when_it_moves_enough(self):
+        """A change is made for a following triangle, past the tolerance, in range.
+
+        Args: None.
+        Returns: None.
+        """
+        s = self.triangle(piezo_output="ao1", piezo_frequency_hz=0.25)
+        self.assertIsNone(daq.followed(s, 30.0))  # already right
+        self.assertIsNone(daq.followed(s, 30.0 * (1 + daq.FOLLOW_TOLERANCE / 2)))
+        moved = daq.followed(s, 20.0)
+        self.assertAlmostEqual(moved.piezo_frequency_hz, 20.0 * 0.075 / 9.0)
+        self.assertEqual(daq.replace(moved, piezo_frequency_hz=0.25), s)
+        self.assertIsNotNone(daq.followed(daq.replace(s, piezo_frequency_hz=0.0), 30.0))
+        for other in (daq.replace(s, piezo_follow_fps=False),
+                      daq.replace(s, piezo_mode=daq.HOLD),
+                      daq.replace(s, piezo_output=daq.OFF)):
+            self.assertIsNone(daq.followed(other, 20.0))
+        self.assertIsNone(daq.followed(s, 0.0))  # no frame rate yet
+        fast = daq.replace(s, piezo_quarter_wave_v=5.0, piezo_top_v=0.51)
+        self.assertIsNone(daq.followed(fast, 30.0))  # beyond the triangle's range
+
+    def test_problems_and_storage(self):
+        """Following needs a scale; the new values are saved and restored.
+
+        Args: None.
+        Returns: None.
+        """
+        found = daq.problems(self.triangle(piezo_quarter_wave_v=0.0))
+        self.assertTrue(any("Calibrate phase step" in line for line in found))
+        self.assertEqual(daq.problems(self.triangle()), [])
+        flat = daq.problems(self.triangle(piezo_quarter_wave_v=0.0, piezo_top_v=0.5))
+        self.assertEqual(flat, ["The piezo triangle's top must be above its bottom."])
+        manual = self.triangle(piezo_scale=daq.MANUAL, piezo_um_per_v=0.09,
+                               piezo_gain=10.0, piezo_angle_deg=45.0,
+                               piezo_phase_per_frame_deg=120.0)
+        self.assertEqual(daq.DaqSettings.from_dict(manual.to_dict()), manual)
+        older = daq.DaqSettings.from_dict({"piezo_mode": daq.TRIANGLE})
+        self.assertFalse(older.piezo_follow_fps)
+        self.assertEqual(older.piezo_quarter_wave_v, 0.0)
 
 
 class TimingTests(unittest.TestCase):
