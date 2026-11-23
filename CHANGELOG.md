@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-23 — Updates from the remote-control API
+
+### Previous state
+
+- The control server could not check for or install a newer build; that was possible only from the window's Check for updates button and its dialogs.
+
+### Current state
+
+- `GET /update` reports the running build, the newest known build, whether one is downloaded, whether a job is running, whether a recording is running, and why updating is unavailable (for example, a run from source). `POST /update` runs `check`, `download`, `install` (download if needed, then close and restart into the new build) or `restart` (restart into a downloaded build). Control-triggered updates never open a dialog. An install is refused with 409 while a recording or frame save is running.
+- `espi_live control update` shows the same state; `control update check|download|install|restart` runs an action.
+
 ## 2026-11-23 — DAQ and NI USB controls in the remote-control API
 
 ### Previous state

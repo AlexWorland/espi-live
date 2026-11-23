@@ -4989,6 +4989,281 @@ class CloseTests(WindowTestCase):
         self.assertTrue(self.engine.wait(5.0))
 
 
+class RemoteUpdateTests(WindowTestCase):
+    """Update actions requested by the control server: no dialogs, restart on install."""
+
+    def act(self, name):
+        """Run one control-server update action on the window.
+
+        Args: name is an UPDATE_ACTIONS key.
+        Returns: The action's result dict.
+        """
+        return self.window._control_update(name)
+
+    def post(self, kind, payload):
+        """Queue an updater event and process it.
+
+        Args: kind and payload are the event name and data.
+        Returns: None.
+        """
+        self.window.updates.events.put((kind, payload))
+        self.window._handle_update_events()
+
+    def assert_refused(self, name, status=409):
+        """Assert that an action is refused with a ControlError.
+
+        Args: name is an UPDATE_ACTIONS key; status is the expected HTTP status.
+        Returns: The ControlError's message.
+        """
+        with self.assertRaises(qt_app.control.ControlError) as caught:
+            self.act(name)
+        self.assertEqual(caught.exception.status, status)
+        return str(caught.exception)
+
+    def test_check_starts_without_a_dialog(self):
+        """A remote check starts the worker and shows nothing.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.act("check"), {"started": "check"})
+        self.assertEqual(self.window.updates.checks, 1)
+        self.dialogs.information.assert_not_called()
+        self.assertIsNone(self.window.update_remote)
+
+    def test_check_refused_while_busy(self):
+        """A second check or download is refused while one runs.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.updates.busy = True
+        self.assertIn("already running", self.assert_refused("check"))
+        self.assertEqual(self.window.updates.checks, 0)
+
+    def test_download_needs_a_known_update(self):
+        """Download is refused until a check has found a build.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIn("run check first", self.assert_refused("download"))
+
+    def test_download_refused_when_already_downloaded(self):
+        """A build that is already downloaded is not downloaded again.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        self.window.pending_update = "staged"
+        self.assertIn("use restart", self.assert_refused("download"))
+
+    def test_download_refused_while_busy(self):
+        """A download is refused while a check or download runs.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        self.window.updates.busy = True
+        self.assert_refused("download")
+        self.assertEqual(self.window.updates.downloads, [])
+
+    def test_download_then_event_stays_quiet(self):
+        """A remote download finishes without a restart or a question.
+
+        Args: None.
+        Returns: None.
+        """
+        info = make_info()
+        self.window.update_info = info
+        self.act("download")
+        self.assertEqual(self.window.updates.downloads, [info])
+        self.assertEqual(self.window.update_remote, "download")
+        with mock.patch.object(self.window, "close") as close:
+            self.post("downloaded", "staged")
+        close.assert_not_called()
+        self.dialogs.question.assert_not_called()
+        self.assertFalse(self.window.relaunch_after_exit)
+        self.assertIsNone(self.window.update_remote)
+        self.assertEqual(self.window.pending_update, "staged")
+        self.assertTrue(any("Restart ESPI live" in line for line in self.log.lines))
+
+    def test_install_downloads_then_restarts(self):
+        """Install downloads the known build, then closes to relaunch it.
+
+        Args: None.
+        Returns: None.
+        """
+        info = make_info()
+        self.window.update_info = info
+        with mock.patch.object(self.window, "_capture_busy", return_value=False):
+            self.assertEqual(self.act("install"), {"started": "install"})
+            self.assertEqual(self.window.updates.downloads, [info])
+            with mock.patch.object(self.window, "close") as close:
+                self.post("downloaded", "staged")
+        close.assert_called_once()
+        self.assertTrue(self.window.relaunch_after_exit)
+        self.dialogs.question.assert_not_called()
+        self.assertIsNone(self.window.update_remote)
+
+    def test_install_without_a_known_update_checks_first(self):
+        """Install with nothing known checks, then downloads what the check finds.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window, "_capture_busy", return_value=False):
+            self.act("install")
+            self.assertEqual(self.window.updates.checks, 1)
+            self.assertEqual(self.window.update_remote, "install")
+            self.post("checked", make_info())
+            self.assertEqual(len(self.window.updates.downloads), 1)
+            with mock.patch.object(self.window, "close") as close:
+                self.post("downloaded", "staged")
+        close.assert_called_once()
+        self.dialogs.question.assert_not_called()
+
+    def test_install_refused_while_recording(self):
+        """Nothing is checked, downloaded or closed while a recording runs.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        with mock.patch.object(self.window, "_capture_busy", return_value=True):
+            self.assertIn("stop it first", self.assert_refused("install"))
+        self.assertEqual(self.window.updates.downloads, [])
+        self.assertFalse(self.window.relaunch_after_exit)
+        self.assertIsNone(self.window.update_remote)
+
+    def test_install_refused_while_busy(self):
+        """Install waits for a running check or download to finish.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.updates.busy = True
+        self.assert_refused("install")
+        self.assertIsNone(self.window.update_remote)
+
+    def test_downloaded_during_recording_waits_for_restart(self):
+        """A download that finishes while recording stays pending, with no close.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        with mock.patch.object(self.window, "_capture_busy", return_value=False):
+            self.act("install")
+        with mock.patch.object(self.window, "_capture_busy", return_value=True), \
+                mock.patch.object(self.window, "close") as close:
+            self.post("downloaded", "staged")
+        close.assert_not_called()
+        self.assertFalse(self.window.relaunch_after_exit)
+        self.assertEqual(self.window.pending_update, "staged")
+        self.dialogs.question.assert_not_called()
+        self.assertTrue(any("once no recording" in line for line in self.log.lines))
+
+    def test_remote_download_failure_shows_no_dialog(self):
+        """A failed remote download is logged; no warning box opens.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_info = make_info()
+        self.window.update_remote = "download"
+        self.post("download_failed", "disk full")
+        self.dialogs.warning.assert_not_called()
+        self.assertIsNone(self.window.update_remote)
+        self.assertTrue(any("disk full" in line for line in self.log.lines))
+
+    def test_remote_check_failure_shows_no_dialog(self):
+        """A failed check started for an install is logged; no warning box opens.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_remote = "install"
+        self.post("check_failed", "offline")
+        self.dialogs.warning.assert_not_called()
+        self.assertIsNone(self.window.update_remote)
+
+    def test_remote_up_to_date_ends_the_request(self):
+        """An up-to-date answer ends an install request without a dialog.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.update_remote = "install"
+        self.post("checked", None)
+        self.dialogs.information.assert_not_called()
+        self.assertIsNone(self.window.update_remote)
+
+    def test_restart_needs_a_downloaded_build(self):
+        """Restart is refused when nothing has been downloaded.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertIn("no downloaded update", self.assert_refused("restart"))
+
+    def test_restart_refused_while_recording(self):
+        """Restart is refused while a recording runs.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.pending_update = "staged"
+        with mock.patch.object(self.window, "_capture_busy", return_value=True):
+            self.assert_refused("restart")
+
+    def test_restart_and_install_close_on_the_next_event_turn(self):
+        """With a build downloaded, restart and install schedule the close.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.pending_update = "staged"
+        for name in ("restart", "install"):
+            with self.subTest(action=name), \
+                    mock.patch.object(self.window, "_capture_busy", return_value=False), \
+                    mock.patch.object(qt_app.QTimer, "singleShot") as single_shot:
+                self.assertEqual(self.act(name), {"started": name})
+            single_shot.assert_called_once_with(0, self.window._restart_now)
+        self.assertIsNone(self.window.update_remote)
+
+    def test_restart_now_flags_relaunch_and_closes(self):
+        """The scheduled restart marks the relaunch and closes the window.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window, "close") as close:
+            self.window._restart_now()
+        self.assertTrue(self.window.relaunch_after_exit)
+        close.assert_called_once()
+
+    def test_update_state_describes_the_window(self):
+        """GET /update reads the worker, the known build and the recording state.
+
+        Args: None.
+        Returns: None.
+        """
+        state = self.window._control_update_state()
+        self.assertIsNone(state["latest"])
+        self.assertFalse(state["downloaded"])
+        self.assertEqual(state["unavailable"], "disabled in tests")
+        self.assertFalse(state["recording"])
+        self.window.update_info = make_info()
+        self.window.updates.progress = (2, 8)
+        state = self.window._control_update_state()
+        self.assertEqual(state["latest"], 99)
+        self.assertEqual(state["label"], self.window.update_info.label())
+        self.assertEqual(state["progress"], [2, 8])
+
+
 class FinishUpdateTests(unittest.TestCase):
     """finish_update installs a staged build after the window closed."""
 
@@ -8426,6 +8701,42 @@ class ControlBackendTestCase(unittest.TestCase):
         """
         self.window.close()
         self.window.deleteLater()
+
+
+class ControlBackendUpdateTests(ControlBackendTestCase):
+    """GET and POST /update over the Qt backend."""
+
+    def test_update_state_is_read_from_the_window(self):
+        """The backend returns the window's update state.
+
+        Args: None.
+        Returns: None.
+        """
+        state = self.backend.update_state()
+        self.assertEqual(state["unavailable"], "disabled in tests")
+        self.assertIn("current", state)
+
+    def test_update_action_refused_when_updating_is_unavailable(self):
+        """Every action is a 409 with the reason when this copy cannot update.
+
+        Args: None.
+        Returns: None.
+        """
+        with self.assertRaises(qt_app.control.ControlError) as caught:
+            self.backend.update_action("check")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("disabled in tests", str(caught.exception))
+        self.assertEqual(self.window.updates.checks, 0)
+
+    def test_update_action_runs_on_the_window(self):
+        """With updating available, an action starts on the GUI side.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(qt_app.updater, "unavailable_reason", return_value=None):
+            self.assertEqual(self.backend.update_action("check"), {"started": "check"})
+        self.assertEqual(self.window.updates.checks, 1)
 
 
 class ControlBackendDescriptionTests(ControlBackendTestCase):

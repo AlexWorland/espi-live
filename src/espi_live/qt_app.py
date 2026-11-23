@@ -4463,6 +4463,27 @@ class ControlBackend:
             result["frozen"] = True
         return result
 
+    def update_state(self):
+        """Return the update state for GET /update.
+
+        Args: None.
+        Returns: The dict MainWindow._control_update_state builds, read on the
+            GUI thread.
+        """
+        return self.caller.call(self.window._control_update_state)
+
+    def update_action(self, name):
+        """Run one update action for POST /update.
+
+        Args: name is an UPDATE_ACTIONS key.
+        Returns: {"started": name}. Raises ControlError (409) when updating is
+            unavailable in this copy or the window refuses the action.
+        """
+        reason = updater.unavailable_reason()
+        if reason:
+            raise control.ControlError(f"updating is unavailable: {reason}", 409)
+        return self.caller.call(lambda: self.window._control_update(name))
+
     def log_tail(self, lines):
         """Return the last lines of the run log.
 
@@ -4938,6 +4959,9 @@ class MainWindow(QMainWindow):
         self.update_info = None
         self.announced_build = None  # build number last named in the status bar
         self.update_manual = False  # report "up to date" and errors in dialogs
+        # "download" or "install" while a control-server request runs: no dialogs,
+        # and "install" closes the window once the build is downloaded.
+        self.update_remote = None
         self.pending_update = None  # unpacked build to install on exit
         self._periodic_checks = False
         self.update_timer = QTimer(self)
@@ -8829,8 +8853,97 @@ class MainWindow(QMainWindow):
             "is released before the new version starts. If you choose No, the "
             "update installs when you close ESPI live.")
         if answer == QMessageBox.Yes:
-            self.relaunch_after_exit = True
-            self.close()
+            self._restart_now()
+
+    def _restart_now(self):
+        """Close the window so the downloaded build installs and relaunches on exit.
+
+        Args: None.
+        Returns: None.
+        """
+        self.relaunch_after_exit = True
+        self.close()
+
+    def _control_update_state(self):
+        """Describe the update state for GET /update (GUI thread).
+
+        Args: None.
+        Returns: {current, latest, label, downloaded, busy, downloading,
+            progress, unavailable, recording}; latest and label are None when
+            no newer build is known.
+        """
+        info = self.update_info
+        return {"current": updater.current_build(),
+                "latest": info.build if info else None,
+                "label": info.label() if info else None,
+                "downloaded": self.pending_update is not None,
+                "busy": self.updates.busy,
+                "downloading": self.updates.downloading,
+                "progress": list(self.updates.progress),
+                "unavailable": updater.unavailable_reason(),
+                "recording": self._capture_busy()}
+
+    def _control_update(self, name):
+        """Start one update action requested by the control server (GUI thread).
+
+        Nothing here opens a dialog. "install" and "restart" close the window
+        after the camera is free, and the installer relaunches the app.
+
+        Args: name is an UPDATE_ACTIONS key.
+        Returns: {"started": name}. Raises ControlError (409) when the action
+            cannot run now.
+        """
+        if name == "check":
+            if self.updates.busy:
+                raise control.ControlError("an update check or download is already running", 409)
+            self.updates.check()
+        elif name == "download":
+            self._control_check_download()
+            self.update_remote = "download"
+            self.updates.download(self.update_info)
+        elif name == "restart":
+            if self.pending_update is None:
+                raise control.ControlError("no downloaded update to restart into", 409)
+            self._control_check_recording()
+            QTimer.singleShot(0, self._restart_now)
+        else:  # install
+            if self.pending_update is not None:
+                self._control_check_recording()
+                QTimer.singleShot(0, self._restart_now)
+            else:
+                if self.updates.busy:
+                    raise control.ControlError("an update check or download is already running", 409)
+                self._control_check_recording()
+                self.update_remote = "install"
+                if self.update_info is not None:
+                    self.updates.download(self.update_info)
+                else:
+                    self.updates.check()  # the checked event starts the download
+        return {"started": name}
+
+    def _control_check_download(self):
+        """Refuse a download request that has nothing to download (GUI thread).
+
+        Args: None.
+        Returns: None. Raises ControlError (409) when a build is already
+            downloaded, none is known, or a job is running.
+        """
+        if self.pending_update is not None:
+            raise control.ControlError("the update is already downloaded; use restart", 409)
+        if self.update_info is None:
+            raise control.ControlError("no update is known; run check first", 409)
+        if self.updates.busy:
+            raise control.ControlError("an update check or download is already running", 409)
+
+    def _control_check_recording(self):
+        """Refuse a restart while a recording or frame save would be cut short.
+
+        Args: None.
+        Returns: None. Raises ControlError (409) while capture is busy.
+        """
+        if self._capture_busy():
+            raise control.ControlError(
+                "a recording or frame save is running; stop it first", 409)
 
     def _handle_update_events(self):
         """Show update check and download results.
@@ -8849,19 +8962,24 @@ class MainWindow(QMainWindow):
             except queue.Empty:
                 break
             manual, self.update_manual = self.update_manual, False
+            remote = self.update_remote  # set by a control-server request; no dialogs
             if kind == "checked" and payload is None:
                 self.log.write(f"Up to date ({updater.describe_build()})")
                 if manual:
                     QMessageBox.information(self, "Updates", "ESPI live is up to date.")
+                self.update_remote = None
             elif kind == "checked":
                 self.log.write(f"Update available: {payload.label()}")
                 self._show_available_update(payload)
                 if manual:
                     self._update_clicked()
+                elif remote == "install":
+                    self.updates.download(payload)
             elif kind == "check_failed":
                 self.log.warning(f"Update check failed: {payload}")
                 if manual:
                     QMessageBox.warning(self, "Updates", f"Update check failed: {payload}")
+                self.update_remote = None
             elif kind == "downloaded":
                 self.pending_update = payload
                 self.log.write("Update downloaded; it installs when ESPI live restarts")
@@ -8870,11 +8988,20 @@ class MainWindow(QMainWindow):
                             "Restart now to install the downloaded build, or close ESPI live "
                             "and the update installs on exit.")
                 self.update_button.setEnabled(True)
-                self._offer_restart()
+                self.update_remote = None
+                if remote is None:
+                    self._offer_restart()
+                elif remote == "install" and not self._capture_busy():
+                    self._restart_now()
+                else:  # a download, or an install that must wait for a recording
+                    self.log.write("Restart ESPI live to install the downloaded update "
+                                   "once no recording is running")
             elif kind == "download_failed":
                 self.log.warning(f"Update download failed: {payload}")
                 self._show_available_update(self.update_info)
-                QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
+                if remote is None:
+                    QMessageBox.warning(self, "Update failed", f"Download failed: {payload}")
+                self.update_remote = None
         self._sync_check_button()
 
     def _sync_check_button(self):
