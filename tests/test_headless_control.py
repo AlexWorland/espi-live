@@ -140,6 +140,27 @@ class ProtocolTests(SessionCase):
         """
         self.assertIsNone(self.session.handle_line("  \n"))
 
+    def test_byte_order_mark_is_ignored(self):
+        """PowerShell 5.1 starts piped text with U+FEFF: the first command still runs.
+
+        Args: None.
+        Returns: None.
+        """
+        reply = self.session.handle_line('\ufeff{"cmd": "status"}\n')
+        self.assertTrue(reply["ok"], reply)
+        self.assertIn("cameras", reply)
+        self.assertTrue(self.session.handle_line('{"cmd": "status"}')["ok"])  # none: as before
+        self.assertIn("not valid JSON", self.session.handle_line("\ufeff{nope")["error"])
+
+    def test_line_with_only_a_byte_order_mark_is_blank(self):
+        """A BOM, with or without whitespace, is a blank line: no reply.
+
+        Args: None.
+        Returns: None.
+        """
+        for line in ("\ufeff", "\ufeff\n", "\ufeff  \r\n"):
+            self.assertIsNone(self.session.handle_line(line), repr(line))
+
     def test_bad_json_and_bad_shapes_are_errors_not_crashes(self):
         """Malformed input is answered and the session carries on.
 
@@ -263,6 +284,20 @@ class ScanAndConnectTests(SessionCase):
         fake_nidaqmx.install(self)
         names = [d["name"] for d in self.good("daq_scan")["devices"]]
         self.assertEqual(names, ["Dev1", daq.SIMULATED])
+
+    def test_scan_marks_an_ni_max_simulated_device(self):
+        """A device NI MAX simulates says so in its label and in ni_simulated.
+
+        Args: None.
+        Returns: None.
+        """
+        fake_nidaqmx.install(self, devices=("Dev1", "SimDev1"), simulated=("SimDev1",))
+        real, ni_max, stand_in = self.good("daq_scan")["devices"]
+        self.assertEqual((real["simulated"], real["ni_simulated"]), (False, False))
+        self.assertEqual((ni_max["simulated"], ni_max["ni_simulated"]), (False, True))
+        self.assertIn("NI MAX simulation, no hardware", ni_max["label"])
+        self.assertNotIn("NI MAX", real["label"])
+        self.assertEqual((stand_in["simulated"], stand_in["ni_simulated"]), (True, False))
 
     def test_connect_needs_a_device_name(self):
         """A missing or empty name is refused.
@@ -839,6 +874,15 @@ class ServeTests(SessionCase):
         replies = self.serve(text)
         self.assertEqual([r.get("id") for r in replies], [1, None, 2])
         self.assertEqual([r["ok"] for r in replies], [True, False, True])
+
+    def test_piped_text_with_a_byte_order_mark_runs_every_command(self):
+        """PowerShell's piped text (BOM, then the lines) answers the first command too.
+
+        Args: None.
+        Returns: None.
+        """
+        replies = self.serve('\ufeff{"cmd":"status","id":1}\r\n{"cmd":"status","id":2}\r\n')
+        self.assertEqual([(r["ok"], r["id"]) for r in replies], [(True, 1), (True, 2)])
 
     def test_end_of_input_stops_the_loop(self):
         """Closed stdin counts as quit.

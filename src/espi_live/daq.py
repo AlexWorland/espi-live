@@ -268,15 +268,27 @@ def terminal_label(terminal):
 
 @dataclass(frozen=True)
 class DeviceInfo:
-    """One NI device: its DAQmx name, model and serial number."""
+    """One NI device: its DAQmx name, model and serial number.
+
+    `simulated` (the app's own SIMULATED stand-in) and `ni_simulated` (a device
+    created as simulated in NI MAX, reported by NI-DAQmx) are different things:
+    only the first one skips the safety checklist. An NI MAX simulated device
+    is driven through the same DAQmx calls as hardware, so it is marked in its
+    label but gated exactly like a real device.
+    """
 
     name: str
     model: str
     serial: str = ""
+    ni_simulated: bool = False  # NI MAX simulated device (DAQmx Device.is_simulated)
 
     @property
     def simulated(self):
         """Tell whether this is the stand-in that drives no hardware.
+
+        This is the app's own SIMULATED device only, never `ni_simulated`:
+        DaqController.is_armed lets this one through without the checklist, and
+        an NI MAX simulated device must still need it.
 
         Args: None.
         Returns: True for the simulated device.
@@ -288,10 +300,13 @@ class DeviceInfo:
         """Describe the device for a list.
 
         Args: None.
-        Returns: Text such as "Dev1: USB-6251 (01A2B3C4)".
+        Returns: Text such as "Dev1: USB-6251 (01A2B3C4)", or "SimDev1: NI
+            Simulated DAQ Device (NI MAX simulation, no hardware)".
         """
         if self.simulated:
             return "Simulated device (no hardware)"
+        if self.ni_simulated:
+            return f"{self.name}: {self.model} (NI MAX simulation, no hardware)"
         serial = f" ({self.serial})" if self.serial else ""
         return f"{self.name}: {self.model}{serial}"
 
@@ -872,7 +887,8 @@ class PylablibBackend:
         info = self.nidaq.get_device_info()
         dev = self.nidaq.dev
         self.outputs = DeviceOutputs(
-            DeviceInfo(info.name, info.model, info.serial_number),
+            DeviceInfo(info.name, info.model, info.serial_number,
+                       ni_simulated=read_ni_simulated(ni, info.name)),
             analog=tuple(_short(name) for name in dev.ao_physical_chans.channel_names),
             # Counters only: the USB-6251 also lists "freqout" here, which
             # cannot make the generator's square wave.
@@ -1029,18 +1045,42 @@ def _short(name):
     return name.strip("/").split("/")[-1].lower()
 
 
-def list_devices():
-    """List the NI devices NI-DAQmx can see.
+def read_ni_simulated(ni, name, log=None):
+    """Ask NI-DAQmx whether a device is an NI MAX simulated one.
 
-    Args: None.
-    Returns: (devices, reason): a list of DeviceInfo, and None, or the text
-        returned by unavailable_reason() when devices cannot be listed.
+    Calls nidaqmx, so run it on the DaqController thread like every other
+    NI call.
+
+    Args: ni is the pyLabLib NI module; name is the DAQmx device name; log is
+        the AppLog to note a failure in (DEBUG), or None.
+    Returns: True for a device created as simulated in NI MAX; False for
+        hardware, or when the property cannot be read.
     """
     try:
-        found = load_ni().list_nidaqmx_devices()
+        return bool(ni.daq.nidaqmx.system.Device(name).is_simulated)
+    except Exception as exc:  # an older driver, or the device went away
+        if log is not None:
+            log.debug(f"NI DAQ: could not read whether {name} is simulated: {exc}")
+        return False
+
+
+def list_devices(log=None):
+    """List the NI devices NI-DAQmx can see.
+
+    Args: log is the AppLog for a DEBUG note when a device's simulation flag
+        cannot be read (default: none).
+    Returns: (devices, reason): a list of DeviceInfo (`ni_simulated` set for NI
+        MAX simulated devices), and None, or the text returned by
+        unavailable_reason() when devices cannot be listed.
+    """
+    try:
+        ni = load_ni()
+        found = ni.list_nidaqmx_devices()
+        return [DeviceInfo(d.name, d.model, d.serial_number,
+                           ni_simulated=read_ni_simulated(ni, d.name, log))
+                for d in found], None
     except Exception as exc:  # missing package, driver or platform support
         return [], unavailable_reason(exc)
-    return [DeviceInfo(d.name, d.model, d.serial_number) for d in found], None
 
 
 class DaqController:
@@ -1299,7 +1339,7 @@ class DaqController:
         Args: None.
         Returns: None.
         """
-        devices, reason = list_devices()
+        devices, reason = list_devices(self.log)
         if reason:
             self.log.warning(f"NI DAQ: {reason}")
         self.events.put(("devices", (devices, reason)))

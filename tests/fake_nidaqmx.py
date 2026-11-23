@@ -295,13 +295,19 @@ class FakeTask:
 class FakeDevice:
     """An NI device as nidaqmx.system.Device describes it."""
 
-    def __init__(self, name, product_type="USB-6251", serial=0x1A2B3C4D):
+    def __init__(self, name, product_type="USB-6251", serial=0x1A2B3C4D, simulated=False,
+                 hardware=None):
         """Describe a USB-6251.
 
-        Args: name is the DAQmx name; product_type and serial describe it.
+        Args: name is the DAQmx name; product_type and serial describe it;
+            simulated is what is_simulated reports (a device created as
+            simulated in NI MAX); hardware is the FakeHardware whose injected
+            "is_simulated" failure the property raises, or None.
         Returns: None.
         """
         self.name = name
+        self._simulated = simulated
+        self._hardware = hardware
         self.product_type = product_type
         self.dev_serial_num = serial
         self.ao_physical_chans = SimpleNamespace(
@@ -312,15 +318,28 @@ class FakeDevice:
         self.terminals = ([f"/{name}/PFI{index}" for index in range(16)]
                           + [f"/{name}/20MHzTimebase", f"/{name}/ao/SampleClock"])
 
+    @property
+    def is_simulated(self):
+        """Report whether the device is an NI MAX simulated one, as nidaqmx does.
 
-def make_module(hardware, devices=("Dev1",)):
+        Args: None.
+        Returns: True for a simulated device. Raises an injected "is_simulated" failure.
+        """
+        if self._hardware is not None:
+            self._hardware.check("is_simulated")
+        return self._simulated
+
+
+def make_module(hardware, devices=("Dev1",), simulated=()):
     """Build the fake nidaqmx module.
 
-    Args: hardware is the FakeHardware; devices are the DAQmx names present.
+    Args: hardware is the FakeHardware; devices are the DAQmx names present;
+        simulated are the names among them that report is_simulated.
     Returns: A namespace with Task, system, constants, errors and DaqError.
     """
     task = type("Task", (FakeTask,), {"hardware": hardware})
-    found = {name: FakeDevice(name) for name in devices}
+    found = {name: FakeDevice(name, simulated=name in simulated, hardware=hardware)
+             for name in devices}
 
     def device(name):
         """Look a device up, as nidaqmx.system.Device does.
@@ -347,15 +366,16 @@ def make_module(hardware, devices=("Dev1",)):
                            constants=constants, errors=errors, DaqError=errors.DaqError)
 
 
-def install(test, devices=("Dev1",)):
+def install(test, devices=("Dev1",), simulated=()):
     """Run pyLabLib's real NIDAQ on the fake for the rest of a test.
 
     Args: test is the unittest.TestCase (its cleanup undoes the patches);
-        devices are the DAQmx names present.
+        devices are the DAQmx names present; simulated are the names among
+        them that nidaqmx reports as simulated (NI MAX simulated devices).
     Returns: The FakeHardware.
     """
     hardware = FakeHardware()
-    patchers = (mock.patch.object(NI.daq, "nidaqmx", make_module(hardware, devices)),
+    patchers = (mock.patch.object(NI.daq, "nidaqmx", make_module(hardware, devices, simulated)),
                 mock.patch.object(daq, "_NI", NI))
     for patcher in patchers:
         patcher.start()

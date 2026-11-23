@@ -62,7 +62,7 @@ class DaqWindowTestCase(WindowTestCase):
         """
         super().setUp()
         patchers = (mock.patch.object(qt_app.daq, "list_devices",
-                                      side_effect=lambda: self.devices),
+                                      side_effect=lambda *args: self.devices),
                     mock.patch.object(qt_app.daq, "default_backend", backend_for))
         for patcher in patchers:
             patcher.start()
@@ -636,6 +636,27 @@ class DriveHandOffTests(DaqWindowTestCase):
             dialog.show()
             dialog.poll()
             connect.assert_called_once_with()
+
+
+class NiMaxSimulatedDeviceTests(DaqWindowTestCase):
+    """A device created as simulated in NI MAX is listed, and marked as such."""
+
+    devices = ([REAL, daq.DeviceInfo("SimDev1", "NI Simulated DAQ Device", "0",
+                                     ni_simulated=True)], None)
+
+    def test_device_list_marks_the_ni_max_simulation(self):
+        """The combo says which entry is NI MAX's simulation, and which is hardware.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        texts = [dialog.device_box.itemText(i) for i in range(dialog.device_box.count())]
+        self.assertEqual(texts, [
+            "Dev1: USB-6251 (1A2B3C4D)",
+            "SimDev1: NI Simulated DAQ Device (NI MAX simulation, no hardware)",
+            daq.SIMULATED_DEVICE.label])
+        self.assertEqual(dialog.device_box.itemData(1), "SimDev1")
 
 
 class NoDeviceTests(DaqWindowTestCase):

@@ -72,6 +72,22 @@ class LabelTests(unittest.TestCase):
         self.assertTrue(daq.SIMULATED_DEVICE.simulated)
         self.assertIn("no hardware", daq.SIMULATED_DEVICE.label)
 
+    def test_ni_max_simulated_device_is_marked_but_not_the_stand_in(self):
+        """An NI MAX simulated device says so in its label, yet is not `simulated`.
+
+        `simulated` is what lets a device skip the safety checklist, so it stays
+        False for a device NI-DAQmx merely reports as simulated.
+
+        Args: None.
+        Returns: None.
+        """
+        ni_max = daq.DeviceInfo("SimDev1", "NI Simulated DAQ Device", "0", ni_simulated=True)
+        self.assertEqual(ni_max.label,
+                         "SimDev1: NI Simulated DAQ Device (NI MAX simulation, no hardware)")
+        self.assertFalse(ni_max.simulated)
+        self.assertFalse(daq.DeviceInfo("Dev1", "USB-6251").ni_simulated)
+        self.assertFalse(daq.SIMULATED_DEVICE.ni_simulated)
+
 
 class WiringTests(unittest.TestCase):
     """Which socket each role uses, and where its cable goes."""
@@ -683,6 +699,40 @@ class PylablibBackendTests(unittest.TestCase):
         devices, reason = daq.list_devices()
         self.assertIsNone(reason)
         self.assertEqual(devices, [info])
+        self.assertFalse(info.ni_simulated)
+
+    def test_list_devices_reads_the_ni_max_simulation_flag(self):
+        """list_devices and a connection mark a device nidaqmx reports as simulated.
+
+        Args: None.
+        Returns: None.
+        """
+        fake_nidaqmx.install(self, devices=("Dev1", "SimDev1"), simulated=("SimDev1",))
+        devices, reason = daq.list_devices()
+        self.assertIsNone(reason)
+        self.assertEqual([(d.name, d.ni_simulated, d.simulated) for d in devices],
+                         [("Dev1", False, False), ("SimDev1", True, False)])
+        self.assertIn("NI MAX simulation", devices[1].label)
+        backend = daq.PylablibBackend()
+        self.addCleanup(backend.close)
+        self.assertTrue(backend.open("SimDev1").device.ni_simulated)
+        self.assertFalse(self.outputs.device.ni_simulated)  # Dev1, connected in setUp
+
+    def test_unreadable_simulation_flag_means_hardware(self):
+        """When nidaqmx cannot say, the device is listed as hardware and DEBUG notes why.
+
+        Args: None.
+        Returns: None.
+        """
+        log = ListLog()
+        self.hardware.fail["is_simulated"] = fake_nidaqmx.daq_error('driver too old')
+        devices, reason = daq.list_devices(log)
+        self.assertIsNone(reason)
+        self.assertEqual([d.ni_simulated for d in devices], [False])
+        self.assertEqual([level for level, _, _ in log.records], ["DEBUG"])
+        self.assertTrue(log.has("could not read whether Dev1 is simulated"))
+        self.hardware.fail["is_simulated"] = fake_nidaqmx.daq_error('driver too old')
+        self.assertFalse(daq.read_ni_simulated(daq.load_ni(), "Dev1"))  # no log to write to
 
     def test_sine_and_held_level_reach_the_outputs(self):
         """The generator's sine and the piezo's level are generated together.
@@ -1300,6 +1350,33 @@ class SelfCheckTests(unittest.TestCase):
         self.connect()
         self.assertFalse(self.controller.is_armed(settings))
         self.assertFalse(self.controller.checklist_done())
+
+    def test_ni_max_simulated_device_still_needs_the_checklist(self):
+        """A device created as simulated in NI MAX is gated like hardware.
+
+        Only the app's own SIMULATED stand-in skips the checklist.
+
+        Args: None.
+        Returns: None.
+        """
+        fake_nidaqmx.install(self, devices=("SimDev1",), simulated=("SimDev1",))
+        controller = daq.DaqController(self.log)
+        self.addCleanup(controller.shutdown, 5.0)
+        controller.request("connect", device="SimDev1")
+        outputs = wait_event(controller, "connected")[0]
+        self.assertTrue(outputs.device.ni_simulated)
+        self.assertFalse(outputs.device.simulated)
+        self.assertTrue(controller.status()["device"].ni_simulated)
+        settings = daq.DaqSettings(device="SimDev1", piezo_on=True, piezo_voltage_v=0.2)
+        self.assertFalse(controller.is_armed(settings))
+        controller.request("apply", settings=settings)
+        self.assertEqual(wait_event(controller, "rejected")[0], [daq.CHECKLIST_REQUIRED])
+        with self.assertRaisesRegex(daq.PiezoMoveError, "safety checklist"):
+            controller.move_piezo(settings, 0.3, 5.0)
+        controller.arm(settings)
+        self.assertTrue(controller.is_armed(settings))
+        controller.request("apply", settings=settings)
+        wait_event(controller, "applied")
 
     def test_readback_fault_sets_everything_to_zero_once(self):
         """An output that reads back wrong stops everything, and is reported once.
