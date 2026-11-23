@@ -22,6 +22,23 @@
 - A built-in terminal client covers the same ground: `python -m espi_live control status|cameras|get|set|run|log`, with `--camera` to pick a camera by index, serial or label and `--json` for raw output. `save` saves the frozen frame when the display is frozen, like the Save button.
 - Settings changes apply through the running engines and the window's controls follow along; the change is saved to the camera's profile like a hand-made one. Camera values are clamped to the device's reported limits, other values to their controls' ranges. Start the app with `--control-port N` to fix the port or `--no-control` to turn the server off. The API is unauthenticated and bound to 127.0.0.1, so nothing outside the machine can reach it.
 
+## 2026-11-23 — Headless runs can drive the NI DAQ: the config file's "daq" block, and follow, tune and calibrate over the control protocol
+
+### Previous state
+
+- A batch run (`--headless --config`) could not drive the NI DAQ at all: no connect, no apply, no piezo. Only a `--control` run could, one JSON command at a time, and even then the two closed loops stayed out of reach: the **Follow the camera's frame rate** checkbox was accepted into the settings but never acted on (the window's timer did that), **Auto-tune** was a button in the DAQ window only, and **Calibrate phase step** was a menu click that no `--control` command reached.
+
+### Current state
+
+- **The `"daq"` config block** drives the DAQ from a batch run's config file: `{"daq": {"device": "Dev1", "settings": {…DaqSettings fields…}, "arm": true, "tune": true}}`. It connects, applies the settings **with the outputs switched off first** (so the safety checklist can be recorded for the sockets the settings use), arms (only with `--daq-checklist-done`, the same gate as before) and then switches the outputs on. `"tune": true` also starts the experimental auto-tune on the first running camera. A block the DAQ refuses stops the run with its reason instead of running blind, and the session is closed either way.
+- **`tick` runs the window's job in a batch run**: while the run lasts, a `piezo_follow_fps` triangle is kept at the frequency the frames need (re-applied only past the 3% tolerance, each change restarting the triangle) and the auto-tune keeps measuring and applying, with no window and no timer.
+- **New `--control` commands**, one JSON line each:
+  - `daq_follow {camera?}` — set a frame-rate-following triangle's frequency from the camera's measured frame rate now (the window's timer in one shot). The reply carries the frame rate, the frequency and the formula's sentence.
+  - `piezo_tune {on?, camera?}` — start or stop the experimental auto-tune headless. While it runs it is driven from `tick` and reports `{"event": "tune", state, scale, text}` lines; `status` carries a `tuning` object. Stopping with `on: false` keeps the tuned frequency, as in the window.
+  - `phase_calibrate {camera?}` — the **Calibrate phase step** measurement over the protocol: it switches the camera to the Phase view, waits for the five 5-step sets and replies with the step measured in degrees and the new volts per step, kept for the next `daq_apply`. A step too far from 90° or a Phase view that stops is an error with the reason.
+- **Auto-tune stops on the same events as in the window**: a camera that stops, the Phase view, a new DAQ connection, a zero, a failure, a fault or a checklist that no longer covers the outputs — and the DAQ fault path also detaches the stepper and sends `Drive()` to the cameras, as before.
+- Defaults, exposure, gain, frame rate and the safety rules are unchanged; the checklist gate stays in `DaqController`, and every way out still sets the outputs to 0 V.
+
 ## 2026-11-22 — Experimental auto-tune of the piezo triangle, and a piezo debug overlay
 
 ### Previous state

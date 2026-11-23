@@ -22,9 +22,20 @@ Config keys (all optional; command-line options override them)::
      "upload": true,
      "upload_still_mb": 3, "upload_clip_mb": 20,
      "settings": {"mode": "Previous", "exposure_us": 8000},   # every camera
-     "cameras": [{"serial": "12345678", "settings": {"gain_db": 3}}]}  # or "index"
+     "cameras": [{"serial": "12345678", "settings": {"gain_db": 3}}],  # or "index"
+     "daq": {"device": "Dev1",   # the NI DAQ: connect, apply and drive the piezo
+             "settings": {"piezo_mode": "triangle", "piezo_on": true,
+                          "piezo_bottom_v": 1, "piezo_top_v": 10,
+                          "piezo_scale": "manual", "piezo_um_per_v": 0.116,
+                          "piezo_follow_fps": true},
+             "arm": true,        # record the safety checklist (needs --daq-checklist-done)
+             "tune": true}}      # also run the experimental auto-tune
 
 ``settings`` takes any field a saved profile does (see ``profiles.PERSISTED_FIELDS``).
+A ``daq`` block with a ``device`` connects at startup and, while the run lasts,
+keeps a ``piezo_follow_fps`` triangle at the frequency the frames need and runs
+auto-tune when ``tune`` is set. Without ``arm`` (or without the flag) the DAQ
+refuses to switch a real output on, and the run stops with that reason.
 
 With ``--control`` the run does not stop on a timer: it takes JSON commands on
 stdin (NI DAQ, Phase view, camera settings, saves) and answers on stdout, see
@@ -53,7 +64,8 @@ from espi_live.recording import safe_name
 
 DEFAULTS = {"duration_s": 0, "record": False, "save_interval_s": 0, "demo": False,
             "demo_cameras": 1, "all_cameras": False, "upload": True,
-            "upload_still_mb": 3, "upload_clip_mb": 20, "settings": {}, "cameras": []}
+            "upload_still_mb": 3, "upload_clip_mb": 20, "settings": {}, "cameras": [],
+            "daq": {}}
 POLL_S = 0.25
 STATUS_EVERY_S = 30.0
 STOP_WAIT_S = 20.0
@@ -216,11 +228,13 @@ def start_channels(channels, config, log):
                  + (", recording" if config["record"] else "") + ".")
 
 
-def pump_events(channels, log, failures):
+def pump_events(channels, log, failures, on_event=None):
     """Handle every engine's events; stop channels that ended.
 
     Args: channels is the Channel list; log is the AppLog; failures collects
-        the labels of cameras that failed.
+        the labels of cameras that failed; on_event is called with (kind,
+        payload, channel) for every event, for a control command that waits on
+        one (default: nothing).
     Returns: How many channels are still running.
     """
     alive = 0
@@ -234,6 +248,8 @@ def pump_events(channels, log, failures):
                 kind, payload = engine.events.get_nowait()
             except queue.Empty:
                 break
+            if on_event is not None:
+                on_event(kind, payload, channel)
             if kind == "record_off":
                 log.warning(f"{channel.label}: recording stopped by the engine (see the log).")
             elif kind in ("fatal", "open_failed"):
@@ -264,12 +280,14 @@ def log_status(channels, log):
                      f"{status.get('record', 'Recording: off')}")
 
 
-def loop(channels, config, stop, log, failures):
+def loop(channels, config, stop, log, failures, session=None):
     """Run until the duration ends, a signal arrives or every camera has stopped.
 
     Args: channels is the Channel list; config is the run config; stop is the
         threading.Event the signal handler sets; log is the AppLog; failures
-        collects the labels of cameras that failed.
+        collects the labels of cameras that failed; session is the
+        headless_control.ControlSession that drives the NI DAQ from the config
+        file's block, or None.
     Returns: None.
     """
     duration = float(config["duration_s"] or 0)
@@ -282,6 +300,8 @@ def loop(channels, config, stop, log, failures):
         if duration and now - begun >= duration:
             log.write(f"Duration of {duration:g} s reached.")
             return
+        if session is not None:
+            session.tick()  # the DAQ's heartbeat, events, frame-rate following and tuner
         if not pump_events(channels, log, failures):
             log.write("No camera is running any more.")
             return
@@ -450,6 +470,26 @@ def shutdown(channels, log):
     return final
 
 
+def daq_session(channels, config, log, checklist_done):
+    """Make the session that drives the NI DAQ from the config file's block.
+
+    Args: channels is the Channel list; config is the run config; log is the
+        AppLog; checklist_done is True when --daq-checklist-done was given.
+    Returns: A headless_control.ControlSession, or None when the config has no
+        "daq" block. Its close() must be called: it sets the outputs to 0 V.
+    """
+    block = config.get("daq") or {}
+    if not block:
+        return None
+    session = headless_control.ControlSession(channels, log, allow_arm=checklist_done)
+    try:
+        session.configure_daq(block)
+    except BaseException:
+        session.close()  # do not leave the device thread running on a refused block
+        raise
+    return session
+
+
 def run_control(channels, config, stop, log, failures, checklist_done, replies):
     """Serve JSON commands on stdin until quit, end of input, a signal or the duration.
 
@@ -460,11 +500,13 @@ def run_control(channels, config, stop, log, failures, checklist_done, replies):
         the headless_control.line_writer() for stdout.
     Returns: None. The NI outputs are at 0 V and the DAQ thread is finished.
     """
-    session = headless_control.ControlSession(
-        channels, log, allow_arm=checklist_done,
-        pump=lambda: pump_events(channels, log, failures))
+    session = headless_control.ControlSession(channels, log, allow_arm=checklist_done)
+    # The session hears the engines' events as well: phase_calibrate waits on one.
+    session.pump = lambda: pump_events(channels, log, failures, session.note_event)
     log.info("Control: reading JSON commands on stdin, replying on stdout.")
     try:
+        # Inside the try: a config block the DAQ refuses must not skip the close.
+        session.configure_daq(config.get("daq") or {})
         headless_control.serve(session, sys.stdin, replies, stop,
                                float(config["duration_s"] or 0))
     finally:
@@ -496,6 +538,7 @@ def run(config, log_level=None, control=False, checklist_done=False):
     previous = install_signals(stop, log)
     started = time.time()
     channels, failures, final, code = [], [], {}, 0
+    session = None
     try:
         channels = open_channels(config, log)
         if channels:
@@ -508,13 +551,16 @@ def run(config, log_level=None, control=False, checklist_done=False):
         if control:
             run_control(channels, config, stop, log, failures, checklist_done, replies)
         elif channels:
-            loop(channels, config, stop, log, failures)
+            session = daq_session(channels, config, log, checklist_done)
+            loop(channels, config, stop, log, failures, session)
     except KeyboardInterrupt:
         log.write("Interrupted.")
     except Exception as exc:
         log.exception(f"Headless run failed: {exc}")
         code = 1
     finally:
+        if session is not None:
+            session.close()  # outputs to 0 V before the cameras stop
         final = shutdown(channels, log)
         restore_signals(previous)
     ended = time.time()
