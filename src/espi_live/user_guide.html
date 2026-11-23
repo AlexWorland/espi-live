@@ -1717,6 +1717,27 @@ python -m espi_live</code></pre>
         the simulated device is offered, and the window says what is
         missing. The log records every setting applied, including the
         frequency the device really produces.</p>
+      <p><strong>Headless (no window).</strong> A batch run's config file can
+        carry a <code>"daq"</code> block —
+        <code>{"daq": {"device": "Dev1", "settings": {…}, "arm": true,
+        "tune": true}}</code> — which connects, applies the settings with the
+        outputs switched off first (so the safety checklist can be recorded
+        for the sockets they use), arms it and switches the outputs on;
+        <code>"tune": true</code> also runs the experimental auto-tune. While
+        the run lasts, a <strong>Follow the camera's frame rate</strong>
+        triangle is kept at the frequency the frames need, and the tuner keeps
+        running, with no window. A block the device refuses stops the run with
+        its reason. With <code>--headless --control</code> the same block runs,
+        and the JSON commands can also do one at a time what the window does:
+        <code>daq_follow</code> (follow the frame rate now),
+        <code>piezo_tune</code> (start or stop the auto-tune, which reports
+        <code>{"event": "tune", …}</code> lines while it runs),
+        <code>phase_attach</code> plus <code>phase_calibrate</code> (measure
+        the piezo's phase step; the reply carries the step in degrees and the
+        volts per 90°), and <code>status</code>, whose reply carries
+        <code>"tuning"</code> while the auto-tune runs. Arming needs
+        <code>--daq-checklist-done</code> on the command line, the same as
+        <code>daq_arm</code>. Every way out sets the outputs to 0 V.</p>
     </section>
 
     <section id="phase">
