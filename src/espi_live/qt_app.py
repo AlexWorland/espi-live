@@ -28,6 +28,7 @@ import queue
 import random
 import sys
 import textwrap
+import threading
 import time
 import traceback
 from dataclasses import asdict, dataclass, replace
@@ -3291,6 +3292,7 @@ class DaqDialog(QDialog):
         self.window.set_daq_drive(daq.Drive())
         if outputs is not None:
             self._fill_outputs(outputs)
+            self._set_combo(self.device_box, outputs.device.name)
             info = outputs.device
             if info.simulated:
                 note = f"{self.scan_note} " if self.scan_note else ""
@@ -3335,6 +3337,12 @@ class DaqDialog(QDialog):
                       if self.outputs is not None and self.outputs.device.simulated
                       else "Outputs: ")
             self.state_label.setText(prefix + payload.summary)
+            applied = self.controller.status()["settings"]
+            if applied is not None and applied.to_dict() != self.settings().to_dict():
+                # The settings came from somewhere else (the control server, the
+                # frame-rate follower, auto-tune): show them, as if typed here.
+                self.load(applied)
+                self.refresh()
         elif kind == "rejected":
             self.problem_label.setText("\n".join(payload))
             self.state_label.setText("Outputs: not changed.")
@@ -4463,6 +4471,427 @@ class ControlBackend:
         """
         return control.tail(getattr(self.window.log, "path", None), lines)
 
+    # ----- NI DAQ ------------------------------------------------------------
+
+    DAQ_TIMEOUT_S = 10.0  # longest wait for the DAQ thread to answer one action
+    SELF_TEST_TIMEOUT_S = 30.0  # the self-test steps every analog output and reads it back
+
+    def _daq_controller(self):
+        """Return the window's DAQ controller, creating it on the GUI thread.
+
+        Args: None.
+        Returns: The daq.DaqController. Raises ControlError (503) when the
+            app is closing.
+        """
+        if self.window.closing:
+            raise control.ControlError("the app is closing", 503)
+        return self.caller.call(self.window._ensure_daq)
+
+    def _daq_state(self):
+        """Snapshot the controller, its status and the saved settings.
+
+        Args: None.
+        Returns: (controller, status dict, saved DaqSettings); the status
+            dict is controller.status()'s (device, active, summary, settings)
+            and the saved settings come from the GUI thread's QSettings.
+        """
+        controller = self._daq_controller()
+        saved = self.caller.call(DaqDialog._saved_settings)
+        return controller, controller.status(), saved
+
+    def _daq_base(self, state, saved):
+        """The settings the next DAQ apply or step starts from.
+
+        Args: state is controller.status()'s dict; saved is the saved
+            DaqSettings.
+        Returns: The settings last written to the device, or the saved ones
+            with the device filled in and both roles off (nothing drives
+            from a bare connection).
+        """
+        if state["settings"] is not None:
+            return state["settings"]
+        device = state["device"]
+        return replace(saved, device=device.name if device is not None else "",
+                       generator_on=False, piezo_on=False)
+
+    @staticmethod
+    def _daq_device_dict(info):
+        """Describe a device for a reply.
+
+        Args: info is a daq.DeviceInfo.
+        Returns: A dict.
+        """
+        return {"name": info.name, "model": info.model, "serial": info.serial,
+                "label": info.label, "simulated": info.simulated,
+                "ni_simulated": info.ni_simulated}
+
+    @staticmethod
+    def _daq_connection(connection):
+        """Describe one cable of daq.wiring for a reply.
+
+        Args: connection is a daq.Connection.
+        Returns: A dict.
+        """
+        return {"terminal": connection.terminal, "label": connection.label,
+                "role": connection.role, "target": connection.target,
+                "note": connection.note, "bnc": connection.bnc}
+
+    def daq(self):
+        """Describe the NI DAQ for GET /daq.
+
+        Args: None.
+        Returns: A dict: the device, its state, the settings last applied,
+            the saved ones, the checklist, the wiring and auto-tune.
+        """
+        controller, state, saved = self._daq_state()
+        device = state["device"]
+        base = self._daq_base(state, saved)
+        tuning, note = self.caller.call(
+            lambda: (self.window.piezo_tuner is not None, self.window.tune_text()))
+        return {
+            "connected": device is not None,
+            "device": self._daq_device_dict(device) if device is not None else None,
+            "active": state["active"],
+            "summary": state["summary"],
+            "settings": state["settings"].to_dict() if state["settings"] is not None
+            else None,
+            "saved": saved.to_dict(),
+            "checklist_done": controller.checklist_done(),
+            "problems": daq.problems(base),
+            "wiring": [self._daq_connection(item) for item in daq.wiring(base)],
+            "tuning": {"on": tuning, "note": note},
+        }
+
+    def daq_summary(self):
+        """Summarize the NI DAQ for GET /status.
+
+        Args: None.
+        Returns: A small dict, or {"connected": False} when no device is
+            connected.
+        """
+        controller, state, _ = self._daq_state()
+        device = state["device"]
+        return {"connected": device is not None,
+                "device": device.label if device is not None else None,
+                "active": state["active"], "summary": state["summary"],
+                "checklist_done": controller.checklist_done()}
+
+    def daq_action(self, action, **arguments):
+        """Run one DAQ action for POST /daq.
+
+        Args: action is a control.DAQ_ACTIONS key; arguments are its
+            coerced values (device, settings, volts, camera_index, on).
+        Returns: The action's result dict. Raises ControlError when the
+            action cannot be carried out.
+        """
+        runners = {"scan": self._daq_scan, "connect": self._daq_connect,
+                   "apply": self._daq_apply, "zero": self._daq_zero,
+                   "self_test": self._daq_self_test, "step": self._daq_step,
+                   "attach": self._daq_attach, "detach": self._daq_detach,
+                   "checklist": self._daq_checklist, "tune": self._daq_tune}
+        return runners[action](**arguments)
+
+    def _dispatch_daq_event(self, kind, payload):
+        """Run one DAQ event's window side effects from the control server.
+
+        Runs each part on the GUI thread, exactly as poll_daq would: the
+        window follows the piezo and the demo cameras' drive, and an open,
+        visible DAQ window shows the event. Unlike poll_daq, a device list
+        is never kept back: the control request itself is waiting for it.
+
+        Args: kind and payload are the controller's event.
+        Returns: None.
+        """
+        def run():
+            """Dispatch one event on the GUI thread."""
+            self.window._daq_event(kind, payload)
+            dialog = self.window.daq_dialog
+            if dialog is not None and dialog.isVisible():
+                dialog.handle(kind, payload)
+
+        self.caller.call(run)
+
+    def _daq_flush(self, controller):
+        """Dispatch the events queued after an answer, without waiting.
+
+        Args: controller is the daq.DaqController.
+        Returns: None.
+        """
+        pending = []
+        while True:
+            try:
+                pending.append(controller.events.get_nowait())
+            except queue.Empty:
+                break
+        for kind, payload in pending:
+            self._dispatch_daq_event(kind, payload)
+
+    def _daq_roundtrip(self, action, kinds, timeout, **payload):
+        """Send one DAQ request and wait for its answer, dispatching the events.
+
+        Runs on the control server's thread. It holds the window's
+        daq_events_lock, so poll_daq leaves the events queue alone; every
+        event's side effects still run, on the GUI thread.
+
+        Args: action is a DaqController.request action; kinds are the event
+            kinds that end the wait; timeout is in seconds; payload goes to
+            request().
+        Returns: (kind, payload) of the event that ended the wait. Raises
+            ControlError (504) when the DAQ does not answer in time, and
+            ControlError when it reports a failure.
+        """
+        controller = self._daq_controller()
+        with self.window.daq_events_lock:
+            controller.request(action, **payload)
+            deadline = time.monotonic() + timeout
+            while True:
+                controller.heartbeat()
+                try:
+                    kind, event = controller.events.get(timeout=0.1)
+                except queue.Empty:
+                    if time.monotonic() >= deadline:
+                        raise control.ControlError(
+                            f"the DAQ did not answer within {timeout:g} s", 504) \
+                            from None
+                    continue
+                self._dispatch_daq_event(kind, event)
+                if kind in kinds:
+                    self._daq_flush(controller)
+                    return kind, event
+                if kind == "failed":
+                    raise control.ControlError(f"the DAQ failed: {event}") \
+                        from None
+
+    def _daq_scan(self):
+        """List the NI devices.
+
+        Args: None.
+        Returns: The reply fields: devices (with the simulated one last) and
+            reason (why none could be listed).
+        """
+        _, (devices, reason) = self._daq_roundtrip("scan", ("devices",),
+                                                   self.DAQ_TIMEOUT_S)
+        names = ", ".join(info.name for info in devices) or "none"
+        self.window.log.write(f"Control: NI DAQ scan: {names}"
+                              + (f"; {reason}" if reason else ""))
+        return {"devices": [self._daq_device_dict(info) for info in devices]
+                + [self._daq_device_dict(daq.SIMULATED_DEVICE)], "reason": reason}
+
+    def _daq_connect(self, name):
+        """Connect to a device; every output goes to 0 V.
+
+        Args: name is a DAQmx device name or "Simulated".
+        Returns: The reply fields: the device and its outputs.
+        """
+        _, outputs = self._daq_roundtrip("connect", ("connected",),
+                                         self.DAQ_TIMEOUT_S, device=name)
+        self.window.log.write(f"Control: NI DAQ connected to {outputs.device.label}; "
+                              "every output is at 0 V.")
+        return {"device": self._daq_device_dict(outputs.device),
+                "analog": list(outputs.analog), "counters": list(outputs.counters)}
+
+    @staticmethod
+    def _daq_changed_text(base, merged):
+        """Describe what a DAQ apply changes, for the log.
+
+        Args: base is the DaqSettings the changes start from; merged is
+            what will be applied.
+        Returns: Text such as "piezo_on: off → on, piezo_mode: hold →
+            triangle (2 changed)", or "no settings changed".
+        """
+        before, after = base.to_dict(), merged.to_dict()
+        changed = [name for name in after if after[name] != before[name]]
+        if not changed:
+            return "no settings changed"
+        text = ", ".join(f"{name}: {before[name]} → {after[name]}"
+                         for name in changed)
+        return f"{text} ({len(changed)} changed)"
+
+    def _daq_apply(self, changes):
+        """Change the DAQ settings and write them to the device.
+
+        Args: changes is a dict of DaqSettings fields, laid over the
+            settings last applied (or the saved ones).
+        Returns: The reply fields: what the outputs now do. Raises
+            ControlError for a rejected setting or a checklist not yet
+            ticked off.
+        """
+        controller, state, saved = self._daq_state()
+        device = state["device"]
+        if device is None:
+            raise control.ControlError(
+                "connect to a NI device first (the connect action)", 409)
+        base = self._daq_base(state, saved)
+        candidate = replace(base, **changes)
+        merged = replace(candidate, device=device.name)
+        found = daq.problems(merged)
+        if found:
+            raise control.ControlError("the DAQ refused the settings: "
+                                       + " ".join(found), 400)
+        changed = self._daq_changed_text(base, merged)
+        if daq.drives(merged) and not controller.is_armed(merged):
+            raise control.ControlError(
+                daq.CHECKLIST_REQUIRED + ' Run the "checklist" action to show '
+                "it on the app's screen.", 409)
+        if self.window.piezo_tuner is not None:  # new settings replace what it tunes
+            self.caller.call(lambda: self.window.set_auto_tune(
+                False, "new settings were applied"))
+        # Saved first, as the DAQ window's Apply does: the settings are what
+        # you want even while the checklist is still waiting.
+        self.caller.call(lambda: QSettings("ESPI", "espi_live").setValue(
+            DAQ_SETTINGS_KEY, json.dumps(merged.to_dict())))
+        kind, plan = self._daq_roundtrip("apply", ("applied", "rejected"),
+                                         self.DAQ_TIMEOUT_S, settings=merged)
+        if kind == "rejected":
+            raise control.ControlError("the DAQ rejected the settings: "
+                                       + " ".join(plan), 400)
+        self.window.log.write(f"Control: NI DAQ apply: {changed}. Now: {plan.summary}.")
+        return {"summary": plan.summary, "active": daq.drives(merged),
+                "settings": merged.to_dict(), "drive": asdict(plan.drive),
+                "frequency_hz": plan.frequency_hz,
+                "piezo_frequency_hz": plan.piezo_frequency_hz}
+
+    def _daq_zero(self):
+        """Set every output to 0 V.
+
+        Args: None.
+        Returns: The reply fields (none). Raises ControlError (409) when no
+            device is connected.
+        """
+        _, state, _ = self._daq_state()
+        if state["device"] is None:
+            raise control.ControlError(
+                "no NI device is connected (the connect action)", 409)
+        self._daq_roundtrip("zero", ("zeroed",), self.DAQ_TIMEOUT_S)
+        self.window.log.write("Control: NI DAQ: every output set to 0 V.")
+        return {}
+
+    def _daq_self_test(self):
+        """Step each analog output and read it back.
+
+        Args: None.
+        Returns: The reply fields: passed and the result lines. Raises
+            ControlError (409) when no device is connected.
+        """
+        _, state, _ = self._daq_state()
+        if state["device"] is None:
+            raise control.ControlError(
+                "no NI device is connected (the connect action)", 409)
+        _, (passed, lines) = self._daq_roundtrip("self_test", ("self_test",),
+                                                 self.SELF_TEST_TIMEOUT_S)
+        outcome = "passed." if passed else "FAILED: " + "; ".join(lines)
+        self.window.log.write(f"Control: NI DAQ self-test: {outcome}")
+        return {"passed": passed, "lines": lines}
+
+    def _daq_step(self, volts):
+        """Hold the piezo at a level, as a phase step does.
+
+        Args: volts is the level at the DAQ.
+        Returns: The reply fields: the level and what was written. Raises
+            ControlError when no piezo is assigned or the DAQ refuses the
+            level.
+        """
+        controller, state, saved = self._daq_state()
+        device = state["device"]
+        if device is None:
+            raise control.ControlError(
+                "connect to a NI device first (the connect action)", 409)
+        base = self._daq_base(state, saved)
+        if base.piezo_output == daq.OFF:
+            raise control.ControlError(
+                "assign the piezo driver to an analog output first (apply "
+                "with piezo_output)", 400)
+        moved = replace(base, piezo_on=True, piezo_mode=daq.HOLD,
+                        piezo_voltage_v=float(volts))
+        try:
+            written = controller.move_piezo(moved, volts, self.DAQ_TIMEOUT_S)
+        except daq.PiezoMoveError as exc:
+            raise control.ControlError(str(exc), 400) from None
+        self._daq_flush(controller)
+        self.caller.call_async(lambda: self.window.set_daq_drive(written.drive))
+        self.caller.call_async(lambda: self.window._control_daq_form(moved))
+        self.window.log.write(f"Control: NI DAQ: piezo held at {float(volts):g} V.")
+        return {"volts": float(volts), "summary": written.summary}
+
+    def _daq_attach(self, camera_index):
+        """Give the piezo to a camera's Phase view.
+
+        Args: camera_index is the channel's position (the service resolved
+            it; the displayed camera by default).
+        Returns: The reply fields: the camera, now in the Phase view.
+            Raises ControlError when no device is connected, the piezo is
+            unassigned or the checklist does not cover it.
+        """
+        controller, state, saved = self._daq_state()
+        device = state["device"]
+        if device is None:
+            raise control.ControlError(
+                "connect to a NI device first (the connect action)", 409)
+        base = self._daq_base(state, saved)
+        if base.piezo_output == daq.OFF:
+            raise control.ControlError(
+                "assign the piezo driver to an analog output first (apply "
+                "with piezo_output)", 400)
+        if not controller.is_armed(replace(base, piezo_on=True)):
+            raise control.ControlError(
+                daq.CHECKLIST_REQUIRED + ' Run the "checklist" action to show '
+                "it on the app's screen.", 409)
+        label = self.caller.call(lambda: self.window._control_daq_attach(
+            camera_index, base, device.simulated))
+        self.window.log.write(f"Control: NI DAQ: the piezo now drives camera "
+                              f"{label}'s Phase view.")
+        return {"camera": label, "mode": "Phase"}
+
+    def _daq_detach(self):
+        """Take the piezo away from the Phase view.
+
+        Args: None.
+        Returns: The reply fields: whether a stepper was attached.
+        """
+        had = self.caller.call(lambda: self.window.phase_stepper is not None)
+        self.caller.call(lambda: self.window._attach_stepper(None))
+        self.window.log.write("Control: NI DAQ: the piezo no longer drives the "
+                              "Phase view.")
+        return {"detached": had}
+
+    def _daq_checklist(self, changes):
+        """Show the safety checklist on the app's screen for these settings.
+
+        Args: changes is a dict of DaqSettings fields laid over the settings
+            the next apply would start from, or None for those as they are.
+        Returns: The reply fields: shown, the checklist's items and the
+            settings they are about. Raises ControlError (409) when no
+            device is connected.
+        """
+        _, state, saved = self._daq_state()
+        device = state["device"]
+        if device is None:
+            raise control.ControlError(
+                "connect to a NI device first (the connect action)", 409)
+        base = self._daq_base(state, saved)
+        merged = replace(base, **(changes or {}), device=device.name)
+        items = daq.checklist_items(merged)
+        self.caller.call(lambda: self.window._control_daq_checklist(merged))
+        self.window.log.write("Control: NI DAQ: the safety checklist was shown on "
+                              "the app's screen; ticking it arms the device and "
+                              "applies the settings.")
+        return {"shown": True, "items": items, "settings": merged.to_dict()}
+
+    def _daq_tune(self, on):
+        """Start or stop the experimental piezo auto-tune.
+
+        Args: on is True to start, False to stop.
+        Returns: The reply fields: tuning and note (what it is doing, or why
+            it cannot).
+        """
+        self.caller.call(lambda: self.window.set_auto_tune(on))
+        tuning, note = self.caller.call(
+            lambda: (self.window.piezo_tuner is not None, self.window.tune_text()))
+        self.window.log.write("Control: NI DAQ auto-tune "
+                              + ("started." if on else "stopped.")
+                              + (f" {note}" if note else ""))
+        return {"tuning": tuning, "note": note}
+
 
 class MainWindow(QMainWindow):
     """Viewer, controls, log and status for the displayed camera's engine."""
@@ -4536,6 +4965,7 @@ class MainWindow(QMainWindow):
         self.daq_drive = daq.Drive()  # what its outputs produce, for demo cameras
         self.daq_dialog = None  # DaqDialog, built on first use
         self.daq_auto = None  # device name startup connects to once the scan ends
+        self.daq_events_lock = threading.Lock()  # the control server drains events too
         self.phase_stepper = None  # phase.PiezoStepper the displayed engine steps
         self.view_state = None  # last logged (view size, zoom, image size)
         self.drawn_frames = 0
@@ -7183,6 +7613,11 @@ class MainWindow(QMainWindow):
     def poll_daq(self, defer_devices=False):
         """Handle the DAQ controller's events, for the window and the DAQ window.
 
+        The control server drains the same queue while a DAQ request of its
+        own is waiting for an answer (it holds daq_events_lock and dispatches
+        each event exactly as this method would), so the drain here is
+        skipped while it holds the lock.
+
         Args: defer_devices keeps a device list for the DAQ window until it
             is shown (as it is kept while that window is closed), because the
             window connects to a device when it gets one.
@@ -7192,6 +7627,23 @@ class MainWindow(QMainWindow):
         if self.daq is None or self.closing:
             return
         self.daq.heartbeat()  # the DAQ zeroes the outputs if this stops while they are on
+        if not self.daq_events_lock.acquire(blocking=False):
+            return
+        try:
+            self._drain_daq_events(defer_devices)
+        finally:
+            self.daq_events_lock.release()
+
+    def _drain_daq_events(self, defer_devices):
+        """Read every queued DAQ event and dispatch it.
+
+        Runs on the GUI thread with daq_events_lock held.
+
+        Args: defer_devices keeps a device list for the DAQ window until it
+            is shown, because the window connects to a device when it gets
+            one.
+        Returns: None.
+        """
         later = []
         while True:
             try:
@@ -7208,6 +7660,68 @@ class MainWindow(QMainWindow):
                 dialog.handle(kind, payload)
         for event in later:
             self.daq.events.put(event)
+
+    def _control_daq_form(self, settings):
+        """Refresh the NI DAQ window's form after the control server changed it.
+
+        Runs on the GUI thread (scheduled by the control backend). The
+        applied event already updates the form while the window is open;
+        this covers paths that send no event, such as a held piezo level.
+
+        Args: settings is the DaqSettings to show in the form.
+        Returns: None.
+        """
+        dialog = self.daq_dialog
+        if dialog is None:
+            return
+        dialog.load(settings)
+        dialog.refresh()
+
+    def _control_daq_checklist(self, settings):
+        """Show the safety checklist for settings the control server wants applied.
+
+        Runs on the GUI thread. The DAQ window gets it through its own
+        checklist flow when it is open; otherwise a checklist opens over the
+        main window, and ticking it arms the device and applies the settings.
+
+        Args: settings is the daq.DaqSettings the checklist is shown for.
+        Returns: None.
+        """
+        dialog = self.daq_dialog
+        if dialog is not None:
+            dialog.load(settings)
+            dialog._ask_checklist(settings)
+            return
+        box = DaqChecklistDialog(self, settings)
+
+        def allowed():
+            """Arm the device and apply the settings (the checklist's Allow)."""
+            self.daq.arm(settings)
+            self.log.write("NI DAQ: safety checklist ticked off for "
+                           f"{settings.device or 'the device'} (from the control server).")
+            self.daq.request("apply", settings=settings)
+
+        box.accepted.connect(allowed)
+        box.open()
+
+    def _control_daq_attach(self, index, settings, simulated):
+        """Display a camera and give its Phase view the piezo (control server).
+
+        Runs on the GUI thread. A camera other than the displayed one is
+        displayed first, as a person would.
+
+        Args: index is the channel's position (out of range: the displayed
+            one); settings is the DaqSettings the stepper steps with;
+            simulated says whether the device drives no hardware.
+        Returns: The camera's label.
+        """
+        channel = self.current
+        if isinstance(index, int) and 0 <= index < len(self.channels):
+            channel = self.channels[index]
+        if channel is not self.current:
+            self.show_channel(channel)
+        self._attach_stepper(phase.PiezoStepper(self.daq, settings, simulated))
+        return channel.label
 
     def received_fps(self):
         """The rate frames arrive from the displayed camera.

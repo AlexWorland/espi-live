@@ -20,6 +20,13 @@ the front end does the work. Engine calls (update_settings, request,
 status) are thread-safe by design and run on the server thread; anything
 that touches window widgets is marshaled to the GUI thread by the backend.
 
+The NI DAQ (the frequency generator and piezo driver on the NI USB device)
+has its own pair of endpoints: GET /daq reports the device, its settings,
+the safety checklist and the wiring; POST /daq runs the same actions the
+NI DAQ window offers (scan, connect, apply, zero, self-test, piezo step,
+Phase-view attach, auto-tune). DAQ settings are DaqSettings fields; every
+change is logged and the window's controls follow, like camera changes.
+
 The module also holds the terminal client used by `espi_live control ...`,
 which discovers the server through output/control.json or the default
 port range.
@@ -37,7 +44,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, fields
 
-from espi_live import paths, profiles
+from espi_live import daq, paths, profiles
 from espi_live.engine import Settings
 from espi_live.updater import describe_build
 
@@ -61,6 +68,37 @@ SETTING_TYPES = {
 }
 _BOOL_WORDS = {"true": True, "1": True, "on": True, "yes": True,
                "false": False, "0": False, "off": False, "no": False}
+
+# Every DaqSettings field and its type name, for POST /daq's "settings".
+_DAQ_DEFAULTS = daq.DaqSettings()
+DAQ_SETTING_TYPES = {_field.name: type(getattr(_DAQ_DEFAULTS, _field.name)).__name__
+                     for _field in fields(daq.DaqSettings)}
+
+# The DAQ actions POST /daq runs: description, then each argument with its
+# validator ("text", "settings", "number", "flag" or "camera") and whether
+# it is required.
+DAQ_ACTIONS = {
+    "scan": ("list the NI devices (plus the simulated one)", {}),
+    "connect": ("connect to a device by DAQmx name, or \"Simulated\"; every "
+                "output goes to 0 V",
+                {"device": ("text", True)}),
+    "apply": ("change DAQ settings (DaqSettings fields) and write them to "
+              "the device",
+              {"settings": ("settings", True)}),
+    "zero": ("set every output to 0 V", {}),
+    "self_test": ("step each analog output to 0.5 V and read it back; switch "
+                  "the amplifiers off first", {}),
+    "step": ("hold the piezo at a level, in volts at the DAQ",
+             {"volts": ("number", True)}),
+    "attach": ("give the piezo to a camera's Phase view",
+               {"camera": ("camera", False)}),
+    "detach": ("take the piezo away from the Phase view", {}),
+    "checklist": ("show the NI DAQ safety checklist on the app's screen for "
+                  "these settings; ticking it arms the device and applies",
+                  {"settings": ("settings", False)}),
+    "tune": ("start or stop the experimental piezo auto-tune",
+             {"on": ("flag", True)}),
+}
 
 COMMANDS = {
     "save": ("save the displayed frame as a PNG in output/frames (the frozen "
@@ -146,6 +184,89 @@ def clamp_setting(name, value):
         return value
     low, high = profiles.RANGES[name]
     return min(max(value, low), high)
+
+
+def coerce_daq_setting(name, value):
+    """Coerce one JSON-decoded value to a DaqSettings field's type.
+
+    Args: name is a DaqSettings field name; value is the decoded JSON value.
+    Returns: The coerced value. Raises ControlError (HTTP 400) when the
+        value does not fit the field. Ranges and choices are checked later,
+        by daq.problems on the device's own terms.
+    """
+    kind = DAQ_SETTING_TYPES[name]
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str) and value.strip().lower() in _BOOL_WORDS:
+            return _BOOL_WORDS[value.strip().lower()]
+        raise ControlError(f"{name} must be true or false")
+    if kind == "str":
+        if isinstance(value, str) and value:
+            return value
+        raise ControlError(f"{name} must be text")
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ControlError(f"{name} must be a number")
+    try:
+        number = float(value)
+    except ValueError:
+        raise ControlError(f"{name} must be a number") from None
+    if not math.isfinite(number):
+        raise ControlError(f"{name} must be a finite number")
+    return number
+
+
+def coerce_daq_settings(values):
+    """Coerce a dict of DaqSettings changes.
+
+    Args: values is the decoded "settings" object of a DAQ action.
+    Returns: A dict of coerced values. Raises ControlError (HTTP 400) for
+        an unknown field name or a value of the wrong type.
+    """
+    if not isinstance(values, dict):
+        raise ControlError('"settings" must be an object of DAQ settings')
+    unknown = sorted(set(values) - set(DAQ_SETTING_TYPES))
+    if unknown:
+        raise ControlError(f"unknown DAQ setting {unknown[0]!r}; names: "
+                           + ", ".join(DAQ_SETTING_TYPES))
+    return {name: coerce_daq_setting(name, value)
+            for name, value in values.items()}
+
+
+def _coerce_daq_argument(kind, value, action):
+    """Coerce one DAQ action argument.
+
+    Args: kind is the validator name from DAQ_ACTIONS; value is the decoded
+        JSON value; action is the action's name, for error messages.
+    Returns: The coerced value. Raises ControlError (HTTP 400) when the
+        value does not fit.
+    """
+    if kind == "text":
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        raise ControlError(f"{action} needs device as text, for example "
+                           '"Simulated"')
+    if kind == "settings":
+        return coerce_daq_settings(value)
+    if kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ControlError(f"{action} needs volts as a finite number")
+        try:
+            number = float(value)
+        except ValueError:
+            raise ControlError(f"{action} needs volts as a finite number") from None
+        if not math.isfinite(number):
+            raise ControlError(f"{action} needs volts as a finite number")
+        return number
+    if kind == "flag":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in _BOOL_WORDS:
+            return _BOOL_WORDS[value.strip().lower()]
+        raise ControlError(f"{action} needs on as true or false")
+    return value  # "camera": any JSON value; _resolve() reports bad ones
 
 
 def tail(path, lines):
@@ -255,11 +376,15 @@ class ControlService:
                     return 200, self._get_settings(query)
                 if route == "/log":
                     return 200, self._log(query)
+                if route == "/daq":
+                    return 200, self._daq()
             elif method == "POST":
                 if route == "/settings":
                     return 200, self._post_settings(body)
                 if route == "/command":
                     return 200, self._post_command(body)
+                if route == "/daq":
+                    return 200, self._post_daq(body)
             else:
                 raise ControlError(f"{method} is not supported here", 405)
             raise ControlError(f"unknown address {route}; GET / lists the API",
@@ -296,10 +421,18 @@ class ControlService:
                                    " settings; camera is optional"),
                 "POST /command": ('{"command": "reference", "camera": N} runs a'
                                   " one-shot command"),
+                "GET /daq": ("the NI DAQ: device, settings, checklist, wiring "
+                             "and what the outputs produce"),
+                "POST /daq": ('{"action": "apply", "settings": {"piezo_on": '
+                              'true}} runs a DAQ action'),
                 "GET /log?lines=200": "the last lines of the run log",
             },
             "settings": settings,
             "commands": {name: text for name, (text, _) in COMMANDS.items()},
+            "daq": {
+                "settings": DAQ_SETTING_TYPES,
+                "actions": {name: text for name, (text, _) in DAQ_ACTIONS.items()},
+            },
         }
 
     def _status(self):
@@ -316,6 +449,7 @@ class ControlService:
             "current": next((channel["index"] for channel in channels
                              if channel["displayed"]), None),
             "channels": [self._channel_detail(channel) for channel in channels],
+            "daq": self.backend.daq_summary(),
         }
 
     def _channel_detail(self, base):
@@ -436,6 +570,44 @@ class ControlService:
         index = self._resolve(payload.get("camera"))["index"]
         result = self.backend.command(index, name, extra)
         return {"ok": True, "camera": index, "command": name, "result": result}
+
+    def _daq(self):
+        """Report the NI DAQ's state.
+
+        Args: None.
+        Returns: The payload for GET /daq.
+        """
+        return {"ok": True, **self.backend.daq()}
+
+    def _post_daq(self, body):
+        """Run one NI DAQ action.
+
+        Args: body carries "action", that action's arguments, and for attach
+            an optional "camera" selecting the target (a position, a serial
+            or a label; default the displayed one).
+        Returns: The payload for POST /daq.
+        """
+        if not isinstance(body, dict):
+            raise ControlError("the body must be a JSON object")
+        payload = dict(body)
+        name = payload.pop("action", None)
+        if name not in DAQ_ACTIONS:
+            raise ControlError(f"unknown DAQ action {name!r}; actions: "
+                               + ", ".join(sorted(DAQ_ACTIONS)))
+        if "camera" in payload and name != "attach":
+            raise ControlError("only attach takes camera")
+        arguments = {}
+        for key, (kind, required) in DAQ_ACTIONS[name][1].items():
+            if key not in payload:
+                if required:
+                    raise ControlError(f"{name} needs {key!r}; GET / describes "
+                                       "the DAQ actions")
+                continue
+            arguments[key] = _coerce_daq_argument(kind, payload[key], name)
+        if name == "attach":
+            arguments["camera_index"] = self._resolve(payload.get("camera"))["index"]
+        result = self.backend.daq_action(name, **arguments)
+        return {"ok": True, "action": name, "result": result}
 
 
 class ControlHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -786,6 +958,74 @@ def add_parser(parser):
                      help=f"how many lines (default {DEFAULT_LOG_LINES})")
     log.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     log.set_defaults(handler=_run_log)
+    _add_daq_parser(actions)
+
+
+def _daq_flags(parser):
+    """Add --json and --port to one daq subcommand parser.
+
+    Args: parser is the parser to add the flags to (a subparser of daq, or
+        daq itself for the bare status form).
+    Returns: None.
+    """
+    parser.add_argument("--json", action="store_true", help="print raw JSON")
+    parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
+
+
+def _add_daq_parser(actions):
+    """Add the "daq" action and its subcommands to cli.py's control parser.
+
+    Args: actions is the control parser's action subparsers.
+    Returns: None.
+    """
+    daq_parser = actions.add_parser(
+        "daq", help="NI DAQ: frequency generator and piezo (status by itself)")
+    _daq_flags(daq_parser)
+    daq_parser.set_defaults(handler=_run_daq, daq_verb="")
+    verbs = daq_parser.add_subparsers(dest="daq_verb", metavar="DAQ ACTION")
+
+    def verb(name, help_text, body):
+        """Add one daq subcommand.
+
+        Args: name is the subcommand; help_text is its help; body is the
+            POST /daq body template ({"action": name} plus fixed fields).
+        Returns: The subparser.
+        """
+        parser = verbs.add_parser(name, help=help_text)
+        _daq_flags(parser)
+        parser.set_defaults(handler=_run_daq, daq_verb=name, body=body)
+        return parser
+
+    verb("scan", "list the NI devices (plus the simulated one)",
+         {"action": "scan"})
+    connect = verb("connect", "connect to a device; every output goes to 0 V",
+                   {"action": "connect"})
+    connect.add_argument("device", metavar="DEVICE",
+                         help='a DAQmx name ("Dev1") or "Simulated"')
+    apply_command = verb("apply", "change DAQ settings and write them",
+                         {"action": "apply"})
+    apply_command.add_argument("changes", nargs="*", type=_change,
+                               metavar="KEY=VALUE",
+                               help="DaqSettings fields (control daq shows them)")
+    verb("zero", "set every output to 0 V", {"action": "zero"})
+    verb("self-test", "step each analog output and read it back",
+         {"action": "self_test"})
+    step = verb("step", "hold the piezo at a level, in volts at the DAQ",
+                {"action": "step"})
+    step.add_argument("volts", type=float, metavar="VOLTS",
+                      help="the level to hold (at most the piezo safety limit)")
+    attach = verb("attach", "give the piezo to a camera's Phase view",
+                  {"action": "attach"})
+    attach.add_argument("camera", nargs="?", default=None, metavar="CAMERA",
+                        help="camera by index, serial or label (default: the "
+                             "displayed one)")
+    verb("detach", "take the piezo away from the Phase view",
+         {"action": "detach"})
+    verb("checklist", "show the safety checklist on the app's screen",
+         {"action": "checklist"})
+    tune = verb("tune", "start or stop the experimental piezo auto-tune",
+                {"action": "tune"})
+    tune.add_argument("state", choices=("on", "off"), metavar="on|off")
 
 
 def run_cli(args):
@@ -914,4 +1154,62 @@ def _run_log(args, port):
     _, payload = request(port, "GET", f"/log?lines={args.lines}")
     for line in payload["lines"]:
         print(line)
+    return 0
+
+
+def _run_daq(args, port):
+    """Run one NI DAQ action, or show the DAQ's state by itself.
+
+    Args: args carries daq_verb, an optional body template, the verb's own
+        arguments and --json; port is the server port.
+    Returns: The exit code, 0, or 1 when the server refused.
+    """
+    if not args.daq_verb:
+        _, payload = request(port, "GET", "/daq")
+    else:
+        body = dict(getattr(args, "body", {}) or {})
+        if getattr(args, "device", None) is not None:
+            body["device"] = args.device
+        if hasattr(args, "changes"):  # apply: no pairs pushes the saved settings
+            body["settings"] = dict(args.changes or {})
+        if getattr(args, "volts", None) is not None:
+            body["volts"] = args.volts
+        if getattr(args, "camera", None) is not None:
+            body["camera"] = args.camera
+        if args.daq_verb == "tune":
+            body["on"] = args.state == "on"
+        _, payload = request(port, "POST", "/daq", body)
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    if args.daq_verb:
+        result = payload.get("result") or {}
+        if result:
+            print("; ".join(f"{key}: {value}" for key, value in result.items()))
+        else:
+            print(f"ran {payload['action']}")
+        return 0
+    daq_status = payload
+    device = daq_status.get("device")
+    if not daq_status.get("connected"):
+        print("NI DAQ: not connected. "
+              "`espi_live control daq connect Simulated` tries the controls "
+              "without hardware.")
+        return 0
+    print(f"NI DAQ: {device['label']}"
+          + ("" if daq_status.get("active") else "  (idle)"))
+    print(f"Outputs: {daq_status.get('summary', '')}")
+    print("Safety checklist: "
+          + ("ticked off for this connection" if daq_status.get("checklist_done")
+             else "not ticked off; apply needs it (daq checklist)"))
+    applied = daq_status.get("settings")
+    if applied:
+        for key, value in applied.items():
+            print(f"{key} = {value}")
+    else:
+        print("settings: none applied since connecting or zeroing")
+    tuning = daq_status.get("tuning") or {}
+    if tuning.get("on") or tuning.get("note"):
+        print(f"auto-tune: {'on' if tuning.get('on') else 'off'}"
+              + (f" ({tuning['note']})" if tuning.get("note") else ""))
     return 0

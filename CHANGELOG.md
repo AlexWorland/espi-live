@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-23 — DAQ and NI USB controls in the remote-control API
+
+### Previous state
+
+- The control server (`python -m espi_live control …`) could drive the cameras only; the frequency generator and piezo driver on the NI USB device could be changed only in the app's NI DAQ window, so a terminal or agent had to reach for the GUI.
+
+### Current state
+
+- `GET /daq` reports the NI device, the settings last applied, the saved ones, the safety checklist's state, the cables the settings need and auto-tune's state; `GET /status` now includes a DAQ summary. `POST /daq` runs every action the NI DAQ window offers: `scan`, `connect`, `apply` (any DaqSettings field, merged over the last applied or saved settings and saved like Apply does), `zero`, `self_test`, `step` (hold the piezo at a level), `attach`/`detach` (the Phase view's piezo, on any camera), `checklist` (shows the safety checklist on the app's screen; ticking it arms the device and applies) and `tune` (auto-tune on/off). The checklist gate is untouched: no drive signal reaches a real device until it is ticked off for the connection.
+- The terminal client wraps it all: `control daq` shows the state, and `control daq scan|connect DEVICE|apply KEY=VALUE…|zero|self-test|step VOLTS|attach [CAMERA]|detach|checklist|tune on|off` run the actions.
+- Changes made through the API are logged with a `Control:` line naming exactly what changed, the NI DAQ window's form follows the new values (device, settings, checkboxes and drop-downs), and demo cameras follow the outputs. DAQ requests coordinate with the window's event polling, so nothing is lost while a terminal command waits for the device's answer.
+
 ## 2026-11-23 — Frequency generator and piezo window fits the screen
 
 ### Previous state
