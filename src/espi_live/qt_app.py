@@ -56,8 +56,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication, 
                                QVBoxLayout, QWidget)
 
 from espi_live import (camera, camera_reports, capture_uploads, codex, daq, error_reports,
-                       feedback, iphone, log_uploads, paths, phase, profiles, simulation, source_code, tips,
-                       ui_scale, updater)
+                       feedback, iphone, log_uploads, paths, phase, profiles, simulation, source_code,
+                       step_tuning, tips, ui_scale, updater)
 from espi_live.channels import demo_channels, open_camera_channels, restore_channel
 from espi_live.engine import LABVIEW_FLOW
 from espi_live.guide import guide_path
@@ -340,6 +340,9 @@ def describe_session(channels, display):
 
 # Amber marks a frozen (held, not live) image; red is reserved for dummy mode.
 FROZEN_STYLE = "background:#e0a000;color:black;font-weight:bold;"
+PIEZO_DEBUG_STYLE = ("background:#101010;color:#7cfc00;font-family:Menlo,Consolas,"
+                     "'DejaVu Sans Mono','Courier New',monospace;padding:4px 8px;")
+PIEZO_DEBUG_WINDOW_S = 2.0  # the overlay's step figures cover the last this many seconds
 # The pixel square's outline on the main image: a bright line with a dark
 # edge reads on every palette. A square smaller than BOX_MIN_SIZE screen
 # pixels is outlined at that size around its center, so a 1×1 square shows.
@@ -2685,6 +2688,18 @@ class DaqDialog(QDialog):
                     "twice the mirror's travel times the cosine of this angle.")
         self.piezo_follow_result = QLabel()
         self.piezo_follow_result.setWordWrap(True)
+        self.auto_tune_button = QPushButton("Auto-tune (experimental)")
+        self.auto_tune_button.setCheckable(True)
+        set_tooltip(self.auto_tune_button,
+                    "Experimental. Tune the applied triangle's frequency from the camera "
+                    "frames for a 180° step per frame, the steadiest Previous-view image, "
+                    "and keep it there. The piezo first holds still for a few seconds to "
+                    "measure the camera noise. Keep the object still while it tunes. "
+                    "Turning it off keeps the tuned frequency (with Follow on, the "
+                    "computed one returns when the frame rate moves).")
+        self.auto_tune_button.toggled.connect(self.window.set_auto_tune)
+        self.piezo_tune_result = QLabel()
+        self.piezo_tune_result.setWordWrap(True)
         self.quarter_wave_v = 0.0  # volts per 90° from Calibrate phase step (0: none)
         self.piezo_step = daq_spin(0.0001, daq.MAX_VOLTS, 4, " V", 0.01)
         set_tooltip(self.piezo_step,
@@ -2722,6 +2737,8 @@ class DaqDialog(QDialog):
         piezo_form.addRow("Amplifier gain", self.piezo_gain)
         piezo_form.addRow("Mirror angle", self.piezo_angle)
         piezo_form.addRow(self.piezo_follow_result)
+        piezo_form.addRow(self.auto_tune_button)
+        piezo_form.addRow(self.piezo_tune_result)
         piezo_form.addRow("Step", step_row)
         piezo_form.addRow("Safety limit", self.piezo_limit)
         piezo_form.addRow(self.piezo_result)
@@ -3009,6 +3026,7 @@ class DaqDialog(QDialog):
         self.problem_label.setText("\n".join(found))
         self.piezo_follow_result.setText("" if found else self._follow_text(s))
         fit_label(self.piezo_follow_result)
+        self.show_auto_tune()
         self.apply_button.setEnabled(self.outputs is not None and not found)
         self.test_button.setEnabled(self.outputs is not None)
         self.safety_label.setText(self._safety_text(s))
@@ -3063,6 +3081,22 @@ class DaqDialog(QDialog):
         if not s.piezo_follow_fps:
             return ""
         return daq.follow_text(s, self.window.received_fps())
+
+    def show_auto_tune(self):
+        """Show whether auto-tune runs and what it is doing.
+
+        Args: None.
+        Returns: None.
+        """
+        tuning = self.window.piezo_tuner is not None
+        self.auto_tune_button.setEnabled(tuning or (
+            self.outputs is not None and self.piezo_output.currentData() != daq.OFF
+            and self.piezo_mode.currentData() == daq.TRIANGLE))
+        self.auto_tune_button.blockSignals(True)
+        self.auto_tune_button.setChecked(tuning)
+        self.auto_tune_button.blockSignals(False)
+        self.piezo_tune_result.setText(self.window.tune_text())
+        fit_label(self.piezo_tune_result)
 
     def follow_frame_rate(self):
         """Show the frequency the newest frame rate needs, while following it.
@@ -3119,6 +3153,8 @@ class DaqDialog(QDialog):
         Args: None.
         Returns: None.
         """
+        if self.window.piezo_tuner is not None:  # new settings replace what it tunes
+            self.window.set_auto_tune(False, "new settings were applied")
         settings = self.settings()
         QSettings("ESPI", "espi_live").setValue(DAQ_SETTINGS_KEY,
                                                 json.dumps(settings.to_dict()))
@@ -4220,6 +4256,11 @@ class MainWindow(QMainWindow):
         self.pixels_dialog = None  # PixelSquareDialog, built on first use
         self.daq = None  # daq.DaqController, made when the DAQ window first opens
         self.piezo_follow_hz = None  # a frame-rate frequency change sent, not yet applied
+        self.piezo_tuner = None  # step_tuning.StepTuner while auto-tune runs
+        self.tune_engine = None  # the engine whose frames it measures
+        self.tune_settings = None  # the applied triangle it tunes
+        self.tune_sent = None  # (DaqSettings, factor, held) last sent by it
+        self.tune_note = ""  # why auto-tune last stopped
         self.daq_drive = daq.Drive()  # what its outputs produce, for demo cameras
         self.daq_dialog = None  # DaqDialog, built on first use
         self.daq_auto = None  # device name startup connects to once the scan ends
@@ -4239,11 +4280,20 @@ class MainWindow(QMainWindow):
         self._styled(self.frozen_banner,
                      FROZEN_STYLE + "padding:4px 12px;margin-top:8px;border-radius:4px;")
         self.frozen_banner.setVisible(False)
+        # The piezo debug readout is a strip along the top of the image area,
+        # so it never covers the image or dummy mode's watermark; it is on
+        # screen only, never in saved frames or recordings.
+        self.piezo_debug = QLabel()
+        self._styled(self.piezo_debug, PIEZO_DEBUG_STYLE)
+        self.piezo_debug.setVisible(False)
         center = QWidget()
         stack = QGridLayout(center)
         stack.setContentsMargins(0, 0, 0, 0)
-        stack.addWidget(self.view, 0, 0)
-        stack.addWidget(self.frozen_banner, 0, 0, Qt.AlignTop | Qt.AlignHCenter)
+        stack.setSpacing(0)
+        stack.addWidget(self.piezo_debug, 0, 0)
+        stack.addWidget(self.view, 1, 0)
+        stack.addWidget(self.frozen_banner, 1, 0, Qt.AlignTop | Qt.AlignHCenter)
+        stack.setRowStretch(1, 1)
         self.setCentralWidget(center)
         # The controls dock takes the full window height; the log sits under
         # the image only.
@@ -6186,6 +6236,15 @@ class MainWindow(QMainWindow):
                     "running. Shortcut: Space.")
         self.freeze_action.triggered.connect(self.set_frozen)
         menu.addAction(self.freeze_action)
+        self.piezo_debug_action = QAction("Piezo debug overlay", self)
+        self.piezo_debug_action.setCheckable(True)
+        set_tooltip(self.piezo_debug_action,
+                    "Show the piezo's numbers in a strip above the image: the frame rate "
+                    "received, the triangle applied and computed, the phase step per "
+                    "frame measured from the frames, flicker and auto-tune. On screen "
+                    "only: saved frames and recordings never show it.")
+        self.piezo_debug_action.triggered.connect(self._show_piezo_debug)
+        menu.addAction(self.piezo_debug_action)
         menu.addSeparator()
         # The live image has no tooltip: a popup there would hide the measurement.
         # The shortcut list lives here instead.
@@ -6883,6 +6942,9 @@ class MainWindow(QMainWindow):
         """
         if self.daq is None or self.closing:
             return
+        if self.piezo_tuner is not None:  # auto-tune follows the frame rate itself
+            self._run_tuner()
+            return
         applied = self.daq.status()["settings"]
         if applied is None or not applied.piezo_on:
             return
@@ -6900,6 +6962,186 @@ class MainWindow(QMainWindow):
                        f"{settings.piezo_phase_per_frame_deg:g}° per frame.")
         self.daq.request("apply", settings=settings)
 
+    def set_auto_tune(self, on, reason=""):
+        """Start or stop the experimental auto-tune of the piezo triangle.
+
+        It needs an applied triangle with the piezo on. Stopping by hand keeps
+        the tuned frequency (and puts the triangle back after the noise
+        hold); stopping for a reason (the DAQ stopped, settings changed) sends
+        nothing.
+
+        Args: on is True to start; reason says why it stops, "" when the
+            user turned it off.
+        Returns: None.
+        """
+        if on and self.piezo_tuner is None:
+            applied = self.daq.status()["settings"] if self.daq is not None else None
+            if applied is None or not applied.piezo_on or \
+                    applied.piezo_output == daq.OFF or applied.piezo_mode != daq.TRIANGLE:
+                self.tune_note = ("Auto-tune needs a piezo triangle: choose Triangle, tick "
+                                  "Piezo on and Apply first.")
+            else:
+                self.piezo_tuner = step_tuning.StepTuner()
+                self.tune_engine, self.tune_settings = self.engine, applied
+                self.tune_sent, self.tune_note = None, ""
+                self.log.write("Auto-tune (experimental): on. The piezo holds still to "
+                               "measure the camera noise, then the triangle's frequency is "
+                               "tuned for a 180° step per frame. Keep the object still.")
+        elif not on and self.piezo_tuner is not None:
+            tuner, self.piezo_tuner = self.piezo_tuner, None
+            wanted = self._tune_target(tuner.scale, False)
+            self.tune_note = f"Auto-tune stopped: {reason}." if reason else ""
+            if reason:
+                self.log.write(f"Auto-tune (experimental): stopped, {reason}.")
+            else:
+                self.log.write(f"Auto-tune (experimental): off; the triangle keeps "
+                               f"{wanted.piezo_frequency_hz:.4g} Hz (×{tuner.scale:.3f}).")
+                if self.tune_sent is None or self.tune_sent[0] != wanted:
+                    self._send_tuned(wanted)
+        self._sync_step_monitor()
+        if self.daq_dialog is not None:
+            self.daq_dialog.show_auto_tune()
+
+    def tune_text(self):
+        """Say what auto-tune is doing, or why it last stopped.
+
+        Args: None.
+        Returns: One sentence, or "".
+        """
+        if self.piezo_tuner is not None:
+            return self.piezo_tuner.describe()
+        return self.tune_note
+
+    def _tune_target(self, scale, hold):
+        """Work out the piezo settings auto-tune wants now.
+
+        Args: scale is the tuner's factor on the frequency; hold is True while
+            it measures the noise with the piezo still.
+        Returns: daq.DaqSettings: the tuned triangle (its frequency follows
+            the frame rate when Follow is on), or the piezo held at the
+            triangle's centre.
+        """
+        base = self.tune_settings
+        if hold:
+            return replace(base, piezo_mode=daq.HOLD,
+                           piezo_voltage_v=(base.piezo_bottom_v + base.piezo_top_v) / 2)
+        frequency = base.piezo_frequency_hz
+        if base.piezo_follow_fps:
+            computed, _ = daq.follow_frequency(base, self.received_fps())
+            frequency = computed or frequency
+        frequency = min(daq.MAX_TRIANGLE_HZ, max(daq.MIN_TRIANGLE_HZ, frequency * scale))
+        return replace(base, piezo_frequency_hz=frequency)
+
+    def _send_tuned(self, settings):
+        """Apply settings auto-tune chose, if the safety checklist allows them.
+
+        Args: settings is daq.DaqSettings.
+        Returns: True when they were sent.
+        """
+        if not self.daq.is_armed(settings):
+            return False
+        self.daq.request("apply", settings=settings)
+        return True
+
+    def _run_tuner(self):
+        """Measure, let the tuner decide, and apply what it wants.
+
+        Args: None.
+        Returns: None.
+        """
+        tuner = self.piezo_tuner
+        if self.engine is not self.tune_engine:
+            self.set_auto_tune(False, "the displayed camera changed")
+            return
+        if self.engine.settings().mode == "Phase":
+            self.set_auto_tune(False, "the Phase view steps the piezo itself; use the "
+                               "Previous view")
+            return
+        now = time.monotonic()
+        before = tuner.state
+        tuner.update(now, self.tune_engine.step_monitor)
+        if tuner.state != before and tuner.state in ("holding", "lost"):
+            self.log.write(f"Auto-tune (experimental): {tuner.describe()}")
+        wanted = self._tune_target(tuner.scale, tuner.wants_hold)
+        sent = self.tune_sent
+        key = (tuner.scale, tuner.wants_hold)
+        if sent is not None and (sent[1], sent[2]) == key:
+            old = sent[0].piezo_frequency_hz
+            if abs(wanted.piezo_frequency_hz - old) <= daq.FOLLOW_TOLERANCE * old:
+                return  # nothing new (a small frame-rate drift is left alone)
+        if not self._send_tuned(wanted):
+            self.set_auto_tune(False, "the safety checklist does not cover these outputs")
+            return
+        self.tune_sent = (wanted, tuner.scale, tuner.wants_hold)
+        tuner.changed(now)
+        if not tuner.wants_hold:
+            self.log.write(f"Auto-tune (experimental): {wanted.piezo_frequency_hz:.4g} Hz "
+                           f"(×{tuner.scale:.3f}).")
+
+    def _sync_step_monitor(self):
+        """Measure the step only on the displayed camera, and only when needed.
+
+        Args: None.
+        Returns: None.
+        """
+        wanted = self.piezo_tuner is not None or self.piezo_debug_action.isChecked()
+        for channel in self.channels:
+            engine = channel.engine
+            if engine is not None:
+                on = wanted and channel is self.current
+                if engine.step_monitor.on != on:
+                    engine.step_monitor.switch(on)
+
+    def _show_piezo_debug(self, *_):
+        """Draw or hide the piezo debug overlay over the image.
+
+        Args: _ is the menu action's checked state (ignored; the action is read).
+        Returns: None.
+        """
+        on = self.piezo_debug_action.isChecked()
+        self.piezo_debug.setVisible(on)
+        if on:
+            self._sync_step_monitor()
+            self.piezo_debug.setText(self.piezo_debug_text())
+
+    def piezo_debug_text(self):
+        """Build the overlay's lines from the DAQ, the frames and auto-tune.
+
+        Args: None.
+        Returns: Text of a few lines.
+        """
+        fps = self.received_fps()
+        lines = [f"camera   {fps:.1f} fps received"]
+        applied = self.daq.status()["settings"] if self.daq is not None else None
+        if applied is None or not applied.piezo_on or applied.piezo_output == daq.OFF:
+            lines.append("piezo    not driven")
+        elif applied.piezo_mode == daq.TRIANGLE:
+            lines.append(f"piezo    triangle {applied.piezo_bottom_v:g}–"
+                         f"{applied.piezo_top_v:g} V at {applied.piezo_frequency_hz:.4g} Hz")
+            computed, reason = daq.follow_frequency(applied, fps)
+            lines.append("formula  " + (
+                f"{computed:.4g} Hz for {applied.piezo_phase_per_frame_deg:g}°/frame"
+                if computed is not None else reason))
+        elif applied.piezo_mode == daq.HOLD:
+            lines.append(f"piezo    held at {applied.piezo_voltage_v:g} V")
+        else:
+            lines.append(f"piezo    sine {applied.piezo_amplitude_v:g} V peak")
+        tuner = self.piezo_tuner
+        noise = tuner.noise if tuner is not None else 0.0
+        stats = self.engine.step_monitor.stats(time.monotonic() - PIEZO_DEBUG_WINDOW_S,
+                                               noise)
+        if stats is None:
+            lines.append("step     waiting for frames")
+        else:
+            measured = "" if noise else " (noise not taken off)"
+            lines.append(f"step     {stats.step_deg:.0f}°/frame  D2/D1 {stats.q:.2f}"
+                         f"{measured}")
+            lines.append(f"D1       {stats.d1:.4g}  noise {noise:.4g}  flicker "
+                         f"{stats.flicker:.0%}")
+        if tuner is not None:  # short, so the overlay stays clear of the watermark
+            lines.append(f"tune     {tuner.state} ×{tuner.scale:.3f}")
+        return "\n".join(lines)
+
     def _daq_event(self, kind, payload):
         """Follow the piezo: attach it to the Phase view, or take it away.
 
@@ -6913,6 +7155,10 @@ class MainWindow(QMainWindow):
         """
         if kind in ("applied", "rejected", "zeroed", "failed", "closed", "fault"):
             self.piezo_follow_hz = None  # a frequency change sent has been answered
+        if kind in ("rejected", "zeroed", "failed", "closed", "fault") and \
+                self.piezo_tuner is not None:
+            self.set_auto_tune(False, f"the NI DAQ outputs were {kind}"
+                               if kind != "rejected" else "the NI DAQ refused a setting")
         if kind == "devices" and self.daq_auto is not None and self.daq_dialog is None:
             wanted, self.daq_auto = self.daq_auto, None
             names = [info.name for info in payload[0]] + [daq.SIMULATED]
@@ -7307,6 +7553,8 @@ class MainWindow(QMainWindow):
             self.log_view.appendPlainText(text.rstrip("\n"))
         self.poll_daq()  # the drive for demo cameras and the piezo for the Phase view
         self._follow_frame_rate()
+        self._sync_step_monitor()
+        self._show_piezo_debug()
         now = time.monotonic()
         if now - self.fps_window_start >= 1.0:
             self.display_fps = self.drawn_frames / (now - self.fps_window_start)
