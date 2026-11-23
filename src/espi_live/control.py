@@ -100,8 +100,13 @@ DAQ_ACTIONS = {
                {"camera": ("camera", False)}),
     "detach": ("take the piezo away from the Phase view", {}),
     "checklist": ("show the NI DAQ safety checklist on the app's screen for "
-                  "these settings; ticking it arms the device and applies",
+                  "these settings and return its items; ticking it on screen, "
+                  "or the approve action, arms the device and applies",
                   {"settings": ("settings", False)}),
+    "approve": ("tick off the checklist that checklist put on screen (needs "
+                "confirm true: every item holds for this wiring), arm the "
+                "device and apply those settings",
+                {"confirm": ("flag", True)}),
     "tune": ("start or stop the experimental piezo auto-tune",
              {"on": ("flag", True)}),
 }
@@ -1067,8 +1072,15 @@ def _add_daq_parser(actions):
                              "displayed one)")
     verb("detach", "take the piezo away from the Phase view",
          {"action": "detach"})
-    verb("checklist", "show the safety checklist on the app's screen",
-         {"action": "checklist"})
+    checklist = verb("checklist", "show the safety checklist on the app's screen",
+                     {"action": "checklist"})
+    checklist.add_argument("changes", nargs="*", type=_change, metavar="KEY=VALUE",
+                           help="DaqSettings fields to show it for (default: the "
+                                "settings as they are)")
+    approve = verb("approve", "tick off the shown checklist, arm and apply",
+                   {"action": "approve"})
+    approve.add_argument("--yes", action="store_true", required=True,
+                         help="every checklist item (daq checklist) holds for this wiring")
     tune = verb("tune", "start or stop the experimental piezo auto-tune",
                 {"action": "tune"})
     tune.add_argument("state", choices=("on", "off"), metavar="on|off")
@@ -1246,6 +1258,8 @@ def _run_daq(args, port):
             body["device"] = args.device
         if hasattr(args, "changes"):  # apply: no pairs pushes the saved settings
             body["settings"] = dict(args.changes or {})
+        if args.daq_verb == "approve":
+            body["confirm"] = bool(args.yes)
         if getattr(args, "volts", None) is not None:
             body["volts"] = args.volts
         if getattr(args, "camera", None) is not None:
@@ -1258,7 +1272,12 @@ def _run_daq(args, port):
         return 0
     if args.daq_verb:
         result = payload.get("result") or {}
-        if result:
+        if args.daq_verb == "checklist" and result.get("items"):
+            print("Safety checklist, now on the app's screen:")
+            for number, item in enumerate(result["items"], 1):
+                print(f"  {number}. {item}")
+            print("Check each one, then: espi_live control daq approve --yes")
+        elif result:
             print("; ".join(f"{key}: {value}" for key, value in result.items()))
         else:
             print(f"ran {payload['action']}")
@@ -1275,7 +1294,9 @@ def _run_daq(args, port):
     print(f"Outputs: {daq_status.get('summary', '')}")
     print("Safety checklist: "
           + ("ticked off for this connection" if daq_status.get("checklist_done")
-             else "not ticked off; apply needs it (daq checklist)"))
+             else "not ticked off; apply needs it (daq checklist, then daq approve --yes)")
+          + ("; a checklist is on the app's screen" if daq_status.get("checklist_pending")
+             else ""))
     applied = daq_status.get("settings")
     if applied:
         for key, value in applied.items():
