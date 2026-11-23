@@ -1014,3 +1014,215 @@ class PhaseWindowTests(DaqWindowTestCase):
         self.assertEqual((w.phase_steps.currentData(), w.phase_filter.spin.value(),
                           w.phase_settle.spin.value()), (5, 11, 1))
         self.assertEqual(self.engine.settings().phase_steps, 4)  # not sent back
+
+
+class AutoTuneTests(DaqWindowTestCase):
+    """The experimental auto-tune of the piezo triangle and the debug overlay."""
+
+    TRIANGLE = daq.DaqSettings(piezo_on=True, piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.5,
+                               piezo_top_v=9.5, piezo_limit_v=10.0, piezo_frequency_hz=0.25)
+
+    def controller(self, settings=TRIANGLE):
+        """Give the window a stand-in DAQ controller with settings applied.
+
+        Args: settings is the daq.DaqSettings it reports as applied.
+        Returns: The mock controller.
+        """
+        controller = mock.Mock()
+        controller.status.return_value = {"settings": settings, "device": REAL}
+        controller.is_armed.return_value = True
+        self.window.daq = controller
+        self.addCleanup(setattr, self.window, "daq", None)
+        return controller
+
+    def sent(self, controller):
+        """List the settings the window applied.
+
+        Args: controller is the mock controller.
+        Returns: A list of daq.DaqSettings.
+        """
+        return [call.kwargs["settings"] for call in controller.request.call_args_list
+                if call.args == ("apply",)]
+
+    def test_needs_an_applied_triangle(self):
+        """Without a DAQ, or with a held piezo, it explains and stays off.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        w.set_auto_tune(True)
+        self.assertIsNone(w.piezo_tuner)
+        self.assertIn("needs a piezo triangle", w.tune_text())
+        self.controller(daq.replace(self.TRIANGLE, piezo_mode=daq.HOLD))
+        w.set_auto_tune(True)
+        self.assertIsNone(w.piezo_tuner)
+        w.set_auto_tune(False)  # already off: nothing happens
+        self.assertIsNone(w.piezo_tuner)
+
+    def test_holds_for_the_noise_then_tunes_and_keeps_the_result(self):
+        """On: the piezo is held at the centre, then the triangle is tuned; off keeps it.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        controller = self.controller()
+        w.set_auto_tune(True)
+        tuner = w.piezo_tuner
+        self.assertIsNotNone(tuner)
+        self.assertTrue(w.engine.step_monitor.on)
+        self.assertTrue(self.log.has("Auto-tune (experimental): on"))
+        self.assertIn("held still", w.tune_text())
+        w._follow_frame_rate()  # runs the tuner
+        hold = self.sent(controller)[-1]
+        self.assertEqual((hold.piezo_mode, hold.piezo_voltage_v), (daq.HOLD, 5.0))
+        w._run_tuner()  # nothing new to send
+        self.assertEqual(len(self.sent(controller)), 1)
+        tuner.state, tuner.scale = "measuring", 0.8  # the noise was measured
+        w._run_tuner()
+        tuned = self.sent(controller)[-1]
+        self.assertEqual(tuned.piezo_mode, daq.TRIANGLE)
+        self.assertAlmostEqual(tuned.piezo_frequency_hz, 0.2)
+        self.assertTrue(self.log.has("Auto-tune (experimental): 0.2 Hz (×0.800)"))
+        tuner.last = qt_app.step_tuning.StepStats(0.05, 176.0, 0.02, 90, 300.0)
+        with mock.patch.object(tuner, "update",
+                               side_effect=lambda *_: setattr(tuner, "state", "holding")):
+            w._run_tuner()
+        self.assertTrue(self.log.has("Auto-tune (experimental): Auto-tune: holding ×0.800; "
+                                     "step about 176° per frame"))
+        w.set_auto_tune(False)  # by hand: the tuned frequency stays, nothing new to send
+        self.assertEqual(len(self.sent(controller)), 2)
+        self.assertTrue(self.log.has("off; the triangle keeps 0.2 Hz"))
+        self.assertFalse(w.engine.step_monitor.on)
+        self.assertEqual(w.tune_text(), "")
+
+    def test_turning_off_during_the_noise_hold_puts_the_triangle_back(self):
+        """Stopped by hand while held, the triangle is applied again.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        controller = self.controller()
+        w.set_auto_tune(True)
+        w._run_tuner()
+        w.set_auto_tune(False)
+        self.assertEqual(self.sent(controller)[-1], self.TRIANGLE)
+
+    def test_follow_and_frequency_limits(self):
+        """With Follow on the frame rate sets the base; the result stays in range.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        follow = daq.replace(self.TRIANGLE, piezo_follow_fps=True, piezo_quarter_wave_v=0.075)
+        self.controller(follow)
+        w.set_auto_tune(True)
+        with mock.patch.object(w, "received_fps", return_value=20.0):
+            self.assertAlmostEqual(w._tune_target(1.0, False).piezo_frequency_hz,
+                                   20.0 * 0.075 / 9.0)
+        with mock.patch.object(w, "received_fps", return_value=0.0):
+            self.assertEqual(w._tune_target(1.0, False).piezo_frequency_hz, 0.25)
+        w.tune_settings = daq.replace(self.TRIANGLE, piezo_frequency_hz=900.0)
+        self.assertEqual(w._tune_target(4.0, False).piezo_frequency_hz,
+                         daq.MAX_TRIANGLE_HZ)
+
+    def test_what_stops_it(self):
+        """A camera switch, the Phase view, the checklist or the DAQ stop it.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        controller = self.controller()
+        w.set_auto_tune(True)
+        w.tune_engine = mock.Mock()
+        w._run_tuner()
+        self.assertIn("the displayed camera changed", w.tune_text())
+        w.set_auto_tune(True)
+        self.engine.update_settings(mode="Phase")
+        w._run_tuner()
+        self.assertIn("Phase view steps the piezo", w.tune_text())
+        self.engine.update_settings(mode="Previous")
+        w.set_auto_tune(True)
+        controller.is_armed.return_value = False
+        w._run_tuner()
+        self.assertIn("safety checklist", w.tune_text())
+        self.assertFalse(w._send_tuned(self.TRIANGLE))
+        controller.is_armed.return_value = True
+        for kind, words in (("zeroed", "outputs were zeroed"),
+                            ("rejected", "refused a setting")):
+            w.set_auto_tune(True)
+            w._daq_event(kind, ["no"] if kind == "rejected" else None)
+            self.assertIsNone(w.piezo_tuner)
+            self.assertIn(words, w.tune_text())
+        self.assertTrue(self.log.has("Auto-tune (experimental): stopped, the NI DAQ"))
+
+    def test_dialog_button_follows_the_tuner(self):
+        """The DAQ window's button starts it, shows it, and Apply stops it.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        w = self.window
+        self.assertFalse(dialog.auto_tune_button.isEnabled())  # hold mode in the form
+        dialog._set_combo(dialog.piezo_mode, daq.TRIANGLE)
+        self.assertTrue(dialog.auto_tune_button.isEnabled())
+        dialog.auto_tune_button.click()  # nothing applied yet
+        self.assertFalse(dialog.auto_tune_button.isChecked())
+        self.assertIn("needs a piezo triangle", dialog.piezo_tune_result.text())
+        real = w.daq
+        self.controller()
+        dialog.auto_tune_button.click()
+        self.assertTrue(dialog.auto_tune_button.isChecked())
+        self.assertIn("held still", dialog.piezo_tune_result.text())
+        w.daq = real
+        dialog.apply()  # new settings replace what it tunes
+        self.assertIsNone(w.piezo_tuner)
+        self.assertFalse(dialog.auto_tune_button.isChecked())
+        self.assertIn("new settings were applied", dialog.piezo_tune_result.text())
+
+    def test_debug_overlay(self):
+        """The overlay draws the frame rate, piezo, formula, step and tuner lines.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        self.assertFalse(w.piezo_debug.isVisible())
+        self.assertIn("Piezo debug overlay", w.piezo_debug_action.text())
+        w.piezo_debug_action.trigger()
+        self.assertTrue(w.piezo_debug_action.isChecked())
+        self.assertFalse(w.piezo_debug.isHidden())
+        self.assertTrue(w.engine.step_monitor.on)
+        text = w.piezo_debug.text()
+        self.assertIn("camera   ", text)
+        self.assertIn("fps received", text)
+        self.assertIn("piezo    not driven", text)
+        self.assertIn("step     waiting for frames", text)
+        controller = self.controller(daq.replace(self.TRIANGLE, piezo_follow_fps=True,
+                                                 piezo_quarter_wave_v=0.075))
+        monitor = w.engine.step_monitor
+        for n in range(5):
+            monitor.feed(qt_app.np.full((8, 8), float(n % 2) * 10), time.monotonic())
+        text = w.piezo_debug_text()
+        self.assertIn("triangle 0.5–9.5 V at 0.25 Hz", text)
+        self.assertIn("formula  ", text)
+        self.assertIn("(noise not taken off)", text)
+        self.assertIn("flicker", text)
+        w.set_auto_tune(True)
+        w.piezo_tuner.noise = 1.0
+        text = w.piezo_debug_text()
+        self.assertNotIn("noise not taken off", text)
+        self.assertIn("tune     noise ×1.000", text)
+        for settings, words in ((daq.replace(self.TRIANGLE, piezo_mode=daq.HOLD,
+                                             piezo_voltage_v=2.0), "held at 2 V"),
+                                (daq.replace(self.TRIANGLE, piezo_mode=daq.SINE,
+                                             piezo_amplitude_v=0.3), "sine 0.3 V peak")):
+            controller.status.return_value["settings"] = settings
+            self.assertIn(words, w.piezo_debug_text())
+        w.piezo_debug_action.trigger()
+        self.assertTrue(w.piezo_debug.isHidden())

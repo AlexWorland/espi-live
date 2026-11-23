@@ -1397,6 +1397,12 @@ python -m espi_live</code></pre>
             uses one camera pixel per screen pixel.</li>
           <li><strong>Freeze display</strong> (<kbd>Space</kbd>) — hold the
             displayed image without saving it; the camera keeps running.</li>
+          <li><strong>Piezo debug overlay</strong> — show the piezo's numbers
+            in a strip along the top of the image area: frames received per second, the triangle
+            applied and the frequency the formula gives, the phase step per
+            frame measured from the frames (with D2/D1, D1, the camera noise and
+            flicker) and what auto-tune is doing. On screen only: saved frames
+            and recordings never show it.</li>
         </ul>
         <p>Docks can also be dragged by their title bars. Dropping one outside
           the main window floats it; closing a dock hides it. The layout is
@@ -1641,7 +1647,21 @@ python -m espi_live</code></pre>
           <strong>Mirror angle</strong> (the angle of incidence, 45° in the
           lab) for the HeNe laser (632.8 nm). Both are approximate (an
           open-loop piezo's travel varies with the span), so fine-tune
-          <strong>Phase per frame</strong> by eye.</p></li>
+          <strong>Phase per frame</strong> by eye.</p>
+          <p><strong>Auto-tune (experimental)</strong> tunes the applied
+          triangle's frequency from the camera frames instead, for a 180° step
+          per frame, where the Previous-view difference is strongest and
+          steadiest, and keeps it there. Apply a triangle with
+          <strong>Piezo on</strong> first, use the Previous view and keep the
+          object still. The piezo first holds still at the triangle's centre for
+          a few seconds to measure the camera noise; then it compares frames one
+          and two apart (at a 180° step, frames two apart match), finds which
+          side of 180° the step is on with a small trial change, jumps close,
+          and finishes with small steps. Each change restarts the triangle and
+          is logged. It stops by itself when the displayed camera changes, the
+          Phase view is chosen, new settings are applied or the outputs stop;
+          if it cannot find the step it goes back to the computed frequency and
+          says so. Turning it off keeps the tuned frequency.</p></li>
         <li><strong>Safety limit</strong> — each role refuses any setting that
           would go beyond this many volts. Set it to your amplifier's largest
           safe input before switching anything on. The piezo driver never goes
