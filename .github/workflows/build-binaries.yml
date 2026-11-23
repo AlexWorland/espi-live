@@ -393,6 +393,10 @@ jobs:
           # daq.py imports pyLabLib's NI module (and through it nidaqmx) lazily. The
           # NI-DAQmx driver itself is installed on the camera PC, not bundled.
           args+=(--hidden-import pylablib.devices.NI --hidden-import nidaqmx --collect-all nidaqmx)
+          # nidaqmx and nitypes read their own version from the installed package's
+          # metadata when imported; without it the import fails inside the build and
+          # pyLabLib reports "nidaqmx not installed".
+          args+=(--recursive-copy-metadata nidaqmx)
           # A folder (onedir) starts at once, where a single self-extracting
           # file unpacks everything to a temporary folder on every start. Each
           # build keeps its libraries in its own _internal-N (N = build number)
@@ -432,6 +436,13 @@ jobs:
           case "$check_out" in
             *"cv2_enumerate_cameras available"*) ;;
             *) echo "::error::the binary cannot import cv2_enumerate_cameras"; exit 1 ;;
+          esac
+          # The NI DAQ window needs pyLabLib and nidaqmx importable in the frozen
+          # program (the NI-DAQmx driver is not needed to import them); "not
+          # installed" would ship a build that offers only the simulated device.
+          case "$check_out" in
+            *"NI DAQ: pyLabLib and nidaqmx available"*) ;;
+            *) echo "::error::the binary cannot import pyLabLib and nidaqmx"; exit 1 ;;
           esac
           shopt -s dotglob
           entries=(dist/espi-live/*)

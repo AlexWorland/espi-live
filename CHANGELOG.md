@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-22 — The Windows build can reach the NI DAQ again
+
+### Previous state
+
+- The prebuilt Windows program (v0.17.0, build 62) could not use a real NI DAQ: `espi-live.exe --check` said `NI DAQ: pyLabLib and nidaqmx not installed`, and the DAQ window offered only the simulated device. nidaqmx reads its own version from its package metadata when it is imported, and the build bundled the code without that metadata, so the import failed and pyLabLib treated nidaqmx as missing.
+
+### Current state
+
+- The build bundles the package metadata of nidaqmx and its dependencies, so the program finds a connected USB-6251 (or any NI-DAQmx device) again.
+- The build's smoke test fails when the program cannot import pyLabLib and nidaqmx, so a build without NI DAQ support is never published. The Quick release smoke test also gained the video-device enumerator check that Release already had.
+
 ## 2026-11-22 — Headless batch runs (`--headless`)
 
 ### Previous state
