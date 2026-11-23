@@ -2314,6 +2314,29 @@ PYTHONPATH=src python -m espi_live control log --lines 100        # the run log'
         section shows what was actually used. A camera that is not
         processing must be started first:
         <code>run processing_on --camera …</code>.</p>
+      <p>The NI DAQ has its own pair of endpoints, covering everything the
+        <strong>Frequency generator and piezo (NI DAQ)</strong> window can do.
+        <code>GET /daq</code> reports the connected device, the settings last
+        applied, the saved ones, the safety checklist's state, the cables the
+        settings need and what auto-tune is doing. <code>POST /daq</code> runs
+        an action: <code>{"action": "apply", "settings": {"piezo_on": true,
+        "piezo_mode": "triangle"}}</code> changes any <code>DaqSettings</code>
+        field and writes it to the device, and <code>scan</code>,
+        <code>connect</code>, <code>zero</code>, <code>self_test</code>,
+        <code>step</code> (hold the piezo at a level), <code>attach</code> and
+        <code>detach</code> (the Phase view's piezo), <code>checklist</code> and
+        <code>tune</code> cover the rest. The terminal client wraps them:
+        <code>control daq</code> shows the state and <code>control daq
+        scan|connect DEVICE|apply KEY=VALUE…|zero|self-test|step VOLTS|attach
+        [CAMERA]|detach|checklist|tune on|off</code> runs an action.</p>
+      <p>DAQ changes made through the API behave like ones made in the window:
+        they are written to the run log marked <code>Control:</code>, the NI
+        DAQ window's form follows the new values, and a demo camera's signal
+        follows the outputs. The safety checklist keeps its gate: an
+        <code>apply</code> that would drive a real device is refused until the
+        checklist has been ticked off for this connection — run the
+        <code>checklist</code> action to show it on the app's screen, tick it
+        there, and the settings apply.</p>
       <p>The chosen port is written to
         <code>output/control.json</code> for the client to find; start the
         app with <code>--control-port N</code> to fix the port (useful with

@@ -128,6 +128,28 @@ class FakeBackend:
         self._check()
         return self.log_lines[-lines:]
 
+    def daq(self):
+        """Return the DAQ description (not connected, like a fresh app).
+
+        Args: None.
+        Returns: A dict as qt_app.ControlBackend.daq() does.
+        """
+        self._check()
+        return {"connected": False, "device": None, "active": False,
+                "summary": "Not connected", "settings": None, "saved": {},
+                "checklist_done": False, "problems": [], "wiring": [],
+                "tuning": {"on": False, "note": ""}}
+
+    def daq_summary(self):
+        """Return the DAQ summary for /status.
+
+        Args: None.
+        Returns: A small dict.
+        """
+        self._check()
+        return {"connected": False, "device": None, "active": False,
+                "summary": "Not connected", "checklist_done": False}
+
 
 def response_of(raw):
     """Split a handler's raw HTTP response into status and payload.
