@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-22 — Headless batch runs (`--headless`)
+
+### Previous state
+
+- The program needed a window and PySide6 to run at all, so an unattended recording meant leaving the viewer open.
+
+### Current state
+
+- `espi_live --headless --config run.json --duration 600 --record` opens the cameras, applies the config's settings, records an AVI per camera, optionally saves a PNG every `--save-interval` seconds, and exits after the duration or on Ctrl+C / SIGTERM, finishing the recordings first.
+- When it ends, the run's recordings and frames are copied to the private captures repository (same repository and token as the scheduled uploads: `ESPI_CAPTURES_TOKEN` or `captures-token.txt`), shrunk in a copy when over their size budget (stills 3 MB, clips 20 MB). `--no-upload` keeps them local; demo runs never upload.
+- No DAQ or Phase-view control in headless runs. Has no tests yet.
+
 ## 2026-11-22 — The NI DAQ drives the piezo amplifier with a triangle, never below 0 V
 
 ### Previous state
