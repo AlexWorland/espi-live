@@ -46,6 +46,22 @@ def cli(argv=None):
     parser.add_argument("--no-error-reports", action="store_true",
                         help="don't send unexpected errors to GitHub as issues "
                              "(also ESPI_ERROR_REPORTS=0)")
+    parser.add_argument("--headless", action="store_true",
+                        help="run without a window: open the cameras, apply --config, "
+                             "record or save frames, upload the outputs and exit "
+                             "(Ctrl+C or SIGTERM stops cleanly)")
+    parser.add_argument("--config", metavar="FILE",
+                        help="JSON settings file for --headless (see espi_live/headless.py)")
+    parser.add_argument("--duration", type=float, default=None, metavar="SECONDS",
+                        help="--headless: stop after this many seconds (default: run "
+                             "until a signal)")
+    parser.add_argument("--record", action="store_true",
+                        help="--headless: record an AVI of each camera")
+    parser.add_argument("--save-interval", type=float, default=None, metavar="SECONDS",
+                        help="--headless: also save a PNG of each camera this often")
+    parser.add_argument("--no-upload", action="store_true",
+                        help="--headless: keep the outputs local, don't send them to "
+                             "the captures repository")
     args = parser.parse_args(argv)
     if args.version:
         print(updater.describe_build())
@@ -57,6 +73,9 @@ def cli(argv=None):
     if args.send_changes:
         from espi_live import changes
         sys.exit(changes.send_from_cli())
+    if args.headless:
+        from espi_live import headless
+        sys.exit(headless.main(args))
     try:
         from espi_live import qt_app
     except ImportError as exc:
