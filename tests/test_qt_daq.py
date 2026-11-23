@@ -20,6 +20,9 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 
 from espi_live import daq, qt_app
+from espi_live.camera import CameraInfo
+from espi_live.channels import Channel
+from espi_live.engine import Engine
 from test_qt_app import APP, FakeSettings, WindowTestCase
 
 REAL = daq.DeviceInfo("Dev1", "USB-6251", "1A2B3C4D")
@@ -784,9 +787,6 @@ class HelperTests(unittest.TestCase):
         self.assertEqual((spin.suffix(), spin.singleStep()), (" V", 0.5))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class PhaseWindowTests(DaqWindowTestCase):
     """The window follows the piezo: Phase view, steps, calibration."""
@@ -937,21 +937,21 @@ class PhaseWindowTests(DaqWindowTestCase):
         w.calibrate_phase()
         self.assertEqual(self.engine.settings().mode, "Phase")
         self.assertIn(("calibrate_phase", {}), self.queued())
-        w._handle_event(w.current, "phase_calibrated", (72.0, 0.0625))
+        w._handle_event(w.current, "phase_calibrated", (72.0, 0.0625, 1))
         self.assertEqual(w.phase_stepper.step_v, 0.0625)
         self.assertIs(self.engine.phase_stepper, w.phase_stepper)
         saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
         self.assertEqual(saved["piezo_step_v"], 0.0625)
         self.assertIn("now 0.0625 V per step", w.statusBar().currentMessage())
         w._show_daq_dialog()
-        w._handle_event(w.current, "phase_calibrated", (88.0, 0.07))
+        w._handle_event(w.current, "phase_calibrated", (88.0, 0.07, 1))
         self.assertEqual(w.daq_dialog.piezo_step.value(), 0.07)
-        w._handle_event(w.current, "phase_calibration_failed", 12.0)
+        w._handle_event(w.current, "phase_calibration_failed", (12.0, 1))
         self.assertIn("12° per step", w.statusBar().currentMessage())
         w._handle_event(w.current, "phase_stopped", "gone")
         self.assertIsNone(w.phase_stepper)
         self.assertIn("Phase view stopped: gone", w.statusBar().currentMessage())
-        w._handle_event(w.current, "phase_calibrated", (90.0, 0.08))  # no piezo now
+        w._handle_event(w.current, "phase_calibrated", (90.0, 0.08, 1))  # no piezo now
         self.assertIsNone(w.phase_stepper)
         w._handle_event(mock.Mock(), "phase_stopped", "elsewhere")  # not displayed
 
@@ -964,11 +964,11 @@ class PhaseWindowTests(DaqWindowTestCase):
         w = self.window
         w._attach_stepper(qt_app.phase.PiezoStepper(mock.Mock(),
                                                     daq.DaqSettings(piezo_step_v=0.05)))
-        w._handle_event(w.current, "phase_calibrated", (72.0, 0.0625))
+        w._handle_event(w.current, "phase_calibrated", (72.0, 0.0625, 1))
         saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
         self.assertEqual(saved["piezo_quarter_wave_v"], 0.0625)
         w._show_daq_dialog()
-        w._handle_event(w.current, "phase_calibrated", (88.0, 0.07))
+        w._handle_event(w.current, "phase_calibrated", (88.0, 0.07, 1))
         self.assertEqual(w.daq_dialog.quarter_wave_v, 0.07)
 
     def test_the_window_keeps_the_triangle_on_the_frame_rate(self):
@@ -1004,7 +1004,7 @@ class PhaseWindowTests(DaqWindowTestCase):
         w._follow_frame_rate()  # the change is on its way: not sent twice
         self.assertEqual(controller.request.call_count, 1)
         w._daq_event("rejected", ["no"])
-        self.assertIsNone(w.piezo_follow_hz)
+        self.assertEqual(w.piezo_follow_hz, {})
         controller.is_armed.return_value = False
         w._follow_frame_rate()  # not allowed to drive: nothing sent
         self.assertEqual(controller.request.call_count, 1)
@@ -1015,6 +1015,13 @@ class PhaseWindowTests(DaqWindowTestCase):
         w.daq_dialog.follow_frame_rate.assert_called_once()
         self.assertEqual(controller.request.call_count, 2)
         w.daq_dialog = None
+        fps.stop()  # no frames measured: the triangle is left as it is
+        fps = mock.patch.object(w, "received_fps", return_value=0.0)
+        fps.start()
+        self.addCleanup(fps.stop)
+        w.piezo_follow_hz = {}  # nothing on its way any more
+        w._follow_frame_rate()
+        self.assertEqual(controller.request.call_count, 2)
         w.daq = None
 
     def test_phase_controls_reach_the_engine(self):
@@ -1245,5 +1252,332 @@ class AutoTuneTests(DaqWindowTestCase):
                                              piezo_amplitude_v=0.3), "sine 0.3 V peak")):
             controller.status.return_value["settings"] = settings
             self.assertIn(words, w.piezo_debug_text())
+        controller.status.return_value["settings"] = daq.replace(
+            self.TRIANGLE, piezo2_output="ao0")
+        self.assertIn("piezo2   not driven", w.piezo_debug_text())
+        controller.status.return_value["settings"] = daq.replace(
+            self.TRIANGLE, piezo2_output=daq.OFF)
+        self.assertNotIn("piezo2", w.piezo_debug_text())
         w.piezo_debug_action.trigger()
         self.assertTrue(w.piezo_debug.isHidden())
+
+
+class SecondDriverDialogTests(DaqWindowTestCase):
+    """The DAQ window's second piezo driver, its step buttons and the choosers."""
+
+    def open_dialog(self):
+        """Open the DAQ window and wait until it has connected.
+
+        Args: None.
+        Returns: The DaqDialog.
+        """
+        self.window._show_daq_dialog()
+        dialog = self.window.daq_dialog
+        self.settle(dialog, lambda: dialog.outputs is not None)
+        return dialog
+
+    def allow(self, dialog):
+        """Tick off the safety checklist the last Apply opened.
+
+        Args: dialog is the DaqDialog.
+        Returns: None.
+        """
+        checklist = dialog.checklist
+        self.assertIsNotNone(checklist)
+        for box in checklist.boxes:
+            box.setChecked(True)
+        checklist.allow_button.click()
+
+    def settle(self, dialog, predicate, timeout=5.0):
+        """Poll the dialog until a condition holds.
+
+        Args: dialog is the DaqDialog; predicate is a zero-argument callable;
+            timeout is in seconds.
+        Returns: None. Fails the test when the condition never holds.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            APP.processEvents()
+            dialog.poll()
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail("the dialog never reached the expected state")
+
+    def cleanup_second(self, channel):
+        """Close the window first, then stop a second camera's engine.
+
+        Args: channel is the second Channel.
+        Returns: None.
+        """
+        if not self.window.closing:
+            self.window.close()
+            self.window.deleteLater()
+        channel.stop()
+        channel.wait(5.0)
+
+    def test_second_driver_settings_round_trip(self):
+        """Thor 2's controls edit, save and restore their own fields.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog._set_combo(dialog.piezo2_output, "ao0")
+        dialog.piezo2_on.setChecked(True)
+        dialog.piezo2_voltage.setValue(0.3)
+        dialog.piezo2_limit.setValue(10.0)
+        s = dialog.settings()
+        self.assertEqual((s.piezo2_output, s.piezo2_on, s.piezo2_voltage_v,
+                          s.piezo2_limit_v), ("ao0", True, 0.3, 10.0))
+        dialog.apply()
+        self.allow(dialog)
+        self.settle(dialog, lambda: "holds 0.3 V" in dialog.state_label.text())
+        saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
+        self.assertEqual(saved["piezo2_output"], "ao0")
+        self.assertTrue(saved["piezo2_on"])
+        self.assertEqual(saved["piezo2_voltage_v"], 0.3)
+        dialog.load(daq.DaqSettings.from_dict(saved))
+        self.assertEqual(dialog.piezo2_voltage.value(), 0.3)
+        self.assertEqual(dialog.piezo2_output.currentData(), "ao0")
+
+    def test_step_buttons_move_each_driver(self):
+        """Step − and Step + exist for each driver and apply when it is on.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog._set_combo(dialog.piezo_output, daq.OFF)
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog._set_combo(dialog.piezo2_output, "ao0")
+        dialog.piezo2_step.setValue(0.05)
+        dialog.piezo2_voltage.setValue(0.10)
+        dialog.piezo2_limit.setValue(10.0)
+        dialog.piezo2_on.setChecked(True)
+        self.assertTrue(dialog.piezo2_step.isEnabled())
+        dialog.step(1, 2)
+        self.assertEqual(dialog.piezo2_voltage.value(), 0.15)
+        self.allow(dialog)
+        self.settle(dialog, lambda: "holds 0.15 V" in dialog.state_label.text())
+        self.assertIn("second piezo AO 0 holds 0.15 V", dialog.state_label.text())
+
+    def test_camera_choosers_list_cameras_and_stay_apart(self):
+        """Each chooser lists the cameras; one camera cannot serve both.
+
+        Args: None.
+        Returns: None.
+        """
+        engine = Engine(self.log)
+        engine.use_demo("DEMO2")
+        second = Channel(self.log, CameraInfo("DEMO2", "Synthetic camera"),
+                         demo=True, engine=engine)
+        self.window.channels.append(second)
+        self.window._rebuild_cameras()
+        self.addCleanup(self.cleanup_second, second)
+        dialog = self.open_dialog()
+        for box in (dialog.piezo_camera_box, dialog.piezo2_camera_box):
+            keys = [box.itemData(index) for index in range(box.count())]
+            self.assertEqual(keys[0], "")
+            self.assertIn(second.profile_key, keys)
+        dialog._set_combo(dialog.piezo_camera_box, second.profile_key)
+        keys = [dialog.piezo2_camera_box.itemData(index)
+                for index in range(dialog.piezo2_camera_box.count())]
+        self.assertNotIn(second.profile_key, keys)
+        s = dialog.settings()
+        self.assertEqual(s.piezo_camera, second.profile_key)
+        self.assertEqual(s.piezo2_camera, "")
+
+
+    def test_a_saved_camera_that_is_not_open_falls_back(self):
+        """A chooser naming a camera that is not open shows the default again.
+
+        Args: None.
+        Returns: None.
+        """
+        saved = daq.DaqSettings(piezo_camera="profiles/demo/NOPE")
+        FakeSettings.store[qt_app.DAQ_SETTINGS_KEY] = json.dumps(saved.to_dict())
+        dialog = self.open_dialog()
+        self.assertEqual(dialog.piezo_camera_box.currentData(), "")
+        s = dialog.settings()
+        self.assertEqual(s.piezo_camera, "")
+
+    def test_received_fps_for_an_unknown_camera(self):
+        """A pairing key with no camera measures no frames; a real one measures.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(self.window.received_fps_for("profiles/demo/NOPE"), 0.0)
+        self.assertEqual(self.window.received_fps_for(""), 0.0)
+        self.assertEqual(
+            self.window.received_fps_for(self.window.current.profile_key), 0.0)
+
+    def test_a_chooser_naming_the_other_drivers_camera_falls_back(self):
+        """Thor 1 cannot take the camera Thor 2 already has; the choice is dropped.
+
+        Args: None.
+        Returns: None.
+        """
+        engine = Engine(self.log)
+        engine.use_demo("DEMO2")
+        second = Channel(self.log, CameraInfo("DEMO2", "Synthetic camera"),
+                         demo=True, engine=engine)
+        self.window.channels.append(second)
+        self.window._rebuild_cameras()
+        self.addCleanup(self.cleanup_second, second)
+        dialog = self.open_dialog()
+        dialog._set_combo(dialog.piezo2_camera_box, second.profile_key)
+        dialog.piezo_camera_box.setCurrentIndex(
+            dialog.piezo_camera_box.findData(second.profile_key))  # not offered
+        self.assertEqual(dialog.piezo_camera_box.currentData(), "")
+        self.assertEqual(dialog.settings().piezo_camera, "")
+
+    def test_the_quarter_wave_setter_records_driver_1(self):
+        """The quarter_wave_v property reads and writes Thor 1's value.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog.quarter_wave_v = 0.07
+        self.assertEqual(dialog.quarter_wave[1], 0.07)
+        self.assertEqual(dialog.quarter_wave_v, 0.07)
+
+    def test_the_wiring_dialog_names_two_amplifiers(self):
+        """With both drivers assigned, the wiring window says what changes.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog._set_combo(dialog.piezo2_output, "ao0")
+        dialog.show_wiring()
+        self.assertIn("Two Thorlabs amplifiers",
+                      dialog.wiring.legend.text())
+        self.assertIn("Thor 1 is on AO 1 and Thor 2 on AO 0",
+                      dialog.wiring.legend.text())
+
+
+class TwoDriverWindowTests(PhaseWindowTests):
+    """Two steppers attached by pairing, and per-driver calibration."""
+
+    def add_second_camera(self, serial="DEMO2"):
+        """Give the window a second processing camera.
+
+        Args: serial is the synthetic camera's serial.
+        Returns: The new Channel (with an idle demo engine).
+        """
+        engine = Engine(self.log)
+        engine.use_demo(serial)
+        channel = Channel(self.log, CameraInfo(serial, "Synthetic camera"),
+                          demo=True, engine=engine)
+        self.window.channels.append(channel)
+        self.window._rebuild_cameras()
+        self.addCleanup(self.cleanup_second, channel)
+        return channel
+
+    def cleanup_second(self, channel):
+        """Close the window first, then stop a second camera's engine.
+
+        Args: channel is the second Channel.
+        Returns: None.
+        """
+        if not self.window.closing:
+            self.window.close()
+            self.window.deleteLater()
+        channel.stop()
+        channel.wait(5.0)
+
+    def test_apply_builds_a_stepper_for_each_driver(self):
+        """Apply with both drivers on gives each camera its own stepper.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.show_channel(second)
+        dialog = self.open_dialog()
+        dialog._set_combo(dialog.generator_output, daq.OFF)
+        dialog.piezo_on.setChecked(True)
+        dialog.piezo_limit.setValue(10.0)
+        dialog._set_combo(dialog.piezo_camera_box, second.profile_key)
+        dialog._set_combo(dialog.piezo2_output, "ao0")
+        dialog.piezo2_on.setChecked(True)
+        dialog.piezo2_voltage.setValue(0.3)
+        dialog.piezo2_limit.setValue(10.0)
+        dialog._set_combo(dialog.piezo2_camera_box, self.window.channels[0].profile_key)
+        dialog.apply()
+        self.allow(dialog)
+        self.pump(lambda: self.window.phase_steppers[1] is not None
+                  and self.window.phase_steppers[2] is not None)
+        self.assertIs(second.engine.phase_stepper, self.window.phase_steppers[1])
+        self.assertIs(self.engine.phase_stepper, self.window.phase_steppers[2])
+        self.assertEqual(self.window._driver_of(second), 1)
+        self.assertEqual(self.window._driver_of(self.window.channels[0]), 2)
+        dialog.zero_button.click()
+        self.pump(lambda: self.window.phase_steppers[1] is None
+                  and self.window.phase_steppers[2] is None)
+        self.assertIsNone(self.engine.phase_stepper)
+        self.assertIsNone(second.engine.phase_stepper)
+
+    def test_calibration_per_driver(self):
+        """A Thor 2 calibration saves its own step and updates its stepper.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        stepper = qt_app.phase.PiezoStepper(
+            mock.Mock(), daq.DaqSettings(piezo2_output="ao0", piezo2_step_v=0.05,
+                                         piezo2_limit_v=1.0), index=2)
+        w.phase_steppers[2] = stepper
+        w._handle_event(w.current, "phase_calibrated", (72.0, 0.0625, 2))
+        self.assertEqual(w.phase_steppers[2].step_v, 0.0625)
+        saved = json.loads(FakeSettings.store[qt_app.DAQ_SETTINGS_KEY])
+        self.assertEqual(saved["piezo2_step_v"], 0.0625)
+        self.assertEqual(saved["piezo2_quarter_wave_v"], 0.0625)
+        self.assertEqual(saved["piezo_step_v"], 0.05)  # Thor 1's own value stands
+        self.assertIn("Thor 2", w.statusBar().currentMessage())
+
+    def test_the_demo_drive_follows_the_paired_driver(self):
+        """Each demo camera is sent the Drive of the driver it is paired to.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        second = self.add_second_camera()
+        w.piezo_pairing = {1: second.profile_key, 2: w.current.profile_key}
+        drive = daq.Drive(piezo_mode=daq.HOLD, piezo_v=0.2, piezo2_mode=daq.TRIANGLE,
+                          piezo2_v=3.0)
+        w.set_daq_drive(drive)
+        self.assertEqual(second.drive.piezo_v, 0.2)
+        self.assertEqual(w.current.drive.piezo_v, 3.0)
+        self.assertEqual(w.current.drive.piezo_mode, daq.TRIANGLE)
+
+    def test_legacy_no_pairing_follows_the_display(self):
+        """With no camera paired anywhere, Thor 1 still follows the display.
+
+        Args: None.
+        Returns: None.
+        """
+        w = self.window
+        second = self.add_second_camera()
+        stepper = qt_app.phase.PiezoStepper(mock.Mock(), daq.DaqSettings(), True)
+        w._saved_piezo = mock.Mock(return_value=daq.DaqSettings(piezo_output="ao1"))
+        w.daq = mock.Mock()
+        w.daq.is_armed.return_value = True
+        w.phase_steppers[1] = stepper
+        w._read_pairing(daq.DaqSettings())
+        w._attach_steppers()
+        self.assertIs(w.current.engine.phase_stepper, stepper)
+        self.assertIsNone(second.engine.phase_stepper)
+        w.show_channel(second)
+        self.assertIs(second.engine.phase_stepper, stepper)
+        self.assertIsNone(self.engine.phase_stepper)
+
+if __name__ == "__main__":
+    unittest.main()

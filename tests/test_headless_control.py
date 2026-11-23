@@ -1192,7 +1192,7 @@ class PhaseCalibrateTests(SessionCase):
         self.connect_simulated()
         self.good("daq_apply", settings={"piezo_step_v": 0.05})
         self.good("phase_attach")
-        self.channels[0].engine.events.put(("phase_calibration_failed", 12.0))
+        self.channels[0].engine.events.put(("phase_calibration_failed", (12.0, 1)))
         self.bad("phase_calibrate", "too far from 90")
 
     def test_calibrate_reports_a_phase_view_that_stopped(self):

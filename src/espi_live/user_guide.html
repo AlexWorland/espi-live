@@ -498,6 +498,7 @@
             <li><a href="#status-bar">Status bar</a></li>
             <li><a href="#log">Log panel</a></li>
             <li><a href="#view-menu">View menu</a></li>
+            <li><a href="#two-streams">Two streams at once</a></li>
             <li><a href="#devices-menu">Devices menu</a></li>
             <li><a href="#help-menu">Help menu</a></li>
           </ol>
@@ -1404,10 +1405,57 @@ python -m espi_live</code></pre>
             frame measured from the frames (with D2/D1, D1, the camera noise and
             flicker) and what auto-tune is doing. On screen only: saved frames
             and recordings never show it.</li>
+          <li><strong>Split two streams</strong> — show two cameras side by
+            side, each pane named with its camera; click a pane to make that
+            camera the one the controls edit. Needs two processing cameras;
+            see <a href="#two-streams">Two streams at once</a>.</li>
+          <li><strong>Overlay two streams</strong> — blend two cameras into
+            one image (the average of the two grey levels), for example the
+            front and the back of a sample.</li>
+          <li><strong>Second stream window…</strong> — open another window
+            showing a second camera's live stream, while this window keeps
+            its own.</li>
         </ul>
         <p>Docks can also be dragged by their title bars. Dropping one outside
           the main window floats it; closing a dock hides it. The layout is
           saved on exit. The menu also lists the shortcut keys.</p>
+      </section>
+
+      <section id="two-streams">
+        <h3>Two streams at once <a class="anchor" href="#two-streams" aria-label="Link to Two streams at once">#</a></h3>
+        <p>Every camera has its own settings, reference and recording already
+          (see <a href="#several-cameras">Several cameras</a>); the View menu
+          adds three ways to see two of them at the same time — for example
+          the front and the back of one sample. Each needs two processing
+          cameras; with one camera the actions are greyed out.</p>
+        <ul>
+          <li><strong>Split two streams</strong> — the image area becomes two
+            panes side by side. The left pane is the displayed camera (the
+            one the controls panel edits); the right pane shows another
+            processing camera. Each pane is named at its top left. Clicking
+            a pane makes that camera the displayed one, so the panes swap:
+            the camera you clicked takes the controls with it. Freeze,
+            Save, Record and the view buttons apply to the displayed
+            camera; the other pane keeps live updating while its camera
+            processes.</li>
+          <li><strong>Overlay two streams</strong> — one image showing the
+            average of the two cameras' displayed grey levels (each shown
+            exactly as it would be alone, then blended half and half). If
+            the two cameras have different frame sizes, the second is scaled
+            to the first's. A demo stream keeps the dummy-mode watermark in
+            the blend. The overlay is a display: Save still saves the
+            displayed camera's own frame.</li>
+          <li><strong>Second stream window…</strong> — a separate window
+            showing another camera's live stream, with its own zoom and pan;
+            the main window is untouched. Closing it changes nothing in the
+            main window.</li>
+        </ul>
+        <p>Which camera the second pane or window shows follows the cameras:
+            the first processing camera other than the displayed one. When
+            cameras open, close or switch, the second stream follows. In the
+            Phase view each camera can step its own piezo: pair Thor 1 and
+            Thor 2 to their cameras in the
+            <a href="#daq">NI DAQ window</a>.</p>
       </section>
 
       <section id="devices-menu">
@@ -1608,15 +1656,22 @@ python -m espi_live</code></pre>
           or <strong>AO 1</strong>, a sine) or a counter
           (<strong>Counter 0</strong> or <strong>Counter 1</strong>, a 0–5 V
           square wave on the <strong>PFI</strong> terminal you pick; on the
-          USB-6251 BNC, PFI 0–7 have BNC sockets). The piezo driver uses an
-          analog output. Choose <strong>Off</strong> to leave a role
-          unassigned.</li>
+          USB-6251 BNC, PFI 0–7 have BNC sockets). Each of the two
+          <strong>piezo drivers</strong> uses an analog output: Thor 1
+          defaults to AO 1; assign Thor 2 to AO 0 when you use it. Choose
+          <strong>Off</strong> to
+          leave a role unassigned. Below the outputs, <strong>Thor 1 steps
+          camera</strong> and <strong>Thor 2 steps camera</strong> pair each
+          driver to a camera for the Phase view; "Follow the displayed
+          camera" (the default) keeps the one-camera behaviour, and two
+          drivers cannot take the same camera.</li>
         <li><strong>Frequency generator</strong> — <strong>Frequency</strong>,
           <strong>Amplitude</strong> (peak) and <strong>Offset</strong>. The
           line below says exactly what the device will produce: the sine is
           built from whole samples of a 20 MHz clock, so the frequency can be
           a few parts per million off what you typed.</li>
-        <li><strong>Piezo driver</strong> — <strong>Hold a voltage</strong>
+        <li><strong>Piezo drivers (Thor 1 and Thor 2)</strong> — each has the
+          same controls: <strong>Hold a voltage</strong>
           (with <strong>Step −</strong> and <strong>Step +</strong> to move it
           by a set amount, for manual phase steps), or <strong>Sine at the
           generator's frequency</strong> with its own amplitude, centre voltage
@@ -1628,12 +1683,16 @@ python -m espi_live</code></pre>
           a function generator used to feed the piezo amplifier; the line below
           says the frequency the device really produces. Both analog outputs
           share one sample clock, so a triangle needs the frequency generator
-          off or on a counter.
+          off or on a counter, and two triangles must agree on one frequency
+          (held levels and the Phase view's steps run independently). A second
+          driver's sine is possible only while the other driver is off, since
+          the generator needs an analog output too.
           <p><strong>Follow the camera's frame rate</strong> sets the
           triangle's frequency for you, so the reference phase moves by
           <strong>Phase per frame</strong> (default 180°, half a wavelength of
           path) from one frame to the next: the frame rate is the rate frames
-          really arrive from the displayed camera, and the frequency is set
+          really arrive from the camera that driver steps (the displayed one
+          when nothing is paired), and the frequency is set
           again whenever that rate moves it by more than 3% (each change
           restarts the triangle at its bottom). With <strong>Frames back</strong>
           N in the Previous view, use 180° / N. <strong>Piezo scale</strong>
@@ -1648,7 +1707,9 @@ python -m espi_live</code></pre>
           <strong>Mirror angle</strong> (the angle of incidence, 45° in the
           lab) for the HeNe laser (632.8 nm). Both are approximate (an
           open-loop piezo's travel varies with the span), so fine-tune
-          <strong>Phase per frame</strong> by eye.</p>
+          <strong>Phase per frame</strong> by eye. Calibrate phase step is
+          per driver: whichever camera is displayed measures its own Thor's
+          step.</p>
           <p><strong>Auto-tune (experimental)</strong> tunes the applied
           triangle's frequency from the camera frames instead, for a 180° step
           per frame, where the Previous-view difference is strongest and
@@ -1697,14 +1758,23 @@ python -m espi_live</code></pre>
           while it is open. A counter on PFI 8–15 is marked on its row of the
           screw-terminal strip, since those have no BNC.</li>
       </ul>
-      <p><strong>Wiring the piezo (Thorlabs MDT694A).</strong> Connect the
-        DAQ's <strong>AO 1</strong> BNC to the MDT694A's <strong>EXT
-        INPUT</strong> (0–10 V) and leave its <strong>OUTPUT</strong> on the
-        piezo. The MDT694A multiplies the input by 15 at its 150 V limit and
+      <p><strong>Wiring the piezos (Thorlabs MDT694A).</strong> Connect the
+        DAQ's <strong>AO 1</strong> BNC to the first MDT694A's <strong>EXT
+        INPUT</strong> (0–10 V) and leave its <strong>OUTPUT</strong> on
+        its piezo. For a second Thor — for example the front and the back
+        of one sample, one camera each — connect <strong>AO 0</strong> to
+        the second MDT694A's <strong>EXT INPUT</strong> the same way, and
+        pair the drivers to their cameras under <strong>Assign
+        outputs</strong>. The frequency generator then needs a counter
+        output or must be off (there are only two analog outputs), and the
+        safety checklist is asked per driver. The MDT694A multiplies the
+        input by 15 at its 150 V limit and
         adds the <strong>OUTPUT ADJ</strong> knob, so turn the knob to zero
         unless you want an offset on top, and keep Top × 15 + the knob at or
-        below the limit lit on its front. Never connect the MDT694A's output
-        (up to 150 V) to the DAQ.</p>
+        below the limit lit on its front. Never connect an MDT694A's output
+        (up to 150 V) to the DAQ. <code>docs/notes/piezo-thorlabs-mdt694a-wiring.md</code>
+        in the source has the full instructions, with a wiring diagram for
+        one and for two amplifiers.</p>
       <p>All volts are at the DAQ, before your amplifiers. The DAQ cannot
         drive a shaker or piezo itself (±10 V, ±5 mA). Closing the window
         leaves the outputs running; they go to 0 V on an error and when ESPI

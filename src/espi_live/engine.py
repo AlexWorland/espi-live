@@ -1443,7 +1443,8 @@ class Engine:
 
         Args: stepper is the PiezoStepper the sets were taken with.
         Returns: None. Sends "phase_calibrated" ((degrees measured, new volts
-            per step)) or "phase_calibration_failed" (degrees measured).
+            per step, the stepper's piezo driver index)) or
+            "phase_calibration_failed" (degrees measured, the index).
         """
         angle = self._phase.calibration_result()
         if angle is None:
@@ -1454,12 +1455,12 @@ class Engine:
             self.log.warning(f"Phase step calibration: {stepper.step_v:.4g} V moved "
                              f"{degrees:.0f}° per step, too far from 90° to correct; "
                              "check the piezo, its amplifier and the step voltage.")
-            self.events.put(("phase_calibration_failed", degrees))
+            self.events.put(("phase_calibration_failed", (degrees, stepper.index)))
             return
         self.log.write(f"Phase step calibration: {stepper.step_v:.4g} V gave "
                        f"{degrees:.1f}° per step; {volts:.4g} V gives "
                        f"{math.degrees(NOMINAL_STEP):.0f}°.")
-        self.events.put(("phase_calibrated", (degrees, volts)))
+        self.events.put(("phase_calibrated", (degrees, volts, stepper.index)))
 
     def _phase_failed(self, stepper, exc):
         """Stop phase stepping after the piezo could not be moved.

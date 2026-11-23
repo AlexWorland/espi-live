@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSl
                                QAbstractSpinBox, QApplication, QComboBox, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QStyle, QTextEdit, QToolTip, QWidget)
 
-from espi_live import (camera, camera_reports, capture, control, feedback, iphone,
+from espi_live import (camera, camera_reports, capture, control, daq, feedback, iphone,
                        paths, qt_app, sources, tips, ui_scale, updater)
 from fake_capture import (FakeCaptureFactory, FakeEnumerator, integrated_webcam,
                           interlaced_frame, usb_live2, webcam)
@@ -8792,6 +8792,280 @@ class StartControlTests(unittest.TestCase):
         with mock.patch.object(qt_app.control, "ControlServer", FakeServer):
             server = qt_app.start_control(self.window, self.log, None)
         self.assertIs(server.service.backend.window, self.window)
+
+
+class TwoStreamTests(WindowTestCase):
+    """Split view, overlay and the second stream window for two cameras."""
+
+    def add_second_camera(self, serial="DEMO2"):
+        """Give the window a second processing camera.
+
+        Args: serial is the synthetic camera's serial.
+        Returns: The new Channel (with an idle demo engine).
+        """
+        engine = Engine(self.log)
+        engine.use_demo(serial)
+        channel = Channel(self.log, CameraInfo(serial, "Synthetic camera"),
+                          demo=True, engine=engine)
+        self.window.channels.append(channel)
+        self.window._rebuild_cameras()
+        self.addCleanup(self.cleanup_second, channel)
+        return channel
+
+    def cleanup_second(self, channel):
+        """Close the window first, then stop a second camera's engine.
+
+        Args: channel is the second Channel.
+        Returns: None.
+        """
+        if not self.window.closing:
+            self.window.close()
+            self.window.deleteLater()
+        channel.stop()
+        channel.wait(5.0)
+
+    def packet(self, serial="DEMO1", value=100, size=(8, 10), sequence=1, demo=False,
+               gamma=1.0):
+        """Build a FramePacket as an engine would publish.
+
+        Args: serial names the camera (only for the mode label); value is the
+            grey level; size is the (height, width); sequence counts frames;
+            demo marks dummy mode; gamma is the display tone still to apply.
+        Returns: A FramePacket.
+        """
+        return FramePacket(sequence, np.full(size, value, np.uint8), gamma, "Raw", demo)
+
+    def test_actions_need_two_cameras(self):
+        """The two-stream actions are greyed out with one camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertFalse(self.window.split_action.isEnabled())
+        self.assertFalse(self.window.overlay_action.isEnabled())
+        self.assertFalse(self.window.stream_window_action.isEnabled())
+        self.add_second_camera()
+        self.assertTrue(self.window.split_action.isEnabled())
+        self.assertTrue(self.window.overlay_action.isEnabled())
+        self.assertTrue(self.window.stream_window_action.isEnabled())
+
+    def test_split_view_shows_and_names_two_panes(self):
+        """Split view shows a second pane with both cameras named.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.set_display_mode("split")
+        self.assertEqual(self.window.display_mode, "split")
+        self.assertFalse(self.window.second_view.isHidden())
+        self.assertTrue(self.window.split_action.isChecked())
+        self.assertEqual(self.window.second_channel, second)
+        self.assertEqual(self.window.view_caption.text(), self.window.current.label)
+        self.assertEqual(self.window.second_caption.text(), second.label)
+        self.assertFalse(self.window.view_caption.isHidden())
+        self.assertFalse(self.window.second_caption.isHidden())
+        self.assertTrue(self.log.has("Showing two streams"))
+        self.window.set_display_mode("single")
+        self.assertTrue(self.window.second_view.isHidden())
+        self.assertTrue(self.window.view_caption.isHidden())
+        self.assertTrue(self.log.has("Hiding the second stream"))
+
+    def test_clicking_the_second_pane_switches_cameras(self):
+        """A click on the second pane makes its camera the displayed one.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.set_display_mode("split")
+        self.window._second_clicked(3, 4)
+        self.assertIs(self.window.current, second)
+        self.assertEqual(self.window.second_channel.label, "Synthetic camera (DEMO1)")
+
+    def test_overlay_mode_is_exclusive_and_blends(self):
+        """Overlay switches off split and blends both cameras' frames.
+
+        Args: None.
+        Returns: None.
+        """
+        self.add_second_camera()
+        self.window.set_display_mode("split")
+        self.window.set_display_mode("overlay")
+        self.assertFalse(self.window.split_action.isChecked())
+        self.assertTrue(self.window.overlay_action.isChecked())
+        self.assertTrue(self.window.second_view.isHidden())
+        first = self.packet(value=100)
+        blend = self.window._blend_packets(first, self.packet(value=200))
+        self.assertEqual(blend.image[0, 0], 150)
+        self.assertEqual((blend.gamma, blend.mode), (1.0, "Raw"))
+        self.assertFalse(blend.demo)
+
+    def test_overlay_blends_sizes_and_keeps_the_watermark(self):
+        """A different frame size is scaled; dummy mode marks the blend.
+
+        Args: None.
+        Returns: None.
+        """
+        self.add_second_camera()
+        blend = self.window._blend_packets(self.packet(size=(8, 10), value=60),
+                                           self.packet(size=(4, 5), value=100,
+                                                       demo=True))
+        self.assertEqual(blend.image.shape, (8, 10))
+        self.assertEqual(blend.image[0, 0], 80)
+        self.assertTrue(blend.demo)
+
+    def test_overlay_draws_the_blend(self):
+        """The overlay draws into the main view once per pair of frames.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.set_display_mode("overlay")
+        self.window._poll_frame()  # no frames yet: nothing to blend
+        with mock.patch.object(type(self.window.view), "show_packet") as show:
+            self.window.current.engine.latest_packet = mock.Mock(
+                return_value=self.packet(sequence=1, value=100))
+            second.engine.latest_packet = mock.Mock(
+                return_value=self.packet(sequence=1, value=200))
+            self.window._poll_frame()
+            self.assertEqual(show.call_count, 1)
+            blended = show.call_args[0][0]
+            self.assertEqual(blended.image[0, 0], 150)
+            self.window._poll_frame()  # the same pair: not drawn again
+            self.assertEqual(show.call_count, 1)
+
+    def test_split_draws_the_second_pane(self):
+        """The second pane shows its camera's newest frame with its own tone.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.set_display_mode("split")
+        second.engine.latest_packet = mock.Mock(
+            return_value=self.packet(sequence=4, value=90, gamma=1.2))
+        with mock.patch.object(type(self.window.second_view), "show_packet") as show:
+            self.window._draw_second()
+            self.assertEqual(show.call_count, 1)
+            packet, table, key = show.call_args[0]
+            self.assertEqual((packet.sequence, key), (4, 1.2))
+            self.window._draw_second()  # the same frame: not drawn again
+            self.assertEqual(show.call_count, 1)
+
+    def test_the_second_stream_window(self):
+        """The second window shows another camera and closes cleanly.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.open_stream_window()
+        stream = self.window.stream_window
+        self.assertIsNotNone(stream)
+        self.assertIs(stream.channel, second)
+        self.assertEqual(stream.windowTitle(),
+                         f"{second.label} (second stream)")
+        second.engine.latest_packet = mock.Mock(
+            return_value=self.packet(sequence=2, value=70))
+        with mock.patch.object(type(stream.view), "show_packet") as show:
+            stream.poll()
+            self.assertEqual(show.call_count, 1)
+        stream.set_channel(second)  # already showing it: nothing restarts
+        self.assertEqual(stream.sequence, 2)
+        self.window.close()  # the main window closes its stream window too
+        self.assertIsNone(self.window.stream_window)
+
+    def test_the_second_stream_follows_camera_changes(self):
+        """Opening, closing and switching cameras re-points the second stream.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.set_display_mode("split")
+        self.assertIs(self.window.second_channel, second)
+        second.stop()  # the engine is gone: the pane moves to another camera
+        self.window._stream_follow()
+        self.assertIsNone(self.window.second_channel)
+        self.assertFalse(self.window.split_action.isEnabled())
+
+    def test_the_stream_window_follows_camera_changes(self):
+        """An open second window re-points when cameras change, and survives none.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.open_stream_window()
+        stream = self.window.stream_window
+        self.addCleanup(stream.close)
+        second.stop()
+        self.window._stream_follow()
+        self.assertIs(stream.channel, None)
+        self.assertEqual(stream.windowTitle(), "Second stream")
+        stream.poll()  # no channel: nothing drawn, no error
+        self.assertIsNone(stream.sequence)
+
+    def test_display_mode_guards(self):
+        """The mode cannot be set twice or turned on with one camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.window.set_display_mode("split")  # one camera: refused
+        self.assertEqual(self.window.display_mode, "single")
+        self.add_second_camera()
+        self.window.set_display_mode("split")
+        self.window.set_display_mode("split")  # already split: nothing changes
+        self.assertEqual(self.window.display_mode, "split")
+        self.assertFalse(self.window.second_view.isHidden())
+
+    def test_clicking_the_main_pane_in_single_mode(self):
+        """A click outside split view only moves the pixel square.
+
+        Args: None.
+        Returns: None.
+        """
+        with mock.patch.object(self.window, "_image_clicked") as clicked:
+            self.window._second_clicked(2, 3)
+        clicked.assert_called_once_with(2, 3)
+
+    def test_both_drivers_on_one_camera_go_to_thor_1(self):
+        """A camera two drivers name is claimed by Thor 1.
+
+        Args: None.
+        Returns: None.
+        """
+        window = self.window
+        stepper1 = qt_app.phase.PiezoStepper(mock.Mock(), daq.DaqSettings(), True, 1)
+        stepper2 = qt_app.phase.PiezoStepper(mock.Mock(), daq.DaqSettings(), True, 2)
+        window.phase_steppers = {1: stepper1, 2: stepper2}
+        window.piezo_pairing = {1: window.current.profile_key,
+                                2: window.current.profile_key}
+        window._attach_steppers()
+        self.assertIs(window.current.engine.phase_stepper, stepper1)
+        self.assertEqual(window.stepper_claims[window.current], 1)
+
+    def test_poll_frame_draws_both_panes_in_split_view(self):
+        """One poll draws the displayed camera and the second pane.
+
+        Args: None.
+        Returns: None.
+        """
+        second = self.add_second_camera()
+        self.window.set_display_mode("split")
+        self.window.current.engine.latest_packet = mock.Mock(
+            return_value=self.packet(sequence=7, value=10))
+        second.engine.latest_packet = mock.Mock(
+            return_value=self.packet(sequence=9, value=20))
+        with mock.patch.object(self.window.view, "show_packet") as show, \
+                mock.patch.object(self.window.second_view, "show_packet") as show2:
+            self.window._poll_frame()
+            self.assertEqual(show.call_count, 1)
+            self.assertEqual(show2.call_count, 1)
+            self.assertEqual(show2.call_args[0][0].image[0, 0], 20)
 
 
 if __name__ == "__main__":

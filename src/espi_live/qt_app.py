@@ -61,7 +61,7 @@ from espi_live import (camera, camera_reports, capture_uploads, codex, control,
                        phase, profiles, simulation, source_code, step_tuning,
                        tips, ui_scale, updater)
 from espi_live.channels import demo_channels, open_camera_channels, restore_channel
-from espi_live.engine import LABVIEW_FLOW
+from espi_live.engine import LABVIEW_FLOW, FramePacket
 from espi_live.guide import guide_path
 from espi_live.logs import AppLog, header_lines
 from espi_live.pixel_square import DEFAULT_SQUARE_SIZE, SQUARE_SIZES
@@ -2559,6 +2559,7 @@ class DaqDialog(QDialog):
         self.setWindowTitle(DAQ_TITLE)
         self.sized = False  # the first show fits the window to its contents and the screen
         saved = self._saved_settings()
+        self.quarter_wave = {1: 0.0, 2: 0.0}  # volts per 90° from Calibrate phase step
 
         self.device_box = WheelIgnoringComboBox()
         set_tooltip(self.device_box,
@@ -2581,16 +2582,36 @@ class DaqDialog(QDialog):
         set_tooltip(self.generator_terminal,
                     "The PFI terminal a counter's square wave comes out on. On the "
                     "USB-6251 BNC, PFI 0–7 have BNC sockets.")
-        self.piezo_output = WheelIgnoringComboBox()
-        set_tooltip(self.piezo_output,
-                    "Which analog output drives the reference piezo's amplifier.")
+        self.piezo_widgets = {index: self._build_piezo_widgets(index)
+                              for index in daq.PIEZOS}
+        # Driver 1 keeps the historic attribute names (piezo_on, ...); driver
+        # 2 gets the same names with a piezo2_ prefix.
+        special = {"step_down": ("step_down", "piezo2_step_down"),
+                   "step_up": ("step_up", "piezo2_step_up"),
+                   "follow_result": ("piezo_follow_result", "piezo2_follow_result"),
+                   "result": ("piezo_result", "piezo2_result")}
+        for index in daq.PIEZOS:
+            for name, widget in self.piezo_widgets[index].items():
+                attribute = special[name][index - 1] if name in special \
+                    else f"piezo{'2' if index == 2 else ''}_{name}"
+                setattr(self, attribute, widget)
+        self.piezo_camera_box = self._camera_chooser(
+            1, "Which camera's Phase view this driver steps. None follows the "
+               "displayed camera, as it always has.")
+        self.piezo2_camera_box = self._camera_chooser(
+            2, "Which camera's Phase view the second driver steps. Pick another "
+               "camera than Thor 1's to phase-step two cameras at once.")
         generator_row = QHBoxLayout()
         generator_row.addWidget(self.generator_output, 1)
         generator_row.addWidget(self.generator_terminal)
         assign = QGroupBox("Assign outputs")
         assign_form = QFormLayout(assign)
         assign_form.addRow("Frequency generator", generator_row)
-        assign_form.addRow("Piezo driver", self.piezo_output)
+        for index in daq.PIEZOS:
+            assign_form.addRow(daq.piezo_driver_label(index),
+                               self.piezo_widgets[index]["output"])
+        assign_form.addRow("Thor 1 steps camera", self.piezo_camera_box)
+        assign_form.addRow("Thor 2 steps camera", self.piezo2_camera_box)
 
         self.generator_on = QCheckBox("Generator on")
         set_tooltip(self.generator_on,
@@ -2619,131 +2640,7 @@ class DaqDialog(QDialog):
         generator_form.addRow("Safety limit", self.generator_limit)
         generator_form.addRow(self.generator_result)
 
-        self.piezo_on = QCheckBox("Piezo on")
-        set_tooltip(self.piezo_on, "Drive the piezo after Apply. Off holds it at 0 V.")
-        self.piezo_mode = WheelIgnoringComboBox()
-        for mode, text in PIEZO_MODE_TEXT:
-            self.piezo_mode.addItem(text, mode)
-        set_tooltip(self.piezo_mode,
-                    "Hold a voltage (step it by hand for phase steps), follow the "
-                    "generator with a sine at the same frequency and a set phase, or "
-                    "sweep a triangle between two voltages at its own frequency (the "
-                    "ramp a function generator would feed the piezo amplifier).")
-        self.piezo_voltage = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
-        set_tooltip(self.piezo_voltage,
-                    "The held voltage, or the centre of the sine, at the DAQ.")
-        self.piezo_amplitude = daq_spin(0.0, daq.MAX_VOLTS, 4, " V", 0.01)
-        set_tooltip(self.piezo_amplitude, "Sine amplitude (peak). Sine mode only.")
-        self.piezo_phase = daq_spin(-360.0, 360.0, 1, "°", 5.0)
-        set_tooltip(self.piezo_phase,
-                    "Phase of the piezo sine relative to the generator. Sine mode only.")
-        self.piezo_bottom = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
-        set_tooltip(self.piezo_bottom,
-                    "The triangle's lowest voltage (its DC offset). At 0 V or above, "
-                    "so the piezo amplifier's input never goes negative. Triangle mode "
-                    "only.")
-        self.piezo_top = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
-        set_tooltip(self.piezo_top,
-                    "The triangle's highest voltage, at most the safety limit. "
-                    "Triangle mode only.")
-        self.piezo_frequency = daq_spin(daq.MIN_TRIANGLE_HZ, daq.MAX_TRIANGLE_HZ, 4,
-                                        " Hz", 0.01)
-        set_tooltip(self.piezo_frequency,
-                    "How many times a second the triangle goes up and down. The device "
-                    "rounds it slightly; the value it produces is shown below. Needs "
-                    "the frequency generator off or on a counter, because both analog "
-                    "outputs share one sample clock. Triangle mode only.")
-        self.piezo_follow = QCheckBox("Follow the camera's frame rate")
-        set_tooltip(self.piezo_follow,
-                    "Set the triangle's frequency from the rate frames arrive from the "
-                    "displayed camera, so the reference phase changes by the same amount "
-                    "(Phase per frame) between successive frames. It is set again "
-                    f"whenever the frame rate moves the frequency by more than "
-                    f"{daq.FOLLOW_TOLERANCE:.0%}. Triangle mode only.")
-        self.piezo_phase_per_frame = daq_spin(1.0, daq.MAX_PHASE_PER_FRAME_DEG, 1, "°",
-                                              10.0)
-        set_tooltip(self.piezo_phase_per_frame,
-                    "How far the reference phase moves from one frame to the next. 180° "
-                    "(half a wavelength of path) gives the strongest Previous-view "
-                    "difference; with Frames back N, use 180° / N.")
-        self.piezo_scale = WheelIgnoringComboBox()
-        for scale, text in PIEZO_SCALE_TEXT:
-            self.piezo_scale.addItem(text, scale)
-        set_tooltip(self.piezo_scale,
-                    "Where the piezo's phase per volt comes from. Calibrated uses the "
-                    "voltage per 90° step that Calibrate phase step measured (the mirror "
-                    "angle and piezo are then included). Manual works it out from the "
-                    "numbers below for the HeNe laser "
-                    f"({daq.HENE_WAVELENGTH_NM:g} nm).")
-        self.piezo_um_per_v = daq_spin(0.0001, 10.0, 4, " µm/V", 0.01)
-        set_tooltip(self.piezo_um_per_v,
-                    "Manual: how far the piezo moves per volt across it. A Thorlabs PE4 "
-                    "moves about 15 µm at 150 V, about 0.1 µm/V (open loop, approximate).")
-        self.piezo_gain = daq_spin(0.1, 100.0, 2, " ×", 0.5)
-        set_tooltip(self.piezo_gain,
-                    "Manual: the piezo amplifier's gain from the DAQ to the piezo (15 for "
-                    "the Thorlabs MDT694A at its 150 V limit).")
-        self.piezo_angle = daq_spin(0.0, daq.MAX_MIRROR_ANGLE_DEG, 1, "°", 5.0)
-        set_tooltip(self.piezo_angle,
-                    "Manual: the angle of incidence of the reference beam on the piezo "
-                    "mirror (0° straight on; 45° in the lab's setup). The path changes by "
-                    "twice the mirror's travel times the cosine of this angle.")
-        self.piezo_follow_result = QLabel()
-        self.piezo_follow_result.setWordWrap(True)
-        self.auto_tune_button = QPushButton("Auto-tune (experimental)")
-        self.auto_tune_button.setCheckable(True)
-        set_tooltip(self.auto_tune_button,
-                    "Experimental. Tune the applied triangle's frequency from the camera "
-                    "frames for a 180° step per frame, the steadiest Previous-view image, "
-                    "and keep it there. The piezo first holds still for a few seconds to "
-                    "measure the camera noise. Keep the object still while it tunes. "
-                    "Turning it off keeps the tuned frequency (with Follow on, the "
-                    "computed one returns when the frame rate moves).")
-        self.auto_tune_button.toggled.connect(self.window.set_auto_tune)
-        self.piezo_tune_result = QLabel()
-        self.piezo_tune_result.setWordWrap(True)
-        self.quarter_wave_v = 0.0  # volts per 90° from Calibrate phase step (0: none)
-        self.piezo_step = daq_spin(0.0001, daq.MAX_VOLTS, 4, " V", 0.01)
-        set_tooltip(self.piezo_step,
-                    "How far one Step press moves the held voltage (for example the "
-                    "voltage of a quarter-wave phase step).")
-        self.step_down = QPushButton("Step −")
-        set_tooltip(self.step_down, "Lower the held voltage by one step and apply it.")
-        self.step_up = QPushButton("Step +")
-        set_tooltip(self.step_up, "Raise the held voltage by one step and apply it.")
-        step_row = QHBoxLayout()
-        step_row.addWidget(self.piezo_step, 1)
-        step_row.addWidget(self.step_down)
-        step_row.addWidget(self.step_up)
-        self.piezo_limit = daq_spin(0.01, daq.MAX_VOLTS, 2, " V", 0.1)
-        set_tooltip(self.piezo_limit,
-                    "Safety limit: the piezo driver stays between 0 V and this many "
-                    "volts. Set it to the piezo amplifier's largest safe input (10 V "
-                    "for the Thorlabs MDT694A's EXT INPUT).")
-        self.piezo_result = QLabel()
-        self.piezo_result.setWordWrap(True)
-        piezo = QGroupBox("Piezo driver")
-        piezo_form = QFormLayout(piezo)
-        piezo_form.addRow(self.piezo_on)
-        piezo_form.addRow("Mode", self.piezo_mode)
-        piezo_form.addRow("Voltage", self.piezo_voltage)
-        piezo_form.addRow("Amplitude", self.piezo_amplitude)
-        piezo_form.addRow("Phase", self.piezo_phase)
-        piezo_form.addRow("Bottom", self.piezo_bottom)
-        piezo_form.addRow("Top", self.piezo_top)
-        piezo_form.addRow("Frequency", self.piezo_frequency)
-        piezo_form.addRow(self.piezo_follow)
-        piezo_form.addRow("Phase per frame", self.piezo_phase_per_frame)
-        piezo_form.addRow("Piezo scale", self.piezo_scale)
-        piezo_form.addRow("Piezo travel", self.piezo_um_per_v)
-        piezo_form.addRow("Amplifier gain", self.piezo_gain)
-        piezo_form.addRow("Mirror angle", self.piezo_angle)
-        piezo_form.addRow(self.piezo_follow_result)
-        piezo_form.addRow(self.auto_tune_button)
-        piezo_form.addRow(self.piezo_tune_result)
-        piezo_form.addRow("Step", step_row)
-        piezo_form.addRow("Safety limit", self.piezo_limit)
-        piezo_form.addRow(self.piezo_result)
+        self.piezo_groups = [self._build_piezo_group(index) for index in daq.PIEZOS]
 
         self.problem_label = QLabel()
         self.problem_label.setWordWrap(True)
@@ -2789,7 +2686,8 @@ class DaqDialog(QDialog):
         body_layout.addWidget(self.device_status)
         body_layout.addWidget(assign)
         body_layout.addWidget(generator)
-        body_layout.addWidget(piezo)
+        for group in self.piezo_groups:
+            body_layout.addWidget(group)
         body_layout.addWidget(self.problem_label)
         body_layout.addWidget(self.state_label)
         body_layout.addWidget(self.safety_label)
@@ -2814,22 +2712,25 @@ class DaqDialog(QDialog):
         self.wiring_button.clicked.connect(self.show_wiring)
         self.checklist = None  # the safety checklist, while it is open
         self.test_button.clicked.connect(self.run_self_test)
-        self.step_down.clicked.connect(lambda: self.step(-1))
-        self.step_up.clicked.connect(lambda: self.step(1))
         close.clicked.connect(self.reject)
         self._fill_outputs(daq.DeviceOutputs(daq.SIMULATED_DEVICE))
         self.load(saved)
-        for box in (self.generator_output, self.generator_terminal, self.piezo_output,
-                    self.piezo_mode, self.piezo_scale):
+        for box in (self.generator_output, self.generator_terminal,
+                    self.piezo_camera_box, self.piezo2_camera_box):
             box.currentIndexChanged.connect(self.refresh)
-        for spin in (self.frequency, self.amplitude, self.offset, self.generator_limit,
-                     self.piezo_voltage, self.piezo_amplitude, self.piezo_phase,
-                     self.piezo_bottom, self.piezo_top, self.piezo_frequency,
-                     self.piezo_step, self.piezo_limit, self.piezo_phase_per_frame,
-                     self.piezo_um_per_v, self.piezo_gain, self.piezo_angle):
+        for spin in (self.frequency, self.amplitude, self.offset, self.generator_limit):
             spin.valueChanged.connect(self.refresh)
-        for check in (self.generator_on, self.piezo_on, self.piezo_follow):
-            check.toggled.connect(self.refresh)
+        self.generator_on.toggled.connect(self.refresh)
+        for index in daq.PIEZOS:
+            w = self.piezo_widgets[index]
+            for box in (w["output"], w["mode"], w["scale"]):
+                box.currentIndexChanged.connect(self.refresh)
+            for spin in (w["voltage"], w["amplitude"], w["phase"], w["bottom"],
+                         w["top"], w["frequency"], w["step"], w["limit"],
+                         w["phase_per_frame"], w["um_per_v"], w["gain"], w["angle"]):
+                spin.valueChanged.connect(self.refresh)
+            for check in (w["on"], w["follow"]):
+                check.toggled.connect(self.refresh)
         self.connected(None)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
@@ -2848,6 +2749,194 @@ class DaqDialog(QDialog):
         except (TypeError, ValueError):
             data = {}
         return daq.DaqSettings.from_dict(data)
+
+    @property
+    def quarter_wave_v(self):
+        """The first driver's volts per 90° from Calibrate phase step.
+
+        Args: None.
+        Returns: Volts, 0.0 when nothing was calibrated.
+        """
+        return self.quarter_wave[1]
+
+    @quarter_wave_v.setter
+    def quarter_wave_v(self, volts):
+        """Record the first driver's volts per 90°.
+
+        Args: volts is the new voltage per 90° step.
+        Returns: None.
+        """
+        self.quarter_wave[1] = volts
+
+    def _camera_chooser(self, index, tip):
+        """Build the camera chooser of one piezo driver.
+
+        Args: index is the driver, 1 or 2; tip is the chooser's tooltip.
+        Returns: A WheelIgnoringComboBox whose data is a channel's profile
+            key, or "" for "follow the displayed camera".
+        """
+        box = WheelIgnoringComboBox()
+        set_tooltip(box, tip)
+        box.currentIndexChanged.connect(self.refresh)
+        return box
+
+    def _build_piezo_widgets(self, index):
+        """Build one piezo driver's controls.
+
+        Args: index is the driver, 1 or 2 (Thor 1 or Thor 2).
+        Returns: A dict from a short name ("output", "on", "mode", "voltage",
+            "amplitude", "phase", "bottom", "top", "frequency", "follow",
+            "phase_per_frame", "scale", "um_per_v", "gain", "angle",
+            "follow_result", "step", "step_down", "step_up", "limit",
+            "result", and for driver 1 also "auto_tune" and "tune_result")
+            to the widget; _build_piezo_group lays it out.
+        """
+        which = "" if index == 1 else "second "
+        w = {}
+        w["output"] = box = WheelIgnoringComboBox()
+        set_tooltip(box,
+                    f"Which analog output drives the {which}reference piezo's "
+                    "amplifier.")
+        w["on"] = check = QCheckBox("Piezo on")
+        set_tooltip(check, "Drive the piezo after Apply. Off holds it at 0 V.")
+        w["mode"] = mode = WheelIgnoringComboBox()
+        for mode_name, text in PIEZO_MODE_TEXT:
+            mode.addItem(text, mode_name)
+        set_tooltip(mode,
+                    "Hold a voltage (step it by hand for phase steps), follow the "
+                    "generator with a sine at the same frequency and a set phase, or "
+                    "sweep a triangle between two voltages at its own frequency (the "
+                    "ramp a function generator would feed the piezo amplifier).")
+        w["voltage"] = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(w["voltage"],
+                    "The held voltage, or the centre of the sine, at the DAQ.")
+        w["amplitude"] = daq_spin(0.0, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(w["amplitude"], "Sine amplitude (peak). Sine mode only.")
+        w["phase"] = daq_spin(-360.0, 360.0, 1, "°", 5.0)
+        set_tooltip(w["phase"],
+                    "Phase of the piezo sine relative to the generator. Sine mode only.")
+        w["bottom"] = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(w["bottom"],
+                    "The triangle's lowest voltage (its DC offset). At 0 V or above, "
+                    "so the piezo amplifier's input never goes negative. Triangle mode "
+                    "only.")
+        w["top"] = daq_spin(daq.PIEZO_FLOOR_V, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(w["top"],
+                    "The triangle's highest voltage, at most the safety limit. "
+                    "Triangle mode only.")
+        w["frequency"] = daq_spin(daq.MIN_TRIANGLE_HZ, daq.MAX_TRIANGLE_HZ, 4,
+                                  " Hz", 0.01)
+        set_tooltip(w["frequency"],
+                    "How many times a second the triangle goes up and down. The device "
+                    "rounds it slightly; the value it produces is shown below. Needs "
+                    "the frequency generator off or on a counter, because both analog "
+                    "outputs share one sample clock. Triangle mode only.")
+        w["follow"] = QCheckBox("Follow the camera's frame rate")
+        set_tooltip(w["follow"],
+                    "Set the triangle's frequency from the rate frames arrive from the "
+                    "camera this driver steps, so the reference phase changes by the "
+                    "same amount (Phase per frame) between successive frames. It is "
+                    "set again whenever the frame rate moves the frequency by more "
+                    f"than {daq.FOLLOW_TOLERANCE:.0%}. Triangle mode only.")
+        w["phase_per_frame"] = daq_spin(1.0, daq.MAX_PHASE_PER_FRAME_DEG, 1, "°", 10.0)
+        set_tooltip(w["phase_per_frame"],
+                    "How far the reference phase moves from one frame to the next. 180° "
+                    "(half a wavelength of path) gives the strongest Previous-view "
+                    "difference; with Frames back N, use 180° / N.")
+        w["scale"] = scale = WheelIgnoringComboBox()
+        for scale_name, text in PIEZO_SCALE_TEXT:
+            scale.addItem(text, scale_name)
+        set_tooltip(scale,
+                    "Where the piezo's phase per volt comes from. Calibrated uses the "
+                    "voltage per 90° step that Calibrate phase step measured (the mirror "
+                    "angle and piezo are then included). Manual works it out from the "
+                    "numbers below for the HeNe laser "
+                    f"({daq.HENE_WAVELENGTH_NM:g} nm).")
+        w["um_per_v"] = daq_spin(0.0001, 10.0, 4, " µm/V", 0.01)
+        set_tooltip(w["um_per_v"],
+                    "Manual: how far the piezo moves per volt across it. A Thorlabs PE4 "
+                    "moves about 15 µm at 150 V, about 0.1 µm/V (open loop, approximate).")
+        w["gain"] = daq_spin(0.1, 100.0, 2, " ×", 0.5)
+        set_tooltip(w["gain"],
+                    "Manual: the piezo amplifier's gain from the DAQ to the piezo (15 for "
+                    "the Thorlabs MDT694A at its 150 V limit).")
+        w["angle"] = daq_spin(0.0, daq.MAX_MIRROR_ANGLE_DEG, 1, "°", 5.0)
+        set_tooltip(w["angle"],
+                    "Manual: the angle of incidence of the reference beam on the piezo "
+                    "mirror (0° straight on; 45° in the lab's setup). The path changes by "
+                    "twice the mirror's travel times the cosine of this angle.")
+        w["follow_result"] = label = QLabel()
+        label.setWordWrap(True)
+        if index == 1:  # auto-tune belongs to the first driver's group only
+            self.auto_tune_button = tune = QPushButton("Auto-tune (experimental)")
+            tune.setCheckable(True)
+            set_tooltip(tune,
+                        "Experimental. Tune the applied triangle's frequency from the "
+                        "camera frames for a 180° step per frame, the steadiest "
+                        "Previous-view image, and keep it there. The piezo first holds "
+                        "still for a few seconds to measure the camera noise. Keep the "
+                        "object still while it tunes. Turning it off keeps the tuned "
+                        "frequency (with Follow on, the computed one returns when the "
+                        "frame rate moves).")
+            tune.toggled.connect(self.window.set_auto_tune)
+            self.piezo_tune_result = label = QLabel()
+            label.setWordWrap(True)
+        w["step"] = daq_spin(0.0001, daq.MAX_VOLTS, 4, " V", 0.01)
+        set_tooltip(w["step"],
+                    "How far one Step press moves the held voltage (for example the "
+                    "voltage of a quarter-wave phase step).")
+        w["step_down"] = down = QPushButton("Step −")
+        set_tooltip(down, "Lower the held voltage by one step and apply it.")
+        w["step_up"] = up = QPushButton("Step +")
+        set_tooltip(up, "Raise the held voltage by one step and apply it.")
+        down.clicked.connect(lambda: self.step(-1, index))
+        up.clicked.connect(lambda: self.step(1, index))
+        row = QHBoxLayout()
+        row.addWidget(w["step"], 1)
+        row.addWidget(down)
+        row.addWidget(up)
+        w["step_row"] = row
+        w["limit"] = daq_spin(0.01, daq.MAX_VOLTS, 2, " V", 0.1)
+        set_tooltip(w["limit"],
+                    "Safety limit: the piezo driver stays between 0 V and this many "
+                    "volts. Set it to the piezo amplifier's largest safe input (10 V "
+                    "for the Thorlabs MDT694A's EXT INPUT).")
+        w["result"] = label = QLabel()
+        label.setWordWrap(True)
+        return w
+
+    def _build_piezo_group(self, index):
+        """Lay one piezo driver's controls out in a titled group.
+
+        Args: index is the driver, 1 or 2, naming the widgets built by
+            _build_piezo_widgets.
+        Returns: A QGroupBox.
+        """
+        w = self.piezo_widgets[index]
+        group = QGroupBox(daq.piezo_driver_label(index))
+        form = QFormLayout(group)
+        form.addRow(w["on"])
+        form.addRow("Mode", w["mode"])
+        form.addRow("Voltage", w["voltage"])
+        form.addRow("Amplitude", w["amplitude"])
+        form.addRow("Phase", w["phase"])
+        form.addRow("Bottom", w["bottom"])
+        form.addRow("Top", w["top"])
+        form.addRow("Frequency", w["frequency"])
+        form.addRow(w["follow"])
+        form.addRow("Phase per frame", w["phase_per_frame"])
+        form.addRow("Piezo scale", w["scale"])
+        form.addRow("Piezo travel", w["um_per_v"])
+        form.addRow("Amplifier gain", w["gain"])
+        form.addRow("Mirror angle", w["angle"])
+        form.addRow(w["follow_result"])
+        if index == 1:
+            form.addRow(self.auto_tune_button)
+            form.addRow(self.piezo_tune_result)
+        form.addRow("Step", w["step_row"])
+        form.addRow("Safety limit", w["limit"])
+        form.addRow(w["result"])
+        return group
 
     def showEvent(self, event):
         """Follow the controller while the window is open; scan the first time.
@@ -2926,10 +3015,11 @@ class DaqDialog(QDialog):
         """
         choices = ((self.generator_output,
                     (daq.OFF,) + outputs.analog + outputs.counters, generator_choice_text),
-                   (self.piezo_output, (daq.OFF,) + outputs.analog,
-                    lambda output: "Off (not assigned)" if output == daq.OFF
-                    else daq.output_label(output)),
                    (self.generator_terminal, outputs.terminals, daq.terminal_label))
+        for index in daq.PIEZOS:
+            choices += ((self.piezo_widgets[index]["output"], (daq.OFF,) + outputs.analog,
+                         lambda output: "Off (not assigned)" if output == daq.OFF
+                         else daq.output_label(output)),)
         for box, values, text in choices:
             current = box.currentData()
             box.blockSignals(True)
@@ -2949,46 +3039,53 @@ class DaqDialog(QDialog):
         s = settings
         self._set_combo(self.generator_output, s.generator_output)
         self._set_combo(self.generator_terminal, s.generator_terminal)
-        self._set_combo(self.piezo_output, s.piezo_output)
-        self._set_combo(self.piezo_mode, s.piezo_mode)
+        self._set_combo(self.piezo_camera_box, s.piezo_camera)
+        self._set_combo(self.piezo2_camera_box, s.piezo2_camera)
         self.generator_on.setChecked(s.generator_on)
         self.frequency.setValue(s.generator_frequency_hz)
         self.amplitude.setValue(s.generator_amplitude_v)
         self.offset.setValue(s.generator_offset_v)
         self.generator_limit.setValue(s.generator_limit_v)
-        self.piezo_on.setChecked(s.piezo_on)
-        self.piezo_voltage.setValue(s.piezo_voltage_v)
-        self.piezo_amplitude.setValue(s.piezo_amplitude_v)
-        self.piezo_phase.setValue(s.piezo_phase_deg)
-        self.piezo_bottom.setValue(s.piezo_bottom_v)
-        self.piezo_top.setValue(s.piezo_top_v)
-        self.piezo_frequency.setValue(s.piezo_frequency_hz)
-        self.piezo_step.setValue(s.piezo_step_v)
-        self.piezo_limit.setValue(s.piezo_limit_v)
-        self.piezo_follow.setChecked(s.piezo_follow_fps)
-        self.piezo_phase_per_frame.setValue(s.piezo_phase_per_frame_deg)
-        self._set_combo(self.piezo_scale, s.piezo_scale)
-        self.piezo_um_per_v.setValue(s.piezo_um_per_v)
-        self.piezo_gain.setValue(s.piezo_gain)
-        self.piezo_angle.setValue(s.piezo_angle_deg)
-        self.quarter_wave_v = s.piezo_quarter_wave_v
+        for index in daq.PIEZOS:
+            w = self.piezo_widgets[index]
+            self._set_combo(w["output"], daq.pget(s, index, "output"))
+            self._set_combo(w["mode"], daq.pget(s, index, "mode"))
+            w["on"].setChecked(daq.pget(s, index, "on"))
+            w["voltage"].setValue(daq.pget(s, index, "voltage_v"))
+            w["amplitude"].setValue(daq.pget(s, index, "amplitude_v"))
+            w["phase"].setValue(daq.pget(s, index, "phase_deg"))
+            w["bottom"].setValue(daq.pget(s, index, "bottom_v"))
+            w["top"].setValue(daq.pget(s, index, "top_v"))
+            w["frequency"].setValue(daq.pget(s, index, "frequency_hz"))
+            w["step"].setValue(daq.pget(s, index, "step_v"))
+            w["limit"].setValue(daq.pget(s, index, "limit_v"))
+            w["follow"].setChecked(daq.pget(s, index, "follow_fps"))
+            w["phase_per_frame"].setValue(daq.pget(s, index, "phase_per_frame_deg"))
+            self._set_combo(w["scale"], daq.pget(s, index, "scale"))
+            w["um_per_v"].setValue(daq.pget(s, index, "um_per_v"))
+            w["gain"].setValue(daq.pget(s, index, "gain"))
+            w["angle"].setValue(daq.pget(s, index, "angle_deg"))
+            self.quarter_wave[index] = daq.pget(s, index, "quarter_wave_v")
         self.wanted_device = s.device
 
     def settings(self):
         """Read the form.
 
-        With Follow the camera's frame rate on, the triangle's frequency is
-        the one the displayed camera's frame rate needs, once it is measured
+        With a driver's Follow the camera's frame rate on, its triangle's
+        frequency is the one its camera's frame rate needs, once measured
         and within the triangle's range; otherwise the typed one.
 
         Args: None.
         Returns: daq.DaqSettings.
         """
         typed = self._typed_settings()
-        frequency, _ = daq.follow_frequency(typed, self.window.received_fps())
-        if (typed.piezo_follow_fps and frequency is not None and
-                daq.MIN_TRIANGLE_HZ <= frequency <= daq.MAX_TRIANGLE_HZ):
-            return replace(typed, piezo_frequency_hz=frequency)
+        for index in daq.PIEZOS:
+            if not daq.pget(typed, index, "follow_fps"):
+                continue
+            fps = self.window.received_fps_for(daq.pget(typed, index, "camera"))
+            frequency, _ = daq.follow_frequency(typed, fps, index)
+            if frequency is not None and daq.MIN_TRIANGLE_HZ <= frequency <= daq.MAX_TRIANGLE_HZ:
+                typed = daq.pset(typed, index, frequency_hz=frequency)
         return typed
 
     def _typed_settings(self):
@@ -2997,7 +3094,7 @@ class DaqDialog(QDialog):
         Args: None.
         Returns: daq.DaqSettings.
         """
-        return daq.DaqSettings(
+        values = dict(
             device=self.device_box.currentData() or "",
             generator_output=self.generator_output.currentData() or daq.OFF,
             generator_terminal=self.generator_terminal.currentData() or "",
@@ -3005,25 +3102,40 @@ class DaqDialog(QDialog):
             generator_frequency_hz=self.frequency.value(),
             generator_amplitude_v=self.amplitude.value(),
             generator_offset_v=self.offset.value(),
-            generator_limit_v=self.generator_limit.value(),
-            piezo_output=self.piezo_output.currentData() or daq.OFF,
-            piezo_on=self.piezo_on.isChecked(),
-            piezo_mode=self.piezo_mode.currentData(),
-            piezo_voltage_v=self.piezo_voltage.value(),
-            piezo_amplitude_v=self.piezo_amplitude.value(),
-            piezo_phase_deg=self.piezo_phase.value(),
-            piezo_bottom_v=self.piezo_bottom.value(),
-            piezo_top_v=self.piezo_top.value(),
-            piezo_frequency_hz=self.piezo_frequency.value(),
-            piezo_step_v=self.piezo_step.value(),
-            piezo_limit_v=self.piezo_limit.value(),
-            piezo_follow_fps=self.piezo_follow.isChecked(),
-            piezo_phase_per_frame_deg=self.piezo_phase_per_frame.value(),
-            piezo_scale=self.piezo_scale.currentData(),
-            piezo_quarter_wave_v=self.quarter_wave_v,
-            piezo_um_per_v=self.piezo_um_per_v.value(),
-            piezo_gain=self.piezo_gain.value(),
-            piezo_angle_deg=self.piezo_angle.value())
+            generator_limit_v=self.generator_limit.value())
+        for index in daq.PIEZOS:
+            w = self.piezo_widgets[index]
+            values.update({
+                daq.pfield(index, "output"): w["output"].currentData() or daq.OFF,
+                daq.pfield(index, "on"): w["on"].isChecked(),
+                daq.pfield(index, "mode"): w["mode"].currentData(),
+                daq.pfield(index, "voltage_v"): w["voltage"].value(),
+                daq.pfield(index, "amplitude_v"): w["amplitude"].value(),
+                daq.pfield(index, "phase_deg"): w["phase"].value(),
+                daq.pfield(index, "bottom_v"): w["bottom"].value(),
+                daq.pfield(index, "top_v"): w["top"].value(),
+                daq.pfield(index, "frequency_hz"): w["frequency"].value(),
+                daq.pfield(index, "step_v"): w["step"].value(),
+                daq.pfield(index, "limit_v"): w["limit"].value(),
+                daq.pfield(index, "follow_fps"): w["follow"].isChecked(),
+                daq.pfield(index, "phase_per_frame_deg"): w["phase_per_frame"].value(),
+                daq.pfield(index, "scale"): w["scale"].currentData(),
+                daq.pfield(index, "quarter_wave_v"): self.quarter_wave[index],
+                daq.pfield(index, "um_per_v"): w["um_per_v"].value(),
+                daq.pfield(index, "gain"): w["gain"].value(),
+                daq.pfield(index, "angle_deg"): w["angle"].value(),
+                daq.pfield(index, "camera"): self._camera_choice(index)})
+        return daq.DaqSettings(**values)
+
+    def _camera_choice(self, index):
+        """The camera one driver steps, as its profile key.
+
+        Args: index is the driver, 1 or 2.
+        Returns: The chosen channel's profile key, or "" to follow the
+            displayed camera.
+        """
+        box = self.piezo_camera_box if index == 1 else self.piezo2_camera_box
+        return box.currentData() or ""
 
     def refresh(self, *_):
         """Enable the controls that apply, and preview or explain the result.
@@ -3041,40 +3153,86 @@ class DaqDialog(QDialog):
         has_generator = s.generator_output != daq.OFF
         for widget in (self.generator_on, self.frequency, self.generator_limit):
             widget.setEnabled(has_generator)
-        has_piezo = s.piezo_output != daq.OFF
-        sine_piezo = has_piezo and s.piezo_mode == daq.SINE
-        triangle_piezo = has_piezo and s.piezo_mode == daq.TRIANGLE
-        for widget in (self.piezo_on, self.piezo_mode, self.piezo_limit):
-            widget.setEnabled(has_piezo)
-        self.piezo_voltage.setEnabled(has_piezo and not triangle_piezo)
-        for widget in (self.piezo_amplitude, self.piezo_phase):
-            widget.setEnabled(sine_piezo)
-        for widget in (self.piezo_bottom, self.piezo_top, self.piezo_follow):
-            widget.setEnabled(triangle_piezo)
-        following = triangle_piezo and s.piezo_follow_fps
-        self.piezo_frequency.setEnabled(triangle_piezo and not following)
-        for widget in (self.piezo_phase_per_frame, self.piezo_scale):
-            widget.setEnabled(following)
-        for widget in (self.piezo_um_per_v, self.piezo_gain, self.piezo_angle):
-            widget.setEnabled(following and s.piezo_scale == daq.MANUAL)
-        if following:
-            self.piezo_frequency.blockSignals(True)
-            self.piezo_frequency.setValue(s.piezo_frequency_hz)
-            self.piezo_frequency.blockSignals(False)
-        for widget in (self.piezo_step, self.step_down, self.step_up):
-            widget.setEnabled(has_piezo and s.piezo_mode == daq.HOLD)
+        for index in daq.PIEZOS:
+            self._refresh_piezo(s, index, outputs)
+        self._refresh_camera_choosers()
         found = daq.problems(s, outputs)
         self.problem_label.setText("\n".join(found))
-        self.piezo_follow_result.setText("" if found else self._follow_text(s))
-        fit_label(self.piezo_follow_result)
+        self.piezo_widgets[1]["follow_result"].setText(
+            "" if found else self._follow_text(s, 1))
+        self.piezo_widgets[2]["follow_result"].setText(
+            "" if found else self._follow_text(s, 2))
+        fit_label(self.piezo_widgets[1]["follow_result"])
+        fit_label(self.piezo_widgets[2]["follow_result"])
         self.show_auto_tune()
         self.apply_button.setEnabled(self.outputs is not None and not found)
         self.test_button.setEnabled(self.outputs is not None)
         self.safety_label.setText(self._safety_text(s))
         self.generator_result.setText(self._preview(s, outputs, found))
-        self.piezo_result.setText(self._piezo_preview(s, outputs, found))
+        for index in daq.PIEZOS:
+            self.piezo_widgets[index]["result"].setText(
+                self._piezo_preview(s, index, outputs, found))
         if self.wiring is not None:
             self.wiring.show_settings(s, self.outputs and self.outputs.device)
+
+    def _refresh_piezo(self, s, index, outputs):
+        """Enable one piezo driver's controls and show its follow frequency.
+
+        Args: s is the form's daq.DaqSettings; index is the driver, 1 or 2;
+            outputs is the connected device's daq.DeviceOutputs (the
+            simulated one when nothing is connected).
+        Returns: None.
+        """
+        w = self.piezo_widgets[index]
+        has_piezo = daq.pget(s, index, "output") != daq.OFF
+        sine_piezo = has_piezo and daq.pget(s, index, "mode") == daq.SINE
+        triangle_piezo = has_piezo and daq.pget(s, index, "mode") == daq.TRIANGLE
+        for widget in (w["on"], w["mode"], w["limit"]):
+            widget.setEnabled(has_piezo)
+        w["voltage"].setEnabled(has_piezo and not triangle_piezo)
+        for widget in (w["amplitude"], w["phase"]):
+            widget.setEnabled(sine_piezo)
+        for widget in (w["bottom"], w["top"], w["follow"]):
+            widget.setEnabled(triangle_piezo)
+        following = triangle_piezo and daq.pget(s, index, "follow_fps")
+        w["frequency"].setEnabled(triangle_piezo and not following)
+        for widget in (w["phase_per_frame"], w["scale"]):
+            widget.setEnabled(following)
+        for widget in (w["um_per_v"], w["gain"], w["angle"]):
+            widget.setEnabled(following and daq.pget(s, index, "scale") == daq.MANUAL)
+        if following:
+            w["frequency"].blockSignals(True)
+            w["frequency"].setValue(daq.pget(s, index, "frequency_hz"))
+            w["frequency"].blockSignals(False)
+        for widget in (w["step"], w["step_down"], w["step_up"]):
+            widget.setEnabled(has_piezo and daq.pget(s, index, "mode") == daq.HOLD)
+
+    def _refresh_camera_choosers(self):
+        """Fill the camera choosers from the window's channels and keep them apart.
+
+        Each driver may step any open camera, but both drivers cannot step
+        the same one: choosing a camera for one driver drops it from the
+        other's list.
+
+        Args: None.
+        Returns: None.
+        """
+        choices = [("", "Follow the displayed camera")]
+        choices += [(channel.profile_key, channel.label)
+                    for channel in self.window.channels if channel.supported]
+        chosen = {index: self._camera_choice(index) for index in daq.PIEZOS}
+        for index in daq.PIEZOS:
+            box = self.piezo_camera_box if index == 1 else self.piezo2_camera_box
+            other = 2 if index == 1 else 1
+            box.blockSignals(True)
+            box.clear()
+            for key, label in choices:
+                if key and key == chosen[other]:
+                    continue  # one camera per driver
+                box.addItem(label, key)
+            if not self._set_combo(box, chosen[index]):
+                box.setCurrentIndex(0)
+            box.blockSignals(False)
 
     def show_wiring(self):
         """Open the "Where to plug in" window for the settings in the form.
@@ -3104,24 +3262,28 @@ class DaqDialog(QDialog):
             actual = daq.square_frequency(settings.generator_frequency_hz)
             return (f"Produces about {actual:.6g} Hz, 0–5 V square, on "
                     f"{daq.terminal_label(settings.generator_terminal)}.")
-        channels = len({settings.generator_output, settings.piezo_output} - {daq.OFF})
+        channels = len({settings.generator_output,
+                        *[daq.pget(settings, index, "output") for index in daq.PIEZOS]}
+                       - {daq.OFF})
         rate, samples, actual = daq.choose_timing(settings.generator_frequency_hz, channels)
         return (f"Produces {actual:.6g} Hz: {samples} samples per cycle at "
                 f"{rate:,.0f} samples/s.")
 
-    def _follow_text(self, settings):
-        """Say what frequency the triangle follows, and the scale behind it.
+    def _follow_text(self, settings, index):
+        """Say what frequency a triangle follows, and the scale behind it.
 
-        Args: settings is the form's daq.DaqSettings.
-        Returns: One line of text ("" when the triangle does not follow the
+        Args: settings is the form's daq.DaqSettings; index is the piezo
+            driver, 1 or 2.
+        Returns: One line of text ("" when that triangle does not follow the
             frame rate, and the calibration on record otherwise).
         """
         s = settings
-        if s.piezo_output == daq.OFF or s.piezo_mode != daq.TRIANGLE:
+        if not daq.piezo_assigned(s, index) or daq.pget(s, index, "mode") != daq.TRIANGLE:
             return ""
-        if not s.piezo_follow_fps:
+        if not daq.pget(s, index, "follow_fps"):
             return ""
-        return daq.follow_text(s, self.window.received_fps())
+        fps = self.window.received_fps_for(daq.pget(s, index, "camera"))
+        return daq.follow_text(s, fps, index)
 
     def show_auto_tune(self):
         """Show whether auto-tune runs and what it is doing.
@@ -3129,50 +3291,61 @@ class DaqDialog(QDialog):
         Args: None.
         Returns: None.
         """
+        tune = self.auto_tune_button
         tuning = self.window.piezo_tuner is not None
-        self.auto_tune_button.setEnabled(tuning or (
-            self.outputs is not None and self.piezo_output.currentData() != daq.OFF
-            and self.piezo_mode.currentData() == daq.TRIANGLE))
-        self.auto_tune_button.blockSignals(True)
-        self.auto_tune_button.setChecked(tuning)
-        self.auto_tune_button.blockSignals(False)
+        tune.setEnabled(tuning or (
+            self.outputs is not None and self.piezo_widgets[1]["output"].currentData()
+            != daq.OFF and self.piezo_widgets[1]["mode"].currentData() == daq.TRIANGLE))
+        tune.blockSignals(True)
+        tune.setChecked(tuning)
+        tune.blockSignals(False)
         self.piezo_tune_result.setText(self.window.tune_text())
         fit_label(self.piezo_tune_result)
 
     def follow_frame_rate(self):
-        """Show the frequency the newest frame rate needs, while following it.
+        """Show the frequency the newest frame rates need, while following them.
 
         Args: None.
         Returns: None.
         """
-        if self.piezo_follow.isChecked() and self.piezo_follow.isEnabled():
-            self.refresh()
+        for index in daq.PIEZOS:
+            w = self.piezo_widgets[index]
+            if w["follow"].isChecked() and w["follow"].isEnabled():
+                self.refresh()
+                return
 
-    def set_quarter_wave(self, volts):
+    def set_quarter_wave(self, volts, index=1):
         """Take a new Calibrate phase step result for the Calibrated scale.
 
-        Args: volts is the DAQ voltage per 90° step.
+        Args: volts is the DAQ voltage per 90° step; index is the driver it
+            was measured on, 1 or 2.
         Returns: None.
         """
-        self.quarter_wave_v = volts
-        self.piezo_step.setValue(volts)
+        self.quarter_wave[index] = volts
+        self.piezo_widgets[index]["step"].setValue(volts)
         self.refresh()
 
     @staticmethod
-    def _piezo_preview(settings, outputs, found):
-        """Say what the piezo triangle will produce once applied.
+    def _piezo_preview(settings, index, outputs, found):
+        """Say what a piezo triangle will produce once applied.
 
-        Args: settings is daq.DaqSettings; outputs the device's outputs;
-            found is the list of problems.
+        Args: settings is daq.DaqSettings; index is the driver, 1 or 2;
+            outputs the device's outputs; found is the list of problems.
         Returns: One line of text ("" outside triangle mode or with problems).
         """
         s = settings
-        if found or s.piezo_output == daq.OFF or s.piezo_mode != daq.TRIANGLE:
+        if found or not daq.piezo_assigned(s, index) \
+                or daq.pget(s, index, "mode") != daq.TRIANGLE:
             return ""
-        channels = len({s.generator_output, s.piezo_output} & set(outputs.analog))
-        rate, samples, actual = daq.choose_timing(s.piezo_frequency_hz, channels)
-        return (f"Produces a {actual:.6g} Hz triangle from {s.piezo_bottom_v:g} V to "
-                f"{s.piezo_top_v:g} V: {samples} samples per cycle at "
+        channels = len({s.generator_output,
+                        *[daq.pget(s, i, "output") for i in daq.PIEZOS]}
+                       & set(outputs.analog))
+        rate, samples, actual = daq.choose_timing(
+            daq.pget(s, index, "frequency_hz"), channels)
+        which = "" if index == 1 else "second "
+        return (f"Produces a {which}{actual:.6g} Hz triangle from "
+                f"{daq.pget(s, index, 'bottom_v'):g} V to "
+                f"{daq.pget(s, index, 'top_v'):g} V: {samples} samples per cycle at "
                 f"{rate:,.0f} samples/s.")
 
     def _connect_selected(self, *_):
@@ -3270,15 +3443,15 @@ class DaqDialog(QDialog):
         self.test_label.setText("Testing outputs…")
         self.controller.request("self_test")
 
-    def step(self, direction):
-        """Move the held piezo voltage by one step, and apply it if the piezo is on.
+    def step(self, direction, index=1):
+        """Move a held piezo voltage by one step, and apply it if the piezo is on.
 
-        Args: direction is +1 or -1.
+        Args: direction is +1 or -1; index is the driver to step, 1 or 2.
         Returns: None.
         """
-        self.piezo_voltage.setValue(self.piezo_voltage.value()
-                                    + direction * self.piezo_step.value())
-        if self.piezo_on.isChecked() and self.apply_button.isEnabled():
+        w = self.piezo_widgets[index]
+        w["voltage"].setValue(w["voltage"].value() + direction * w["step"].value())
+        if w["on"].isChecked() and self.apply_button.isEnabled():
             self.apply()
 
     def connected(self, outputs):
@@ -3371,13 +3544,14 @@ class DaqDialog(QDialog):
             self.state_label.setText("Outputs: stopped after an error.")
 
     def _switch_off(self):
-        """Untick both On boxes, to match outputs at 0 V.
+        """Untick every On box, to match outputs at 0 V.
 
         Args: None.
         Returns: None.
         """
         self.generator_on.setChecked(False)
-        self.piezo_on.setChecked(False)
+        for index in daq.PIEZOS:
+            self.piezo_widgets[index]["on"].setChecked(False)
 
     def _show_devices(self, devices, reason):
         """List the devices found (plus the simulated one) and connect.
@@ -3781,8 +3955,8 @@ class DaqWiringDialog(QDialog):
         source.setWordWrap(True)
         source.setStyleSheet("color: gray;")
         safety = QLabel(
-            "<b>Never connect the MDT694A's OUTPUT (up to 150 V) to the DAQ.</b> "
-            "Switch the MDT694A on after ESPI live is running and the device is "
+            "<b>Never connect an MDT694A's OUTPUT (up to 150 V) to the DAQ.</b> "
+            "Switch each MDT694A on after ESPI live is running and the device is "
             "connected, and off before you unplug the DAQ: its outputs are undefined "
             "for a moment while it powers up. The Wavetek function generator is not "
             "needed in the piezo chain: the DAQ makes the triangle.")
@@ -3818,8 +3992,16 @@ class DaqWiringDialog(QDialog):
             lines.append(f'<p><span style="color:{colour}; font-weight:bold;">'
                          f"{number}. {item.label}{where}</span> → {item.target} "
                          f"<i>({item.role.lower()})</i><br>{item.note}</p>")
+        assigned = [daq.pget(settings, index, "output") for index in daq.PIEZOS
+                    if daq.piezo_assigned(settings, index)]
+        if len(assigned) > 1:
+            lines.append("<p><b>Two Thorlabs amplifiers:</b> Thor 1 is on "
+                         f"{daq.output_label(assigned[0])} and Thor 2 on "
+                         f"{daq.output_label(assigned[1])}. The frequency generator "
+                         "then needs a counter output (or must be off): the "
+                         "USB-6251 BNC has only two analog outputs.</p>")
         self.legend.setText("".join(lines) or
-                            "<p>Nothing to plug in yet: assign the piezo driver or the "
+                            "<p>Nothing to plug in yet: assign a piezo driver or the "
                             "frequency generator to an output.</p>")
         model = device.model if device is not None else ""
         if device is None or device.simulated:
@@ -4470,6 +4652,85 @@ class ControlBackend:
         Returns: A list of lines (oldest first), possibly empty.
         """
         return control.tail(getattr(self.window.log, "path", None), lines)
+class StreamWindow(QWidget):
+    """A second window showing one camera's live stream, beside the main one.
+
+    It draws the channel's newest processed frame on its own timer; the main
+    window's controls and status bar stay untouched. Closing it only closes
+    the window.
+    """
+
+    POLL_MS = 33  # about one frame at 30 fps
+
+    def __init__(self, main):
+        """Build the window and start polling.
+
+        Args: main is the MainWindow that opened it (for the log, the GL or
+            CPU view choice and to be told when this window closes).
+        Returns: None.
+        """
+        super().__init__(None)  # its own top-level window, not a dialog
+        self.main = main
+        self.channel = None
+        self.sequence = None
+        self.setWindowTitle("Second stream")
+        self.resize(ui_scale.px(480), ui_scale.px(360))
+        self.caption = QLabel()
+        self.caption.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.caption.setStyleSheet("color:white;background:rgba(0,0,0,55%);"
+                                   f"padding:2px 8px;border-radius:3px;"
+                                   f"font-size:{ui_scale.px(11)}px;")
+        self.caption.setVisible(False)
+        self.view = GLImageView() if main.using_gl else CpuImageView()
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.view, 0, 0)
+        layout.addWidget(self.caption, 0, 0, Qt.AlignTop | Qt.AlignLeft)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+        self.timer.start(self.POLL_MS)
+
+    def set_channel(self, channel):
+        """Show another camera's stream.
+
+        Args: channel is a Channel with a running engine, or None to show
+            nothing.
+        Returns: None.
+        """
+        if channel is self.channel:
+            return
+        self.channel = channel
+        self.sequence = None
+        self.view.clear()
+        label = f"{channel.label} (second stream)" if channel is not None \
+            else "Second stream"
+        self.setWindowTitle(label)
+        self.caption.setText(channel.label if channel is not None else "")
+        self.caption.setVisible(channel is not None)
+
+    def poll(self):
+        """Draw the channel's newest frame.
+
+        Args: None.
+        Returns: None.
+        """
+        packet = self.channel.engine.latest_packet() \
+            if self.channel is not None and self.channel.engine is not None else None
+        if packet is None or packet.sequence == self.sequence:
+            return
+        self.sequence = packet.sequence
+        table = display_rgb_table(packet.gamma)
+        self.view.show_packet(packet, table, round(packet.gamma, 4))
+
+    def closeEvent(self, event):
+        """Tell the main window this window is gone.
+
+        Args: event is the Qt close event.
+        Returns: None.
+        """
+        self.main.stream_window = None
+        super().closeEvent(event)
 
     # ----- NI DAQ ------------------------------------------------------------
 
@@ -4956,8 +5217,9 @@ class MainWindow(QMainWindow):
         self.compare_dialog = None  # ReferenceCompareDialog, built on first use
         self.pixels_dialog = None  # PixelSquareDialog, built on first use
         self.daq = None  # daq.DaqController, made when the DAQ window first opens
-        self.piezo_follow_hz = None  # a frame-rate frequency change sent, not yet applied
+        self.piezo_follow_hz = {}  # driver -> a frame-rate frequency change sent, not yet applied
         self.piezo_tuner = None  # step_tuning.StepTuner while auto-tune runs
+        self.tune_index = None  # the driver auto-tune tunes, 1 or 2
         self.tune_engine = None  # the engine whose frames it measures
         self.tune_settings = None  # the applied triangle it tunes
         self.tune_sent = None  # (DaqSettings, factor, held) last sent by it
@@ -4966,15 +5228,26 @@ class MainWindow(QMainWindow):
         self.daq_dialog = None  # DaqDialog, built on first use
         self.daq_auto = None  # device name startup connects to once the scan ends
         self.daq_events_lock = threading.Lock()  # the control server drains events too
-        self.phase_stepper = None  # phase.PiezoStepper the displayed engine steps
+        self.phase_steppers = {1: None, 2: None}  # daq.PiezoStepper per driver
+        self.stepper_claims = {}  # Channel -> driver index whose stepper it runs
+        self.piezo_pairing = {1: "", 2: ""}  # driver -> camera profile key
+        self.phase_stepper = None  # the displayed camera's stepper (from phase_steppers)
         self.view_state = None  # last logged (view size, zoom, image size)
         self.drawn_frames = 0
         self.fps_window_start = time.monotonic()
         self.display_fps = 0.0
         self.hover = (-1, -1)
+        self.using_gl = use_gl
         self.view = GLImageView() if use_gl else CpuImageView()
         self.view.hovered.connect(self._set_hover)
         self.view.imageClicked.connect(self._image_clicked)
+        self.second_view = GLImageView() if use_gl else CpuImageView()
+        self.second_view.hovered.connect(self._set_hover)
+        self.second_view.imageClicked.connect(self._second_clicked)
+        self.second_view.setVisible(False)
+        # Small captions name each pane in split view (on screen only).
+        self.view_caption = self._pane_caption()
+        self.second_caption = self._pane_caption()
         # The frozen banner floats over the top of the image (same grid cell);
         # mouse events pass through it so zoom, pan and the readout still work.
         self.frozen_banner = QLabel()
@@ -4992,11 +5265,20 @@ class MainWindow(QMainWindow):
         stack = QGridLayout(center)
         stack.setContentsMargins(0, 0, 0, 0)
         stack.setSpacing(0)
-        stack.addWidget(self.piezo_debug, 0, 0)
+        stack.addWidget(self.piezo_debug, 0, 0, 1, 2)
         stack.addWidget(self.view, 1, 0)
+        stack.addWidget(self.second_view, 1, 1)
+        stack.addWidget(self.view_caption, 1, 0, Qt.AlignTop | Qt.AlignLeft)
+        stack.addWidget(self.second_caption, 1, 1, Qt.AlignTop | Qt.AlignLeft)
         stack.addWidget(self.frozen_banner, 1, 0, Qt.AlignTop | Qt.AlignHCenter)
+        stack.setColumnStretch(0, 1)
+        stack.setColumnStretch(1, 1)
         stack.setRowStretch(1, 1)
         self.setCentralWidget(center)
+        self.display_mode = "single"  # or "split" or "overlay": how two streams show
+        self.second_channel = None  # the Channel the second pane (or window) shows
+        self.second_sequence = None  # (sequences) last drawn for the second stream
+        self.stream_window = None  # the second stream window, built on first use
         # The controls dock takes the full window height; the log sits under
         # the image only.
         self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
@@ -6948,6 +7230,31 @@ class MainWindow(QMainWindow):
         self.piezo_debug_action.triggered.connect(self._show_piezo_debug)
         menu.addAction(self.piezo_debug_action)
         menu.addSeparator()
+        self.split_action = QAction("Split two streams", self)
+        self.split_action.setCheckable(True)
+        set_tooltip(self.split_action,
+                    "Show two cameras side by side. Click a pane to make that camera "
+                    "the one the controls edit. Needs two processing cameras.")
+        self.split_action.triggered.connect(
+            lambda on: self.set_display_mode("split" if on else "single"))
+        menu.addAction(self.split_action)
+        self.overlay_action = QAction("Overlay two streams", self)
+        self.overlay_action.setCheckable(True)
+        set_tooltip(self.overlay_action,
+                    "Blend two cameras into one image (their average grey level), for "
+                    "example the front and back of a sample. Needs two processing "
+                    "cameras.")
+        self.overlay_action.triggered.connect(
+            lambda on: self.set_display_mode("overlay" if on else "single"))
+        menu.addAction(self.overlay_action)
+        self.stream_window_action = QAction("Second stream window…", self)
+        set_tooltip(self.stream_window_action,
+                    "Open another window showing a second camera's live stream, while "
+                    "this window keeps its own. Needs two processing cameras.")
+        self.stream_window_action.triggered.connect(self.open_stream_window)
+        menu.addAction(self.stream_window_action)
+        self._sync_stream_actions()
+        menu.addSeparator()
         # The live image has no tooltip: a popup there would hide the measurement.
         # The shortcut list lives here instead.
         hint = menu.addAction("Wheel to zoom, drag to pan, Q or Esc to quit")
@@ -7064,6 +7371,7 @@ class MainWindow(QMainWindow):
         self.process_note.setVisible(several)
         self.profile_label.setVisible(several)
         self._sync_cameras()
+        self._stream_follow()
 
     def _sync_cameras(self):
         """Show which camera is displayed and which ones are processing.
@@ -7107,7 +7415,7 @@ class MainWindow(QMainWindow):
             self.log.write(f"Processing on: {channel.label}")
             channel.start(self._release_shared_device(channel))
         self.current = channel
-        self._attach_stepper(self.phase_stepper)  # the piezo follows the display
+        self._attach_steppers()  # each camera keeps its own driver's stepper
         self.drawn_sequence = 0
         self.shown_packet = None
         self.view.clear()
@@ -7117,6 +7425,7 @@ class MainWindow(QMainWindow):
         self._load_settings(self.engine.settings(), channel.limits)
         self._set_demo(channel.demo)
         self._sync_cameras()
+        self._stream_follow()
         self.log.write(f"Displaying {channel.label}")
 
     def _release_shared_device(self, channel):
@@ -7595,20 +7904,65 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _saved_piezo():
-        """The DAQ settings saved by Apply, when they assign the piezo driver.
+        """The DAQ settings saved by Apply, when they assign a piezo driver.
 
         A piezo counts as configured only after Apply has saved settings that
-        assign it: the DAQ window's defaults name AO 1 for the piezo, and
-        merely opening that window must never start driving it.
+        assign it: the DAQ window's defaults name AO 1 for the first driver,
+        and merely opening that window must never start driving anything.
 
         Args: None.
-        Returns: daq.DaqSettings, or None when nothing is saved or the piezo
-            is unassigned.
+        Returns: daq.DaqSettings, or None when nothing is saved or neither
+            driver is assigned.
         """
         if not QSettings("ESPI", "espi_live").value(DAQ_SETTINGS_KEY, ""):
             return None
         saved = DaqDialog._saved_settings()
-        return saved if saved.piezo_output != daq.OFF else None
+        return saved if any(daq.piezo_assigned(saved, index)
+                            for index in daq.PIEZOS) else None
+
+    def received_fps_for(self, key):
+        """The rate frames arrive from a camera, chosen by its profile key.
+
+        Args: key is the camera's profile key, or "" for the displayed one.
+        Returns: Frames per second over the last second (0.0 before any
+            arrive, or when the camera is not open).
+        """
+        if not key:
+            return self.received_fps()
+        channel = self._channel_by_key(key)
+        if channel is None or channel.engine is None:
+            return 0.0
+        return float(channel.engine.status().get("processed_fps") or 0.0)
+
+    def received_fps(self):
+        """The rate frames arrive from the displayed camera.
+
+        Args: None.
+        Returns: Frames per second over the last second (0.0 before any arrive).
+        """
+        return float(self.engine.status().get("processed_fps") or 0.0)
+
+    def _channel_by_key(self, key):
+        """Find a channel by its profile key.
+
+        Args: key is a profiles.profile_key value, or "".
+        Returns: The Channel, or None.
+        """
+        return next((channel for channel in self.channels
+                     if channel.profile_key == key), None)
+
+    def _driver_of(self, channel):
+        """Which piezo driver a camera is paired to.
+
+        Args: channel is one of self.channels.
+        Returns: The driver index, 1 or 2, whose pairing names this camera;
+            1 when nothing pairs it (the historical default: Thor 1 follows
+            the displayed camera).
+        """
+        for index in (2, 1):
+            if self.piezo_pairing.get(index) == channel.profile_key:
+                return index
+        return 1
 
     def poll_daq(self, defer_devices=False):
         """Handle the DAQ controller's events, for the window and the DAQ window.
@@ -7723,19 +8077,13 @@ class MainWindow(QMainWindow):
         self._attach_stepper(phase.PiezoStepper(self.daq, settings, simulated))
         return channel.label
 
-    def received_fps(self):
-        """The rate frames arrive from the displayed camera.
-
-        Args: None.
-        Returns: Frames per second over the last second (0.0 before any arrive).
-        """
-        return float(self.engine.status().get("processed_fps") or 0.0)
-
     def _follow_frame_rate(self):
-        """Keep a piezo triangle that follows the frame rate at the frequency it needs.
+        """Keep piezo triangles that follow a frame rate at the frequency it needs.
 
-        The frequency is set again only when the frame rate moves it by more
-        than daq.FOLLOW_TOLERANCE, since each change restarts the triangle.
+        Each driver follows the frame rate of the camera it is paired to (the
+        displayed one when nothing is paired). The frequency is set again
+        only when the frame rate moves it by more than daq.FOLLOW_TOLERANCE,
+        since each change restarts the triangle.
 
         Args: None.
         Returns: None.
@@ -7746,21 +8094,37 @@ class MainWindow(QMainWindow):
             self._run_tuner()
             return
         applied = self.daq.status()["settings"]
-        if applied is None or not applied.piezo_on:
+        if applied is None:
             return
-        if self.piezo_follow_hz is not None:  # a change is on its way
-            applied = replace(applied, piezo_frequency_hz=self.piezo_follow_hz)
-        fps = self.received_fps()
-        settings = daq.followed(applied, fps)
+        wanted = applied
+        changes = {}
+        for index in daq.PIEZOS:
+            if not daq.pget(applied, index, "on") or \
+                    not daq.pget(applied, index, "follow_fps"):
+                continue
+            pending = self.piezo_follow_hz.get(index)
+            if pending is not None:  # a change is on its way
+                wanted = daq.pset(wanted, index, frequency_hz=pending)
+                continue
+            fps = self.received_fps_for(daq.pget(applied, index, "camera"))
+            settings = daq.followed(applied, fps, index)
+            if settings is None:
+                continue
+            wanted = daq.pset(wanted, index,
+                              frequency_hz=daq.pget(settings, index, "frequency_hz"))
+            changes[index] = (fps, daq.pget(settings, index, "frequency_hz"),
+                              daq.pget(settings, index, "phase_per_frame_deg"))
         if self.daq_dialog is not None and self.daq_dialog.isVisible():
             self.daq_dialog.follow_frame_rate()
-        if settings is None or not self.daq.is_armed(settings):
+        if not changes or not self.daq.is_armed(wanted):
             return
-        self.piezo_follow_hz = settings.piezo_frequency_hz
-        self.log.write(f"NI DAQ: the piezo triangle follows the camera's {fps:.1f} fps: "
-                       f"{settings.piezo_frequency_hz:.4g} Hz for "
-                       f"{settings.piezo_phase_per_frame_deg:g}° per frame.")
-        self.daq.request("apply", settings=settings)
+        for index, (fps, frequency, per_frame) in changes.items():
+            which = ("the piezo triangle follows the camera's" if index == 1
+                     else "the second piezo's triangle follows its camera's")
+            self.log.write(f"NI DAQ: {which} {fps:.1f} fps: "
+                           f"{frequency:.4g} Hz for {per_frame:g}° per frame.")
+            self.piezo_follow_hz[index] = frequency
+        self.daq.request("apply", settings=wanted)
 
     def set_auto_tune(self, on, reason=""):
         """Start or stop the experimental auto-tune of the piezo triangle.
@@ -7776,26 +8140,33 @@ class MainWindow(QMainWindow):
         """
         if on and self.piezo_tuner is None:
             applied = self.daq.status()["settings"] if self.daq is not None else None
-            if applied is None or not applied.piezo_on or \
-                    applied.piezo_output == daq.OFF or applied.piezo_mode != daq.TRIANGLE:
+            index = self._driver_of(self.current)
+            if applied is None or not daq.pget(applied, index, "on") or \
+                    not daq.piezo_assigned(applied, index) or \
+                    daq.pget(applied, index, "mode") != daq.TRIANGLE:
                 self.tune_note = ("Auto-tune needs a piezo triangle: choose Triangle, tick "
                                   "Piezo on and Apply first.")
             else:
                 self.piezo_tuner = step_tuning.StepTuner()
+                self.tune_index = index
                 self.tune_engine, self.tune_settings = self.engine, applied
                 self.tune_sent, self.tune_note = None, ""
+                which = "" if index == 1 else "Thor 2's "
                 self.log.write("Auto-tune (experimental): on. The piezo holds still to "
                                "measure the camera noise, then the triangle's frequency is "
-                               "tuned for a 180° step per frame. Keep the object still.")
+                               f"tuned for a 180° step per frame on {which}output. Keep "
+                               "the object still.")
         elif not on and self.piezo_tuner is not None:
             tuner, self.piezo_tuner = self.piezo_tuner, None
+            index, self.tune_index = self.tune_index, None
             wanted = self._tune_target(tuner.scale, False)
             self.tune_note = f"Auto-tune stopped: {reason}." if reason else ""
             if reason:
                 self.log.write(f"Auto-tune (experimental): stopped, {reason}.")
             else:
                 self.log.write(f"Auto-tune (experimental): off; the triangle keeps "
-                               f"{wanted.piezo_frequency_hz:.4g} Hz (×{tuner.scale:.3f}).")
+                               f"{daq.pget(wanted, index, 'frequency_hz'):.4g} Hz "
+                               f"(×{tuner.scale:.3f}).")
                 if self.tune_sent is None or self.tune_sent[0] != wanted:
                     self._send_tuned(wanted)
         self._sync_step_monitor()
@@ -7821,16 +8192,18 @@ class MainWindow(QMainWindow):
             the frame rate when Follow is on), or the piezo held at the
             triangle's centre.
         """
+        index = self.tune_index or 1
         base = self.tune_settings
         if hold:
-            return replace(base, piezo_mode=daq.HOLD,
-                           piezo_voltage_v=(base.piezo_bottom_v + base.piezo_top_v) / 2)
-        frequency = base.piezo_frequency_hz
-        if base.piezo_follow_fps:
-            computed, _ = daq.follow_frequency(base, self.received_fps())
+            return daq.pset(base, index, mode=daq.HOLD,
+                            voltage_v=(daq.pget(base, index, "bottom_v")
+                                       + daq.pget(base, index, "top_v")) / 2)
+        frequency = daq.pget(base, index, "frequency_hz")
+        if daq.pget(base, index, "follow_fps"):
+            computed, _ = daq.follow_frequency(base, self.received_fps(), index)
             frequency = computed or frequency
         frequency = min(daq.MAX_TRIANGLE_HZ, max(daq.MIN_TRIANGLE_HZ, frequency * scale))
-        return replace(base, piezo_frequency_hz=frequency)
+        return daq.pset(base, index, frequency_hz=frequency)
 
     def _send_tuned(self, settings):
         """Apply settings auto-tune chose, if the safety checklist allows them.
@@ -7865,9 +8238,11 @@ class MainWindow(QMainWindow):
         wanted = self._tune_target(tuner.scale, tuner.wants_hold)
         sent = self.tune_sent
         key = (tuner.scale, tuner.wants_hold)
+        index = self.tune_index or 1
         if sent is not None and (sent[1], sent[2]) == key:
-            old = sent[0].piezo_frequency_hz
-            if abs(wanted.piezo_frequency_hz - old) <= daq.FOLLOW_TOLERANCE * old:
+            old = daq.pget(sent[0], index, "frequency_hz")
+            if abs(daq.pget(wanted, index, "frequency_hz") - old) <= \
+                    daq.FOLLOW_TOLERANCE * old:
                 return  # nothing new (a small frame-rate drift is left alone)
         if not self._send_tuned(wanted):
             self.set_auto_tune(False, "the safety checklist does not cover these outputs")
@@ -7875,7 +8250,8 @@ class MainWindow(QMainWindow):
         self.tune_sent = (wanted, tuner.scale, tuner.wants_hold)
         tuner.changed(now)
         if not tuner.wants_hold:
-            self.log.write(f"Auto-tune (experimental): {wanted.piezo_frequency_hz:.4g} Hz "
+            self.log.write(f"Auto-tune (experimental): "
+                           f"{daq.pget(wanted, index, 'frequency_hz'):.4g} Hz "
                            f"(×{tuner.scale:.3f}).")
 
     def _sync_step_monitor(self):
@@ -7913,19 +8289,32 @@ class MainWindow(QMainWindow):
         fps = self.received_fps()
         lines = [f"camera   {fps:.1f} fps received"]
         applied = self.daq.status()["settings"] if self.daq is not None else None
-        if applied is None or not applied.piezo_on or applied.piezo_output == daq.OFF:
+        if applied is None:
             lines.append("piezo    not driven")
-        elif applied.piezo_mode == daq.TRIANGLE:
-            lines.append(f"piezo    triangle {applied.piezo_bottom_v:g}–"
-                         f"{applied.piezo_top_v:g} V at {applied.piezo_frequency_hz:.4g} Hz")
-            computed, reason = daq.follow_frequency(applied, fps)
-            lines.append("formula  " + (
-                f"{computed:.4g} Hz for {applied.piezo_phase_per_frame_deg:g}°/frame"
-                if computed is not None else reason))
-        elif applied.piezo_mode == daq.HOLD:
-            lines.append(f"piezo    held at {applied.piezo_voltage_v:g} V")
-        else:
-            lines.append(f"piezo    sine {applied.piezo_amplitude_v:g} V peak")
+        for index in daq.PIEZOS:
+            if applied is None:
+                break
+            name = "piezo" if index == 1 else "piezo2"
+            if not daq.pget(applied, index, "on") or not daq.piezo_assigned(applied, index):
+                if daq.piezo_assigned(applied, index) or index == 1:
+                    lines.append(f"{name}   not driven")
+                continue
+            mode = daq.pget(applied, index, "mode")
+            driver_fps = self.received_fps_for(daq.pget(applied, index, "camera")) \
+                if daq.pget(applied, index, "camera") else fps
+            if mode == daq.TRIANGLE:
+                lines.append(f"{name}   triangle {daq.pget(applied, index, 'bottom_v'):g}–"
+                             f"{daq.pget(applied, index, 'top_v'):g} V at "
+                             f"{daq.pget(applied, index, 'frequency_hz'):.4g} Hz")
+                computed, reason = daq.follow_frequency(applied, driver_fps, index)
+                lines.append("formula  " + (
+                    f"{computed:.4g} Hz for "
+                    f"{daq.pget(applied, index, 'phase_per_frame_deg'):g}°/frame"
+                    if computed is not None else reason))
+            elif mode == daq.HOLD:
+                lines.append(f"{name}   held at {daq.pget(applied, index, 'voltage_v'):g} V")
+            else:
+                lines.append(f"{name}   sine {daq.pget(applied, index, 'amplitude_v'):g} V peak")
         tuner = self.piezo_tuner
         noise = tuner.noise if tuner is not None else 0.0
         stats = self.engine.step_monitor.stats(time.monotonic() - PIEZO_DEBUG_WINDOW_S,
@@ -7943,18 +8332,19 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _daq_event(self, kind, payload):
-        """Follow the piezo: attach it to the Phase view, or take it away.
+        """Follow the piezos: attach them to their paired cameras, or take them away.
 
-        A device whose saved settings assign the piezo driver makes the
-        Phase view the displayed camera's view (the default whenever a piezo
-        is present). Applying settings in the DAQ window updates the steps;
-        0 V, an error or a disconnect stops them.
+        A device whose saved settings assign a piezo driver makes the Phase
+        view that driver's paired camera's view (the displayed camera when
+        nothing is paired, as it always has been). Applying settings in the
+        DAQ window updates the steps; 0 V, an error or a disconnect stops
+        them.
 
         Args: kind and payload are the controller's event.
         Returns: None.
         """
         if kind in ("applied", "rejected", "zeroed", "failed", "closed", "fault"):
-            self.piezo_follow_hz = None  # a frequency change sent has been answered
+            self.piezo_follow_hz = {}  # frequency changes sent have been answered
         if kind in ("rejected", "zeroed", "failed", "closed", "fault") and \
                 self.piezo_tuner is not None:
             self.set_auto_tune(False, f"the NI DAQ outputs were {kind}"
@@ -7970,63 +8360,145 @@ class MainWindow(QMainWindow):
         elif kind == "connected":
             self.set_daq_drive(daq.Drive())  # a new connection starts at 0 V
             saved = self._saved_piezo()
-            if saved is None or saved.piezo_output not in payload.analog:
-                self._attach_stepper(None)
+            if saved is None:
+                self._take_steppers()
                 return
-            # Everything is at 0 V after connecting, so the generator stays off.
-            base = replace(saved, device=payload.device.name, generator_on=False,
-                           piezo_on=False)
-            if not self.daq.is_armed(replace(base, piezo_on=True)):
-                self._attach_stepper(None)
-                self.log.write("Phase view: the NI DAQ piezo waits for the safety checklist "
-                               "(Devices > NI DAQ…, then Apply with the piezo on).")
+            # Everything is at 0 V after connecting, so the generator and both
+            # drivers stay off until a step or an Apply turns one on.
+            base = replace(saved, device=payload.device.name, generator_on=False)
+            off_both = daq.pset(daq.pset(base, 1, on=False), 2, on=False)
+            simulated = payload.device.simulated
+            for index in daq.PIEZOS:
+                stepper = None
+                if daq.piezo_assigned(base, index) and \
+                        self.daq.is_armed(daq.pset(off_both, index, on=True)):
+                    stepper = phase.PiezoStepper(self.daq, off_both, simulated, index)
+                self.phase_steppers[index] = stepper
+            self._read_pairing(base)
+            if not any(self.phase_steppers.values()):
+                self._take_steppers()
+                self.log.write("Phase view: the NI DAQ piezo waits for the safety "
+                               "checklist (Devices > NI DAQ…, then Apply with the "
+                               "piezo on).")
                 return
-            self._attach_stepper(phase.PiezoStepper(self.daq, base,
-                                                    payload.device.simulated))
+            self._attach_steppers(self._arrived())
         elif kind == "applied":
             self.set_daq_drive(payload.drive)
             applied = self.daq.status()["settings"]
             device = self.daq.status()["device"]
-            if applied is not None and applied.piezo_output != daq.OFF:
-                self._attach_stepper(phase.PiezoStepper(
-                    self.daq, applied, device is not None and device.simulated))
-            else:
-                self._attach_stepper(None)
+            simulated = device is not None and device.simulated
+            for index in daq.PIEZOS:
+                self.phase_steppers[index] = (
+                    phase.PiezoStepper(self.daq, applied, simulated, index)
+                    if applied is not None and daq.piezo_assigned(applied, index)
+                    else None)
+            self._read_pairing(applied)
+            self._attach_steppers(self._arrived())
         elif kind in ("zeroed", "failed", "closed", "fault"):
             if kind == "fault":
                 self.log.write(f"NI DAQ self-check: {payload}. Every output was set to 0 V.")
             self.set_daq_drive(daq.Drive())
-            if self.phase_stepper is not None:
+            if any(self.phase_steppers.values()):
                 self.log.write("Phase view: piezo stepping stopped (the NI DAQ outputs "
                                "are at 0 V or disconnected).")
-                self._attach_stepper(None)
+                self._take_steppers()
+
+    def _read_pairing(self, settings):
+        """Record which camera each driver steps, from DaqSettings.
+
+        Args: settings is daq.DaqSettings (the applied or saved ones), or
+            None to forget the pairing.
+        Returns: None.
+        """
+        self.piezo_pairing = {index: (daq.pget(settings, index, "camera")
+                                      if settings is not None else "")
+                              for index in daq.PIEZOS}
+
+    def _take_steppers(self):
+        """Remove every piezo stepper from every engine.
+
+        Args: None.
+        Returns: None.
+        """
+        self.phase_steppers = {index: None for index in daq.PIEZOS}
+        self._attach_steppers()
+
+    def _arrived(self):
+        """Name the drivers whose stepper is new since the last attach.
+
+        Args: None.
+        Returns: A frozenset of driver indexes whose stepper object changed
+            (a new attach), so the Phase view may start for its camera.
+        """
+        arrived = frozenset(index for index in daq.PIEZOS
+                            if self.phase_steppers.get(index) is not None
+                            and getattr(self, "_attached_steppers", {}).get(index)
+                            is not self.phase_steppers.get(index))
+        self._attached_steppers = dict(self.phase_steppers)
+        return arrived
 
     def _attach_stepper(self, stepper):
-        """Give the piezo to the displayed camera's engine, and only to it.
+        """Attach one driver's stepper, or take every stepper away.
 
-        A piezo that was not there before makes the Phase view the displayed
-        camera's view (the default whenever a piezo is configured); a camera
-        switched away from it by hand stays where it is until the piezo is
-        taken away and comes back.
+        The historical single-stepper entry point: a stepper attaches where
+        its pairing (or, with none, the displayed camera) says; None clears
+        every driver.
 
         Args: stepper is a phase.PiezoStepper, or None.
         Returns: None.
         """
-        arrived = stepper is not None and self.phase_stepper is None
-        self.phase_stepper = stepper
+        if stepper is None:
+            self._take_steppers()
+            return
+        self.phase_steppers[stepper.index] = stepper
+        self._attach_steppers(self._arrived())
+
+    def _attach_steppers(self, arrivals=frozenset()):
+        """Give each paired camera's engine its driver's stepper, and only that.
+
+        A driver whose pairing names a camera attaches there; a camera two
+        drivers name goes to Thor 1. When no driver is paired at all, Thor 1
+        follows the displayed camera, as it always has. A stepper that just
+        arrived for the displayed camera makes the Phase view its view.
+
+        Args: arrivals is a frozenset of driver indexes whose stepper is new
+            (from _arrived), for the Phase-view auto-selection.
+        Returns: None.
+        """
+        previous = self.stepper_claims
+        claims = {}
+        paired_any = any(self.piezo_pairing.values())
+        for index in daq.PIEZOS:
+            stepper = self.phase_steppers.get(index)
+            if stepper is None:
+                continue
+            channel = self._channel_by_key(self.piezo_pairing.get(index, ""))
+            if channel is not None and channel not in claims:
+                claims[channel] = index
+            elif channel is None and not paired_any and self.current not in claims:
+                claims[self.current] = index
+        self.stepper_claims = claims
         for channel in self.channels:
             engine = channel.engine
-            if engine is not None:
-                engine.set_phase_stepper(stepper if channel is self.current else None)
-        if arrived:
+            if engine is None:
+                continue
+            index = claims.get(channel)
+            engine.set_phase_stepper(
+                self.phase_steppers.get(index) if index is not None else None)
+        self.phase_stepper = (self.phase_steppers.get(claims[self.current])
+                              if self.current in claims else None)
+        if self.current in claims and previous.get(self.current) != \
+                claims[self.current] and claims[self.current] in arrivals:
             self.engine.update_settings(mode="Phase")
             self._load_settings(self.engine.settings(), self.current.limits)
-            self.log.write(f"NI DAQ piezo on {daq.output_label(stepper.settings.piezo_output)}"
-                           ": Phase view on (phase-shifting ESPI).")
+            stepper = self.phase_stepper
+            self.log.write(f"NI DAQ piezo on {daq.output_label(daq.pget(stepper.settings, claims[self.current], 'output'))} "
+                           f"(Thor {claims[self.current]}): Phase view on "
+                           "(phase-shifting ESPI).")
         self._show_phase_state()
 
     def _show_phase_state(self):
-        """Describe the piezo under Phase shifting and enable Calibrate.
+        """Describe the displayed camera's piezo under Phase shifting and enable Calibrate.
 
         Args: None.
         Returns: None.
@@ -8039,14 +8511,17 @@ class MainWindow(QMainWindow):
             stepper is not None or self.engine.settings().mode == "Phase")
         if stepper is None:
             self.phase_state.setText(
-                "Piezo: not connected. Assign the piezo driver in Devices > NI DAQ; "
-                "the Phase view then starts by itself.")
+                "Piezo: not connected. Assign a piezo driver in Devices > NI DAQ "
+                "(and pair it to this camera there); the Phase view then starts "
+                "by itself.")
             return
         s = stepper.settings
         simulated = " Simulated device: nothing is driven." if stepper.simulated else ""
+        thor = "" if stepper.index == 1 else " (Thor 2)"
         self.phase_state.setText(
-            f"Piezo: {daq.output_label(s.piezo_output)}, from {s.piezo_voltage_v:g} V "
-            f"in steps of {s.piezo_step_v:.4g} V.{simulated}")
+            f"Piezo{thor}: {daq.output_label(daq.pget(s, stepper.index, 'output'))}, "
+            f"from {daq.pget(s, stepper.index, 'voltage_v'):g} V "
+            f"in steps of {daq.pget(s, stepper.index, 'step_v'):.4g} V.{simulated}")
 
     def calibrate_phase(self):
         """Measure the piezo's phase step and set the voltage per step.
@@ -8064,18 +8539,19 @@ class MainWindow(QMainWindow):
         self._load_settings(self.engine.settings(), self.current.limits)
         self.engine.request("calibrate_phase")
 
-    def _save_piezo_step(self, volts):
+    def _save_piezo_step(self, volts, index=1):
         """Keep a calibrated voltage per step in the saved DAQ settings.
 
-        Args: volts is the new voltage per phase step.
+        Args: volts is the new voltage per phase step; index is the driver it
+            was measured on, 1 or 2.
         Returns: None.
         """
-        saved = replace(DaqDialog._saved_settings(), piezo_step_v=volts,
-                        piezo_quarter_wave_v=volts)
+        saved = daq.pset(DaqDialog._saved_settings(), index, step_v=volts,
+                         quarter_wave_v=volts)
         QSettings("ESPI", "espi_live").setValue(DAQ_SETTINGS_KEY,
                                                 json.dumps(saved.to_dict()))
         if self.daq_dialog is not None:
-            self.daq_dialog.set_quarter_wave(volts)
+            self.daq_dialog.set_quarter_wave(volts, index)
 
     def _build_phase_controls(self, add, note, s):
         """Create the Phase shifting controls.
@@ -8199,12 +8675,17 @@ class MainWindow(QMainWindow):
     def _poll_frame(self):
         """Draw the newest engine frame if it has not been drawn yet.
 
-        Nothing is drawn while the displayed camera is frozen.
+        Nothing is drawn while the displayed camera is frozen. In split view
+        the second pane is drawn here too; in overlay mode the blend of the
+        two streams replaces the single image.
 
         Args: None.
         Returns: None.
         """
         if self.current.frozen is not None:
+            return
+        if self.display_mode == "overlay":
+            self._draw_overlay()
             return
         packet = self.engine.latest_packet()
         if packet is None or packet.sequence == self.drawn_sequence:
@@ -8212,6 +8693,8 @@ class MainWindow(QMainWindow):
         self.drawn_sequence = packet.sequence
         self._draw(packet)
         self.drawn_frames += 1
+        if self.display_mode == "split":
+            self._draw_second()
 
     def _draw(self, packet):
         """Put a frame on screen, rebuilding the color table only when needed.
@@ -8225,6 +8708,189 @@ class MainWindow(QMainWindow):
             self.table_key = key
         self.view.show_packet(packet, self.table, key)
         self.shown_packet = packet
+
+    # ----- two streams ---------------------------------------------------------
+
+    def _pane_caption(self):
+        """Build a small caption naming a pane's camera.
+
+        Args: None.
+        Returns: A QLabel that never takes mouse events and starts hidden.
+        """
+        label = QLabel()
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._styled(label, "color:white;background:rgba(0,0,0,55%);"
+                     "padding:2px 8px;border-radius:3px;")
+        label.setVisible(False)
+        return label
+
+    def _second_clicked(self, x, y):
+        """Make the second pane's camera the displayed one.
+
+        Args: x and y are the image pixel clicked.
+        Returns: None.
+        """
+        if self.display_mode == "split" and self.second_channel is not None:
+            self.show_channel(self.second_channel)
+        self._image_clicked(x, y)
+
+    def _active_channels(self):
+        """List the channels that are processing.
+
+        Args: None.
+        Returns: A list of Channel.
+        """
+        return [channel for channel in self.channels if channel.active]
+
+    def _sync_stream_actions(self):
+        """Enable the two-stream actions and check the split/overlay ones.
+
+        Args: None.
+        Returns: None.
+        """
+        two = len(self._active_channels()) >= 2
+        self.split_action.setEnabled(two)
+        self.overlay_action.setEnabled(two)
+        self.stream_window_action.setEnabled(two)
+        self.split_action.blockSignals(True)
+        self.overlay_action.blockSignals(True)
+        self.split_action.setChecked(self.display_mode == "split")
+        self.overlay_action.setChecked(self.display_mode == "overlay")
+        self.split_action.blockSignals(False)
+        self.overlay_action.blockSignals(False)
+        self._show_captions()
+
+    def set_display_mode(self, mode):
+        """Show one stream, two split panes, or two streams overlaid.
+
+        Args: mode is "single", "split" or "overlay".
+        Returns: None.
+        """
+        if mode == self.display_mode:
+            return
+        if mode != "single" and len(self._active_channels()) < 2:
+            return
+        previous, self.display_mode = self.display_mode, mode
+        self.second_channel = self._pick_second_channel()
+        self.second_sequence = None
+        self.drawn_sequence = 0
+        self.second_view.setVisible(mode == "split")
+        if mode == "single":
+            if previous != "single":
+                self.log.write("Hiding the second stream.")
+            self.second_view.clear()
+        elif self.second_channel is not None:
+            self.log.write(f"{'Showing' if mode == 'split' else 'Overlaying'} two "
+                           f"streams: {self.current.label} and "
+                           f"{self.second_channel.label}.")
+        self._sync_stream_actions()
+        self._show_captions()
+
+    def _pick_second_channel(self):
+        """Choose the channel the second pane (or window) shows.
+
+        Args: None.
+        Returns: The first active channel that is not the displayed one, or
+            None when there is no other.
+        """
+        return next((channel for channel in self._active_channels()
+                     if channel is not self.current), None)
+
+    def _show_captions(self):
+        """Name each pane's camera, in split view only.
+
+        Args: None.
+        Returns: None.
+        """
+        show = self.display_mode == "split" and self.second_channel is not None
+        self.view_caption.setText(self.current.label if show else "")
+        self.view_caption.setVisible(show)
+        self.second_caption.setText(self.second_channel.label if show else "")
+        self.second_caption.setVisible(show)
+
+    def _stream_follow(self):
+        """Re-point the second stream after cameras opened, closed or switched.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.display_mode != "single" or self.stream_window is not None:
+            self.second_channel = self._pick_second_channel()
+        self._sync_stream_actions()
+        if self.stream_window is not None:
+            self.stream_window.set_channel(self.second_channel)
+
+    def _draw_second(self):
+        """Draw the second pane's newest frame.
+
+        Args: None.
+        Returns: None.
+        """
+        packet = self.second_channel.engine.latest_packet() \
+            if self.second_channel is not None and self.second_channel.engine \
+            is not None else None
+        if packet is None or packet.sequence == self.second_sequence:
+            return
+        self.second_sequence = packet.sequence
+        key = round(packet.gamma, 4)
+        table = display_rgb_table(packet.gamma)
+        self.second_view.show_packet(packet, table, key)
+
+    def _blend_packets(self, first, second):
+        """Blend two cameras' packets into one, for the overlay display.
+
+        The two images are shown exactly as each would be alone (display
+        tone applied), then averaged. A different frame size is scaled to
+        the displayed camera's. Dummy mode wins: a blend involving a demo
+        stream keeps the dummy-mode watermark.
+
+        Args: first and second are FramePacket.
+        Returns: A FramePacket with gamma 1 (already display-applied) and
+            the displayed camera's mode and sequence.
+        """
+        image = first.render().astype(np.float32)
+        other = second.render()
+        if other.shape != image.shape:
+            other = cv2.resize(other, (image.shape[1], image.shape[0]),
+                               interpolation=cv2.INTER_LINEAR)
+        blended = np.round((image + other) / 2.0).astype(np.uint8)
+        return FramePacket(first.sequence, blended, 1.0, first.mode,
+                           first.demo or second.demo)
+
+    def _draw_overlay(self):
+        """Draw the blend of the two streams into the main view.
+
+        Args: None.
+        Returns: None.
+        """
+        packets = []
+        for channel in (self.current, self.second_channel):
+            packet = channel.engine.latest_packet() if channel is not None and \
+                channel.engine is not None else None
+            packets.append(packet)
+        if packets[0] is None or packets[1] is None:
+            return
+        key = (packets[0].sequence, packets[1].sequence)
+        if key == self.second_sequence:
+            return
+        self.second_sequence = key
+        blended = self._blend_packets(packets[0], packets[1])
+        table = display_rgb_table(1.0)
+        self.view.show_packet(blended, table, 1.0)
+        self.drawn_frames += 1
+
+    def open_stream_window(self):
+        """Open a second window showing another camera's live stream.
+
+        Args: None.
+        Returns: None.
+        """
+        if self.stream_window is None:
+            self.stream_window = StreamWindow(self)
+        self.second_channel = self.second_channel or self._pick_second_channel()
+        self.stream_window.set_channel(self.second_channel)
+        self.stream_window.show()
+        self.stream_window.raise_()
 
     def _log_view_state(self):
         """Log, at DEBUG, each change of what size the image is drawn at.
@@ -8334,12 +9000,16 @@ class MainWindow(QMainWindow):
     def set_daq_drive(self, drive):
         """Follow what the NI DAQ outputs produce, for every demo camera.
 
+        Each camera follows the piezo driver it is paired to (Thor 1 when
+        nothing is paired).
+
         Args: drive is a daq.Drive (daq.Drive() when nothing is driven).
-        Returns: None; every channel gets it (demo engines use it).
+        Returns: None; every channel gets its driver's view of it (demo
+            engines use it).
         """
         self.daq_drive = drive
         for channel in self.channels:
-            channel.set_drive(drive)
+            channel.set_drive(daq.drive_for(drive, self._driver_of(channel)))
         self._show_simulated_note()
 
     def _poll_status(self):
@@ -8935,20 +9605,27 @@ class MainWindow(QMainWindow):
         elif kind == "noise_calibrated" and displayed:
             self.min_range.set_value(payload)
         elif kind == "phase_calibrated":
-            degrees, volts = payload
-            self._save_piezo_step(volts)
-            if self.phase_stepper is not None:
-                self._attach_stepper(self.phase_stepper.with_step(volts))
+            degrees, volts, index = payload
+            self._save_piezo_step(volts, index)
+            stepper = self.phase_steppers.get(index)
+            if stepper is not None:
+                self.phase_steppers[index] = stepper.with_step(volts)
+                self._attach_steppers()
+            which = "" if index == 1 else " (Thor 2)"
             self.statusBar().showMessage(
-                f"Phase step calibrated: {degrees:.0f}° measured; now {volts:.4g} V "
-                "per step.", PHASE_MESSAGE_MS)
+                f"Phase step calibrated{which}: {degrees:.0f}° measured; now "
+                f"{volts:.4g} V per step.", PHASE_MESSAGE_MS)
         elif kind == "phase_calibration_failed":
+            degrees, index = payload
+            which = "" if index == 1 else " (Thor 2)"
             self.statusBar().showMessage(
-                f"Phase step calibration failed: {payload:.0f}° per step measured "
-                "(see the log).", PHASE_MESSAGE_MS)
+                f"Phase step calibration failed{which}: {degrees:.0f}° per step "
+                "measured (see the log).", PHASE_MESSAGE_MS)
         elif kind == "phase_stopped":
-            if displayed:
-                self._attach_stepper(None)
+            index = self.stepper_claims.get(channel)
+            if index is not None:
+                self.phase_steppers[index] = None
+                self._attach_steppers()
             self.statusBar().showMessage(f"{name}Phase view stopped: {payload}",
                                          PHASE_MESSAGE_MS)
         elif kind == "record_off" and displayed:
@@ -8998,6 +9675,7 @@ class MainWindow(QMainWindow):
             self.show_channel(others[0])
         else:
             self._sync_cameras()
+            self._stream_follow()
 
     def closeEvent(self, event):
         """Stop the engine (finishing recordings) and save the window layout.
@@ -9009,6 +9687,8 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.tip_timer.stop()
             self.update_timer.stop()
+            if self.stream_window is not None:
+                self.stream_window.close()
             if self.daq is not None:  # amplifiers must not be left driven
                 self.statusBar().showMessage("Setting the NI DAQ outputs to 0 V…")
                 if not self.daq.shutdown(DAQ_SHUTDOWN_S):

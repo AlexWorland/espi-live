@@ -1,14 +1,18 @@
-"""NI DAQ outputs: a frequency generator and a piezo driver on one NI device.
+"""NI DAQ outputs: a frequency generator and two piezo drivers on one NI device.
 
 The frequency generator excites the specimen (a sine on an analog output, or
-a square TTL wave from a counter on a PFI terminal). The piezo driver sets the
-reference piezo's voltage: a held level for manual phase steps, a sine locked
-to the generator's frequency and phase, or a triangle at its own frequency
-(the slow ramp a function generator used to feed the piezo amplifier). Each
-role is assigned to its own output, and every voltage is clamped to a limit
-the user sets for the amplifier behind it. The piezo driver never goes below
-0 V: the piezo amplifier (a Thorlabs MDT694A) takes 0-10 V on its EXT INPUT,
-and a negative input would drive the piezo below 0 V.
+a square TTL wave from a counter on a PFI terminal). Each piezo driver sets
+one reference piezo's voltage: a held level for manual phase steps, a sine
+locked to the generator's frequency and phase (first driver only), or a
+triangle at its own frequency (the slow ramp a function generator used to
+feed the piezo amplifier). The USB-6251 BNC has two analog outputs, so the
+first driver (Thor 1) takes AO 1 and the second one (Thor 2) AO 0; with both
+drivers in use the frequency generator must be off or on a counter, and two
+triangles share one sample clock so they must run at the same frequency.
+Every voltage is clamped to a limit the user sets for the amplifier behind
+it. A piezo driver never goes below 0 V: the piezo amplifier (a Thorlabs
+MDT694A) takes 0-10 V on its EXT INPUT, and a negative input would drive the
+piezo below 0 V.
 
 pyLabLib's NIDAQ class does the device work on top of NI's ``nidaqmx``
 package; both are imported lazily, so the program runs without them. The
@@ -79,7 +83,12 @@ BNC_GROUPS = (("ANALOG INPUTS", tuple(f"ai{index}" for index in range(8))),
               ("USER", ("user1", "user2")))
 BNC_TERMINALS = tuple(name for _, names in BNC_GROUPS for name in names)
 PIEZO_AMPLIFIER = "Thorlabs MDT694A EXT INPUT"
+PIEZO2_AMPLIFIER = "the second Thorlabs MDT694A's EXT INPUT"
 PIEZO_ROLE, GENERATOR_ROLE = "Piezo driver", "Frequency generator"
+# The two piezo drivers: 1 is Thor 1 (the app's original, defaulting to AO 1),
+# 2 is Thor 2 (defaulting to AO 0, the output the frequency generator would
+# otherwise use). The generator then needs a counter output or must be off.
+PIEZOS = (1, 2)
 
 # Self-checks. The USB-6251 measures its own analog outputs through the
 # internal channels "_ao0_vs_aognd" and "_ao1_vs_aognd", with no wiring.
@@ -190,20 +199,77 @@ def socket_label(name):
     return f"{stem.upper()} {name[len(stem):]}".strip()
 
 
+def pfield(index, base):
+    """Name the DaqSettings field of one piezo driver.
+
+    Args: index is the driver, 1 or 2; base is the shared part of the field
+        name, such as "output", "voltage_v" or "quarter_wave_v".
+    Returns: The field name: "piezo_output" for driver 1, "piezo2_output"
+        for driver 2.
+    """
+    return f"piezo{'2' if index == 2 else ''}_{base}"
+
+
+def pget(settings, index, base):
+    """Read one piezo driver's DaqSettings field.
+
+    Args: settings is DaqSettings; index is the driver, 1 or 2; base is the
+        shared part of the field name (see pfield).
+    Returns: The field's value.
+    """
+    return getattr(settings, pfield(index, base))
+
+
+def pset(settings, index, **bases):
+    """New DaqSettings with one piezo driver's fields replaced.
+
+    Args: settings is DaqSettings; index is the driver, 1 or 2; bases are
+        shared field names (see pfield) and their new values.
+    Returns: The new DaqSettings.
+    """
+    return replace(settings, **{pfield(index, name): value
+                                for name, value in bases.items()})
+
+
+def piezo_driver_label(index):
+    """Name a piezo driver the way the DAQ window does.
+
+    Args: index is the driver, 1 or 2.
+    Returns: "Piezo driver (Thor 1)" or "Piezo driver (Thor 2)".
+    """
+    return f"Piezo driver (Thor {index})"
+
+
+def piezo_assigned(settings, index):
+    """Tell whether one piezo driver is assigned to an output.
+
+    Args: settings is DaqSettings; index is the driver, 1 or 2.
+    Returns: True when its output is not OFF.
+    """
+    return pget(settings, index, "output") != OFF
+
+
 def wiring(settings):
     """List the cables the settings need, for the "Where to plug in" window.
 
     Args: settings is DaqSettings.
-    Returns: A list of Connection, the piezo driver first; empty when no
+    Returns: A list of Connection, the piezo drivers first; empty when no
         role is assigned.
     """
     s = settings
     found = []
-    if s.piezo_output != OFF:
+    if piezo_assigned(s, 1):
         found.append(Connection(
-            s.piezo_output, PIEZO_ROLE, PIEZO_AMPLIFIER,
+            pget(s, 1, "output"), PIEZO_ROLE, PIEZO_AMPLIFIER,
             f"0–{MAX_VOLTS:g} V in; the amplifier adds its OUTPUT ADJ knob, so turn "
             "the knob to zero. Its OUTPUT stays on the piezo."))
+    if piezo_assigned(s, 2):
+        found.append(Connection(
+            pget(s, 2, "output"), PIEZO_ROLE, PIEZO2_AMPLIFIER,
+            f"0–{MAX_VOLTS:g} V in; the amplifier adds its OUTPUT ADJ knob, so turn "
+            "the knob to zero. Its OUTPUT stays on the second piezo. With both "
+            "drivers in use the frequency generator needs a counter output (or "
+            "must be off): there are only two analog outputs."))
     if s.generator_output.startswith("ctr"):
         note = "0–5 V square wave (TTL)."
         if s.generator_terminal not in BNC_TERMINALS:
@@ -231,18 +297,21 @@ def checklist_items(settings):
     """
     s = settings
     items = []
-    if s.piezo_on and s.piezo_output != OFF:
-        piezo = socket_label(s.piezo_output)
+    for index in PIEZOS:
+        if not (pget(s, index, "on") and piezo_assigned(s, index)):
+            continue
+        which = "" if index == 1 else "second "
+        piezo = socket_label(pget(s, index, "output"))
         items += [
-            "The MDT694A's OUTPUT ADJ knob is turned to zero (it adds to the DAQ's "
-            "voltage).",
-            f"Only the DAQ's {piezo} cable goes to the MDT694A's EXT INPUT: the Wavetek "
-            "is unplugged from it.",
-            "The MDT694A's OUTPUT goes only to the piezo, never to the DAQ (it reaches "
-            "150 V).",
-            f"The piezo's safety limit here ({s.piezo_limit_v:g} V at the DAQ, about "
-            f"{s.piezo_limit_v * MDT694A_GAIN:.0f} V at the piezo) and the MDT694A's "
-            "VOLT LIMIT suit this piezo.",
+            f"The {which}MDT694A's OUTPUT ADJ knob is turned to zero (it adds to "
+            "the DAQ's voltage).",
+            f"Only the DAQ's {piezo} cable goes to the {which}MDT694A's EXT INPUT: "
+            "the Wavetek is unplugged from it.",
+            f"The {which}MDT694A's OUTPUT goes only to its piezo, never to the DAQ "
+            "(it reaches 150 V).",
+            f"The {which}piezo's safety limit here ({pget(s, index, 'limit_v'):g} V "
+            f"at the DAQ, about {pget(s, index, 'limit_v') * MDT694A_GAIN:.0f} V at "
+            f"the piezo) and that MDT694A's VOLT LIMIT suit this piezo.",
         ]
     if s.generator_on and s.generator_output != OFF:
         where = socket_label(s.generator_terminal if s.generator_output.startswith("ctr")
@@ -370,6 +439,34 @@ class DaqSettings:
     piezo_um_per_v: float = 0.1  # manual: piezo travel per volt at the piezo (PE4 ~15 µm/150 V)
     piezo_gain: float = 15.0  # manual: amplifier gain (MDT694A at its 150 V limit)
     piezo_angle_deg: float = 45.0  # manual: angle of incidence on the piezo mirror (lab: 45°)
+    # The second piezo driver (Thor 2), for a second camera's phase steps.
+    # It is unassigned until Apply saves settings that assign it, and its
+    # natural output is AO 0, which the frequency generator would otherwise
+    # use: the USB-6251 BNC has only two analog outputs, so with both
+    # drivers in use the generator must be off or on a counter, and two
+    # triangles share one sample clock (one frequency between them).
+    piezo2_output: str = OFF  # an AO, or OFF
+    piezo2_on: bool = False
+    piezo2_mode: str = HOLD
+    piezo2_voltage_v: float = 0.0  # the held level, or the sine's centre
+    piezo2_amplitude_v: float = 0.0  # sine peak
+    piezo2_phase_deg: float = 0.0  # sine phase relative to the generator
+    piezo2_bottom_v: float = 0.0  # triangle's lowest level
+    piezo2_top_v: float = 1.0  # triangle's highest level
+    piezo2_frequency_hz: float = 0.25  # triangle frequency, on the shared clock
+    piezo2_step_v: float = 0.05  # what one Step button press adds
+    piezo2_limit_v: float = 1.0
+    piezo2_follow_fps: bool = False  # triangle frequency follows its camera's frame rate
+    piezo2_phase_per_frame_deg: float = DEFAULT_PHASE_PER_FRAME_DEG
+    piezo2_scale: str = CALIBRATED  # phase per volt: CALIBRATED or MANUAL
+    piezo2_quarter_wave_v: float = 0.0  # DAQ volts per 90° from Calibrate phase step; 0: none
+    piezo2_um_per_v: float = 0.1  # manual: piezo travel per volt at the piezo
+    piezo2_gain: float = 15.0  # manual: amplifier gain (MDT694A at its 150 V limit)
+    piezo2_angle_deg: float = 45.0  # manual: angle of incidence on the piezo mirror
+    # Which camera each driver steps, as the camera's profile key
+    # ("profiles/..."); "" leaves the driver to the displayed camera.
+    piezo_camera: str = ""
+    piezo2_camera: str = ""
 
     def to_dict(self):
         """Describe the settings for storage.
@@ -420,11 +517,12 @@ class Drive:
     """What the outputs produce, for the simulated ESPI signal in dummy mode.
 
     The generator's waveform is "sine", "square" or "" (off or unassigned),
-    at the frequency the device really produces; the piezo's mode is HOLD,
+    at the frequency the device really produces; each piezo's mode is HOLD,
     SINE, TRIANGLE or "" (off or unassigned), with piezo_v its held level or
     its sine's or triangle's centre, piezo_amplitude_v the swing either side
-    of it, and piezo_frequency_hz the triangle's real frequency. device is
-    the label of the device that applied it. Drive() is "nothing driven".
+    of it, and piezo_frequency_hz the triangle's real frequency. The piezo2_
+    fields say the same for the second driver. device is the label of the
+    device that applied it. Drive() is "nothing driven".
     """
 
     waveform: str = ""
@@ -438,15 +536,35 @@ class Drive:
     device: str = ""
     simulated: bool = False
     piezo_frequency_hz: float = 0.0
+    piezo2_mode: str = ""
+    piezo2_v: float = 0.0
+    piezo2_amplitude_v: float = 0.0
+    piezo2_phase_deg: float = 0.0
+    piezo2_frequency_hz: float = 0.0
 
     @property
     def active(self):
-        """Tell whether the generator or the piezo is producing anything.
+        """Tell whether the generator or a piezo is producing anything.
 
         Args: None.
-        Returns: True when either is on.
+        Returns: True when any of them is on.
         """
-        return bool(self.waveform or self.piezo_mode)
+        return bool(self.waveform or self.piezo_mode or self.piezo2_mode)
+
+
+def drive_for(drive, index):
+    """One driver's view of a Drive, for the camera paired to that driver.
+
+    Args: drive is a daq.Drive; index is the piezo driver, 1 or 2.
+    Returns: The Drive itself for driver 1; for driver 2, a Drive whose
+        piezo fields carry the second driver's numbers.
+    """
+    if index == 1:
+        return drive
+    return replace(drive, piezo_mode=drive.piezo2_mode, piezo_v=drive.piezo2_v,
+                   piezo_amplitude_v=drive.piezo2_amplitude_v,
+                   piezo_phase_deg=drive.piezo2_phase_deg,
+                   piezo_frequency_hz=drive.piezo2_frequency_hz)
 
 
 @dataclass(frozen=True)
@@ -524,23 +642,28 @@ def triangle_wave(bottom, top, samples):
     return bottom + (top - bottom) * (1.0 - np.abs(2.0 * position - 1.0))
 
 
-def piezo_range(settings):
-    """Work out the lowest and highest voltage the piezo driver produces.
+def piezo_range(settings, index=1):
+    """Work out the lowest and highest voltage a piezo driver produces.
 
-    Args: settings is DaqSettings (an unknown mode counts as a held level).
+    Args: settings is DaqSettings (an unknown mode counts as a held level);
+        index is the driver, 1 or 2.
     Returns: (lowest, highest) in volts at the DAQ.
     """
-    s = settings
-    if s.piezo_mode == SINE:
-        swing = abs(s.piezo_amplitude_v)
-        return s.piezo_voltage_v - swing, s.piezo_voltage_v + swing
-    if s.piezo_mode == TRIANGLE:
-        return min(s.piezo_bottom_v, s.piezo_top_v), max(s.piezo_bottom_v, s.piezo_top_v)
-    return s.piezo_voltage_v, s.piezo_voltage_v
+    mode = pget(settings, index, "mode")
+    if mode == SINE:
+        centre = pget(settings, index, "voltage_v")
+        swing = abs(pget(settings, index, "amplitude_v"))
+        return centre - swing, centre + swing
+    if mode == TRIANGLE:
+        bottom = pget(settings, index, "bottom_v")
+        top = pget(settings, index, "top_v")
+        return min(bottom, top), max(bottom, top)
+    voltage = pget(settings, index, "voltage_v")
+    return voltage, voltage
 
 
-def phase_per_volt(settings):
-    """Work out the reference phase one DAQ volt on the piezo gives.
+def phase_per_volt(settings, index=1):
+    """Work out the reference phase one DAQ volt on a piezo gives.
 
     CALIBRATED uses the volts per 90° step that Calibrate phase step
     measured. MANUAL uses the piezo's travel per volt, the amplifier gain and
@@ -548,29 +671,35 @@ def phase_per_volt(settings):
     by d changes the path by 2 d cos(angle), so the phase by
     4 pi d cos(angle) / wavelength.
 
-    Args: settings is DaqSettings.
+    Args: settings is DaqSettings; index is the piezo driver, 1 or 2.
     Returns: (radians per DAQ volt, "") or (None, a sentence saying what is
         missing).
     """
     s = settings
-    if s.piezo_scale == CALIBRATED:
-        if s.piezo_quarter_wave_v > 0:
-            return (math.pi / 2) / s.piezo_quarter_wave_v, ""
-        return None, ("Calibrate phase step has not measured this piezo yet: run it "
-                      "in the Phase view, or choose Manual and type the piezo's numbers.")
-    if s.piezo_scale != MANUAL:
-        return None, f"Unknown piezo scale {s.piezo_scale!r}."
-    if s.piezo_um_per_v <= 0 or s.piezo_gain <= 0:
+    which = "" if index == 1 else "second "
+    if pget(s, index, "scale") == CALIBRATED:
+        quarter_wave = pget(s, index, "quarter_wave_v")
+        if quarter_wave > 0:
+            return (math.pi / 2) / quarter_wave, ""
+        return None, (f"Calibrate phase step has not measured the {which}piezo yet: "
+                      "run it in the Phase view on that camera, or choose Manual and "
+                      "type the piezo's numbers.")
+    if pget(s, index, "scale") != MANUAL:
+        return None, f"Unknown piezo scale {pget(s, index, 'scale')!r}."
+    um_per_v = pget(s, index, "um_per_v")
+    gain = pget(s, index, "gain")
+    angle = pget(s, index, "angle_deg")
+    if um_per_v <= 0 or gain <= 0:
         return None, "The piezo's travel per volt and the amplifier gain must be above 0."
-    if not 0 <= s.piezo_angle_deg <= MAX_MIRROR_ANGLE_DEG:
+    if not 0 <= angle <= MAX_MIRROR_ANGLE_DEG:
         return None, (f"The mirror's angle of incidence must be between 0° and "
                       f"{MAX_MIRROR_ANGLE_DEG:g}°.")
-    travel_nm = s.piezo_um_per_v * 1000.0 * s.piezo_gain  # per DAQ volt
-    cosine = math.cos(math.radians(s.piezo_angle_deg))
+    travel_nm = um_per_v * 1000.0 * gain  # per DAQ volt
+    cosine = math.cos(math.radians(angle))
     return 4 * math.pi * travel_nm * cosine / HENE_WAVELENGTH_NM, ""
 
 
-def follow_frequency(settings, fps):
+def follow_frequency(settings, fps, index=1):
     """Work out the triangle frequency for a phase change per camera frame.
 
     The triangle covers its span up and back each cycle, so the DAQ voltage
@@ -579,91 +708,104 @@ def follow_frequency(settings, fps):
     f = step x fps / (2 (top - bottom) x phase per volt).
 
     Args: settings is DaqSettings in triangle mode; fps is the rate frames
-        arrive from the camera (0 or None when unknown).
+        arrive from the camera (0 or None when unknown); index is the piezo
+        driver, 1 or 2.
     Returns: (frequency in Hz, "") or (None, a sentence saying why not).
     """
     s = settings
-    per_volt, reason = phase_per_volt(s)
+    per_volt, reason = phase_per_volt(s, index)
     if per_volt is None:
         return None, reason
-    if not 0 < s.piezo_phase_per_frame_deg <= MAX_PHASE_PER_FRAME_DEG:
+    per_frame = pget(s, index, "phase_per_frame_deg")
+    if not 0 < per_frame <= MAX_PHASE_PER_FRAME_DEG:
         return None, (f"The phase per frame must be above 0° and at most "
                       f"{MAX_PHASE_PER_FRAME_DEG:g}°.")
-    span = s.piezo_top_v - s.piezo_bottom_v
+    bottom = pget(s, index, "bottom_v")
+    top = pget(s, index, "top_v")
+    span = top - bottom
     if span <= 0:
         return None, "The piezo triangle's top must be above its bottom."
     if not fps or fps <= 0:
         return None, "Waiting for frames from the camera to measure its frame rate."
-    step = math.radians(s.piezo_phase_per_frame_deg)
+    step = math.radians(per_frame)
     return step * fps / (2 * span * per_volt), ""
 
 
-def follow_text(settings, fps):
-    """Describe the frequency the triangle follows, for the DAQ window.
+def follow_text(settings, fps, index=1):
+    """Describe the frequency a triangle follows, for the DAQ window.
 
-    Args: settings is DaqSettings in triangle mode with piezo_follow_fps;
-        fps is the camera's measured frame rate (0 or None when unknown).
+    Args: settings is DaqSettings in triangle mode with that driver's
+        follow_fps on; fps is the paired camera's measured frame rate (0 or
+        None when unknown); index is the piezo driver, 1 or 2.
     Returns: One sentence.
     """
     s = settings
-    frequency, reason = follow_frequency(s, fps)
+    frequency, reason = follow_frequency(s, fps, index)
     if frequency is None:
         return reason
     if not MIN_TRIANGLE_HZ <= frequency <= MAX_TRIANGLE_HZ:
         return (f"Following {fps:.1f} fps would need {frequency:.4g} Hz, outside "
                 f"{MIN_TRIANGLE_HZ:g}–{MAX_TRIANGLE_HZ:,.0f} Hz: change Bottom and Top "
                 "(a wider span needs a lower frequency). The frequency is left as it is.")
-    if s.piezo_scale == CALIBRATED:
-        scale = f"calibrated {s.piezo_quarter_wave_v:.4g} V per 90°"
+    if pget(s, index, "scale") == CALIBRATED:
+        scale = (f"calibrated {pget(s, index, 'quarter_wave_v'):.4g} V per 90°")
     else:
-        scale = (f"manual {s.piezo_um_per_v:g} µm/V × {s.piezo_gain:g} at "
-                 f"{s.piezo_angle_deg:g}°, {HENE_WAVELENGTH_NM:g} nm")
-    return (f"Follows the camera: {frequency:.4g} Hz for "
-            f"{s.piezo_phase_per_frame_deg:g}° per frame at {fps:.1f} fps ({scale}).")
+        scale = (f"manual {pget(s, index, 'um_per_v'):g} µm/V × {pget(s, index, 'gain'):g} "
+                 f"at {pget(s, index, 'angle_deg'):g}°, {HENE_WAVELENGTH_NM:g} nm")
+    lead = ("Follows the camera" if index == 1
+            else "The second piezo follows the camera")
+    return (f"{lead}: {frequency:.4g} Hz for "
+            f"{pget(s, index, 'phase_per_frame_deg'):g}° per frame at {fps:.1f} fps "
+            f"({scale}).")
 
 
-def followed(settings, fps):
-    """Settings with the triangle's frequency set from the frame rate, if it changed enough.
+def followed(settings, fps, index=1):
+    """Settings with a triangle's frequency set from the frame rate, if it changed enough.
 
-    Args: settings is DaqSettings; fps is the camera's measured frame rate.
-    Returns: New DaqSettings when the piezo triangle follows the frame rate
-        and its frequency would move by more than FOLLOW_TOLERANCE (and stay
-        within the triangle's range), otherwise None.
+    Args: settings is DaqSettings; fps is the paired camera's measured frame
+        rate; index is the piezo driver, 1 or 2.
+    Returns: New DaqSettings when that driver's triangle follows the frame
+        rate and its frequency would move by more than FOLLOW_TOLERANCE (and
+        stay within the triangle's range), otherwise None.
     """
     s = settings
-    if not (s.piezo_follow_fps and s.piezo_mode == TRIANGLE and s.piezo_output != OFF):
+    if not (pget(s, index, "follow_fps") and pget(s, index, "mode") == TRIANGLE
+            and piezo_assigned(s, index)):
         return None
-    frequency, _ = follow_frequency(s, fps)
+    frequency, _ = follow_frequency(s, fps, index)
     if frequency is None or not MIN_TRIANGLE_HZ <= frequency <= MAX_TRIANGLE_HZ:
         return None
-    old = s.piezo_frequency_hz
+    old = pget(s, index, "frequency_hz")
     if old > 0 and abs(frequency - old) <= FOLLOW_TOLERANCE * old:
         return None
-    return replace(s, piezo_frequency_hz=frequency)
+    return pset(s, index, frequency_hz=frequency)
 
 
 def drives(settings):
     """Tell whether settings send any drive signal.
 
     Args: settings is DaqSettings.
-    Returns: True when the generator or the piezo is switched on and assigned.
+    Returns: True when the generator or a piezo driver is switched on and
+        assigned.
     """
     s = settings
-    return (s.generator_on and s.generator_output != OFF) or (
-        s.piezo_on and s.piezo_output != OFF)
+    return (s.generator_on and s.generator_output != OFF) or any(
+        pget(s, index, "on") and piezo_assigned(s, index) for index in PIEZOS)
 
 
 def driven_roles(settings):
     """Name each role the settings switch on, with the socket it drives.
 
     Args: settings is DaqSettings.
-    Returns: A frozenset of (PIEZO_ROLE, AO channel) and (GENERATOR_ROLE,
-        output, PFI terminal or ""); the safety checklist must cover each one.
+    Returns: A frozenset of (PIEZO_ROLE, AO channel) per switched-on driver
+        and (GENERATOR_ROLE, output, PFI terminal or ""); the safety
+        checklist must cover each one.
     """
     s = settings
     roles = set()
-    if s.piezo_on and s.piezo_output != OFF:
-        roles.add((PIEZO_ROLE, s.piezo_output, ""))
+    for index in PIEZOS:
+        if pget(s, index, "on") and piezo_assigned(s, index):
+            roles.add((PIEZO_ROLE, pget(s, index, "output"), ""))
     if s.generator_on and s.generator_output != OFF:
         terminal = s.generator_terminal if s.generator_output.startswith("ctr") else ""
         roles.add((GENERATOR_ROLE, s.generator_output, terminal))
@@ -726,17 +868,33 @@ def problems(settings, outputs=None):
     if s.generator_output not in generator_outputs:
         found.append(f"This device has no {output_label(s.generator_output)} "
                      "for the frequency generator.")
-    if s.piezo_output not in (OFF,) + outputs.analog:
-        found.append(f"The piezo driver needs an analog output; "
-                     f"{output_label(s.piezo_output)} is not one on this device.")
-    if s.piezo_output != OFF and s.piezo_output == s.generator_output:
-        found.append(f"The frequency generator and the piezo driver are both on "
-                     f"{output_label(s.piezo_output)}. Give each its own output.")
-    for name, limit in (("frequency generator", s.generator_limit_v),
-                        ("piezo driver", s.piezo_limit_v)):
+    for index in PIEZOS:
+        found.extend(_piezo_problems(s, index, outputs))
+    outputs_taken = [pget(s, index, "output") for index in PIEZOS
+                     if piezo_assigned(s, index)]
+    if s.generator_output in outputs.analog and s.generator_output in outputs_taken:
+        found.append(f"The frequency generator and a piezo driver are both on "
+                     f"{output_label(s.generator_output)}. Give each its own output.")
+    if len(outputs_taken) > len(set(outputs_taken)):
+        found.append("Both piezo drivers are on the same output. The USB-6251 BNC "
+                     "has only two analog outputs: give each driver its own "
+                     "(the frequency generator then needs a counter, or must be off).")
+    triangles = [pget(s, index, "frequency_hz") for index in PIEZOS
+                 if pget(s, index, "on") and piezo_assigned(s, index)
+                 and pget(s, index, "mode") == TRIANGLE]
+    if len(triangles) > 1 and abs(triangles[0] - triangles[1]) > CLOSE_ENOUGH:
+        found.append("Both piezo triangles share the one analog-output sample clock: "
+                     "give them the same frequency, or hold one driver still.")
+    for name, limit in (("frequency generator", s.generator_limit_v),):
         if not 0 < limit <= MAX_VOLTS:
             found.append(f"The {name}'s safety limit must be above 0 V and at most "
                          f"{MAX_VOLTS:g} V.")
+    for index in PIEZOS:
+        limit = pget(s, index, "limit_v")
+        if not 0 < limit <= MAX_VOLTS:
+            which = "" if index == 1 else "second "
+            found.append(f"The {which}piezo driver's safety limit must be above 0 V "
+                         f"and at most {MAX_VOLTS:g} V.")
     counter = s.generator_output in outputs.counters
     if counter and s.generator_terminal not in outputs.terminals:
         found.append(f"Choose a PFI terminal for {output_label(s.generator_output)}.")
@@ -749,48 +907,70 @@ def problems(settings, outputs=None):
         if peak > s.generator_limit_v:
             found.append(f"The generator would reach {peak:g} V, above its "
                          f"{s.generator_limit_v:g} V limit.")
-    if s.piezo_output != OFF:
-        lowest, highest = piezo_range(s)
-        peak = max(abs(lowest), abs(highest))
-        if peak > s.piezo_limit_v:
-            found.append(f"The piezo driver would reach {peak:g} V, above its "
-                         f"{s.piezo_limit_v:g} V limit.")
-        if lowest < PIEZO_FLOOR_V:
-            found.append(f"The piezo driver would go down to {lowest:g} V. The piezo "
-                         f"amplifier's input takes 0–{MAX_VOLTS:g} V (a negative input "
-                         "drives the piezo below 0 V): keep every level at 0 V or above.")
-        found.extend(_piezo_mode_problems(s, outputs))
     return found
 
 
-def _piezo_mode_problems(settings, outputs):
-    """Check the rules of the piezo driver's mode.
+def _piezo_problems(settings, index, outputs):
+    """List what is wrong with one piezo driver's settings.
 
-    Args: settings is DaqSettings with the piezo assigned; outputs is the
-        device's DeviceOutputs.
+    Args: settings is DaqSettings; index is the driver, 1 or 2; outputs is
+        the device's DeviceOutputs.
+    Returns: A list of sentences; empty when the driver can run as set.
+    """
+    s = settings
+    found = []
+    which = "" if index == 1 else "second "
+    output = pget(s, index, "output")
+    if output != OFF and output not in outputs.analog:
+        found.append(f"The {which}piezo driver needs an analog output; "
+                     f"{output_label(output)} is not one on this device.")
+    if output == OFF:
+        return found
+    lowest, highest = piezo_range(s, index)
+    peak = max(abs(lowest), abs(highest))
+    limit = pget(s, index, "limit_v")
+    if peak > limit:
+        found.append(f"The {which}piezo driver would reach {peak:g} V, above its "
+                     f"{limit:g} V limit.")
+    if lowest < PIEZO_FLOOR_V:
+        found.append(f"The {which}piezo driver would go down to {lowest:g} V. The piezo "
+                     f"amplifier's input takes 0–{MAX_VOLTS:g} V (a negative input "
+                     "drives the piezo below 0 V): keep every level at 0 V or above.")
+    found.extend(_piezo_mode_problems(s, index, outputs))
+    return found
+
+
+def _piezo_mode_problems(settings, index, outputs):
+    """Check the rules of one piezo driver's mode.
+
+    Args: settings is DaqSettings with that driver assigned; index is the
+        driver, 1 or 2; outputs is the device's DeviceOutputs.
     Returns: A list of sentences; empty when the mode can run.
     """
     s = settings
+    which = "" if index == 1 else "second "
     sine_generator = s.generator_on and s.generator_output in outputs.analog
-    if s.piezo_mode not in PIEZO_MODES:
-        return [f"Unknown piezo mode {s.piezo_mode!r}."]
-    if s.piezo_mode == SINE and s.piezo_on and not sine_generator:
-        return ["A piezo sine follows the frequency generator: put the "
+    mode = pget(s, index, "mode")
+    if mode not in PIEZO_MODES:
+        return [f"Unknown piezo mode {mode!r}."]
+    if mode == SINE and pget(s, index, "on") and not sine_generator:
+        return [f"A {which}piezo sine follows the frequency generator: put the "
                 "generator on an analog output and switch it on."]
-    if s.piezo_mode != TRIANGLE:
+    if mode != TRIANGLE:
         return []
     found = []
-    if s.piezo_top_v <= s.piezo_bottom_v:
-        found.append("The piezo triangle's top must be above its bottom.")
-    elif s.piezo_follow_fps:
-        _, reason = follow_frequency(s, 1.0)  # the scale, whatever the frame rate
+    if pget(s, index, "top_v") <= pget(s, index, "bottom_v"):
+        found.append(f"The {which}piezo triangle's top must be above its bottom.")
+    elif pget(s, index, "follow_fps"):
+        _, reason = follow_frequency(s, 1.0, index)  # the scale, whatever the frame rate
         if reason:
             found.append(reason)
-    if not MIN_TRIANGLE_HZ <= s.piezo_frequency_hz <= MAX_TRIANGLE_HZ:
-        found.append(f"The piezo triangle's frequency must be between "
+    frequency = pget(s, index, "frequency_hz")
+    if not MIN_TRIANGLE_HZ <= frequency <= MAX_TRIANGLE_HZ:
+        found.append(f"The {which}piezo triangle's frequency must be between "
                      f"{MIN_TRIANGLE_HZ:g} Hz and {MAX_TRIANGLE_HZ:,.0f} Hz.")
-    if s.piezo_on and sine_generator:
-        found.append("A piezo triangle runs at its own frequency, but both analog "
+    if pget(s, index, "on") and sine_generator:
+        found.append(f"A {which}piezo triangle runs at its own frequency, but both analog "
                      "outputs share one sample clock: switch the frequency generator "
                      "off, or put it on a counter output.")
     return found
@@ -808,8 +988,9 @@ def plan(settings, outputs=None):
     if found:
         raise ValueError(" ".join(found))
     s = settings
+    piezo_outputs = tuple(pget(s, index, "output") for index in PIEZOS)
     analog = tuple(channel for channel in outputs.analog
-                   if channel in (s.generator_output, s.piezo_output))
+                   if channel in (s.generator_output,) + piezo_outputs)
     sine = s.generator_on and s.generator_output in outputs.analog
     values = {channel: 0.0 for channel in analog}
     rate, samples, frequency, buffer_samples = 0.0, 0, 0.0, 0
@@ -836,33 +1017,64 @@ def plan(settings, outputs=None):
                      f"{terminal_label(s.generator_terminal)}")
     if not s.generator_on and s.generator_output != OFF:
         parts.append(f"generator {output_label(s.generator_output)} off")
-    if s.piezo_output != OFF:
-        if not s.piezo_on:
-            parts.append(f"piezo {output_label(s.piezo_output)} off (0 V)")
-        elif s.piezo_mode == SINE:
-            shift = math.radians(s.piezo_phase_deg)
-            phase = 2 * math.pi * np.arange(samples) / samples + shift
-            values[s.piezo_output] = (s.piezo_voltage_v
-                                      + s.piezo_amplitude_v * np.sin(phase))
-            parts.append(f"piezo {output_label(s.piezo_output)} sine "
-                         f"{s.piezo_amplitude_v:g} V peak at "
-                         f"{s.piezo_phase_deg:g}°, centre {s.piezo_voltage_v:g} V")
-        elif s.piezo_mode == TRIANGLE:
-            rate, samples, piezo_frequency = choose_timing(s.piezo_frequency_hz, len(analog))
-            values[s.piezo_output] = triangle_wave(s.piezo_bottom_v, s.piezo_top_v, samples)
-            buffer_samples = _buffer_samples(rate, samples)
-            parts.append(f"piezo {output_label(s.piezo_output)} triangle "
-                         f"{s.piezo_bottom_v:g}–{s.piezo_top_v:g} V at "
-                         f"{piezo_frequency:.6g} Hz (asked {s.piezo_frequency_hz:g}); "
-                         f"{samples} samples per cycle at {rate:,.0f} S/s")
-        else:
-            values[s.piezo_output] = float(s.piezo_voltage_v)
-            parts.append(f"piezo {output_label(s.piezo_output)} holds "
-                         f"{s.piezo_voltage_v:g} V")
+    # Both piezo triangles share the AO sample clock (problems() has checked
+    # that their frequencies agree), so one rate and cycle length serve them.
+    triangles = [index for index in PIEZOS
+                 if pget(s, index, "on") and piezo_assigned(s, index)
+                 and pget(s, index, "mode") == TRIANGLE]
+    if triangles:
+        rate, samples, piezo_frequency = choose_timing(
+            pget(s, triangles[0], "frequency_hz"), len(analog))
+        buffer_samples = _buffer_samples(rate, samples)
+    for index in PIEZOS:
+        part = _piezo_plan(s, index, analog, values, rate, samples,
+                           piezo_frequency if triangles else 0.0)
+        if part:
+            parts.append(part)
     summary = "; ".join(parts) if parts else "no outputs assigned"
     return OutputPlan(analog, rate, samples, buffer_samples, values, counter,
                       frequency, piezo_frequency, summary,
                       describe_drive(s, outputs, frequency, piezo_frequency))
+
+
+def _piezo_plan(settings, index, analog, values, rate, samples, piezo_frequency):
+    """Add one piezo driver's part to the plan: its values and a summary line.
+
+    Args: settings is DaqSettings that problems() accepts; index is the
+        driver, 1 or 2; analog is the tuple of AO channels in use; values is
+        the dict plan() fills, channel to a float or a 1-D array; rate and
+        samples are the shared AO clock's rate and cycle length (0 for a
+        constant plan); piezo_frequency is the triangle's real frequency
+        (0 otherwise).
+    Returns: One summary sentence.
+    """
+    s = settings
+    output = pget(s, index, "output")
+    if output == OFF:
+        return ""
+    which = "" if index == 1 else "second "
+    label = output_label(output)
+    if not pget(s, index, "on"):
+        values[output] = 0.0
+        return f"{which}piezo {label} off (0 V)"
+    mode = pget(s, index, "mode")
+    if mode == SINE:
+        shift = math.radians(pget(s, index, "phase_deg"))
+        phase = 2 * math.pi * np.arange(samples) / samples + shift
+        values[output] = (pget(s, index, "voltage_v")
+                          + pget(s, index, "amplitude_v") * np.sin(phase))
+        return (f"{which}piezo {label} sine {pget(s, index, 'amplitude_v'):g} V peak at "
+                f"{pget(s, index, 'phase_deg'):g}°, centre "
+                f"{pget(s, index, 'voltage_v'):g} V")
+    if mode == TRIANGLE:
+        values[output] = triangle_wave(pget(s, index, "bottom_v"),
+                                       pget(s, index, "top_v"), samples)
+        return (f"{which}piezo {label} triangle {pget(s, index, 'bottom_v'):g}–"
+                f"{pget(s, index, 'top_v'):g} V at {piezo_frequency:.6g} Hz "
+                f"(asked {pget(s, index, 'frequency_hz'):g}); {samples} samples "
+                f"per cycle at {rate:,.0f} S/s")
+    values[output] = float(pget(s, index, "voltage_v"))
+    return f"{which}piezo {label} holds {pget(s, index, 'voltage_v'):g} V"
 
 
 def describe_drive(settings, outputs, frequency, piezo_frequency=0.0):
@@ -870,7 +1082,7 @@ def describe_drive(settings, outputs, frequency, piezo_frequency=0.0):
 
     Args: settings is the DaqSettings plan() accepted; outputs is the
         device's DeviceOutputs; frequency is the generator's real frequency
-        (0 when it is off); piezo_frequency is the piezo triangle's real
+        (0 when it is off); piezo_frequency is the piezo triangles' real
         frequency (0 for other modes).
     Returns: A Drive.
     """
@@ -880,18 +1092,39 @@ def describe_drive(settings, outputs, frequency, piezo_frequency=0.0):
         waveform, amplitude = "sine", s.generator_amplitude_v
     elif s.generator_on and s.generator_output in outputs.counters:
         waveform = "square"
-    mode = s.piezo_mode if s.piezo_on and s.piezo_output != OFF else ""
-    sine = mode == SINE
-    centre, swing = (s.piezo_voltage_v if mode else 0.0,
-                     s.piezo_amplitude_v if sine else 0.0)
-    if mode == TRIANGLE:
-        centre = (s.piezo_bottom_v + s.piezo_top_v) / 2
-        swing = (s.piezo_top_v - s.piezo_bottom_v) / 2
+    parts = [_describe_piezo_drive(s, index, outputs, frequency,
+                                   piezo_frequency) for index in PIEZOS]
+    first, second = parts
     return Drive(waveform, frequency if waveform else 0.0, amplitude,
-                 s.generator_offset_v if waveform == "sine" else 0.0, mode,
-                 centre, swing, s.piezo_phase_deg if sine else 0.0,
-                 outputs.device.label, outputs.device.simulated,
-                 piezo_frequency if mode == TRIANGLE else 0.0)
+                 s.generator_offset_v if waveform == "sine" else 0.0,
+                 first[0], first[1], first[2], first[3],
+                 outputs.device.label, outputs.device.simulated, first[4],
+                 second[0], second[1], second[2], second[3], second[4])
+
+
+def _describe_piezo_drive(settings, index, outputs, frequency, piezo_frequency):
+    """Describe one piezo driver's output for the ESPI simulation.
+
+    Args: settings is the DaqSettings plan() accepted; index is the driver,
+        1 or 2; outputs is the device's DeviceOutputs; frequency is the
+        generator's real frequency (0 when it is off); piezo_frequency is
+        the triangles' real frequency (0 otherwise).
+    Returns: (mode, centre, swing, phase_deg, triangle_frequency) for the
+        simulation; all empty or 0 when the driver produces nothing.
+    """
+    s = settings
+    on = pget(s, index, "on") and piezo_assigned(s, index)
+    mode = pget(s, index, "mode") if on else ""
+    if mode == SINE:
+        return (mode, pget(s, index, "voltage_v"), abs(pget(s, index, "amplitude_v")),
+                pget(s, index, "phase_deg"), 0.0)
+    if mode == TRIANGLE:
+        bottom, top = pget(s, index, "bottom_v"), pget(s, index, "top_v")
+        return (mode, (bottom + top) / 2, abs(top - bottom) / 2, 0.0,
+                piezo_frequency)
+    if mode == HOLD:
+        return (mode, pget(s, index, "voltage_v"), 0.0, 0.0, 0.0)
+    return ("", 0.0, 0.0, 0.0, 0.0)
 
 
 class SimulatedBackend:
@@ -1338,23 +1571,24 @@ class DaqController:
         with self._lock:
             return dict(self._status)
 
-    def move_piezo(self, settings, volts, timeout):
-        """Hold the piezo at a level and wait until the device has it.
+    def move_piezo(self, settings, volts, timeout, index=1):
+        """Hold one piezo at a level and wait until the device has it.
 
-        The piezo is switched on in hold mode at volts; every other output
-        keeps the values in settings. Unlike request("apply"), nothing is
+        That piezo is switched on in hold mode at volts; every other output
+        keeps the values last applied (so one driver's phase step never
+        moves the other driver's level). Unlike request("apply"), nothing is
         put on the events queue, so stepping does not flood the DAQ window.
 
-        Args: settings is DaqSettings (the generator part is written as is);
-            volts is the piezo level at the DAQ; timeout is the longest wait
-            in seconds.
+        Args: settings is DaqSettings (used as the base when nothing has
+            been applied since connecting); volts is the piezo level at the
+            DAQ; timeout is the longest wait in seconds; index is the piezo
+            driver, 1 or 2.
         Returns: The OutputPlan written. Raises PiezoMoveError when there is
             no device, the level breaks a rule (the safety limit), the device
             fails or it does not answer within timeout.
         """
         reply = queue.SimpleQueue()
-        self.request("piezo", settings=replace(settings, piezo_on=True, piezo_mode=HOLD,
-                                               piezo_voltage_v=float(volts)),
+        self.request("piezo", settings=settings, volts=float(volts), index=index,
                      reply=reply)
         try:
             ok, result = reply.get(timeout=timeout)
@@ -1521,34 +1755,44 @@ class DaqController:
         self.backend.apply(output_plan)
         self.expected = expected_levels(output_plan)
         self._faulted = False
-        active = (settings.generator_on and settings.generator_output != OFF) or (
-            settings.piezo_on and settings.piezo_output != OFF)
+        active = drives(settings)
         self._set_status(active=active, summary=output_plan.summary, settings=settings)
         return output_plan
 
-    def _do_piezo(self, settings, reply):
+    def _do_piezo(self, settings, volts, index, reply):
         """Write one phase-step level and answer the waiting move_piezo().
 
-        Args: settings is DaqSettings with the piezo level to hold; reply is
-            the queue move_piezo() waits on, given (True, OutputPlan) or
-            (False, reason).
+        The level is written on top of the settings last applied, so only
+        this driver's output changes (the other driver and the generator
+        keep what they produce). When nothing has been applied since
+        connecting, the caller's settings are the base.
+
+        Args: settings is DaqSettings (used as the base when nothing has
+            been applied); volts is the level to hold; index is the piezo
+            driver, 1 or 2; reply is the queue move_piezo() waits on, given
+            (True, OutputPlan) or (False, reason).
         Returns: None. A device failure is answered, then raised for _run.
         """
         if self.backend is None:
             reply.put((False, "the NI DAQ is not connected"))
             return
-        found = problems(settings, self.outputs)
-        if not found and not self.is_armed(settings):
+        applied = self._status["settings"]
+        base = applied if applied is not None else settings
+        wanted = pset(base, index, on=True, mode=HOLD, voltage_v=float(volts))
+        found = problems(wanted, self.outputs)
+        if not found and not self.is_armed(wanted):
             found = [CHECKLIST_REQUIRED]
         if found:
             reply.put((False, " ".join(found)))
             return
         try:
-            output_plan = self._write(settings)
+            output_plan = self._write(wanted)
         except Exception as exc:
             reply.put((False, f"{type(exc).__name__}: {exc}"))
             raise
-        self.log.debug(f"NI DAQ phase step: {output_plan.summary}")
+        prefix = "NI DAQ phase step: " if index == 1 else \
+            "NI DAQ phase step (second piezo): "
+        self.log.debug(prefix + output_plan.summary)
         reply.put((True, output_plan))
 
     def _do_zero(self):

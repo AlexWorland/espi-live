@@ -280,15 +280,16 @@ class FakeController:
         self.moves = []
         self.error = error
 
-    def move_piezo(self, settings, volts, timeout):
+    def move_piezo(self, settings, volts, timeout, index=1):
         """Record a move, or fail.
 
-        Args: settings, volts and timeout as DaqController.move_piezo takes them.
+        Args: settings, volts, timeout and index as
+            DaqController.move_piezo takes them.
         Returns: None.
         """
         if self.error is not None:
             raise self.error
-        self.moves.append((settings.piezo_output, volts, timeout))
+        self.moves.append((daq.pget(settings, index, "output"), volts, timeout))
 
 
 PIEZO = daq.DaqSettings(piezo_output="ao1", piezo_voltage_v=0.1, piezo_step_v=0.05,
@@ -337,6 +338,44 @@ class PiezoStepperTests(unittest.TestCase):
             self.assertEqual(len(found), 1)
             self.assertIn(words, found[0])
 
+    def test_second_driver_levels_and_moves(self):
+        """A Thor 2 stepper reads the piezo2_* fields and moves driver 2.
+
+        Args: None.
+        Returns: None.
+        """
+        controller = FakeController()
+        settings = daq.DaqSettings(piezo2_output="ao0", piezo2_voltage_v=0.2,
+                                   piezo2_step_v=0.05, piezo2_limit_v=1.0)
+        stepper = phase.PiezoStepper(controller, settings, simulated=True, index=2)
+        self.assertEqual(stepper.step_v, 0.05)
+        self.assertAlmostEqual(stepper.level(3), 0.35)
+        stepper.move(1, timeout=0.5)
+        self.assertEqual(controller.moves[0], ("ao0", 0.25, 0.5))
+        changed = stepper.with_step(0.0625)
+        self.assertEqual(changed.index, 2)
+        self.assertEqual(changed.step_v, 0.0625)
+        self.assertEqual(daq.pget(changed.settings, 2, "step_v"), 0.0625)
+
+    def test_second_driver_problems(self):
+        """A Thor 2 stepper's checks name the second driver and its output.
+
+        Args: None.
+        Returns: None.
+        """
+        controller = FakeController()
+        settings = daq.DaqSettings(piezo2_output="ao0", piezo2_voltage_v=0.2,
+                                   piezo2_step_v=0.05, piezo2_limit_v=1.0)
+        self.assertEqual(phase.PiezoStepper(controller, settings, index=2).problems(5), [])
+        cases = ((daq.pset(settings, 2, output=daq.OFF), "Assign the second piezo"),
+                 (daq.pset(settings, 2, step_v=0.0), "second piezo's step voltage"),
+                 (daq.pset(settings, 2, step_v=0.3), "the second piezo's"),
+                 (daq.pset(settings, 2, voltage_v=-0.1), "below 0 V"))
+        for wrong, words in cases:
+            found = phase.PiezoStepper(controller, wrong, index=2).problems(5)
+            self.assertEqual(len(found), 1)
+            self.assertIn(words, found[0])
+
     def test_a_failed_move_raises_and_keeps_the_old_level(self):
         """PiezoMoveError comes through; the level is not updated.
 
@@ -380,7 +419,6 @@ class DemoInterferometerTests(unittest.TestCase):
         bright = (demo.object > 20)
         error = np.abs(wrapped(change - expected))[bright]
         self.assertLess(float(np.median(error)), 0.2)
-
 
 if __name__ == "__main__":
     unittest.main()

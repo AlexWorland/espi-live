@@ -906,16 +906,19 @@ class ControlSession:
             ("phase_calibrated", "phase_calibration_failed", "phase_stopped"),
             CALIBRATION_TIMEOUT_S)
         if kind == "phase_calibration_failed":
+            degrees, index = payload
+            which = "the piezo" if index == 1 else "the second piezo"
             raise CommandError(
-                f"the piezo moved {payload:.0f}° per step, too far from 90° to correct: "
+                f"{which} moved {degrees:.0f}° per step, too far from 90° to correct: "
                 "check the piezo, its amplifier and the step voltage")
         if kind == "phase_stopped":
             raise CommandError(f"the Phase view stopped: {payload}")
-        degrees, volts = payload
-        self.settings = replace(self.settings, piezo_step_v=volts,
-                                piezo_quarter_wave_v=volts)
+        degrees, volts, index = payload
+        self.settings = daq.pset(self.settings, index, step_v=volts,
+                                 quarter_wave_v=volts)
         self._attach(self.stepper.with_step(volts), channel)
-        return {"camera": channel.label, "degrees": degrees, "step_v": volts}
+        return {"camera": channel.label, "degrees": degrees, "step_v": volts,
+                "piezo": index}
 
     def cmd_phase_detach(self, command):
         """Take the piezo away from the cameras.
