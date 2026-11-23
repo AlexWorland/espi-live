@@ -62,7 +62,18 @@ def cli(argv=None):
     parser.add_argument("--no-upload", action="store_true",
                         help="--headless: keep the outputs local, don't send them to "
                              "the captures repository")
+    parser.add_argument("--control", action="store_true",
+                        help="--headless: read JSON commands on stdin and answer on stdout, "
+                             "to drive the NI DAQ, the Phase view and the camera settings "
+                             "from a script (see espi_live/headless_control.py)")
+    parser.add_argument("--daq-checklist-done", action="store_true",
+                        help="--control: allow the daq_arm command, i.e. say the NI DAQ "
+                             "safety checklist has been ticked for this wiring")
     args = parser.parse_args(argv)
+    if args.control and not args.headless:
+        parser.error("--control needs --headless")
+    if args.daq_checklist_done and not args.control:
+        parser.error("--daq-checklist-done needs --headless --control")
     if args.version:
         print(updater.describe_build())
         sys.exit(0)

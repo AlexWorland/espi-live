@@ -25,7 +25,11 @@ Config keys (all optional; command-line options override them)::
      "cameras": [{"serial": "12345678", "settings": {"gain_db": 3}}]}  # or "index"
 
 ``settings`` takes any field a saved profile does (see ``profiles.PERSISTED_FIELDS``).
-Phase view and the NI DAQ are not driven headless. No GUI imports here.
+
+With ``--control`` the run does not stop on a timer: it takes JSON commands on
+stdin (NI DAQ, Phase view, camera settings, saves) and answers on stdout, see
+``headless_control``. A control run starts even with no camera, never uploads,
+and sets the NI outputs to 0 V on every way out. No GUI imports here.
 """
 
 import json
@@ -40,7 +44,8 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 
-from espi_live import capture_uploads, log_uploads, paths, profiles, snapshots, updater
+from espi_live import (capture_uploads, headless_control, log_uploads, paths, profiles,
+                       snapshots, updater)
 from espi_live.channels import demo_channels, open_camera_channels
 from espi_live.feedback import FeedbackError
 from espi_live.logs import AppLog, header_lines
@@ -107,7 +112,8 @@ def main(args):
     Args: args is the argparse namespace from cli.
     Returns: The process exit code (see run()).
     """
-    return run(build_config(args), args.log_level)
+    return run(build_config(args), args.log_level, control=args.control,
+               checklist_done=args.daq_checklist_done)
 
 
 def install_signals(stop, log):
@@ -444,17 +450,44 @@ def shutdown(channels, log):
     return final
 
 
-def run(config, log_level=None):
+def run_control(channels, config, stop, log, failures, checklist_done, replies):
+    """Serve JSON commands on stdin until quit, end of input, a signal or the duration.
+
+    Args: channels is the Channel list (possibly empty); config is the run
+        config; stop is the threading.Event the signal handler sets; log is the
+        AppLog; failures collects the labels of cameras that failed;
+        checklist_done is True when --daq-checklist-done was given; replies is
+        the headless_control.line_writer() for stdout.
+    Returns: None. The NI outputs are at 0 V and the DAQ thread is finished.
+    """
+    session = headless_control.ControlSession(
+        channels, log, allow_arm=checklist_done,
+        pump=lambda: pump_events(channels, log, failures))
+    log.info("Control: reading JSON commands on stdin, replying on stdout.")
+    try:
+        headless_control.serve(session, sys.stdin, replies, stop,
+                               float(config["duration_s"] or 0))
+    finally:
+        session.close()  # outputs to 0 V before the cameras stop
+
+
+def run(config, log_level=None, control=False, checklist_done=False):
     """Run one headless batch.
 
     Args: config is the run config (see the module docstring); log_level is
-        the --log-level name or None.
+        the --log-level name or None; control serves JSON commands on stdin
+        instead of running to a timer (see headless_control); checklist_done
+        lets the control session record the NI safety checklist.
     Returns: 0 on success; 1 when a camera failed or the run was cut short by
-        an error; 2 when no camera could be opened; 3 when uploads were
-        wanted but did not all succeed.
+        an error; 2 when no camera could be opened (not in a control run); 3
+        when uploads were wanted but did not all succeed.
     """
+    config = dict(config, upload=False) if control else config
     log = AppLog(log_level)
     path = log.start()
+    replies = None
+    if control:  # stdout is for replies only, from the first log line on
+        replies = headless_control.line_writer(headless_control.divert_console(log))
     for line in header_lines("Headless", log.level):
         log.info(line)
     if path:
@@ -468,9 +501,14 @@ def run(config, log_level=None):
         if channels:
             configure(channels, config, log)
             start_channels(channels, config, log)
-            loop(channels, config, stop, log, failures)
+        elif control:
+            log.warning("Control run: continuing without a camera (the NI DAQ commands work).")
         else:
             code = 2
+        if control:
+            run_control(channels, config, stop, log, failures, checklist_done, replies)
+        elif channels:
+            loop(channels, config, stop, log, failures)
     except KeyboardInterrupt:
         log.write("Interrupted.")
     except Exception as exc:

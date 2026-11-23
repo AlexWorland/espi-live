@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-22 — Drive the NI DAQ and cameras from a script (`--headless --control`)
+
+### Previous state
+
+- Headless runs could not touch the NI DAQ or the Phase view, so testing the generator, the piezo or phase stepping meant clicking through Devices → NI DAQ.
+
+### Current state
+
+- `espi_live --headless --control` reads one JSON command per line on stdin and answers with one JSON line on stdout (logs go to stderr and the log file only). Commands: `status`, `daq_scan`, `daq_connect`, `daq_arm`, `daq_apply`, `daq_zero`, `daq_self_test`, `piezo_step`, `phase_attach`/`phase_detach`, `set_camera`, `save`, `reference`, `wait`, `quit`; they are listed in `src/espi_live/headless_control.py`. It works with `--demo` and the simulated DAQ device, and it starts even with no camera.
+- The safety rules are unchanged: a real device takes no drive signal until the checklist is recorded, which a control run can do only with `--daq-checklist-done` and the `daq_arm` command (the simulated device needs neither). Every way out (`quit`, closed stdin, Ctrl+C/SIGTERM, an error) sets the outputs to 0 V; a DAQ self-check fault arrives as an `{"event": "fault"}` line. A control run never uploads.
+- `headless_control.py` has tests and counts toward the 100% coverage gate.
+
 ## 2026-11-22 — The Windows build can reach the NI DAQ again
 
 ### Previous state
