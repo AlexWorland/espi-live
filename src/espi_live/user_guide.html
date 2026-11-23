@@ -1621,7 +1621,27 @@ python -m espi_live</code></pre>
           a function generator used to feed the piezo amplifier; the line below
           says the frequency the device really produces. Both analog outputs
           share one sample clock, so a triangle needs the frequency generator
-          off or on a counter.</li>
+          off or on a counter.
+          <p><strong>Follow the camera's frame rate</strong> sets the
+          triangle's frequency for you, so the reference phase moves by
+          <strong>Phase per frame</strong> (default 180°, half a wavelength of
+          path) from one frame to the next: the frame rate is the rate frames
+          really arrive from the displayed camera, and the frequency is set
+          again whenever that rate moves it by more than 3% (each change
+          restarts the triangle at its bottom). With <strong>Frames back</strong>
+          N in the Previous view, use 180° / N. <strong>Piezo scale</strong>
+          says where the piezo's phase per volt comes from:
+          <strong>Calibrated</strong> uses the voltage per 90° that
+          <strong>Calibrate phase step</strong> measured (run it once in the
+          Phase view; it includes the mirror angle and the piezo), giving
+          frequency = frame rate × volts per 90° ÷ (Top − Bottom).
+          <strong>Manual</strong> works it out from <strong>Piezo
+          travel</strong> (about 0.1 µm/V for a Thorlabs PE4),
+          <strong>Amplifier gain</strong> (15 for the MDT694A at 150 V) and
+          <strong>Mirror angle</strong> (the angle of incidence, 45° in the
+          lab) for the HeNe laser (632.8 nm). Both are approximate (an
+          open-loop piezo's travel varies with the span), so fine-tune
+          <strong>Phase per frame</strong> by eye.</p></li>
         <li><strong>Safety limit</strong> — each role refuses any setting that
           would go beyond this many volts. Set it to your amplifier's largest
           safe input before switching anything on. The piezo driver never goes
