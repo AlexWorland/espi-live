@@ -147,6 +147,42 @@ class CliDispatchTests(unittest.TestCase):
         self.assertIn("ESPI live needs PySide6", code)
 
 
+class ControlOptionTests(unittest.TestCase):
+    """--control and --daq-checklist-done only make sense in a headless run."""
+
+    def test_control_needs_headless(self):
+        """--control alone is a usage error (exit 2).
+
+        Args: None.
+        Returns: None.
+        """
+        code, _, err = run_cli(["--control"])
+        self.assertEqual(code, 2)
+        self.assertIn("--control needs --headless", err)
+
+    def test_checklist_flag_needs_control(self):
+        """--daq-checklist-done without --control is a usage error (exit 2).
+
+        Args: None.
+        Returns: None.
+        """
+        code, _, err = run_cli(["--headless", "--daq-checklist-done"])
+        self.assertEqual(code, 2)
+        self.assertIn("--daq-checklist-done needs --headless --control", err)
+
+    def test_headless_control_reaches_the_run(self):
+        """Both flags arrive in headless.main's namespace.
+
+        Args: None.
+        Returns: None.
+        """
+        headless = types.SimpleNamespace(main=mock.Mock(return_value=0))
+        with fake_submodule("headless", headless):
+            code, _, _ = run_cli(["--headless", "--control", "--daq-checklist-done"])
+        args = headless.main.call_args.args[0]
+        self.assertEqual((code, args.control, args.daq_checklist_done), (0, True, True))
+
+
 class SelfCheckTests(unittest.TestCase):
     """The --check import probe."""
 
