@@ -170,6 +170,27 @@ class DaqMenuTests(DaqWindowTestCase):
 class DaqDialogTests(DaqWindowTestCase):
     """The form: assignment, enabling, preview, apply and the replies."""
 
+    def test_window_fits_the_screen_and_keeps_buttons_in_view(self):
+        """A tall form scrolls instead of running off a short screen.
+
+        Args: None.
+        Returns: None.
+        """
+        dialog = self.open_dialog()
+        room = dialog.screen().availableGeometry()
+        self.assertLessEqual(dialog.height(), room.height() * 9 // 10)
+        self.assertLessEqual(dialog.width(), room.width() * 9 // 10)
+        self.assertIs(dialog.scroll.widget(), dialog.body)
+        self.assertIs(dialog.apply_button.parentWidget().parentWidget(), dialog)
+        self.assertTrue(dialog.sized)
+        # A size the user chose is kept; one taller than the screen shrinks.
+        dialog.resize(dialog.width(), room.height() * 2)
+        dialog.fit_to_screen()
+        self.assertLessEqual(dialog.height(), room.height() * 9 // 10)
+        dialog.resize(dialog.width() - 10, 300)
+        dialog.fit_to_screen()
+        self.assertEqual(dialog.height(), 300)
+
     def test_assignments_enable_the_right_controls(self):
         """Counters take a terminal and no volts; piezo modes enable their fields.
 

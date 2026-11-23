@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-23 — Frequency generator and piezo window fits the screen
+
+### Previous state
+
+- The Frequency generator and piezo (NI DAQ) window opened at a fixed size, so on a short screen its lower controls and the Apply and other buttons ran off the bottom.
+
+### Current state
+
+- The window sizes itself to its contents but never beyond 90% of the screen's usable height or width. A taller form scrolls, while the note and the buttons (Apply, All outputs to 0 V, Test outputs, Where to plug in, Close) stay in view below it. A size you choose is kept; reopening only shrinks a window that has outgrown the screen.
+
 ## 2026-11-23 — Remote control of the running app from the terminal
 
 ### Previous state
