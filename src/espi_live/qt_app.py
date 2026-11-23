@@ -3714,6 +3714,7 @@ class DaqChecklistDialog(QDialog):
         Returns: None.
         """
         super().__init__(parent)
+        self.settings = settings  # what Allow arms and applies (the control server reads it)
         self.setWindowTitle("Before the DAQ drives anything")
         self.resize(ui_scale.px(520), ui_scale.px(380))
         intro = QLabel("Tick off each check for the outputs you are switching on. Until "
@@ -4578,6 +4579,8 @@ class ControlBackend:
             else None,
             "saved": saved.to_dict(),
             "checklist_done": controller.checklist_done(),
+            "checklist_pending": self.caller.call(
+                lambda: self.window._control_daq_pending_checklist() is not None),
             "problems": daq.problems(base),
             "wiring": [self._daq_connection(item) for item in daq.wiring(base)],
             "tuning": {"on": tuning, "note": note},
@@ -4609,8 +4612,15 @@ class ControlBackend:
                    "apply": self._daq_apply, "zero": self._daq_zero,
                    "self_test": self._daq_self_test, "step": self._daq_step,
                    "attach": self._daq_attach, "detach": self._daq_detach,
-                   "checklist": self._daq_checklist, "tune": self._daq_tune}
-        return runners[action](**arguments)
+                   "checklist": self._daq_checklist, "approve": self._daq_approve,
+                   "tune": self._daq_tune}
+        # POST /daq names the arguments as DAQ_ACTIONS does; the runners keep
+        # their own parameter names for these three.
+        renames = {"connect": {"device": "name"},
+                   "apply": {"settings": "changes"},
+                   "checklist": {"settings": "changes"}}.get(action, {})
+        return runners[action](**{renames.get(key, key): value
+                                  for key, value in arguments.items()})
 
     def _dispatch_daq_event(self, kind, payload):
         """Run one DAQ event's window side effects from the control server.
@@ -4898,6 +4908,39 @@ class ControlBackend:
                               "applies the settings.")
         return {"shown": True, "items": items, "settings": merged.to_dict()}
 
+    def _daq_approve(self, confirm):
+        """Tick off the safety checklist that is on screen, arm the device and apply.
+
+        This is the control server's stand-in for ticking every box and
+        pressing "Allow drive signals": the caller says, with confirm, that
+        the checklist's items (returned by the checklist action) hold for
+        this wiring.
+
+        Args: confirm must be True; anything else is refused.
+        Returns: The apply reply fields plus approved and the checklist's
+            items. Raises ControlError when confirm is not true (400), no
+            device is connected or no checklist is waiting (409), or the
+            apply itself is refused.
+        """
+        if not confirm:
+            raise control.ControlError(
+                'approve needs "confirm": true, which says every checklist item '
+                "(see the checklist action) is true for this wiring", 400)
+        controller, state, _ = self._daq_state()
+        if state["device"] is None:
+            raise control.ControlError(
+                "connect to a NI device first (the connect action)", 409)
+        pending = self.caller.call(self.window._control_daq_take_checklist)
+        if pending is None:
+            raise control.ControlError(
+                'no safety checklist is waiting; run the "checklist" action, read '
+                "its items, then approve", 409)
+        controller.arm(pending)
+        self.window.log.write("NI DAQ: safety checklist ticked off for "
+                              f"{state['device'].label} (approved from the control server).")
+        result = self._daq_apply(pending.to_dict())
+        return {**result, "approved": True, "items": daq.checklist_items(pending)}
+
     def _daq_tune(self, on):
         """Start or stop the experimental piezo auto-tune.
 
@@ -4988,6 +5031,7 @@ class MainWindow(QMainWindow):
         self.tune_note = ""  # why auto-tune last stopped
         self.daq_drive = daq.Drive()  # what its outputs produce, for demo cameras
         self.daq_dialog = None  # DaqDialog, built on first use
+        self.control_checklist = None  # the checklist the control server showed, while open
         self.daq_auto = None  # device name startup connects to once the scan ends
         self.daq_events_lock = threading.Lock()  # the control server drains events too
         self.phase_stepper = None  # phase.PiezoStepper the displayed engine steps
@@ -7716,6 +7760,8 @@ class MainWindow(QMainWindow):
             dialog.load(settings)
             dialog._ask_checklist(settings)
             return
+        if self.control_checklist is not None:
+            self.control_checklist.close()
         box = DaqChecklistDialog(self, settings)
 
         def allowed():
@@ -7726,7 +7772,40 @@ class MainWindow(QMainWindow):
             self.daq.request("apply", settings=settings)
 
         box.accepted.connect(allowed)
+        self.control_checklist = box
         box.open()
+
+    def _control_daq_pending_checklist(self):
+        """Find the safety checklist that is open on screen, if any.
+
+        Runs on the GUI thread. Looks at the one the control server opened
+        over the main window and at the DAQ window's own.
+
+        Args: None.
+        Returns: The open DaqChecklistDialog, or None.
+        """
+        for dialog in (self.control_checklist, getattr(self.daq_dialog, "checklist", None)):
+            if dialog is not None and dialog.isVisible():
+                return dialog
+        return None
+
+    def _control_daq_take_checklist(self):
+        """Close the open safety checklist without applying, and hand back its settings.
+
+        Runs on the GUI thread. The control server approves a checklist by
+        arming the controller and applying the settings itself (so it can
+        report the result), so the dialog is rejected, not accepted.
+
+        Args: None.
+        Returns: The daq.DaqSettings the checklist was shown for, or None
+            when no checklist is open.
+        """
+        dialog = self._control_daq_pending_checklist()
+        if dialog is None:
+            return None
+        settings = dialog.settings
+        dialog.reject()
+        return settings
 
     def _control_daq_attach(self, index, settings, simulated):
         """Display a camera and give its Phase view the piezo (control server).

@@ -11,6 +11,18 @@
 - `GET /update` reports the running build, the newest known build, whether one is downloaded, whether a job is running, whether a recording is running, and why updating is unavailable (for example, a run from source). `POST /update` runs `check`, `download`, `install` (download if needed, then close and restart into the new build) or `restart` (restart into a downloaded build). Control-triggered updates never open a dialog. An install is refused with 409 while a recording or frame save is running.
 - `espi_live control update` shows the same state; `control update check|download|install|restart` runs an action.
 
+## 2026-11-23 — Approve the NI DAQ safety checklist from the control server
+
+### Previous state
+
+- `checklist` put the safety checklist on the app's screen, but only a person at the window could tick it, so a terminal or agent could not get a real NI device to drive anything.
+
+### Current state
+
+- `POST /daq {"action": "approve", "confirm": true}` (terminal: `control daq approve --yes`) ticks off the checklist that `checklist` showed, arms the device for the outputs it covered and applies those settings, returning the apply result plus the checklist's items. The usual run is `connect Dev1`, `checklist piezo_on=true …` (prints the items to check), `approve --yes`, then `attach` or `step` to see the Phase view change.
+- It refuses without `"confirm": true` (400), with no device connected or no checklist waiting (409), so the checklist must be shown, and its items returned, before it can be approved. `GET /daq` reports `checklist_pending`. `control daq checklist` now takes `KEY=VALUE` settings and prints the items numbered.
+- Unchanged: the gate lives in `DaqController`, is still per connection and per role, and the simulated device still needs no checklist. The approval is logged as `NI DAQ: safety checklist ticked off … (approved from the control server)`.
+
 ## 2026-11-23 — DAQ and NI USB controls in the remote-control API
 
 ### Previous state
