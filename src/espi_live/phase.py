@@ -25,7 +25,6 @@ exposed while the piezo moved.
 
 import math
 import time
-from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -359,26 +358,30 @@ class PhaseState:
 
 
 class PiezoStepper:
-    """Move the reference piezo to phase-step levels through the DAQ.
+    """Move one reference piezo to phase-step levels through the DAQ.
 
-    settings are the DAQ window's DaqSettings: piezo_voltage_v is the level
-    of step 0 and piezo_step_v the voltage per step (a quarter wave once
-    calibrated). The generator settings are passed through unchanged, so a
-    step never switches the generator on or off. Instances are replaced, not
-    changed, so the engine thread never sees a half-updated stepper.
+    settings are the DAQ window's DaqSettings: the driver's voltage_v field
+    is the level of step 0 and step_v the voltage per step (a quarter wave
+    once calibrated). index says which driver this stepper moves (1 is Thor
+    1 on AO 1, 2 is Thor 2 on AO 0). The generator and the other driver's
+    settings are passed through unchanged, so a step never switches anything
+    else on or off. Instances are replaced, not changed, so the engine
+    thread never sees a half-updated stepper.
     """
 
-    def __init__(self, controller, settings, simulated=False):
+    def __init__(self, controller, settings, simulated=False, index=1):
         """Wrap a connected DAQ controller.
 
         Args: controller is a daq.DaqController (or anything with
-            move_piezo(settings, volts, timeout)); settings is daq.DaqSettings;
-            simulated is True when the device drives nothing.
+            move_piezo(settings, volts, timeout, index)); settings is
+            daq.DaqSettings; simulated is True when the device drives
+            nothing; index is the piezo driver this stepper moves, 1 or 2.
         Returns: None.
         """
         self.controller = controller
         self.settings = settings
         self.simulated = simulated
+        self.index = index
         self.volts = None  # the level last reached, None before the first move
 
     @property
@@ -388,15 +391,16 @@ class PiezoStepper:
         Args: None.
         Returns: Volts at the DAQ.
         """
-        return self.settings.piezo_step_v
+        return daq.pget(self.settings, self.index, "step_v")
 
-    def level(self, index):
+    def level(self, index_step):
         """The DAQ voltage of one phase step.
 
-        Args: index is the step number, 0 first.
+        Args: index_step is the step number, 0 first.
         Returns: Volts.
         """
-        return self.settings.piezo_voltage_v + index * self.settings.piezo_step_v
+        return (daq.pget(self.settings, self.index, "voltage_v")
+                + index_step * self.step_v)
 
     def problems(self, steps):
         """Check that every step of a sequence can be driven.
@@ -405,18 +409,22 @@ class PiezoStepper:
         Returns: A list of sentences for the user; empty when it can run.
         """
         s = self.settings
-        if s.piezo_output == daq.OFF:
-            return ["Assign the piezo driver to an analog output in the NI DAQ window."]
-        if s.piezo_step_v <= 0:
-            return ["Set a piezo step voltage above 0 V in the NI DAQ window."]
+        which = "" if self.index == 1 else "second "
+        if not daq.piezo_assigned(s, self.index):
+            return [f"Assign the {which}piezo driver to an analog output in the "
+                    "NI DAQ window."]
+        if self.step_v <= 0:
+            return [f"Set the {which}piezo's step voltage above 0 V in the NI DAQ "
+                    "window."]
         if self.level(0) < daq.PIEZO_FLOOR_V:
             return [f"Phase steps would start at {self.level(0):.4g} V, below 0 V: the "
                     f"piezo amplifier's input takes 0–{daq.MAX_VOLTS:g} V. Raise the "
-                    "piezo voltage in the NI DAQ window."]
+                    f"{which}piezo voltage in the NI DAQ window."]
         peak = max(abs(self.level(0)), abs(self.level(steps - 1)))
-        if peak > s.piezo_limit_v:
-            return [f"Phase steps would reach {peak:.4g} V, above the piezo's "
-                    f"{s.piezo_limit_v:g} V safety limit: lower the voltage or the step."]
+        limit = daq.pget(s, self.index, "limit_v")
+        if peak > limit:
+            return [f"Phase steps would reach {peak:.4g} V, above the {which}piezo's "
+                    f"{limit:g} V safety limit: lower the voltage or the step."]
         return []
 
     def move(self, index, timeout=MOVE_TIMEOUT_S):
@@ -427,7 +435,7 @@ class PiezoStepper:
             does not answer in time.
         """
         volts = self.level(index)
-        self.controller.move_piezo(self.settings, volts, timeout)
+        self.controller.move_piezo(self.settings, volts, timeout, self.index)
         self.volts = volts
 
     def phase(self):
@@ -444,8 +452,9 @@ class PiezoStepper:
         Args: step_v is the new voltage per step.
         Returns: A new PiezoStepper.
         """
-        return PiezoStepper(self.controller, replace(self.settings, piezo_step_v=step_v),
-                            self.simulated)
+        return PiezoStepper(self.controller,
+                            daq.pset(self.settings, self.index, step_v=step_v),
+                            self.simulated, self.index)
 
 
 class DemoInterferometer:

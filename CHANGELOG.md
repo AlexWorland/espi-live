@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-23 — A second piezo driver (Thor 2), and two camera streams at once
+
+### Previous state
+
+- The NI DAQ window drove one reference piezo (Thor 1, on AO 1) plus the frequency generator on the only other analog output, and the Phase view's piezo stepped whichever camera was displayed. The window showed one camera at a time.
+
+### Current state
+
+- **Two piezo drivers.** The DAQ window now has **Piezo driver (Thor 1)** and **Piezo driver (Thor 2)**, each with its own output (Thor 1 defaults to AO 1, Thor 2 is assignable to AO 0), mode, voltage, step, safety limit, follow-frame-rate and calibration. The USB-6251 BNC has only two analog outputs, so with both drivers in use the frequency generator must be off or on a counter (a PFI square wave, already supported); two triangles share the one sample clock, so they must agree on a frequency (the window says so). Held levels and the Phase view's steps run independently on the two outputs. Each driver's phase steps never move the other driver's level.
+- **Piezo↔camera pairing.** "Thor 1 steps camera" / "Thor 2 steps camera" in the DAQ window pair each driver to a camera for the Phase view, so two cameras can phase-shift at once (for example the front and the back of a sample). "Follow the displayed camera" (the default) keeps the original behaviour; each camera keeps its own calibrated step voltage.
+- **Two streams at once** (View menu, needs two processing cameras): **Split two streams** shows two panes side by side, each named, and clicking a pane makes that camera the one the controls edit; **Overlay two streams** blends both cameras' displayed images into one (half and half, scaled to the displayed camera's size when they differ, dummy-mode watermark kept); **Second stream window…** opens a separate window showing another camera's live stream with its own zoom and pan.
+- **Where to plug in…** and the wiring notes (`docs/notes/piezo-thorlabs-mdt694a-wiring.md`) now show one-Thor and two-Thor options with a drawing of each chain, the panel sockets and the bench order. The safety checklist lists each switched-on driver separately.
+- Defaults are unchanged: Thor 2 is off until assigned, and the display stays one stream until split, overlay or the second window is chosen.
+
 ## 2026-11-23 — DAQ and NI USB controls in the remote-control API
 
 ### Previous state

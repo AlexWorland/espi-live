@@ -271,19 +271,39 @@ class DirectPhaseTests(unittest.TestCase):
         self.engine.set_phase_stepper(stepper)
         self.engine._phase.calibration = [math.radians(72)] * 5
         self.engine._finish_phase_calibration(stepper)
-        kind, (degrees, volts) = self.engine.events.get_nowait()
+        kind, (degrees, volts, index) = self.engine.events.get_nowait()
         self.assertEqual(kind, "phase_calibrated")
         self.assertAlmostEqual(degrees, 72)
         self.assertAlmostEqual(volts, 0.0625)
         self.engine._phase.calibration = [math.radians(10)] * 5
         self.engine._finish_phase_calibration(stepper)
-        kind, degrees = self.engine.events.get_nowait()
+        kind, (degrees, index) = self.engine.events.get_nowait()
         self.assertEqual(kind, "phase_calibration_failed")
         self.assertAlmostEqual(degrees, 10)
         self.engine._phase.calibration = [math.radians(80)] * 2
         self.assertIn("set 3 of 5", self.engine._phase_note(self.s))
         self.engine._finish_phase_calibration(stepper)  # not enough sets: nothing yet
         self.assertTrue(self.engine.events.empty())
+
+    def test_calibration_names_the_second_driver(self):
+        """A Thor 2 calibration's events carry its driver index.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(piezo2_output="ao0", piezo2_voltage_v=0.1,
+                                   piezo2_step_v=0.05, piezo2_limit_v=1.0)
+        stepper = phase.PiezoStepper(FakeController(), settings, index=2)
+        self.engine.set_phase_stepper(stepper)
+        self.engine._phase.calibration = [math.radians(72)] * 5
+        self.engine._finish_phase_calibration(stepper)
+        kind, (degrees, volts, index) = self.engine.events.get_nowait()
+        self.assertEqual((kind, index), ("phase_calibrated", 2))
+        self.assertAlmostEqual(volts, 0.0625)
+        self.engine._phase.calibration = [math.radians(10)] * 5
+        self.engine._finish_phase_calibration(stepper)
+        kind, (degrees, index) = self.engine.events.get_nowait()
+        self.assertEqual((kind, index), ("phase_calibration_failed", 2))
 
     def test_actions(self):
         """F takes a phase reference; Calibrate needs a piezo.
@@ -376,7 +396,7 @@ class EngineLoopTests(unittest.TestCase):
         self.engine.request("calibrate_phase")
         event = wait_event(self.engine, ("phase_calibrated", "phase_calibration_failed"))
         self.assertIsNotNone(event)
-        kind, (degrees, volts) = event
+        kind, (degrees, volts, index) = event
         self.assertEqual(kind, "phase_calibrated")
         self.assertAlmostEqual(degrees, 72, delta=6)
         self.assertAlmostEqual(volts, 0.0625, delta=0.005)

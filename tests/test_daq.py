@@ -1252,9 +1252,6 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.status()["device"].name, daq.SIMULATED)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class FakeClock:
     """A clock the tests move by hand."""
@@ -1593,3 +1590,318 @@ class SelfCheckTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("FAILED, AO 1 read", lines[0])
         self.assertTrue(self.log.has("NI DAQ self-test FAILED"))
+
+
+class SecondDriverFieldTests(unittest.TestCase):
+    """The piezo2_* fields, their helpers and their storage."""
+
+    def test_field_helpers(self):
+        """pfield, pget and pset name and set each driver's fields.
+
+        Args: None.
+        Returns: None.
+        """
+        self.assertEqual(daq.pfield(1, "output"), "piezo_output")
+        self.assertEqual(daq.pfield(2, "output"), "piezo2_output")
+        settings = daq.DaqSettings(piezo2_voltage_v=0.3)
+        self.assertEqual(daq.pget(settings, 1, "output"), "ao1")
+        self.assertEqual(daq.pget(settings, 2, "output"), daq.OFF)
+        self.assertEqual(daq.pget(settings, 2, "voltage_v"), 0.3)
+        changed = daq.pset(settings, 2, on=True, voltage_v=0.4)
+        self.assertFalse(changed.piezo_on)
+        self.assertTrue(changed.piezo2_on)
+        self.assertEqual(changed.piezo2_voltage_v, 0.4)
+        self.assertEqual(daq.piezo_driver_label(1), "Piezo driver (Thor 1)")
+        self.assertEqual(daq.piezo_driver_label(2), "Piezo driver (Thor 2)")
+
+    def test_round_trip_and_old_saved_settings(self):
+        """The second driver's fields round-trip; an older saved dict gets defaults.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(piezo2_output="ao0", piezo2_on=True,
+                                   piezo2_mode=daq.TRIANGLE, piezo2_bottom_v=0.5,
+                                   piezo2_top_v=9.5, piezo2_quarter_wave_v=0.08,
+                                   piezo_camera="profiles/demo/DEMO1",
+                                   piezo2_camera="profiles/demo/DEMO2")
+        self.assertEqual(daq.DaqSettings.from_dict(settings.to_dict()), settings)
+        older = daq.DaqSettings.from_dict({"piezo_on": True})  # before the second driver
+        default = daq.DaqSettings()
+        self.assertEqual(older.piezo2_output, default.piezo2_output)
+        self.assertEqual(older.piezo_camera, "")
+        self.assertEqual(older.piezo2_camera, "")
+
+
+class SecondDriverWiringTests(unittest.TestCase):
+    """Cables and checklist for the second driver."""
+
+    def test_wiring_lists_both_amplifiers(self):
+        """Both drivers' cables are listed, Thor 1 first, and the note warns.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(generator_output=daq.OFF, piezo2_output="ao0")
+        first, second = daq.wiring(settings)
+        self.assertEqual((first.terminal, first.target),
+                         ("ao1", daq.PIEZO_AMPLIFIER))
+        self.assertEqual((second.terminal, second.target),
+                         ("ao0", daq.PIEZO2_AMPLIFIER))
+        self.assertIn("only two analog outputs", second.note)
+        self.assertTrue(second.bnc)
+
+    def test_checklist_and_roles_cover_both_drivers(self):
+        """Each switched-on driver adds its own checks and role.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(piezo_on=True, piezo2_output="ao0", piezo2_on=True)
+        items = daq.checklist_items(settings)
+        self.assertEqual(len(items), 9)  # 4 per driver + the last one
+        self.assertIn("The MDT694A's OUTPUT ADJ knob", items[0])
+        self.assertIn("second MDT694A", items[4])
+        self.assertEqual(daq.driven_roles(settings),
+                         frozenset({(daq.PIEZO_ROLE, "ao1", ""),
+                                    (daq.PIEZO_ROLE, "ao0", "")}))
+        self.assertTrue(daq.drives(settings))
+
+
+class SecondDriverProblemTests(unittest.TestCase):
+    """The rules that keep two drivers and the generator apart."""
+
+    def test_drivers_on_one_output(self):
+        """Two drivers cannot share an analog output.
+
+        Args: None.
+        Returns: None.
+        """
+        found = daq.problems(daq.DaqSettings(piezo_on=True, piezo2_output="ao1",
+                                             piezo2_on=True))
+        self.assertTrue(any("Both piezo drivers are on the same output" in line
+                            for line in found))
+
+    def test_generator_and_second_driver_clash(self):
+        """The generator and Thor 2 cannot share AO 0.
+
+        Args: None.
+        Returns: None.
+        """
+        found = daq.problems(daq.DaqSettings(generator_on=True, piezo2_output="ao0"))
+        self.assertTrue(any("both on AO 0" in line for line in found))
+
+    def test_two_triangles_need_one_frequency(self):
+        """Two triangles share the AO clock: the same frequency is required.
+
+        Args: None.
+        Returns: None.
+        """
+        base = dict(generator_output=daq.OFF, piezo_on=True,
+                    piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.5, piezo_top_v=9.5,
+                    piezo_limit_v=10.0, piezo2_output="ao0", piezo2_on=True,
+                    piezo2_mode=daq.TRIANGLE, piezo2_bottom_v=0.5, piezo2_top_v=9.5,
+                    piezo2_limit_v=10.0)
+        found = daq.problems(daq.DaqSettings(piezo_frequency_hz=0.25,
+                                             piezo2_frequency_hz=0.5, **base))
+        self.assertTrue(any("share the one analog-output sample clock" in line
+                            for line in found))
+        self.assertEqual(daq.problems(daq.DaqSettings(piezo_frequency_hz=0.25,
+                                                      piezo2_frequency_hz=0.25, **base)),
+                         [])
+
+    def test_second_driver_levels_and_output(self):
+        """The second driver's own limit, floor and output are checked.
+
+        Args: None.
+        Returns: None.
+        """
+        found = daq.problems(daq.DaqSettings(piezo2_output="ao3", piezo2_on=True,
+                                             piezo2_voltage_v=0.5))
+        self.assertTrue(any("AO 3 is not one" in line for line in found))
+        found = daq.problems(daq.DaqSettings(piezo2_output="ao0", piezo2_on=True,
+                                             piezo2_voltage_v=2.0, piezo2_limit_v=1.0))
+        self.assertTrue(any("second piezo driver would reach 2 V" in line
+                            for line in found))
+        found = daq.problems(daq.DaqSettings(piezo2_output="ao0", piezo2_on=True,
+                                             piezo2_mode=daq.SINE,
+                                             piezo2_voltage_v=1.0,
+                                             piezo2_amplitude_v=2.0))
+        self.assertTrue(any("second piezo driver would go down to -1 V" in line
+                            for line in found))
+
+    def test_second_driver_sine_needs_the_generator(self):
+        """A second driver's sine follows the generator like the first one's.
+
+        Args: None.
+        Returns: None.
+        """
+        found = daq.problems(daq.DaqSettings(piezo_output=daq.OFF,
+                                             piezo2_output="ao1", piezo2_on=True,
+                                             piezo2_mode=daq.SINE))
+        self.assertTrue(any("second piezo sine follows the frequency generator" in line
+                            for line in found))
+        settings = daq.DaqSettings(generator_on=True, piezo_output=daq.OFF,
+                                   piezo2_output="ao1", piezo2_on=True,
+                                   piezo2_mode=daq.SINE, piezo2_voltage_v=0.5,
+                                   piezo2_amplitude_v=0.2, piezo2_phase_deg=90.0)
+        self.assertEqual(daq.problems(settings), [])
+        p = daq.plan(settings)
+        self.assertEqual(p.values["ao1"][0], 0.7)  # 90°: top at the first sample
+        self.assertIn("second piezo AO 1 sine", p.summary)
+
+
+class SecondDriverPlanTests(unittest.TestCase):
+    """What plan() writes when the second driver is in use."""
+
+    def test_two_holds(self):
+        """Two held levels land on their own outputs, named in the summary.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(generator_output=daq.OFF, piezo_on=True,
+                                   piezo_voltage_v=0.2, piezo2_output="ao0",
+                                   piezo2_on=True, piezo2_voltage_v=0.3)
+        p = daq.plan(settings)
+        self.assertEqual(p.analog, ("ao0", "ao1"))
+        self.assertEqual(p.values, {"ao0": 0.3, "ao1": 0.2})
+        self.assertEqual(p.rate, 0.0)
+        self.assertIn("piezo AO 1 holds 0.2 V", p.summary)
+        self.assertIn("second piezo AO 0 holds 0.3 V", p.summary)
+
+    def test_triangle_and_held_second_driver(self):
+        """A triangle on AO 1 and a held level on AO 0 share the clock harmlessly.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(generator_output=daq.OFF, piezo_on=True,
+                                   piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.5,
+                                   piezo_top_v=9.5, piezo_frequency_hz=0.281,
+                                   piezo_limit_v=10.0, piezo2_output="ao0",
+                                   piezo2_on=True, piezo2_voltage_v=0.3,
+                                   piezo2_limit_v=10.0)
+        p = daq.plan(settings)
+        self.assertEqual(p.rate, p.piezo_frequency_hz * p.samples_per_cycle)
+        self.assertEqual(p.values["ao0"], 0.3)
+        self.assertEqual(len(p.values["ao1"]), p.samples_per_cycle)
+
+    def test_two_triangles_at_one_frequency(self):
+        """Two triangles with the same frequency run on the shared clock.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(generator_output=daq.OFF, piezo_on=True,
+                                   piezo_mode=daq.TRIANGLE, piezo_bottom_v=0.5,
+                                   piezo_top_v=9.5, piezo_frequency_hz=0.281,
+                                   piezo_limit_v=10.0, piezo2_output="ao0",
+                                   piezo2_on=True, piezo2_mode=daq.TRIANGLE,
+                                   piezo2_bottom_v=1.0, piezo2_top_v=5.0,
+                                   piezo2_frequency_hz=0.281, piezo2_limit_v=10.0)
+        p = daq.plan(settings)
+        self.assertEqual(p.values["ao0"].shape, p.values["ao1"].shape)
+        self.assertEqual(p.values["ao0"][0], 1.0)
+        self.assertEqual(p.values["ao1"][0], 0.5)
+        self.assertIn("second piezo AO 0 triangle 1–5 V", p.summary)
+
+
+class SecondDriverDriveTests(unittest.TestCase):
+    """The Drive the simulation follows, per driver."""
+
+    def test_drive_describes_both_drivers(self):
+        """Each driver's mode, level and swing land in its own Drive fields.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(generator_output=daq.OFF, piezo_on=True,
+                                   piezo_voltage_v=0.2, piezo2_output="ao0",
+                                   piezo2_on=True, piezo2_mode=daq.TRIANGLE,
+                                   piezo2_bottom_v=1.0, piezo2_top_v=5.0,
+                                   piezo2_frequency_hz=0.25, piezo2_limit_v=10.0)
+        p = daq.plan(settings)
+        self.assertEqual((p.drive.piezo_mode, p.drive.piezo_v),
+                         (daq.HOLD, 0.2))
+        self.assertEqual((p.drive.piezo2_mode, p.drive.piezo2_v),
+                         (daq.TRIANGLE, 3.0))
+        self.assertAlmostEqual(p.drive.piezo2_amplitude_v, 2.0)
+        self.assertAlmostEqual(p.drive.piezo2_frequency_hz, p.piezo_frequency_hz)
+        self.assertTrue(p.drive.active)
+
+    def test_drive_for_projects_one_driver(self):
+        """drive_for gives a camera the numbers of the driver it is paired to.
+
+        Args: None.
+        Returns: None.
+        """
+        drive = daq.Drive(piezo_mode=daq.HOLD, piezo_v=0.2, piezo2_mode=daq.TRIANGLE,
+                          piezo2_v=3.0, piezo2_amplitude_v=2.0,
+                          piezo2_frequency_hz=0.25)
+        self.assertIs(daq.drive_for(drive, 1), drive)
+        second = daq.drive_for(drive, 2)
+        self.assertEqual((second.piezo_mode, second.piezo_v, second.piezo_amplitude_v),
+                         (daq.TRIANGLE, 3.0, 2.0))
+        self.assertAlmostEqual(second.piezo_frequency_hz, 0.25)
+
+
+class SecondDriverControllerTests(ControllerTests):
+    """Phase steps on the second driver through the controller."""
+
+    def test_move_piezo_on_the_second_driver(self):
+        """A second-driver step writes AO 0 and keeps Thor 1's applied level.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect()
+        settings = daq.DaqSettings(generator_output=daq.OFF, piezo_on=True,
+                                   piezo_voltage_v=0.2, piezo2_output="ao0",
+                                   piezo2_on=True, piezo2_voltage_v=0.3)
+        self.controller.request("apply", settings=settings)
+        wait_event(self.controller, "applied")
+        written = self.controller.move_piezo(settings, 0.4, 5.0, index=2)
+        self.assertIn("second piezo AO 0 holds 0.4 V", written.summary)
+        self.assertEqual(self.controller.status()["settings"].piezo2_voltage_v, 0.4)
+        self.assertEqual(self.controller.status()["settings"].piezo_voltage_v, 0.2)
+
+    def test_second_driver_step_still_needs_the_checklist(self):
+        """A real device refuses a second-driver step until its role is armed.
+
+        Args: None.
+        Returns: None.
+        """
+        self.connect()
+        settings = daq.DaqSettings(generator_output=daq.OFF, piezo2_output="ao0",
+                                   piezo2_on=True, piezo2_voltage_v=0.3)
+        with mock.patch.object(self.controller, "is_armed", return_value=False):
+            with self.assertRaisesRegex(daq.PiezoMoveError, "safety checklist"):
+                self.controller.move_piezo(settings, 0.4, 5.0, index=2)
+        covered = daq.pset(settings, 2, on=False)
+        self.controller.arm(daq.pset(settings, 2, on=True))
+        written = self.controller.move_piezo(covered, 0.4, 5.0, index=2)
+        self.assertIn("holds 0.4 V", written.summary)
+
+    def test_move_piezo_on_the_second_driver_follows_the_scale(self):
+        """The second driver's own calibration drives its follow frequency.
+
+        Args: None.
+        Returns: None.
+        """
+        settings = daq.DaqSettings(piezo2_output="ao0", piezo2_on=True,
+                                   piezo2_mode=daq.TRIANGLE, piezo2_bottom_v=0.5,
+                                   piezo2_top_v=9.5, piezo2_frequency_hz=0.25,
+                                   piezo2_follow_fps=True, piezo2_quarter_wave_v=0.075,
+                                   piezo2_limit_v=10.0)
+        frequency, _ = daq.follow_frequency(settings, 20.0, index=2)
+        self.assertAlmostEqual(frequency, 20.0 * 0.075 / 9.0)
+        self.assertIn("The second piezo follows the camera",
+                      daq.follow_text(settings, 20.0, index=2))
+        moved = daq.followed(settings, 20.0, index=2)
+        self.assertAlmostEqual(daq.pget(moved, 2, "frequency_hz"),
+                               20.0 * 0.075 / 9.0)
+        self.assertIsNone(daq.followed(settings, 20.0, index=1))
+
+if __name__ == "__main__":
+    unittest.main()
