@@ -4,7 +4,8 @@
 answers each with one JSON line on stdout, so a test harness (or a person at a
 terminal) can do everything the NI DAQ window and the camera controls do without
 a display. Log text goes to stderr and the log file only; stdout carries nothing
-but replies and events.
+but replies and events. A byte-order mark at the start of a line (PowerShell 5.1
+adds one to piped text) is ignored.
 
 A command is ``{"cmd": "<name>", "id": <optional, echoed back>, ...arguments}``.
 A reply is ``{"ok": true, "id": ..., ...result}`` or ``{"ok": false, "error":
@@ -15,7 +16,9 @@ Commands (cameras are chosen with an optional ``camera``: a position, a label or
 a serial number; the default is the first running camera)::
 
     status                              cameras, DAQ, stepper, faults seen
-    daq_scan                            list the NI devices (SIMULATED is always there)
+    daq_scan                            list the NI devices (SIMULATED is always there;
+                                        "ni_simulated" marks a device created as
+                                        simulated in NI MAX, which still needs the checklist)
     daq_connect {device}                connect; every output goes to 0 V
     daq_arm {roles?}                    record the safety checklist ("generator",
                                         "piezo"; default both assigned roles);
@@ -142,9 +145,15 @@ class ControlSession:
     def handle_line(self, line):
         """Run one input line.
 
+        A byte-order mark at the start of the line is dropped: PowerShell 5.1
+        starts piped text with one (U+FEFF), which json.loads refuses and
+        str.strip does not count as whitespace.
+
         Args: line is a line of text.
-        Returns: The reply dict, or None for a blank line.
+        Returns: The reply dict, or None for a blank line (a line holding only
+            a byte-order mark and whitespace is blank too).
         """
+        line = line.lstrip("\ufeff")
         if not line.strip():
             return None
         try:
@@ -380,7 +389,8 @@ class ControlSession:
         Returns: A dict.
         """
         return {"name": info.name, "model": info.model, "serial": info.serial,
-                "label": info.label, "simulated": info.simulated}
+                "label": info.label, "simulated": info.simulated,
+                "ni_simulated": info.ni_simulated}
 
     # ----- commands -----------------------------------------------------------
 

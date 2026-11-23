@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-22 — Headless control accepts a byte-order mark; NI MAX simulated DAQ devices are marked
+
+### Previous state
+
+- `espi-live.exe --headless --control` answered the first command piped from PowerShell 5.1 with `not valid JSON: Expecting value: line 1 column 1 (char 0)`, because PowerShell starts piped text with a byte-order mark (U+FEFF) and the line reached `json.loads` with it.
+- A device created as simulated in NI MAX (for example `SimDev1`, "NI Simulated DAQ Device") looked exactly like hardware in the DAQ window and in the headless replies.
+
+### Current state
+
+- A byte-order mark at the start of an input line is ignored, and a line holding only one (and whitespace) counts as blank.
+- The DAQ window's device list and the headless `daq_scan`, `daq_connect` and `status` replies label an NI MAX simulated device "(NI MAX simulation, no hardware)", and the headless device dicts carry `ni_simulated` next to `simulated`. The safety gate is unchanged: only the app's own `Simulated` device skips the checklist, so an NI MAX simulated device still takes no drive signal until its checklist is recorded.
+
 ## 2026-11-22 — Drive the NI DAQ and cameras from a script (`--headless --control`)
 
 ### Previous state
