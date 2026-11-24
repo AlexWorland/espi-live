@@ -45,7 +45,8 @@ from espi_live.processing import (DEEP_DTYPE, DEFAULT_DIFFERENCE_GAIN,
                                   NoiseCalibration, NoiseFloorMap, PeakHold,
                                   RangeTracker, apply_display, apply_gain,
                                   apply_levels, denoise_strength, display_lut,
-                                  even_out_brightness, is_deep, local_normalize,
+                                  embed_region, even_out_brightness, is_deep,
+                                  local_normalize, polygon_region,
                                   raw_difference, reject_outliers,
                                   single_field, smooth_speckle, stretch_levels,
                                   subtract_floor, to_uint8, watermark_demo)
@@ -92,6 +93,7 @@ class Settings:
     average: int = DEFAULT_AVERAGE
     rolling: bool = False         # running average instead of one image per N frames
     ref_refresh_s: float = 0.0    # recapture the Reference every N s; 0 = never
+    polygon: tuple = ()          # normalized image vertices; empty = whole image
     ref_frames: int = DEFAULT_REF_FRAMES  # camera frames averaged into each reference
     smoothing: int = DEFAULT_SMOOTHING    # speckle filter width in pixels; 0 = off
     smoothing_method: str = DEFAULT_SMOOTHING_METHOD
@@ -381,7 +383,7 @@ def floor_key(s, processor, shape):
     """
     labview = s.gain_before_average and not s.scale_range
     baseline = s.frames_back if s.mode == "Previous" else processor.ref_time
-    return (shape, s.mode, baseline, s.exposure_us, s.gain_db, s.noise_reduction,
+    return (shape, s.polygon, s.mode, baseline, s.exposure_us, s.gain_db, s.noise_reduction,
             s.single_field, s.threshold, s.even_brightness, s.outlier_filter,
             s.average, s.rolling, s.average_frames_first, s.smoothing,
             s.smoothing_method,
@@ -408,7 +410,7 @@ def level_text(value):
 
 def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
                       now=0.0, sample=None, labview_order=False, floor=None,
-                      floor_sample=None):
+                      floor_sample=None, mask=None):
     """Run the steps after averaging: speckle filter, noise floor, peak hold,
     scaling, invert.
 
@@ -422,7 +424,8 @@ def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
         calibration); labview_order says the gain was applied before averaging;
         floor is a NoiseFloorMap result to subtract, or None; floor_sample is
         called with the filtered image and now before the floor is taken off
-        (a noise floor measurement), or None.
+        (a noise floor measurement), or None; mask, when given, selects the
+        pixels the stretch range is measured on (a polygon region).
     Returns: (image, levels): the processed uint8 image (the display gamma is
         still to apply; a deep difference is rounded to 8 bits only here) and
         (low, high, scaled_low,
@@ -445,7 +448,7 @@ def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
             low, high, _, _ = cv2.minMaxLoc(averaged)
             levels = (level(low, averaged), level(high, averaged), None, None)
     elif s.scale_range:
-        low, high = stretch_levels(averaged, s.clip_percent)
+        low, high = stretch_levels(averaged, s.clip_percent, mask)
         low, high = (ranges or RangeTracker()).update(
             low, high, s.min_range, s.steady_range_s, now, fine=is_deep(averaged))
         image = apply_levels(averaged, low, high)
@@ -454,8 +457,8 @@ def finish_difference(averaged, s, measure=True, peaks=None, ranges=None,
         image = to_uint8(averaged if labview_order
                          else apply_gain(averaged, s.difference_gain))
         if measure:
-            low, high, _, _ = cv2.minMaxLoc(averaged)
-            top, bottom, _, _ = cv2.minMaxLoc(image)
+            low, high, _, _ = cv2.minMaxLoc(averaged, mask=mask)
+            top, bottom, _, _ = cv2.minMaxLoc(image, mask=mask)
             levels = (level(low, averaged), level(high, averaged), int(top), int(bottom))
     if s.invert:
         image = cv2.bitwise_not(image)
@@ -1028,6 +1031,8 @@ class Engine:
         last_range_time = 0.0
         last_rolling = applied.rolling
         last_refresh = applied.ref_refresh_s
+        region_key = None
+        bounds, region_mask = None, None
         last_single_field = applied.single_field
         last_noise = applied.noise_reduction
         last_ref_frames = applied.ref_frames
@@ -1182,6 +1187,20 @@ class Engine:
                 camera_sharpness.observe(frame, now, context)
             if not s.raw_difference:
                 frame = processor.denoise(frame, denoise_strength(s.noise_reduction))
+            key = (s.polygon, frame.shape,
+                   s.smoothing if s.polygon else 0,
+                   s.smoothing_method if s.polygon else "")
+            if key != region_key:
+                bounds, region_mask = (polygon_region(frame.shape, s.polygon,
+                                                       s.smoothing, s.smoothing_method)
+                                       if s.polygon else (None, None))
+                processor.reset_previous()
+                processor.reset_avg()
+                region_key = key
+            if processor.ref is not None and processor.ref.shape != frame.shape:
+                processor.ref = None
+                processor.ref_time = None
+                processor.reset_avg()
             now = time.monotonic()
             last_valid = now
             if not self.demo:
@@ -1277,15 +1296,19 @@ class Engine:
                 averaged = None
                 if measured is not None:
                     last_shape = measured.shape
-                    unconditioned = processor.difference(measured, s.mode,
-                                                         s.frames_back)
-                    self._cut_square(unconditioned, (
+                    measurement = (measured if bounds is None else
+                                   measured[bounds[1]:bounds[3], bounds[0]:bounds[2]])
+                    unconditioned = processor.difference(measurement, s.mode,
+                                                         s.frames_back, bounds)
+                    square = (unconditioned if bounds is None or self._square_request is None
+                              else embed_region(unconditioned, bounds, frame.shape))
+                    self._cut_square(square, (
                         processor.previous is not None if s.mode == "Previous" else
                         processor.ref is not None and
-                        processor.ref.shape == measured.shape),
+                        processor.ref.shape == frame.shape),
                         s.mode, s.flip_horizontal, now)
                     difference, labview_order = condition_difference(
-                        unconditioned, measured, s)
+                        unconditioned, measurement, s)
                     count = 1 if s.average_frames_first else s.average
                     scale = None
                     if labview_order:
@@ -1299,12 +1322,14 @@ class Engine:
                                 if s.rolling else
                                 processor.average(difference, count, scale))
                 if averaged is not None:
-                    floor, floor_sample = self._floor_use(s, processor, measured.shape)
+                    floor, floor_sample = self._floor_use(s, processor, measurement.shape)
                     image, levels = finish_difference(
                         averaged, s, update_range, peaks=peaks,
                         ranges=ranges, now=now, sample=self._sample_noise,
                         labview_order=labview_order, floor=floor,
-                        floor_sample=floor_sample)
+                        floor_sample=floor_sample, mask=region_mask)
+                    if bounds is not None:
+                        image = embed_region(image, bounds, frame.shape, region_mask)
                     if update_range:
                         self._set_status(range=range_text(levels, s))
                         last_range_time = now
@@ -2021,7 +2046,7 @@ class Engine:
             self._recorder.stop()
             self._retired.append(self._recorder)
             self._recorder = None
-        self.update_settings(record=False, mode="Raw")
+        self.update_settings(record=False, mode="Raw", polygon=())
         with self._packet_lock:
             self._packet = None
         self._attach_camera(attempt)

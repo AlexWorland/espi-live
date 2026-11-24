@@ -114,7 +114,7 @@ def normalize_min_max(image):
                          dtype=cv2.CV_8U), low, high
 
 
-def stretch_contrast(image, clip_percent):
+def stretch_contrast(image, clip_percent, mask=None):
     """Stretch a measurement image to 0..255, optionally ignoring outliers.
 
     Speckle leaves a few very bright pixels in a difference image; with an
@@ -123,13 +123,21 @@ def stretch_contrast(image, clip_percent):
 
     Args: image is a nonempty, single-channel uint8 array; clip_percent is
         the share of pixels (0..50) allowed to saturate at each end, where 0
-        means the exact minimum and maximum.
+        means the exact minimum and maximum; mask optionally selects pixels
+        used to measure the range (but not the pixels to transform).
     Returns: A tuple of scaled image, low and high input levels. A constant
         image (or clipped range) becomes zeros, as in normalize_min_max.
     """
     if clip_percent <= 0:
-        return normalize_min_max(image)
-    counts = np.cumsum(cv2.calcHist([image], [0], None, [256], [0, 256]).ravel())
+        if mask is None:
+            return normalize_min_max(image)
+        low, high, _, _ = cv2.minMaxLoc(image, mask=mask)
+        low, high = int(low), int(high)
+        if high == low:
+            return np.zeros_like(image), low, high
+        levels = (np.arange(256, dtype=np.float32) - low) * (255.0 / (high - low))
+        return cv2.LUT(image, np.clip(np.rint(levels), 0, 255).astype(np.uint8)), low, high
+    counts = np.cumsum(cv2.calcHist([image], [0], mask, [256], [0, 256]).ravel())
     clipped = counts[-1] * min(clip_percent, 50.0) / 100.0
     low = int(np.searchsorted(counts, clipped, side="right"))
     high = int(np.searchsorted(counts, counts[-1] - clipped, side="left"))
@@ -139,21 +147,21 @@ def stretch_contrast(image, clip_percent):
     return cv2.LUT(image, np.clip(np.rint(levels), 0, 255).astype(np.uint8)), low, high
 
 
-def deep_levels(image, clip_percent):
+def deep_levels(image, clip_percent, mask=None):
     """Find a deep image's stretch levels, to a fraction of a grey level.
 
     A RAW difference is often well under one 8-bit grey level, so the levels
     are kept as floats and found with a fine histogram.
 
     Args: image is a nonempty float32 array; clip_percent is as in
-        stretch_levels.
+        stretch_levels; mask optionally selects the pixels measured.
     Returns: A (low, high) tuple of float grey levels.
     """
-    low, high, _, _ = cv2.minMaxLoc(image)
+    low, high, _, _ = cv2.minMaxLoc(image, mask=mask)
     if clip_percent <= 0 or high <= low:
         return float(low), float(high)
     width = (high - low) / DEEP_BINS
-    counts = np.cumsum(cv2.calcHist([image], [0], None, [DEEP_BINS],
+    counts = np.cumsum(cv2.calcHist([image], [0], mask, [DEEP_BINS],
                                     [low, high + width]).ravel())
     clipped = counts[-1] * min(clip_percent, 50.0) / 100.0
     first = int(np.searchsorted(counts, clipped, side="right"))
@@ -161,21 +169,22 @@ def deep_levels(image, clip_percent):
     return float(low + first * width), float(low + last * width)
 
 
-def stretch_levels(image, clip_percent):
+def stretch_levels(image, clip_percent, mask=None):
     """Find the input levels a contrast stretch maps to black and white.
 
     Args: image is a nonempty, single-channel uint8 or deep (float32) array;
         clip_percent is the share of pixels (0..50) allowed to saturate at
-        each end, where 0 means the exact minimum and maximum.
+        each end, where 0 means the exact minimum and maximum; mask
+        optionally selects the pixels measured (not the ones transformed).
     Returns: A (low, high) tuple: integer grey levels for uint8, floats for a
         deep image.
     """
     if is_deep(image):
-        return deep_levels(image, clip_percent)
+        return deep_levels(image, clip_percent, mask)
     if clip_percent <= 0:
-        low, high, _, _ = cv2.minMaxLoc(image)
+        low, high, _, _ = cv2.minMaxLoc(image, mask=mask)
         return int(low), int(high)
-    counts = np.cumsum(cv2.calcHist([image], [0], None, [256], [0, 256]).ravel())
+    counts = np.cumsum(cv2.calcHist([image], [0], mask, [256], [0, 256]).ravel())
     clipped = counts[-1] * min(clip_percent, 50.0) / 100.0
     low = int(np.searchsorted(counts, clipped, side="right"))
     high = int(np.searchsorted(counts, counts[-1] - clipped, side="left"))
@@ -451,6 +460,49 @@ def smooth_speckle(image, method, size):
     if method == "Oriented":
         return oriented_smooth(image, size)
     return cv2.GaussianBlur(image, (size, size), 0)
+
+
+def polygon_region(shape, polygon, smoothing, method):
+    """Make a cropped polygon mask and its padded bounding box.
+
+    Args: shape is (height, width); polygon contains normalized (x, y)
+        vertices; smoothing and method describe the speckle filter.
+    Returns: ((left, top, right, bottom), uint8 mask), with exclusive ends.
+        Padding supplies real neighboring pixels to the spatial filter.
+    """
+    height, width = shape
+    points = np.array([(round(x * (width - 1)), round(y * (height - 1)))
+                       for x, y in polygon], dtype=np.int32)
+    points[:, 0] = np.clip(points[:, 0], 0, width - 1)
+    points[:, 1] = np.clip(points[:, 1], 0, height - 1)
+    kernel = int(smoothing) | 1
+    if method == "Median":
+        kernel = min(kernel, MAX_MEDIAN_WIDTH)
+    pad = kernel // 2
+    left = max(0, int(points[:, 0].min()) - pad)
+    top = max(0, int(points[:, 1].min()) - pad)
+    right = min(width, int(points[:, 0].max()) + pad + 1)
+    bottom = min(height, int(points[:, 1].max()) + pad + 1)
+    mask = np.zeros((bottom - top, right - left), np.uint8)
+    cv2.fillPoly(mask, [points - (left, top)], 255)
+    return (left, top, right, bottom), mask
+
+
+def embed_region(image, bounds, shape, mask=None):
+    """Place a cropped result in a full-size frame, zero outside the polygon.
+
+    Args: image is the crop's uint8 or deep array; bounds is the (left, top,
+        right, bottom) crop; shape is the full frame's shape; mask optionally
+        keeps only the pixels inside the polygon.
+    Returns: An array of the image's dtype and the full shape, zero outside
+        the selection.
+    """
+    left, top, right, bottom = bounds
+    full = np.zeros(shape, image.dtype)
+    if mask is not None:
+        image = cv2.bitwise_and(image, image, mask=mask)
+    full[top:bottom, left:right] = image
+    return full
 
 
 # Oriented smoothing: the fringe direction is measured on an image this many
@@ -1027,14 +1079,16 @@ class ESPIProcessor:
         self.ref = self.ref_time = self.ref_noise = self.ref_capture = None
         self.ref_frames = 0
 
-    def difference(self, frame, mode, frames_back=1):
+    def difference(self, frame, mode, frames_back=1, bounds=None):
         """Subtract an earlier frame or the captured reference.
 
-        Args: frame is the current Mono8 array; mode is Previous or Reference;
-            frames_back is how many frames back Previous view looks (1 is the
-            frame just before; capped at MAX_FRAMES_BACK). Comparing further
-            back shows slower change, as the LabVIEW VI did by waiting between
-            grabs.
+        Args: frame is the current Mono8 array (already cropped if bounds is
+            given); mode is Previous or Reference; frames_back is how many
+            frames back Previous view looks (1 is the frame just before;
+            capped at MAX_FRAMES_BACK). Comparing further back shows slower
+            change, as the LabVIEW VI did by waiting between grabs; bounds
+            maps that crop into the full reference as
+            (left, top, right, bottom).
         Returns: A uint8 absolute-difference image, or zeros until a baseline
             frame exists. For Previous view, self.previous afterwards holds
             the earlier frame that was subtracted (None while there was
@@ -1055,10 +1109,14 @@ class ESPIProcessor:
             result = cv2.absdiff(frame, self.previous)
             self.history.append(frame.copy())
             return result
-        if (self.ref is None or self.ref.shape != frame.shape
-                or self.ref.dtype != frame.dtype):
+        reference = self.ref
+        if reference is not None and bounds is not None:
+            left, top, right, bottom = bounds
+            reference = reference[top:bottom, left:right]
+        if (reference is None or reference.shape != frame.shape
+                or reference.dtype != frame.dtype):
             return np.zeros_like(frame)
-        return cv2.absdiff(frame, self.ref)
+        return cv2.absdiff(frame, reference)
 
     def average(self, image, count, scale=None):
         """Accumulate a requested number of difference frames.

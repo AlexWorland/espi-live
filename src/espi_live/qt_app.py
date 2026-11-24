@@ -41,7 +41,8 @@ from PySide6.QtCore import (QCoreApplication, QEvent, QObject, QPoint, QPointF, 
                             qInstallMessageHandler)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
                            QKeySequence, QOffscreenSurface, QOpenGLContext, QPainter,
-                           QPainterPath, QPalette, QPen, QPixmap, QSurfaceFormat, QVector4D)
+                           QPainterPath, QPalette, QPen, QPixmap, QPolygonF, QSurfaceFormat,
+                           QVector4D)
 from PySide6.QtOpenGL import (QOpenGLShader, QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -1152,6 +1153,8 @@ class ViewNavigation:
         self.drag_origin = None
         self.press_point = None  # where the left button went down, for clicks
         self.box = None  # the outlined pixel square (left, top, right, bottom), or None
+        self.polygon = ()  # committed region: normalized (x, y) vertices
+        self.polygon_draft = None  # corners being drawn, or None when not drawing
         self.setMouseTracking(True)
 
     def display_rect(self):
@@ -1251,14 +1254,27 @@ class ViewNavigation:
         event.accept()
 
     def mousePressEvent(self, event):
-        """Start panning with the left button.
+        """Add a region corner, or start panning (right-drag while drawing).
 
         Args: event is the Qt mouse event.
         Returns: None.
         """
+        if event.button() == Qt.LeftButton and self.polygon_draft is not None:
+            point = self.widget_to_image(event.position())
+            if point is not None:
+                width, height = self.image_size
+                x, y = point
+                if 0 <= x < width and 0 <= y < height:
+                    self.polygon_draft.append((min(x / max(1, width - 1), 1.0),
+                                               min(y / max(1, height - 1), 1.0)))
+                    self.update()
+            self.setFocus()
+            return
         if event.button() == Qt.LeftButton:
             self.press_point = event.position()
-        if event.button() == Qt.LeftButton and self.zoom > 1.0:
+        if self.zoom > 1.0 and (event.button() == Qt.LeftButton or
+                                (self.polygon_draft is not None and
+                                 event.button() == Qt.RightButton)):
             self.drag_origin = event.position()
             self.setCursor(Qt.ClosedHandCursor)
         self.setFocus()
@@ -1333,6 +1349,62 @@ class ViewNavigation:
         painter.setPen(QPen(BOX_COLOR, 1))
         painter.drawRect(area)
 
+    def set_polygon(self, polygon):
+        """Show a committed region and cancel any unfinished drawing.
+
+        Args: polygon contains normalized image-coordinate vertices.
+        Returns: None.
+        """
+        self.polygon = polygon
+        self.polygon_draft = None
+        self.update()
+
+    def start_polygon(self):
+        """Start collecting a new region without replacing the saved one.
+
+        Args: None.
+        Returns: None.
+        """
+        self.polygon_draft = []
+        self.update()
+
+    def finish_polygon(self):
+        """Commit a nondegenerate region made with image clicks.
+
+        Args: None.
+        Returns: True when committed, otherwise False with the draft retained.
+        """
+        points = self.polygon_draft
+        if points is None or len(points) < 3 or abs(cv2.contourArea(
+                np.asarray(points, dtype=np.float32))) < 1e-9:
+            return False
+        self.set_polygon(tuple(points))
+        self.polygonChanged.emit(self.polygon)
+        return True
+
+    def paint_polygon(self, painter):
+        """Draw the region or unfinished draft over the image.
+
+        Args: painter is an active QPainter on this widget.
+        Returns: None; the outline is never written to saved frames.
+        """
+        points = self.polygon if self.polygon_draft is None else self.polygon_draft
+        rect = self.display_rect()
+        if not points or rect is None:
+            return
+        x, y, _, _, scale = rect
+        width, height = self.image_size
+        vertices = QPolygonF([QPointF(x + px * (width - 1) * scale,
+                                     y + py * (height - 1) * scale)
+                              for px, py in points])
+        painter.setPen(QPen(QColor(255, 230, 0), 2))
+        if self.polygon_draft is None and len(points) >= 3:
+            painter.drawPolygon(vertices)
+        else:
+            painter.drawPolyline(vertices)
+        for point in vertices:
+            painter.drawEllipse(point, 3, 3)
+
     def leaveEvent(self, event):
         """Clear the pixel readout when the cursor leaves the image.
 
@@ -1348,6 +1420,7 @@ class GLImageView(ViewNavigation, QOpenGLWidget):
     hovered = Signal(int, int)
     zoomChanged = Signal(float)  # zoom relative to fit-to-window
     imageClicked = Signal(int, int)  # the image pixel clicked (not dragged)
+    polygonChanged = Signal(object)  # a region finished with Apply
 
     def __init__(self, parent=None):
         """Create the view; GL resources are made in initializeGL.
@@ -1494,6 +1567,7 @@ class GLImageView(ViewNavigation, QOpenGLWidget):
         if self.box is not None:
             painter = QPainter(self)  # after the GL drawing, on top of it
             self.paint_box(painter)
+            self.paint_polygon(painter)
             painter.end()
 
 
@@ -1503,6 +1577,7 @@ class CpuImageView(ViewNavigation, QWidget):
     hovered = Signal(int, int)
     zoomChanged = Signal(float)  # zoom relative to fit-to-window
     imageClicked = Signal(int, int)  # the image pixel clicked (not dragged)
+    polygonChanged = Signal(object)  # a region finished with Apply
 
     def __init__(self, parent=None):
         """Create the fallback view.
@@ -1576,6 +1651,7 @@ class CpuImageView(ViewNavigation, QWidget):
         qimage.setDevicePixelRatio(ratio)
         painter.drawImage(QPointF(x + left * scale, y + top * scale), qimage)
         self.paint_box(painter)
+        self.paint_polygon(painter)
 
 
 class WheelIgnoringSlider(QSlider):
@@ -5043,6 +5119,7 @@ class MainWindow(QMainWindow):
         self.view = GLImageView() if use_gl else CpuImageView()
         self.view.hovered.connect(self._set_hover)
         self.view.imageClicked.connect(self._image_clicked)
+        self.view.polygonChanged.connect(self._polygon_changed)
         # The frozen banner floats over the top of the image (same grid cell);
         # mouse events pass through it so zoom, pan and the readout still work.
         self.frozen_banner = QLabel()
@@ -5857,6 +5934,26 @@ class MainWindow(QMainWindow):
 
         heading("ESPI measurement")
         self._add_preset_buttons(add)
+        region_controls = QWidget()
+        region_row = QHBoxLayout(region_controls)
+        region_row.setContentsMargins(0, 0, 0, 0)
+        self.region_draw = QPushButton("Draw region")
+        self.region_draw.setCheckable(True)
+        self.region_draw.setToolTip("Switch to Raw to see the whole sample. Click "
+                                    "around it, then press Apply. Turn Draw off to "
+                                    "cancel; zoom with the wheel and pan with right-drag.")
+        self.region_draw.toggled.connect(self._polygon_drawing)
+        self.region_apply = QPushButton("Apply")
+        self.region_apply.setEnabled(False)
+        self.region_apply.clicked.connect(self._apply_polygon)
+        self.region_clear = QPushButton("Clear")
+        self.region_clear.clicked.connect(self._clear_polygon)
+        for button in (self.region_draw, self.region_apply, self.region_clear):
+            region_row.addWidget(button)
+        add(region_controls)
+        self.region_note = QLabel()
+        note(self.region_note)
+        self._show_polygon(s.polygon)
         self.average = SliderSpin(1, 60, 1, 0, s.average)
         self.average.set_description(
             "How many difference frames are combined to quiet speckle in the "
@@ -7175,6 +7272,7 @@ class MainWindow(QMainWindow):
             self.log.write(f"Processing on: {channel.label}")
             channel.start(self._release_shared_device(channel))
         self.current = channel
+        self.region_draw.setChecked(False)
         self._attach_stepper(self.phase_stepper)  # the piezo follows the display
         self.drawn_sequence = 0
         self.shown_packet = None
@@ -7234,6 +7332,7 @@ class MainWindow(QMainWindow):
         # Quietly: a slider that clamps the value still on screen (another
         # camera's) would otherwise send it to this camera.
         self._apply_limits({**DEFAULT_LIMITS, **limits}, quiet=True)
+        self._show_polygon(s.polygon)
         for widget, value in ((self.exposure, s.exposure_us), (self.gain, s.gain_db),
                               (self.fps, s.fps), (self.noise_reduction, s.noise_reduction),
                               (self.average, s.average),
@@ -7390,6 +7489,9 @@ class MainWindow(QMainWindow):
             if other.demo_source:
                 self.profiles.save_profile(other.profile_key, other.profile())
         channel.demo_source = False
+        if channel is self.current:
+            self.region_draw.setChecked(False)
+            self._show_polygon(channel.engine.settings().polygon)
         if channel.engine.camera_info is not None:
             channel.info = channel.engine.camera_info
             channel.engine.tag = channel.info.serial
@@ -7626,6 +7728,112 @@ class MainWindow(QMainWindow):
         """
         if self.pixels_dialog is not None and self.pixels_dialog.isVisible():
             self.pixels_dialog.move_to(x, y)
+
+    def _show_polygon(self, polygon):
+        """Restore a camera's committed region and its status text.
+
+        Args: polygon contains normalized image-coordinate vertices.
+        Returns: None.
+        """
+        self.view.set_polygon(polygon)
+        self.region_note.setText("Region active for Previous/Reference" if polygon else
+                                 "Full frame (Previous/Reference)")
+        self.region_clear.setEnabled(bool(polygon))
+
+    def _polygon_drawing(self, drawing):
+        """Start a draft, or cancel it without changing the committed region.
+
+        Args: drawing is the Draw region button's checked state.
+        Returns: None.
+        """
+        self.region_apply.setEnabled(drawing)
+        if drawing:
+            self.view.start_polygon()
+            self.region_note.setText("Click at least 3 corners on the image, then Apply")
+        else:
+            self._show_polygon(self.engine.settings().polygon)
+
+    def _apply_polygon(self):
+        """Finish the draft or explain why more corners are needed.
+
+        Args: None.
+        Returns: None.
+        """
+        if not self.view.finish_polygon():
+            self.region_note.setText("Select at least 3 non-collinear corners")
+
+    def _polygon_changed(self, polygon):
+        """Save a completed region to the displayed camera's settings.
+
+        Args: polygon contains normalized vertices.
+        Returns: None.
+        """
+        self.engine.update_settings(polygon=polygon)
+        self.region_draw.setChecked(False)
+        self._show_polygon(polygon)
+
+    def _clear_polygon(self):
+        """Cancel drawing and restore full-frame measurement for this camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(polygon=())
+        self.region_draw.setChecked(False)
+        self._show_polygon(())
+
+    def _show_polygon(self, polygon):
+        """Restore a camera's committed region and its status text.
+
+        Args: polygon contains normalized image-coordinate vertices.
+        Returns: None.
+        """
+        self.view.set_polygon(polygon)
+        self.region_note.setText("Region active for Previous/Reference" if polygon else
+                                 "Full frame (Previous/Reference)")
+        self.region_clear.setEnabled(bool(polygon))
+
+    def _polygon_drawing(self, drawing):
+        """Start a draft, or cancel it without changing the committed region.
+
+        Args: drawing is the Draw region button's checked state.
+        Returns: None.
+        """
+        self.region_apply.setEnabled(drawing)
+        if drawing:
+            self.view.start_polygon()
+            self.region_note.setText("Click at least 3 corners on the image, then Apply")
+        else:
+            self._show_polygon(self.engine.settings().polygon)
+
+    def _apply_polygon(self):
+        """Finish the draft or explain why more corners are needed.
+
+        Args: None.
+        Returns: None.
+        """
+        if not self.view.finish_polygon():
+            self.region_note.setText("Select at least 3 non-collinear corners")
+
+    def _polygon_changed(self, polygon):
+        """Save a finished region to the displayed camera's settings.
+
+        Args: polygon contains normalized vertices.
+        Returns: None.
+        """
+        self.engine.update_settings(polygon=polygon)
+        self.region_draw.setChecked(False)
+        self._show_polygon(polygon)
+
+    def _clear_polygon(self):
+        """Cancel drawing and restore full-frame measurement for this camera.
+
+        Args: None.
+        Returns: None.
+        """
+        self.engine.update_settings(polygon=())
+        self.region_draw.setChecked(False)
+        self._show_polygon(())
 
     def _ensure_daq(self):
         """Create the DAQ controller on first use.

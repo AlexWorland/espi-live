@@ -236,6 +236,30 @@ def _note(log, message):
         log.write(message)
 
 
+def clean_polygon(value):
+    """Check a stored region outline: no corners, or at least three in 0..1.
+
+    Args: value is the stored list of [x, y] pairs (or a tuple of pairs).
+    Returns: A tuple of (x, y) float tuples; () for no region.
+    Raises: ValueError when a corner is not a pair of numbers in 0..1, or
+        there are one or two corners.
+    """
+    if isinstance(value, tuple):
+        value = list(value)
+    if not isinstance(value, list):
+        raise ValueError("not a list of corners")
+    points = []
+    for point in value:
+        if (not isinstance(point, (list, tuple)) or len(point) != 2 or
+                any(isinstance(c, bool) or not isinstance(c, (int, float)) or
+                    not math.isfinite(c) or not 0 <= c <= 1 for c in point)):
+            raise ValueError("a corner is not a pair of numbers from 0 to 1")
+        points.append((float(point[0]), float(point[1])))
+    if 0 < len(points) < 3:
+        raise ValueError("a region needs at least 3 corners")
+    return tuple(points)
+
+
 def clean_value(name, value):
     """Check one stored setting against its type and allowed values.
 
@@ -245,6 +269,8 @@ def clean_value(name, value):
         float). Raises ValueError when the type is wrong, the number is not
         finite or is out of range, or the text is not one of the choices.
     """
+    if name == "polygon":
+        return clean_polygon(value)
     kind = FIELD_TYPES[name]
     if kind is bool:
         if not isinstance(value, bool):

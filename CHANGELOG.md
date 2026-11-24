@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-24 — Measure a region of the sample
+
+### Previous state
+
+- Previous and Reference views measured the whole camera frame, so background outside the sample added speckle and shaped the brightness range.
+
+### Current state
+
+- **Draw region** (Measurement section) lets you click at least three corners around the sample on the image, then **Apply**. In Previous and Reference views the stretch range is measured only inside the outline, and everything outside it is black in the shown, saved and recorded frame. **Clear** returns to the whole frame. Draw while in Raw view, where the whole sample is visible.
+- The outline is saved per camera with its profile, and applies only to the camera it was drawn on. Switching from dummy mode to live capture clears it. A noise floor measured for a region is used only with that same region.
+
 ## 2026-11-23 — Updates from the remote-control API
 
 ### Previous state
